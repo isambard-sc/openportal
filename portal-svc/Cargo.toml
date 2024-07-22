@@ -10,10 +10,12 @@ license = "MIT"
 homepage = "https://github.com/chryswoods/openportal/"
 repository = "https://github.com/chryswoods/openportal/"
 
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[build-dependencies]
+built = { version = "0.7", default-features = false, features = ["git2"] }
 
 [dependencies]
+clap = { version = "4.5.9", default-features = false, features = ["derive", "color", "help", "usage", "error-context","suggestions", "env", "std", "string"] }
+dirs = { version = "5.0.1", default-features = false }
 paddington = { path = "../paddington" }
 templemeads = { path = "../templemeads" }
 tokio = { version = "1", features = ["full"] }

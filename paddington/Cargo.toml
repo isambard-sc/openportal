@@ -13,8 +13,6 @@ repository = "https://github.com/chryswoods/openportal/"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = "4.5.9"
-clap-serde = "0.5.1"
 futures = "0.3.30"
 futures-channel = "0.3.30"
 futures-util = "0.3.30"

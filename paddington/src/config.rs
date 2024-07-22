@@ -9,7 +9,7 @@ pub struct Config {
     pub port: u16,
 }
 
-pub async fn load() -> Result<Config, IOError> {
+pub fn load() -> Result<Config, IOError> {
     let config = Config {
         server: "localhost".to_string(),
         port: 8080,

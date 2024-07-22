@@ -14,9 +14,11 @@ repository = "https://github.com/chryswoods/openportal/"
 built = { version = "0.7", default-features = false, features = ["git2"] }
 
 [dependencies]
+anyhow = { version = "1.0.86", default-features = false, features = ["std"] }
 clap = { version = "4.5.9", default-features = false, features = ["derive", "color", "help", "usage", "error-context","suggestions", "env", "std", "string"] }
 dirs = { version = "5.0.1", default-features = false }
 paddington = { path = "../paddington" }
+shellexpand = { version = "3.1.0", default-features = false, features = ["base-0", "dirs", "path", "tilde"] }
 templemeads = { path = "../templemeads" }
 tokio = { version = "1", features = ["full"] }
 

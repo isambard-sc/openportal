@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+// SPDX-License-Identifier: MIT
+
 use futures::SinkExt;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;

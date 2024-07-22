@@ -1,7 +1,15 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
 [package]
 name = "provider-svc"
 version = "0.1.0"
+description = "An example of an OpenPortal provider interface service"
 edition = "2021"
+license = "MIT"
+homepage = "https://github.com/chryswoods/openportal/"
+repository = "https://github.com/chryswoods/openportal/"
+
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -9,3 +17,15 @@ edition = "2021"
 paddington = { path = "../paddington" }
 templemeads = { path = "../templemeads" }
 tokio = { version = "1", features = ["full"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_crate_dependencies = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+
+[package.metadata.clippy]
+allow-dbg-in-tests = true

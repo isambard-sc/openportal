@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "paddington", "portal-svc", "provider-svc", "templemeads",
+]
+
+resolver = "2"
+

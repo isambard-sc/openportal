@@ -64,7 +64,7 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
     peer_map.lock().unwrap().remove(&addr);
 }
 
-pub async fn run(config: config::Config) -> Result<(), IOError> {
+pub async fn run(config: config::ServiceConfig) -> Result<(), IOError> {
     let addr: String = config.server + ":" + &config.port.to_string();
 
     let state = PeerMap::new(Mutex::new(HashMap::new()));

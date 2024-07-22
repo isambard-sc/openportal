@@ -6,5 +6,11 @@ use tokio;
 
 #[tokio::main]
 async fn main() {
-    paddington::run_server().await;
+    let config = paddington::config::load().await.unwrap_or_else(|err| {
+        panic!("Error loading config: {:?}", err);
+    });
+
+    println!("Loaded config: {:?}", config);
+
+    paddington::server::run(config).await;
 }

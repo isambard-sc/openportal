@@ -36,6 +36,22 @@ struct Args {
     )]
     config_dir: Option<std::path::PathBuf>,
 
+    #[arg(
+        long,
+        help=format!(
+            "Initialise the config directory using the passed name of the service",
+        )
+    )]
+    init: Option<String>,
+
+    #[arg(
+        long,
+        help=format!(
+            "Whether or not to force reinitialisation of the config directory (removes the original!)",
+        )
+    )]
+    force: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -74,6 +90,26 @@ fn main() -> Result<()> {
         }
     };
 
+    // see if we need to initialise the config directory
+    if let Some(service_name) = &args.init {
+        let config_dir = match &args.config_dir {
+            Some(f) => f.clone(),
+            None => default_config_dir(),
+        };
+
+        if config_dir.exists() {
+            if (args.force) {
+                std::fs::remove_dir_all(&config_dir)
+                    .context("Could not remove existing config directory.")?;
+            } else {
+                anyhow::bail!("Config directory already exists. Use --force to reinitialise.");
+            }
+        }
+
+        paddington::config::create(&config_dir, service_name)
+            .context("Could not create config directory.")?;
+    }
+
     // Load settings from the config file
     let config_dir = match &args.config_dir {
         Some(f) => match f.try_exists() {
@@ -86,7 +122,7 @@ fn main() -> Result<()> {
 
     println!("Using config directory: {}", config_dir.display());
 
-    let config = paddington::config::load().unwrap_or_else(|err| {
+    let config = paddington::config::load(&config_dir).unwrap_or_else(|err| {
         panic!("Error loading config: {:?}", err);
     });
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::{generate_key, SecretKey};
+use crate::crypto::{Key, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::io::Error as IOError;
@@ -18,12 +18,11 @@ use std::path;
 ///
 /// ```
 /// use paddington::config::ServiceConfig;
-/// use paddington::crypto::generate_key;
+/// use paddington::crypto::Key;
 ///
-/// let key = generate_key();
 /// let config = ServiceConfig {
 ///    name: "openportal".to_string(),
-///    key: key,
+///    key: Key::generate(),
 ///    server: "localhost".to_string(),
 ///    port: 8080,
 /// };
@@ -98,7 +97,7 @@ pub fn create(
 
     let config = ServiceConfig {
         name: service_name.clone(),
-        key: generate_key(),
+        key: Key::generate(),
         server: server.clone(),
         port,
     };
@@ -108,6 +107,10 @@ pub fn create(
     println!("Writing config file: {:?}", config_file);
     let config = serde_json::to_string(&config)?;
     std::fs::write(config_file, config)?;
+
+    let encrypted_config = Key::generate().encrypt(config);
+
+    println!("Encrypted config = {:?}", encrypted_config);
 
     // read the config and return it
     load(&config_dir)

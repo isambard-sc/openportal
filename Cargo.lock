@@ -86,6 +86,9 @@ name = "anyhow"
 version = "1.0.86"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3d1d046238990b9cf5bcde22a3fb3584ee5cf65fb2765f454ed428c7a0063da"
+dependencies = [
+ "backtrace",
+]
 
 [[package]]
 name = "autocfg"
@@ -803,6 +806,7 @@ dependencies = [
 name = "paddington"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "futures",
  "futures-channel",
  "futures-util",
@@ -811,6 +815,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "thiserror",
  "tokio",
  "tokio-serde",
  "tokio-tungstenite",

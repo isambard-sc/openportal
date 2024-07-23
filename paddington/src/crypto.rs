@@ -1,29 +1,29 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use orion::aead;
+use orion::{aead, errors::UnknownCryptoError};
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{error::Error, fmt, vec};
 
-#[derive(Debug)]
-pub struct CryptoError;
-
-impl fmt::Display for CryptoError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Oh no, something bad went down")
-    }
-}
-
-impl Error for CryptoError {}
-
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EncryptedData {
     #[serde_as(as = "serde_with::hex::Hex")]
     pub data: vec::Vec<u8>,
     pub version: u8,
+}
+
+impl fmt::Debug for EncryptedData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "EncryptedData {{ data: [REDACTED] length {} bytes, version: {} }}",
+            self.data.len(),
+            self.version
+        )
+    }
 }
 
 #[serde_as]
@@ -93,7 +93,7 @@ impl Key {
     ///
     /// let encrypted_data = key.encrypt("Hello, World!".to_string());
     /// ```
-    pub fn encrypt<T>(&self, data: T) -> Result<EncryptedData, CryptoError>
+    pub fn encrypt<T>(&self, data: T) -> Result<EncryptedData, UnknownCryptoError>
     where
         T: Serialize,
     {

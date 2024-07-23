@@ -99,7 +99,6 @@ fn main() -> Result<()> {
         Some(f) => f.clone(),
         None => default_config_dir(),
     })?;
-    println!("Using config directory: {:?}", config_dir);
 
     // see if we need to initialise the config directory
     match &args.command {
@@ -109,29 +108,25 @@ fn main() -> Result<()> {
             port,
             force,
         }) => {
-            println!("Initialising config directory: {:?}", config_dir);
-
             if config_dir.try_exists()? {
                 if *force {
-                    println!("Removing existing config directory {:?}", config_dir);
                     std::fs::remove_dir_all(&config_dir)
                         .context("Could not remove existing config directory.")?;
                 } else {
-                    anyhow::bail!("Config directory already exists. Use --force to reinitialise.");
+                    anyhow::bail!(
+                        "Config directory {} already exists.\nUse --force to reinitialise.",
+                        config_dir.display()
+                    );
                 }
             }
 
             paddington::config::create(&config_dir, service, host, port)
-                .context("Could not create config directory.")?;
+                .context("Could not create config directory.\n")?;
         }
         _ => {}
     }
 
-    let config = paddington::config::load(&config_dir).unwrap_or_else(|err| {
-        panic!("Error loading config: {:?}", err);
-    });
-
-    println!("Loaded config: {:?}", config);
+    let config = paddington::config::load(&config_dir)?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

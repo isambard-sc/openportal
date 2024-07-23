@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: MIT
 
 use crate::crypto::{Key, SecretKey};
+use anyhow::{bail, Context, Result};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::io::Error as IOError;
 use std::path;
+use thiserror::Error;
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("{0}")]
+struct ConfigError(String);
 
 ///
 /// The full service configuration.
@@ -75,21 +81,21 @@ pub fn create(
     service_name: &Option<String>,
     server: &Option<String>,
     port: &Option<u16>,
-) -> Result<ServiceConfig, IOError> {
+) -> Result<ServiceConfig> {
     // see if this config_dir exists - return an error if it does
     let config_dir = path::absolute(config_dir)?;
 
     if config_dir.try_exists()? {
-        return Err(IOError::new(
-            std::io::ErrorKind::AlreadyExists,
-            "Config directory already exists",
-        ));
+        bail!(ConfigError("Config directory already exists".to_string()));
     }
 
     // create the config directory
-    println!("Creating config directory: {:?}", config_dir);
-    std::fs::create_dir_all(&config_dir)?;
-    println!("Created config directory: {:?}", config_dir);
+    std::fs::create_dir_all(&config_dir).with_context(|| {
+        format!(
+            "Could not create config directory: {:?}",
+            config_dir.to_string_lossy()
+        )
+    })?;
 
     let service_name = service_name.clone().unwrap_or("openportal".to_string());
     let server = server.clone().unwrap_or("localhost".to_string());
@@ -104,13 +110,11 @@ pub fn create(
 
     // write the config to a json file
     let config_file = config_dir.join("service.json");
-    println!("Writing config file: {:?}", config_file);
-    let config = serde_json::to_string(&config)?;
-    std::fs::write(config_file, config)?;
+    let config_file_string = config_dir.to_string_lossy();
 
-    let encrypted_config = Key::generate().encrypt(config);
-
-    println!("Encrypted config = {:?}", encrypted_config);
+    let config_json = serde_json::to_string(&config)?;
+    std::fs::write(config_file, config_json)
+        .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
 
     // read the config and return it
     load(&config_dir)
@@ -144,26 +148,35 @@ pub fn create(
 /// println!("Service name: {}", config.name);
 /// ```
 ///
-pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig, IOError> {
+pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig> {
     // see if this config_dir exists - return an error if it doesn't
     let config_dir = path::absolute(config_dir)?;
 
     if !config_dir.try_exists()? {
-        return Err(IOError::new(
-            std::io::ErrorKind::NotFound,
-            "Config directory not found",
-        ));
+        bail!(ConfigError(format!(
+            "Config directory does not exist: {:?}",
+            config_dir
+        )));
     }
 
     // look for a json config file called "service.json" in the config directory
     let config_file = config_dir.join("service.json");
+    let config_string = config_file.to_string_lossy();
 
     // read the config file
-    println!("Reading config file: {:?}", config_file);
-    let config = std::fs::read_to_string(config_file)?;
+    let config = std::fs::read_to_string(&config_file)
+        .with_context(|| format!("Could not read config file: {:?}", config_string))?;
 
     // parse the config file
-    let config: ServiceConfig = serde_json::from_str(&config)?;
+    let config: ServiceConfig = serde_json::from_str(&config)
+        .with_context(|| format!("Could not parse config file fron json: {:?}", config_string))?;
+
+    let encrypted_config = Key::generate()
+        .expose_secret()
+        .encrypt(&config)
+        .with_context(|| "Could not generate secure key")?;
+
+    println!("Encrypted config = {:?}", encrypted_config);
 
     Ok(config)
 }

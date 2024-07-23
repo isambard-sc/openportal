@@ -1,11 +1,17 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use orion::{aead, errors::UnknownCryptoError};
+use anyhow::{bail, Result};
+use orion::aead;
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
-use std::{error::Error, fmt, vec};
+use std::{fmt, io::Read, str, vec};
+use thiserror::Error;
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("{0}")]
+struct CryptoError(String);
 
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
@@ -91,17 +97,66 @@ impl Key {
     ///
     /// let key = Key::generate();
     ///
-    /// let encrypted_data = key.encrypt("Hello, World!".to_string());
+    /// let encrypted_data = key.expose_secret().encrypt("Hello, World!".to_string());
     /// ```
-    pub fn encrypt<T>(&self, data: T) -> Result<EncryptedData, UnknownCryptoError>
+    pub fn encrypt<T>(&self, data: T) -> Result<EncryptedData>
     where
         T: Serialize,
     {
-        let orion_key = aead::SecretKey::from_slice(&self.data).unwrap();
-        let data = serde_json::to_vec(&data).unwrap();
+        let orion_key = aead::SecretKey::from_slice(&self.data)?;
+        let json_data = serde_json::to_string(&data)?;
+        println!("data: {:?}", json_data);
+
         Ok(EncryptedData {
-            data: aead::seal(&orion_key, &data)?,
+            data: aead::seal(&orion_key, json_data.as_bytes())?,
             version: 1,
         })
+    }
+
+    ///
+    /// Decrypt the passed data with this key.
+    /// This will return the decrypted data.
+    ///
+    /// Arguments
+    ///
+    /// * `data` - The data to decrypt.
+    ///
+    /// Returns
+    ///
+    /// The decrypted data.
+    ///
+    /// Example
+    ///
+    /// ```
+    /// use paddington::crypto::{Key, SecretKey};
+    ///
+    /// let key = Key::generate();
+    ///
+    /// let encrypted_data = key.expose_secret().encrypt("Hello, World!".to_string());
+    /// let decrypted_data = key.expose_secret().decrypt(&encrypted_data).unwrap();
+    ///
+    /// assert_eq!(decrypted_data, "Hello, World!".to_string());
+    /// ```
+    pub fn decrypt<T>(&self, data: &EncryptedData) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        if data.version != 1 {
+            bail!(CryptoError(format!(
+                "Only version 1 is supported. This is version {:?}",
+                data.version
+            )));
+        }
+
+        let orion_key = aead::SecretKey::from_slice(&self.data)?;
+        let decrypted_data = aead::open(&orion_key, &data.data)?;
+
+        let decrypted_string: String = String::from_utf8(decrypted_data)?;
+
+        println!("decrypted_string: {:?}", decrypted_string);
+
+        let obj: T = serde_json::from_str(&decrypted_string)?;
+
+        Ok(obj)
     }
 }

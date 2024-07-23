@@ -171,12 +171,18 @@ pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig> {
     let config: ServiceConfig = serde_json::from_str(&config)
         .with_context(|| format!("Could not parse config file fron json: {:?}", config_string))?;
 
-    let encrypted_config = Key::generate()
+    let key = Key::generate();
+
+    let encrypted_config = key
         .expose_secret()
         .encrypt(&config)
         .with_context(|| "Could not generate secure key")?;
 
     println!("Encrypted config = {:?}", encrypted_config);
+
+    let c2: ServiceConfig = key.expose_secret().decrypt(&encrypted_config)?;
+
+    println!("Decrypted config = {:?}", c2);
 
     Ok(config)
 }

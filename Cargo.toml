@@ -12,6 +12,6 @@ resolver = "2"
 [profile.release]
 strip = true
 opt-level = 3
-lto = true
+lto = false   # Disable LTO to speed up compilation
 codegen-units = 1
 panic = "abort"

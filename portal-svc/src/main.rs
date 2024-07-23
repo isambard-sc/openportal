@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory as _, Parser, Subcommand};
 use paddington;
+use std::path::absolute;
 use tokio;
 
 pub mod built_info {
@@ -94,6 +95,12 @@ fn main() -> Result<()> {
         }
     };
 
+    let config_dir = absolute(match &args.config_dir {
+        Some(f) => f.clone(),
+        None => default_config_dir(),
+    })?;
+    println!("Using config directory: {:?}", config_dir);
+
     // see if we need to initialise the config directory
     match &args.command {
         Some(Commands::Init {
@@ -102,12 +109,9 @@ fn main() -> Result<()> {
             port,
             force,
         }) => {
-            let config_dir = match &args.config_dir {
-                Some(f) => f.clone(),
-                None => default_config_dir(),
-            };
+            println!("Initialising config directory: {:?}", config_dir);
 
-            if config_dir.exists() {
+            if config_dir.try_exists()? {
                 if *force {
                     println!("Removing existing config directory {:?}", config_dir);
                     std::fs::remove_dir_all(&config_dir)
@@ -122,18 +126,6 @@ fn main() -> Result<()> {
         }
         _ => {}
     }
-
-    // Load settings from the config file
-    let config_dir = match &args.config_dir {
-        Some(f) => match f.try_exists() {
-            Ok(true) => shellexpand::path::tilde(f),
-            Ok(false) => anyhow::bail!(format!("Config directory `{}` not found.", &f.display())),
-            Err(err) => return Err(err).context("Could not determine if config directory exists."),
-        },
-        None => default_config_dir().into(),
-    };
-
-    println!("Using config directory: {}", config_dir.display());
 
     let config = paddington::config::load(&config_dir).unwrap_or_else(|err| {
         panic!("Error loading config: {:?}", err);

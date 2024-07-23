@@ -7,6 +7,28 @@ use serde_json;
 use std::io::Error as IOError;
 use std::path;
 
+///
+/// The full service configuration.
+/// This includes the service name, the secret key, the server to bind to and the port to bind to.
+/// The secret key is generated when the service is created and is used to encrypt and decrypt messages.
+/// The server is the address that the service will bind to and the port is the port that the service will bind to.
+/// The service name is the name of the service.
+///
+/// # Example
+///
+/// ```
+/// use paddington::config::ServiceConfig;
+/// use paddington::crypto::generate_key;
+///
+/// let key = generate_key();
+/// let config = ServiceConfig {
+///    name: "openportal".to_string(),
+///    key: key,
+///    server: "localhost".to_string(),
+///    port: 8080,
+/// };
+/// ```
+///
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServiceConfig {
     pub name: String,
@@ -15,6 +37,40 @@ pub struct ServiceConfig {
     pub port: u16,
 }
 
+///
+/// Create a new service configuration in the passed directory.
+/// This will return an error if the config directory already exists.
+/// The service name, server and port can be passed as arguments.
+/// If they are not passed, default values will be used.
+/// The service name will default to "openportal", the server will default to "localhost"
+/// and the port will default to 8080.
+///
+/// # Arguments
+///
+/// * `config_dir` - The directory to create the service configuration in.
+/// * `service_name` - The name of the service.
+/// * `server` - The server to bind to.
+/// * `port` - The port to bind to.
+///
+/// # Returns
+///
+/// The full service configuration.
+///
+/// # Errors
+///
+/// This function will return an error if the config directory already exists.
+///
+/// # Example
+///
+/// ```
+/// use paddington::config;
+///
+/// let config = config::create("/path/to/config", "service_name",
+///                             "https://service_url", 8000)?;
+///
+/// println!("Service name: {}", config.name);
+/// ```
+///
 pub fn create(
     config_dir: &path::PathBuf,
     service_name: &Option<String>,
@@ -57,6 +113,34 @@ pub fn create(
     load(&config_dir)
 }
 
+///
+/// Load the full service configuration from the passed directory.
+/// This will return an error if the config directory does not exist
+/// or if the data within cannot be read.
+///
+/// # Arguments
+///
+/// * `config_dir` - The directory containing the service configuration.
+///
+/// # Returns
+///
+/// The full service configuration.
+///
+/// # Errors
+///
+/// This function will return an error if the config directory does not exist
+/// or if the data within cannot be read.
+///
+/// # Example
+///
+/// ```
+/// use paddington::config;
+///
+/// let config = config::load("/path/to/config")?;
+///
+/// println!("Service name: {}", config.name);
+/// ```
+///
 pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig, IOError> {
     // see if this config_dir exists - return an error if it doesn't
     let config_dir = path::absolute(config_dir)?;

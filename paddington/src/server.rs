@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use anyhow::Context;
+use anyhow::Error as AnyError;
+use thiserror::Error;
+
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use std::{
@@ -17,39 +21,94 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::config;
 
+#[derive(Error, Debug)]
+pub enum ServerError {
+    #[error("{0}")]
+    IOError(#[from] IOError),
+
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    TungsteniteError(#[from] tokio_tungstenite::tungstenite::error::Error),
+
+    #[error("Unknown config error")]
+    Unknown,
+}
+
 type Tx = UnboundedSender<Message>;
 type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
 
-async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: SocketAddr) {
+///
+/// Internal function used to handle a connection from a client.
+/// This function will handle the connection from a client
+///
+async fn handle_connection(
+    peer_map: PeerMap,
+    raw_stream: TcpStream,
+    addr: SocketAddr,
+) -> Result<(), ServerError> {
     println!("Incoming TCP connection from: {}", addr);
 
-    let ws_stream = tokio_tungstenite::accept_async(raw_stream)
-        .await
-        .expect("Error during the websocket handshake occurred");
+    let ws_stream = tokio_tungstenite::accept_async(raw_stream).await?;
     println!("WebSocket connection established: {}", addr);
 
     // Insert the write part of this peer to the peer map.
     let (tx, rx) = unbounded();
-    peer_map.lock().unwrap().insert(addr, tx);
+
+    loop {
+        match peer_map.lock() {
+            Ok(mut peers) => {
+                peers.insert(addr, tx.clone());
+                break;
+            }
+            Err(_) => {
+                continue;
+            }
+        }
+    }
 
     let (outgoing, incoming) = ws_stream.split();
 
     let broadcast_incoming = incoming.try_for_each(|msg| {
-        println!(
-            "Received a message from {}: {}",
-            addr,
-            msg.to_text().unwrap()
-        );
-        let peers = peer_map.lock().unwrap();
+        // If we can't parse the message, we'll just ignore it.
+        let msg = msg.to_text().unwrap_or_else(|_| {
+            println!("Error parsing message from {}", addr);
+            ""
+        });
 
-        // We want to broadcast the message to everyone except ourselves.
-        let broadcast_recipients = peers
-            .iter()
-            .filter(|(peer_addr, _)| peer_addr != &&addr)
-            .map(|(_, ws_sink)| ws_sink);
+        if msg.is_empty() {
+            // ignore empty messages
+            return future::ok(());
+        }
 
-        for recp in broadcast_recipients {
-            recp.unbounded_send(msg.clone()).unwrap();
+        println!("Received a message from {}: {}", addr, msg);
+
+        loop {
+            match peer_map.lock() {
+                Ok(peers) => {
+                    // We want to broadcast the message to everyone except ourselves.
+                    let broadcast_recipients = peers
+                        .iter()
+                        .filter(|(peer_addr, _)| peer_addr != &&addr)
+                        .map(|(_, ws_sink)| ws_sink);
+
+                    for recp in broadcast_recipients {
+                        match recp.unbounded_send(Message::text(msg)) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                println!("Error sending message");
+                                continue;
+                            }
+                        }
+                    }
+
+                    break;
+                }
+                Err(_) => {
+                    continue;
+                }
+            }
         }
 
         future::ok(())
@@ -61,23 +120,52 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
     future::select(broadcast_incoming, receive_from_others).await;
 
     println!("{} disconnected", &addr);
-    peer_map.lock().unwrap().remove(&addr);
+
+    loop {
+        match peer_map.lock() {
+            Ok(mut peers) => {
+                peers.remove(&addr);
+                break;
+            }
+            Err(_) => {
+                continue;
+            }
+        }
+    }
+
+    Ok(())
 }
 
-pub async fn run(config: config::ServiceConfig) -> Result<(), IOError> {
+///
+/// Run the server - this will execute the server and listen for incoming
+/// connections indefinitely, until it is stopped.
+///
+/// # Arguments
+///
+/// * `config` - The configuration for the service.
+///
+/// # Returns
+///
+/// This function will return a ServerError if the server fails to start.
+///
+pub async fn run(config: config::ServiceConfig) -> Result<(), ServerError> {
     let addr: String = config.server + ":" + &config.port.to_string();
 
     let state = PeerMap::new(Mutex::new(HashMap::new()));
 
     // Create the event loop and TCP listener we'll accept connections on.
-    let try_socket = TcpListener::bind(&addr).await;
-    let listener = try_socket.expect("Failed to bind");
+    let listener = TcpListener::bind(&addr).await?;
     println!("Listening on: {}", addr);
 
     // Let's spawn the handling of each connection in a separate task.
-    while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(state.clone(), stream, addr));
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                tokio::spawn(handle_connection(state.clone(), stream, addr));
+            }
+            Err(e) => {
+                eprintln!("Error accepting connection: {}", e);
+            }
+        }
     }
-
-    Ok(())
 }

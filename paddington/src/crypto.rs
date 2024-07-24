@@ -1,17 +1,36 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::{bail, Result};
+use anyhow::Context;
+use anyhow::Error as AnyError;
 use orion::aead;
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json;
 use serde_with::serde_as;
-use std::{fmt, io::Read, str, vec};
+use std::{fmt, str, vec};
 use thiserror::Error;
 
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("{0}")]
-struct CryptoError(String);
+#[derive(Error, Debug)]
+pub enum CryptoError {
+    #[error("{0}")]
+    IOError(#[from] std::io::Error),
+
+    #[error("{0}")]
+    UnknownCryptoError(#[from] orion::errors::UnknownCryptoError),
+
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    SerdeError(#[from] serde_json::Error),
+
+    #[error("Unsupported version: {0}")]
+    VersionError(u8),
+
+    #[error("Unknown config error")]
+    Unknown,
+}
 
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
@@ -99,16 +118,19 @@ impl Key {
     ///
     /// let encrypted_data = key.expose_secret().encrypt("Hello, World!".to_string());
     /// ```
-    pub fn encrypt<T>(&self, data: T) -> Result<EncryptedData>
+    pub fn encrypt<T>(&self, data: T) -> Result<EncryptedData, CryptoError>
     where
         T: Serialize,
     {
-        let orion_key = aead::SecretKey::from_slice(&self.data)?;
-        let json_data = serde_json::to_string(&data)?;
-        println!("data: {:?}", json_data);
+        let orion_key = aead::SecretKey::from_slice(&self.data)
+            .with_context(|| "Failed to create a secret key from the secret key data.")?;
+        let json_data = serde_json::to_string(&data).with_context(|| {
+            "Failed to serialise the data to JSON. Ensure that the data is serialisable by serde."
+        })?;
 
         Ok(EncryptedData {
-            data: aead::seal(&orion_key, json_data.as_bytes())?,
+            data: aead::seal(&orion_key, json_data.as_bytes())
+                .with_context(|| "Failed to encrypt the data.")?,
             version: 1,
         })
     }
@@ -137,25 +159,25 @@ impl Key {
     ///
     /// assert_eq!(decrypted_data, "Hello, World!".to_string());
     /// ```
-    pub fn decrypt<T>(&self, data: &EncryptedData) -> Result<T>
+    pub fn decrypt<T>(&self, data: &EncryptedData) -> Result<T, CryptoError>
     where
         T: DeserializeOwned,
     {
         if data.version != 1 {
-            bail!(CryptoError(format!(
-                "Only version 1 is supported. This is version {:?}",
-                data.version
-            )));
+            return Err(CryptoError::VersionError(data.version));
         }
 
-        let orion_key = aead::SecretKey::from_slice(&self.data)?;
-        let decrypted_data = aead::open(&orion_key, &data.data)?;
+        let orion_key = aead::SecretKey::from_slice(&self.data)
+            .with_context(|| "Failed to create a secret key from the secret key data.")?;
 
-        let decrypted_string: String = String::from_utf8(decrypted_data)?;
+        let decrypted_data =
+            aead::open(&orion_key, &data.data).with_context(|| "Failed to decrypt the data.")?;
 
-        println!("decrypted_string: {:?}", decrypted_string);
+        let decrypted_string: String = String::from_utf8(decrypted_data)
+            .with_context(|| "Failed to convert the decrypted data to a string.")?;
 
-        let obj: T = serde_json::from_str(&decrypted_string)?;
+        let obj: T = serde_json::from_str(&decrypted_string)
+            .with_context(|| "Failed to deserialise the decrypted data from JSON.")?;
 
         Ok(obj)
     }

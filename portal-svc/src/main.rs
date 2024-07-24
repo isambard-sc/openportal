@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
-use clap::{CommandFactory as _, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use paddington;
 use std::path::absolute;
 use tokio;
@@ -86,14 +86,18 @@ enum ClientCommands {
     },
 }
 
-fn main() -> Result<()> {
-    let args = match Args::try_parse() {
-        Ok(args) => args,
-        Err(err) => {
-            err.print();
-            std::process::exit(64); // sysexit EX_USAGE
+async fn async_main(config: paddington::config::ServiceConfig) {
+    match paddington::server::run(config).await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
         }
-    };
+    }
+}
+
+fn main() -> Result<()> {
+    let args = Args::try_parse()?;
 
     let config_dir = absolute(match &args.config_dir {
         Some(f) => f.clone(),
@@ -120,8 +124,7 @@ fn main() -> Result<()> {
                 }
             }
 
-            paddington::config::create(&config_dir, service, host, port)
-                .context("Could not create config directory.\n")?;
+            paddington::config::create(&config_dir, service, host, port)?;
         }
         _ => {}
     }
@@ -132,9 +135,7 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async {
-            paddington::server::run(config).await;
-        });
+        .block_on(async_main(config));
 
     Ok(())
 }

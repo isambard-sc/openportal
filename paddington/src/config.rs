@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::{Key, SecretKey};
+use crate::crypto::{CryptoError, Key, SecretKey};
+use anyhow::Context;
 use anyhow::Error as AnyError;
-use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::path;
@@ -20,6 +19,9 @@ pub enum ConfigError {
 
     #[error("{0}")]
     SerdeError(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    CryptoError(#[from] CryptoError),
 
     #[error("Config directory already exists: {0}")]
     ExistsError(path::PathBuf),
@@ -100,8 +102,6 @@ pub fn create(
     server: &Option<String>,
     port: &Option<u16>,
 ) -> Result<ServiceConfig, ConfigError> {
-    use ConfigError::*;
-
     // see if this config_dir exists - return an error if it does
     let config_dir = path::absolute(config_dir).with_context(|| {
         format!(
@@ -111,7 +111,7 @@ pub fn create(
     })?;
 
     if config_dir.try_exists()? {
-        return Err(ExistsError(config_dir));
+        return Err(ConfigError::ExistsError(config_dir));
     }
 
     // create the config directory
@@ -182,13 +182,11 @@ pub fn create(
 /// ```
 ///
 pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
-    use ConfigError::*;
-
     // see if this config_dir exists - return an error if it doesn't
     let config_dir = path::absolute(config_dir)?;
 
     if !config_dir.try_exists()? {
-        return Err(NotExistsError(config_dir));
+        return Err(ConfigError::NotExistsError(config_dir));
     }
 
     // look for a json config file called "service.json" in the config directory
@@ -202,19 +200,6 @@ pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
     // parse the config file
     let config: ServiceConfig = serde_json::from_str(&config)
         .with_context(|| format!("Could not parse config file fron json: {:?}", config_string))?;
-
-    let key = Key::generate();
-
-    let encrypted_config = key
-        .expose_secret()
-        .encrypt(&config)
-        .with_context(|| "Could not generate secure key for config")?;
-
-    println!("Encrypted config = {:?}", encrypted_config);
-
-    let c2: ServiceConfig = key.expose_secret().decrypt(&encrypted_config)?;
-
-    println!("Decrypted config = {:?}", c2);
 
     Ok(config)
 }

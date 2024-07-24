@@ -97,7 +97,7 @@ async fn async_main(config: paddington::config::ServiceConfig) {
 }
 
 fn main() -> Result<()> {
-    let args = Args::try_parse()?;
+    let args = Args::parse();
 
     let config_dir = absolute(match &args.config_dir {
         Some(f) => f.clone(),
@@ -134,7 +134,10 @@ fn main() -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
+        .unwrap_or_else(|e| {
+            eprintln!("Error creating runtime: {}", e);
+            std::process::exit(1);
+        })
         .block_on(async_main(config));
 
     Ok(())

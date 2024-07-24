@@ -4,7 +4,7 @@
 [package]
 name = "portal-svc"
 version = "0.1.0"
-description = "An example of a OpenPortal portal interface service"
+description = "An example of an OpenPortal portal interface service"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/chryswoods/openportal/"

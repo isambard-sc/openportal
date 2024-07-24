@@ -50,7 +50,10 @@ async fn handle_connection(
 ) -> Result<(), ServerError> {
     println!("Incoming TCP connection from: {}", addr);
 
-    let ws_stream = tokio_tungstenite::accept_async(raw_stream).await?;
+    let ws_stream = tokio_tungstenite::accept_async(raw_stream)
+        .await
+        .with_context(|| format!("Error accepting WebSocket connection from: {}", addr))?;
+
     println!("WebSocket connection established: {}", addr);
 
     // Insert the write part of this peer to the peer map.

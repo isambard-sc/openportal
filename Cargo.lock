@@ -897,6 +897,10 @@ dependencies = [
 name = "provider-svc"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "built",
+ "clap",
+ "dirs",
  "paddington",
  "templemeads",
  "tokio",

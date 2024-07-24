@@ -2,16 +2,34 @@
 // SPDX-License-Identifier: MIT
 
 use crate::crypto::{Key, SecretKey};
-use anyhow::{bail, Context, Result};
+use anyhow::Error as AnyError;
+use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::path;
 use thiserror::Error;
 
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("{0}")]
-struct ConfigError(String);
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("{0}")]
+    IOError(#[from] std::io::Error),
+
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    SerdeError(#[from] serde_json::Error),
+
+    #[error("Config directory already exists: {0}")]
+    ExistsError(path::PathBuf),
+
+    #[error("Config directory does not exist: {0}")]
+    NotExistsError(path::PathBuf),
+
+    #[error("Unknown config error")]
+    Unknown,
+}
 
 ///
 /// The full service configuration.
@@ -81,12 +99,19 @@ pub fn create(
     service_name: &Option<String>,
     server: &Option<String>,
     port: &Option<u16>,
-) -> Result<ServiceConfig> {
+) -> Result<ServiceConfig, ConfigError> {
+    use ConfigError::*;
+
     // see if this config_dir exists - return an error if it does
-    let config_dir = path::absolute(config_dir)?;
+    let config_dir = path::absolute(config_dir).with_context(|| {
+        format!(
+            "Could not get absolute path for config directory: {:?}",
+            config_dir
+        )
+    })?;
 
     if config_dir.try_exists()? {
-        bail!(ConfigError("Config directory already exists".to_string()));
+        return Err(ExistsError(config_dir));
     }
 
     // create the config directory
@@ -112,12 +137,20 @@ pub fn create(
     let config_file = config_dir.join("service.json");
     let config_file_string = config_dir.to_string_lossy();
 
-    let config_json = serde_json::to_string(&config)?;
+    let config_json = serde_json::to_string(&config).with_context(|| {
+        format!(
+            "Could not serialise config to json: {:?}",
+            config_file_string
+        )
+    })?;
+
     std::fs::write(config_file, config_json)
         .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
 
     // read the config and return it
-    load(&config_dir)
+    let config = load(&config_dir)?;
+
+    Ok(config)
 }
 
 ///
@@ -148,15 +181,14 @@ pub fn create(
 /// println!("Service name: {}", config.name);
 /// ```
 ///
-pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig> {
+pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
+    use ConfigError::*;
+
     // see if this config_dir exists - return an error if it doesn't
     let config_dir = path::absolute(config_dir)?;
 
     if !config_dir.try_exists()? {
-        bail!(ConfigError(format!(
-            "Config directory does not exist: {:?}",
-            config_dir
-        )));
+        return Err(NotExistsError(config_dir));
     }
 
     // look for a json config file called "service.json" in the config directory
@@ -176,7 +208,7 @@ pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig> {
     let encrypted_config = key
         .expose_secret()
         .encrypt(&config)
-        .with_context(|| "Could not generate secure key")?;
+        .with_context(|| "Could not generate secure key for config")?;
 
     println!("Encrypted config = {:?}", encrypted_config);
 

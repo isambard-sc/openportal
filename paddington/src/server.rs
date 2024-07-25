@@ -20,8 +20,11 @@ use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config;
+use crate::connection;
 use crate::crypto::{CryptoError, EncryptedData};
 use secrecy::ExposeSecret;
+
+use crate::connection::{Connection, ConnectionError};
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -194,12 +197,8 @@ pub async fn run(config: config::ServiceConfig) -> Result<(), ServerError> {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                tokio::spawn(handle_connection(
-                    state.clone(),
-                    stream,
-                    addr,
-                    config.clone(),
-                ));
+                let connection = Connection::new(format!("Connection from: {}", addr));
+                tokio::spawn(connection.handle_connection(stream));
             }
             Err(e) => {
                 eprintln!("Error accepting connection: {}", e);

@@ -23,9 +23,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.120"
 serde_with = { version="3.9.0", features = ["hex"] }
 thiserror = "1.0.63"
-tokio = "1.38.1"
-tokio-serde = "0.9.0"
+tokio = { version = "1.0", features = ["full"] }
+tokio-serde = { version="0.9.0", features = ["bincode", "cbor", "json", "messagepack"] }
 tokio-tungstenite = "0.23.1"
+tokio-util = { version = "0.7", features = ["codec"] }
 
 [lints.rust]
 unsafe_code = "forbid"

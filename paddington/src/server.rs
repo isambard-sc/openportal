@@ -20,6 +20,8 @@ use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config;
+use crate::crypto::{CryptoError, EncryptedData};
+use secrecy::ExposeSecret;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -31,6 +33,9 @@ pub enum ServerError {
 
     #[error("{0}")]
     TungsteniteError(#[from] tokio_tungstenite::tungstenite::error::Error),
+
+    #[error("{0}")]
+    CryptoError(#[from] CryptoError),
 
     #[error("Unknown config error")]
     Unknown,
@@ -47,6 +52,7 @@ async fn handle_connection(
     peer_map: PeerMap,
     raw_stream: TcpStream,
     addr: SocketAddr,
+    config: config::ServiceConfig,
 ) -> Result<(), ServerError> {
     println!("Incoming TCP connection from: {}", addr);
 
@@ -86,6 +92,30 @@ async fn handle_connection(
         }
 
         println!("Received a message from {}: {}", addr, msg);
+
+        let obj: EncryptedData = serde_json::from_str::<EncryptedData>(msg).unwrap_or_else(|_| {
+            println!("Error parsing message from {}", addr);
+            EncryptedData {
+                data: vec![],
+                version: 0,
+            }
+        });
+
+        if obj.data.is_empty() {
+            // ignore empty messages
+            return future::ok(());
+        }
+
+        println!("Encrypted message: {:?}", obj);
+
+        let key = &config.key;
+
+        let decrypted_message = key.expose_secret().decrypt(&obj).unwrap_or_else(|_| {
+            println!("Error decrypting message from {}", addr);
+            "".to_string()
+        });
+
+        println!("Decrypted message: {:?}", decrypted_message);
 
         loop {
             match peer_map.lock() {
@@ -152,7 +182,7 @@ async fn handle_connection(
 /// This function will return a ServerError if the server fails to start.
 ///
 pub async fn run(config: config::ServiceConfig) -> Result<(), ServerError> {
-    let addr: String = config.server + ":" + &config.port.to_string();
+    let addr: String = config.server.clone() + ":" + &config.port.to_string();
 
     let state = PeerMap::new(Mutex::new(HashMap::new()));
 
@@ -164,7 +194,12 @@ pub async fn run(config: config::ServiceConfig) -> Result<(), ServerError> {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                tokio::spawn(handle_connection(state.clone(), stream, addr));
+                tokio::spawn(handle_connection(
+                    state.clone(),
+                    stream,
+                    addr,
+                    config.clone(),
+                ));
             }
             Err(e) => {
                 eprintln!("Error accepting connection: {}", e);

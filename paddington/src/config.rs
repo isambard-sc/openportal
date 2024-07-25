@@ -54,7 +54,7 @@ pub enum ConfigError {
 /// };
 /// ```
 ///
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServiceConfig {
     pub name: String,
     pub key: SecretKey,

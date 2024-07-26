@@ -50,6 +50,8 @@ pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
 
     // Let's spawn the handling of each connection in a separate task.
     loop {
+        println!("Awaiting the next connection...");
+
         match listener.accept().await {
             Ok((stream, addr)) => {
                 println!("New connection from: {}", addr);
@@ -59,11 +61,20 @@ pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
                 // eventually could look up different handlers based on different
                 // configs and addresses of clients - for now, we will do something basic
                 let message_handler = |msg: &str| -> Result<(), AnyError> {
-                    println!("Received message: {}", msg);
+                    println!("Handler received message: {}", msg);
                     Ok(())
                 };
 
-                tokio::spawn(connection.handle_connection(stream, message_handler));
+                let result = tokio::spawn(connection.handle_connection(stream, message_handler));
+
+                match result.await {
+                    Ok(_) => {
+                        println!("Spawn: Connection closed");
+                    }
+                    Err(e) => {
+                        eprintln!("Error handling connection: {}", e);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Error accepting connection: {}", e);

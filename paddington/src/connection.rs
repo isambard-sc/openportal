@@ -9,6 +9,8 @@ use thiserror::Error;
 use futures::{SinkExt, StreamExt};
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
+use secrecy::ExposeSecret;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -16,6 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use std::sync::{Arc, Mutex};
 
 use crate::config::{PeerConfig, ServiceConfig};
+use crate::crypto::{EncryptedData, Key, SecretKey};
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -51,6 +54,59 @@ pub struct Connection {
 
     tx: Arc<Mutex<Tx>>,
     rx: Rx,
+}
+
+fn envelope_message<T>(
+    message: T,
+    inner_key: &SecretKey,
+    outer_key: &SecretKey,
+) -> Result<Message, AnyError>
+where
+    T: Serialize,
+{
+    let message = inner_key
+        .expose_secret()
+        .encrypt(message)
+        .with_context(|| "Error encrypting message with the inner key.")?;
+    let message = outer_key
+        .expose_secret()
+        .encrypt(message)
+        .with_context(|| "Error encrypting message with the outer key.")?;
+    Ok(Message::text(
+        serde_json::to_string(&message).with_context(|| "Error serialising message to JSON.")?,
+    ))
+}
+
+fn deenvelope_message<T>(
+    message: Message,
+    inner_key: &SecretKey,
+    outer_key: &SecretKey,
+) -> Result<T, AnyError>
+where
+    T: DeserializeOwned,
+{
+    println!("De-enveloping message: {:?}", message);
+    let message: EncryptedData = serde_json::from_str::<EncryptedData>(
+        message
+            .to_text()
+            .with_context(|| "Error converting message to text.")?,
+    )
+    .with_context(|| "Error deserialising message from JSON.")?;
+
+    println!("Outer key {:?}", message);
+    let message = outer_key
+        .expose_secret()
+        .decrypt::<EncryptedData>(&message)
+        .with_context(|| "Error decrypting message with the outer key.")?;
+
+    println!("Inner key {:?}", message);
+    let message = inner_key
+        .expose_secret()
+        .decrypt::<T>(&message)
+        .with_context(|| "Error decrypting message with the inner key.")?;
+
+    println!("Done de-enveloping message");
+    Ok(message)
 }
 
 impl Connection {
@@ -105,8 +161,7 @@ impl Connection {
 
         println!("Successfully connected to the WebSocket");
 
-        // do the handshake - send a message
-        let message = Message::text("Hello World!");
+        let message = envelope_message(Key::generate(), &self.config.key, &peer.key)?;
 
         println!("Sending message: {:?}", message);
         if let Err(r) = socket.send(message).await {
@@ -136,7 +191,7 @@ impl Connection {
                 Ok(self_peer) => {
                     if !self_peer.is_null() {
                         return Err(ConnectionError::BusyLine(format!(
-                            "Already handling a connection {}",
+                            "Already handling a connection {} - closing new connection.",
                             self_peer
                         )));
                     }
@@ -149,42 +204,71 @@ impl Connection {
             }
         }
 
-        let addr: std::net::SocketAddr = stream.peer_addr().unwrap_or_else(|e| {
-            eprint!("Error getting peer address: {}", e);
-            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-        });
+        let addr: std::net::SocketAddr = stream
+            .peer_addr()
+            .with_context(|| "Error getting the peer address. Ensure the connection is open.")?;
 
         println!("Accepted connection from peer: {}", addr);
 
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
-            .with_context(|| format!("Error accepting WebSocket connection from: {}", addr))?;
+            .with_context(|| {
+                format!(
+                    "Error accepting WebSocket connection from: {}. Closing connection.",
+                    addr
+                )
+            })?;
 
         // Split the WebSocket stream into incoming and outgoing parts
         let (mut outgoing, mut incoming) = ws_stream.split();
 
         // do the handshake with the client - the client should have sent an initial message
         // with the peer information
-        let peer_info = incoming
+        let message = incoming
             .next()
             .await
             .ok_or_else(|| {
-                ConnectionError::InvalidPeer("No peer information received".to_string())
+                eprintln!("No peer information received - closing connection.");
+                ConnectionError::InvalidPeer(
+                    "No peer information received - closing connection.".to_string(),
+                )
             })?
             .unwrap_or_else(|_| Message::text(""));
 
-        print!("Received peer information: {:?}", peer_info);
+        if message.is_empty() {
+            eprintln!("No peer information received - closing connection.");
+            return Err(ConnectionError::InvalidPeer(
+                "No peer information received - closing connection.".to_string(),
+            ));
+        }
+
+        println!("Received message: {:?}", message);
+
+        // de-envelope the message
+        let peer_session_key =
+            deenvelope_message::<SecretKey>(message, &self.config.key, &self.config.key)
+                .with_context(|| "Error de-enveloping message - closing connection.")?;
 
         // now check that the peer is correct and we are not already handling
         // another connection
 
-        // now respond to the handshake
-        let response = Message::text("Hello to you!");
+        println!("Sending session key");
+
+        // create our own session key and send this to the client
+        let session_key = Key::generate();
+
+        let response = envelope_message(session_key, &peer_session_key, &self.config.key)
+            .with_context(|| "Error enveloping message - closing connection.")?;
 
         outgoing
             .send(response)
             .await
             .with_context(|| "Error sending response to peer")?;
+
+        println!("Handshake complete!");
+
+        // we've now completed the handshake and can use the two session
+        // keys to trust and secure both ends of the connection
 
         // handle the sending of messages to others
         let send_to_others = incoming.try_for_each(|msg| {

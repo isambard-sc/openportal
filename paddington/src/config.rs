@@ -102,14 +102,14 @@ impl ServiceConfig {
     }
 
     pub fn is_null(&self) -> bool {
-        self.name == "" || self.server == ""
+        self.name.is_empty() || self.server.is_empty()
     }
 
     pub fn is_valid(&self) -> bool {
         !self.is_null()
     }
 
-    pub fn default() -> Self {
+    pub fn create_null() -> Self {
         ServiceConfig {
             name: "".to_string(),
             key: Key::null(),
@@ -147,14 +147,14 @@ impl PeerConfig {
     }
 
     pub fn is_null(&self) -> bool {
-        self.name == "" || self.server == ""
+        self.name.is_empty() || self.server.is_empty()
     }
 
     pub fn is_valid(&self) -> bool {
         !self.is_null()
     }
 
-    pub fn default() -> Self {
+    pub fn create_default() -> Self {
         PeerConfig {
             name: "".to_string(),
             key: Key::null(),

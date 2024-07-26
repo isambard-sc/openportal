@@ -59,8 +59,8 @@ impl Connection {
 
         Connection {
             config,
-            peer: Arc::new(Mutex::new(PeerConfig::default())),
-            tx: Arc::new(Mutex::new(tx)),
+            peer: Arc::new(Mutex::new(PeerConfig::create_default())),
+            tx: Arc::new(Mutex::new(tx.clone())),
             rx,
         }
     }
@@ -108,9 +108,12 @@ impl Connection {
         // do the handshake - send a message
         let message = Message::text("Hello World!");
 
+        println!("Sending message: {:?}", message);
         if let Err(r) = socket.send(message).await {
             return Err(ConnectionError::AnyError(r.into()));
         }
+
+        println!("Receiving message...");
 
         // receive the response
         let response = socket.next().await.with_context(|| {
@@ -158,7 +161,7 @@ impl Connection {
             .with_context(|| format!("Error accepting WebSocket connection from: {}", addr))?;
 
         // Split the WebSocket stream into incoming and outgoing parts
-        let (outgoing, mut incoming) = ws_stream.split();
+        let (mut outgoing, mut incoming) = ws_stream.split();
 
         // do the handshake with the client - the client should have sent an initial message
         // with the peer information
@@ -174,6 +177,14 @@ impl Connection {
 
         // now check that the peer is correct and we are not already handling
         // another connection
+
+        // now respond to the handshake
+        let response = Message::text("Hello to you!");
+
+        outgoing
+            .send(response)
+            .await
+            .with_context(|| "Error sending response to peer")?;
 
         // handle the sending of messages to others
         let send_to_others = incoming.try_for_each(|msg| {

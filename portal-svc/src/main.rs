@@ -3,9 +3,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use paddington;
 use std::path::absolute;
-use tokio;
 
 pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -126,6 +124,17 @@ fn main() -> Result<()> {
 
             paddington::config::create(&config_dir, service, host, port)?;
         }
+        Some(Commands::Client { command }) => match command {
+            Some(ClientCommands::Add { client }) => {
+                println!("Adding client: {}", client);
+            }
+            Some(ClientCommands::Remove { client }) => {
+                println!("Removing client: {}", client);
+            }
+            None => {
+                anyhow::bail!("No client command provided.");
+            }
+        },
         _ => {}
     }
 

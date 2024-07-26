@@ -90,7 +90,7 @@ async fn async_main(config: paddington::config::ServiceConfig) {
     match paddington::client::run(config).await {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Unable to start the client: {}", e);
             std::process::exit(1);
         }
     }

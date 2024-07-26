@@ -3,20 +3,18 @@
 
 use anyhow::Context;
 use anyhow::Error as AnyError;
-use secrecy::ExposeSecret;
+use std::io::Error as IOError;
 use thiserror::Error;
 
-use futures::{SinkExt, StreamExt};
-use serde_json::json;
-use tokio_serde::formats::*;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::protocol::Message;
-
-use crate::config;
+use crate::config::{PeerConfig, ServiceConfig};
+use crate::connection::Connection;
 use crate::crypto;
 
 #[derive(Error, Debug)]
 pub enum ClientError {
+    #[error("{0}")]
+    IOError(#[from] IOError),
+
     #[error("{0}")]
     AnyError(#[from] AnyError),
 
@@ -30,54 +28,38 @@ pub enum ClientError {
     Unknown,
 }
 
-pub async fn run(config: config::ServiceConfig) -> Result<(), ClientError> {
+pub async fn run(config: ServiceConfig) -> Result<(), ClientError> {
     println!("Starting client {}", config.name);
 
-    let url = "ws://localhost:8080/socket";
+    // create a fake peer
+    let peer = PeerConfig::new(
+        "client".to_string(),
+        crypto::Key::generate(),
+        "localhost".to_string(),
+        8080,
+    );
 
-    let (mut socket, _) = connect_async(url)
+    let connection = Connection::new(config.clone());
+
+    // use a default message handler for now - in the future we could
+    // choose this based on the identities of the sides of the connection
+    let message_handler = |msg: &str| -> Result<(), anyhow::Error> {
+        println!("Received message: {}", msg);
+        Ok(())
+    };
+
+    println!("Making the connection to the server");
+
+    // connect to the server
+    connection
+        .make_connection(peer.clone(), message_handler)
         .await
-        .with_context(|| format!("Error connecting to WebSocket at: {}", url))?;
-
-    println!("Successfully connected to the WebSocket");
-
-    let job = "Hello, World!".to_string();
-
-    let key = config.key;
-
-    let encrypted_message = key.expose_secret().encrypt(job)?;
-
-    let json_data = serde_json::to_string(&encrypted_message).with_context(|| {
-        "Failed to serialise the data to JSON. Ensure that the data is serialisable by serde."
-    })?;
-
-    let message: Message = Message::text(json_data);
-
-    if let Err(r) = socket.send(message).await {
-        eprintln!("Error sending message: {:?}", r);
-    }
-
-    // recieve response
-    if let Some(Ok(response)) = socket.next().await {
-        println!("{response}");
-    }
-
-    /*
-    for i in 0..10 {
-        // create message
-        let message = Message::from(format!("Message {}", i));
-
-        // send message
-        if let Err(e) = socket.send(message).await {
-            eprintln!("Error sending message: {:?}", e);
-        }
-
-        // recieve response
-        if let Some(Ok(response)) = socket.next().await {
-            println!("{response}");
-        }
-    }
-    */
+        .with_context(|| {
+            format!(
+                "Error with the connection to the server at: {}:{}",
+                peer.server, peer.port
+            )
+        })?;
 
     Ok(())
 }

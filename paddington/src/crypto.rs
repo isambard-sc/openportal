@@ -95,6 +95,13 @@ impl Key {
     }
 
     ///
+    /// Create and return a null key - this should not be used
+    ///
+    pub fn null() -> SecretKey {
+        Key { data: vec![0; 32] }.into()
+    }
+
+    ///
     /// Encrypt the passed data with this key.
     /// This will return the encrypted data as a struct
     /// that can be serialised and deserialised by serde.

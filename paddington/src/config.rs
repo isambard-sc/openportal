@@ -6,6 +6,7 @@ use anyhow::Context;
 use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::fmt::{self, Display};
 use std::path;
 use thiserror::Error;
 
@@ -60,6 +61,107 @@ pub struct ServiceConfig {
     pub key: SecretKey,
     pub server: String,
     pub port: u16,
+}
+
+impl Display for ServiceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt(f)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PeerConfig {
+    pub name: String,
+    pub key: SecretKey,
+    pub server: String,
+    pub port: u16,
+}
+
+impl Display for PeerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt(f)
+    }
+}
+
+impl ServiceConfig {
+    pub fn new(name: String, key: SecretKey, server: String, port: u16) -> Self {
+        ServiceConfig {
+            name,
+            key,
+            server,
+            port,
+        }
+    }
+
+    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ServiceConfig {{ name: {}, server: {}, port: {} }}",
+            self.name, self.server, self.port
+        )
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.name == "" || self.server == ""
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.is_null()
+    }
+
+    pub fn default() -> Self {
+        ServiceConfig {
+            name: "".to_string(),
+            key: Key::null(),
+            server: "".to_string(),
+            port: 0,
+        }
+    }
+}
+
+impl PeerConfig {
+    pub fn new(name: String, key: SecretKey, server: String, port: u16) -> Self {
+        PeerConfig {
+            name,
+            key,
+            server,
+            port,
+        }
+    }
+
+    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PeerConfig {{ name: {}, server: {}, port: {} }}",
+            self.name, self.server, self.port
+        )
+    }
+
+    pub fn from_service_config(config: ServiceConfig) -> Self {
+        PeerConfig {
+            name: config.name,
+            key: config.key,
+            server: config.server,
+            port: config.port,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.name == "" || self.server == ""
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.is_null()
+    }
+
+    pub fn default() -> Self {
+        PeerConfig {
+            name: "".to_string(),
+            key: Key::null(),
+            server: "".to_string(),
+            port: 0,
+        }
+    }
 }
 
 ///

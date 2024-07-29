@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use std::sync::{Arc, Mutex};
 
-use crate::config::{ClientConfig, ServiceConfig};
+use crate::config::{PeerConfig, ServerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
 
 #[derive(Error, Debug)]
@@ -50,8 +50,7 @@ type Rx = UnboundedReceiver<Message>;
 #[derive(Debug)]
 pub struct Connection {
     pub config: ServiceConfig,
-    pub peer: Arc<Mutex<ClientConfig>>,
-
+    pub peer: Arc<Mutex<PeerConfig>>,
     tx: Arc<Mutex<Tx>>,
     rx: Rx,
 }
@@ -111,7 +110,7 @@ impl Connection {
 
         Connection {
             config,
-            client: Arc::new(Mutex::new(ClientConfig::create_default())),
+            peer: Arc::new(Mutex::new(PeerConfig::create_null())),
             tx: Arc::new(Mutex::new(tx.clone())),
             rx,
         }
@@ -119,7 +118,7 @@ impl Connection {
 
     pub async fn make_connection(
         self,
-        peer: PeerConfig,
+        peer: &PeerConfig,
         message_handler: fn(&str) -> Result<(), anyhow::Error>,
     ) -> Result<(), ConnectionError> {
         println!("make_connection");
@@ -147,7 +146,17 @@ impl Connection {
             }
         }
 
-        let url = format!("ws://{}:{}/socket", peer.server, peer.port);
+        let peer = match peer {
+            PeerConfig::Server(server) => server,
+            _ => {
+                return Err(ConnectionError::InvalidPeer(format!(
+                    "Peer {} is not a server",
+                    peer
+                )))
+            }
+        };
+
+        let url = peer.url.to_string();
 
         println!("Connecting to WebSocket at: {}", url);
 
@@ -157,9 +166,10 @@ impl Connection {
 
         println!("Successfully connected to the WebSocket");
 
-        let message = envelope_message(Key::generate(), &self.config.key, &peer.key)?;
+        let message = envelope_message(Key::generate(), &peer.inner_key, &peer.outer_key)?;
 
         println!("Sending message: {:?}", message);
+
         if let Err(r) = socket.send(message).await {
             return Err(ConnectionError::AnyError(r.into()));
         }
@@ -172,6 +182,8 @@ impl Connection {
         })?;
 
         println!("Received response: {:?}", response);
+
+        // we should now loop and await in the message handler
 
         Ok(())
     }
@@ -205,6 +217,20 @@ impl Connection {
             .with_context(|| "Error getting the peer address. Ensure the connection is open.")?;
 
         println!("Accepted connection from peer: {}", addr);
+
+        let clients = self.config.get_clients();
+
+        // should look through all our clients and see who is not connected...
+        let peer = match clients.iter().find(|client| client.matches(addr.ip())) {
+            Some(peer) => peer,
+            None => {
+                eprintln!("No clients matching peer: {} - closing connection.", addr);
+                return Err(ConnectionError::InvalidPeer(format!(
+                    "No clients matching peer: {} - closing connection.",
+                    addr
+                )));
+            }
+        };
 
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
@@ -242,7 +268,7 @@ impl Connection {
 
         // de-envelope the message
         let peer_session_key =
-            deenvelope_message::<SecretKey>(message, &self.config.key, &self.config.key)
+            deenvelope_message::<SecretKey>(message, &peer.inner_key, &peer.outer_key)
                 .with_context(|| "Error de-enveloping message - closing connection.")?;
 
         // now check that the peer is correct and we are not already handling
@@ -253,7 +279,7 @@ impl Connection {
         // create our own session key and send this to the client
         let session_key = Key::generate();
 
-        let response = envelope_message(session_key, &peer_session_key, &self.config.key)
+        let response = envelope_message(session_key, &peer_session_key, &peer.outer_key)
             .with_context(|| "Error enveloping message - closing connection.")?;
 
         outgoing

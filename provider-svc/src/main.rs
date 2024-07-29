@@ -7,7 +7,7 @@ use paddington;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = paddington::args::process_args()
+    let config: paddington::config::ServiceConfig = paddington::args::process_args()
         .await
         .context("Error processing arguments")?;
 
@@ -24,9 +24,9 @@ async fn main() -> Result<()> {
         }));
     }
 
-    for client in config.get_clients().iter() {
+    for server in config.get_servers().iter() {
         handles.append(tokio::spawn(async move {
-            paddington::client::run(client).context("Error running client")?
+            paddington::client::run(&config, &server).context("Error connecting to server")?
         }));
     }
 

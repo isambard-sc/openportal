@@ -5,6 +5,7 @@ use anyhow::Context;
 use anyhow::Error as AnyError;
 use clap::{Parser, Subcommand};
 use std::path::absolute;
+use thiserror::Error;
 use url::Url;
 
 use crate::config;

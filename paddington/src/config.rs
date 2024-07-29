@@ -4,7 +4,8 @@
 use crate::crypto::{CryptoError, Key, SecretKey};
 use anyhow::Context;
 use anyhow::Error as AnyError;
-use serde::{Deserialize, Serialize};
+use iptools::iprange::IpRange;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json;
 use std::fmt::{self, Display};
 use std::net::IpAddr;
@@ -83,10 +84,44 @@ impl ServerConfig {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum IpOrRange {
+    IP(IpAddr),
+    Range(String),
+}
+
+impl Display for IpOrRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IpOrRange::IP(ip) => write!(f, "{}", ip),
+            IpOrRange::Range(range) => write!(f, "{}", range),
+        }
+    }
+}
+
+impl IpOrRange {
+    pub fn new(ip: IpAddr) -> Self {
+        IpOrRange::IP(ip)
+    }
+
+    pub fn new_range(range: IpRange) -> Self {
+        IpOrRange::Range(format!("{:?}", range))
+    }
+
+    pub fn matches(&self, addr: &IpAddr) -> bool {
+        match self {
+            IpOrRange::IP(ip) => ip == addr,
+            IpOrRange::Range(range) => match IpRange::new(range, "") {
+                Ok(range) => range.contains(&addr.to_string()).unwrap_or_else(|_| false),
+                Err(_) => false,
+            },
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
-    pub ip: Option<IpAddr>,
-    pub netmask: Option<IpAddr>,
+    pub ip: Option<IpOrRange>,
     pub inner_key: SecretKey,
     pub outer_key: SecretKey,
 }
@@ -98,10 +133,9 @@ impl Display for ClientConfig {
 }
 
 impl ClientConfig {
-    pub fn new(ip: Option<IpAddr>, netmask: Option<IpAddr>) -> Self {
+    pub fn new(ip: Option<IpOrRange>) -> Self {
         ClientConfig {
             ip,
-            netmask,
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -110,7 +144,6 @@ impl ClientConfig {
     pub fn create_null() -> Self {
         ClientConfig {
             ip: None,
-            netmask: None,
             inner_key: Key::null(),
             outer_key: Key::null(),
         }
@@ -118,6 +151,67 @@ impl ClientConfig {
 
     pub fn is_null(&self) -> bool {
         self.ip.is_none()
+    }
+
+    pub fn matches(&self, addr: IpAddr) -> bool {
+        if self.ip.is_none() {
+            return false;
+        }
+
+        self.ip.as_ref().unwrap().matches(&addr)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum PeerConfig {
+    Server(ServerConfig),
+    Client(ClientConfig),
+    None,
+}
+
+impl Display for PeerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PeerConfig::Server(server) => write!(f, "{}", server),
+            PeerConfig::Client(client) => write!(f, "{}", client),
+            PeerConfig::None => write!(f, "PeerConfig {{ None }}"),
+        }
+    }
+}
+
+impl PeerConfig {
+    pub fn from_server(server: &ServerConfig) -> Self {
+        PeerConfig::Server(server.clone())
+    }
+
+    pub fn from_client(client: &ClientConfig) -> Self {
+        PeerConfig::Client(client.clone())
+    }
+
+    pub fn create_null() -> Self {
+        PeerConfig::None
+    }
+
+    pub fn is_null(&self) -> bool {
+        match self {
+            PeerConfig::Server(server) => server.is_null(),
+            PeerConfig::Client(client) => client.is_null(),
+            PeerConfig::None => true,
+        }
+    }
+
+    pub fn is_client(&self) -> bool {
+        match self {
+            PeerConfig::Client(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_server(&self) -> bool {
+        match self {
+            PeerConfig::Server(_) => true,
+            _ => false,
+        }
     }
 }
 

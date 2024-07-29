@@ -16,9 +16,23 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    paddington::server::run(config)
-        .await
-        .context("Error running server")?;
+    let mut handles = vec![];
+
+    if config.has_clients() {
+        handles.append(tokio::spawn(async move {
+            paddington::server::run(config).context("Error running server")?;
+        }));
+    }
+
+    for client in config.get_clients().iter() {
+        handles.append(tokio::spawn(async move {
+            paddington::client::run(client).context("Error running client")?
+        }));
+    }
+
+    for handle in handles {
+        handle.await?;
+    }
 
     Ok(())
 }

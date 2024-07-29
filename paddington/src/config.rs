@@ -53,6 +53,36 @@ pub struct ServerConfig {
     pub outer_key: SecretKey,
 }
 
+impl Display for ServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ServerConfig {{ name: {} }}", self.name)
+    }
+}
+
+impl ServerConfig {
+    pub fn new(name: String, url: Url) -> Self {
+        ServerConfig {
+            name,
+            url,
+            inner_key: Key::generate(),
+            outer_key: Key::generate(),
+        }
+    }
+
+    pub fn create_null() -> Self {
+        ServerConfig {
+            name: "".to_string(),
+            url: Url::parse("http://localhost").unwrap(),
+            inner_key: Key::null(),
+            outer_key: Key::null(),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.name.len() == 0
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
     pub ip: Option<IpAddr>,
@@ -61,13 +91,46 @@ pub struct ClientConfig {
     pub outer_key: SecretKey,
 }
 
+impl Display for ClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ClientConfig {{ ip: {} }}", self.ip.as_ref().unwrap())
+    }
+}
+
+impl ClientConfig {
+    pub fn new(ip: Option<IpAddr>, netmask: Option<IpAddr>) -> Self {
+        ClientConfig {
+            ip,
+            netmask,
+            inner_key: Key::generate(),
+            outer_key: Key::generate(),
+        }
+    }
+
+    pub fn create_null() -> Self {
+        ClientConfig {
+            ip: None,
+            netmask: None,
+            inner_key: Key::null(),
+            outer_key: Key::null(),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.ip.is_none()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServiceConfig {
     pub name: Option<String>,
     pub url: Option<Url>,
-    pub servers: Option<Vec<ServerConfig>>,
-    pub clients: Option<Vec<ClientConfig>>,
-    pub encryption: Option<String>,
+    pub ip: Option<IpAddr>,
+    pub port: Option<u16>,
+
+    servers: Option<Vec<ServerConfig>>,
+    clients: Option<Vec<ClientConfig>>,
+    encryption: Option<String>,
 }
 
 impl Display for ServiceConfig {
@@ -81,6 +144,8 @@ impl ServiceConfig {
         ServiceConfig {
             name: Some(name),
             url,
+            ip: None,
+            port: None,
             servers: None,
             clients: None,
             encryption: None,
@@ -118,10 +183,28 @@ impl ServiceConfig {
         ServiceConfig {
             name: None,
             url: None,
+            ip: None,
+            port: None,
             servers: None,
             clients: None,
             encryption: None,
         }
+    }
+
+    pub fn has_clients(&self) -> bool {
+        if self.clients.is_none() {
+            return false;
+        }
+
+        self.clients.as_ref().unwrap().len() > 0
+    }
+
+    pub fn has_servers(&self) -> bool {
+        if self.servers.is_none() {
+            return false;
+        }
+
+        self.servers.as_ref().unwrap().len() > 0
     }
 
     pub fn num_clients(&self) -> usize {

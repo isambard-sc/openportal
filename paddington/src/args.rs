@@ -16,7 +16,13 @@ pub enum ArgsError {
     IOError(#[from] std::io::Error),
 
     #[error("{0}")]
+    ConfigError(#[from] config::ConfigError),
+
+    #[error("{0}")]
     AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    ServiceNameError(String),
 
     #[error("Unknown arguments error")]
     Unknown,
@@ -98,7 +104,9 @@ enum ClientCommands {
     },
 }
 
-async fn process_args() -> Result<config::ServiceConfig, ArgsError> {
+async fn process_args(
+    default_service_name: Option<String>,
+) -> Result<config::ServiceConfig, ArgsError> {
     let args = Args::parse();
 
     let config_file = absolute(match &args.config_file {
@@ -118,14 +126,25 @@ async fn process_args() -> Result<config::ServiceConfig, ArgsError> {
                     std::fs::remove_file(&config_file)
                         .context("Could not remove existing config file.")?;
                 } else {
-                    anyhow::bail!(
-                        "Config file {} already exists.\nUse --force to reinitialise.",
-                        config_file.display()
-                    );
+                    return Err(ArgsError::Unknown);
                 }
             }
 
-            config::create(&config_file, service, url)?;
+            let service_name = match service {
+                Some(name) => name.clone(),
+                None => match default_service_name {
+                    Some(name) => name,
+                    None => "".to_string(),
+                },
+            };
+
+            if service_name.is_empty() {
+                return Err(ArgsError::ServiceNameError(
+                    "No service name provided.".to_string(),
+                ));
+            }
+
+            config::create(&config_file, &service_name, url)?;
         }
         Some(Commands::Client { command }) => match command {
             Some(ClientCommands::Add { client }) => {
@@ -135,7 +154,7 @@ async fn process_args() -> Result<config::ServiceConfig, ArgsError> {
                 println!("Removing client: {}", client);
             }
             None => {
-                anyhow::bail!("No client command provided.");
+                return Err(ArgsError::Unknown);
             }
         },
         _ => {}

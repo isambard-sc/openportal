@@ -5,7 +5,7 @@ use crate::crypto::{CryptoError, Key, SecretKey};
 use anyhow::Context;
 use anyhow::Error as AnyError;
 use iptools::iprange::IpRange;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::fmt::{self, Display};
 use std::net::IpAddr;

@@ -6,7 +6,7 @@ use anyhow::Error as AnyError;
 use std::io::Error as IOError;
 use thiserror::Error;
 
-use crate::config::{PeerConfig, ServerConfig, ServiceConfig};
+use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::Connection;
 use crate::crypto;
 

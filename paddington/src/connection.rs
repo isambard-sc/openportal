@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use std::sync::{Arc, Mutex};
 
-use crate::config::{PeerConfig, ServerConfig, ServiceConfig};
+use crate::config::{PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
 
 #[derive(Error, Debug)]

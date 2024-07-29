@@ -781,6 +781,7 @@ name = "paddington"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "built",
  "futures",
  "futures-channel",
  "futures-util",
@@ -794,6 +795,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "url",
 ]
 
 [[package]]
@@ -1312,6 +1314,7 @@ dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
+ "serde",
 ]
 
 [[package]]

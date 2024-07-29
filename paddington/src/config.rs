@@ -7,9 +7,11 @@ use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::fmt::{self, Display};
+use std::net::IpAddr;
 use std::path;
 use thiserror::Error;
-use toml::{from_str, to_string};
+use toml;
+use url::Url;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -35,33 +37,37 @@ pub enum ConfigError {
     Unknown,
 }
 
-///
-/// The full service configuration.
-/// This includes the service name, the secret key, the server to bind to and the port to bind to.
-/// The secret key is generated when the service is created and is used to encrypt and decrypt messages.
-/// The server is the address that the service will bind to and the port is the port that the service will bind to.
-/// The service name is the name of the service.
-///
-/// # Example
-///
-/// ```
-/// use paddington::config::ServiceConfig;
-/// use paddington::crypto::Key;
-///
-/// let config = ServiceConfig {
-///    name: "openportal".to_string(),
-///    key: Key::generate(),
-///    server: "localhost".to_string(),
-///    port: 8080,
-/// };
-/// ```
-///
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ConnectionInvite {
+    pub name: String,
+    pub url: url::Url,
+    pub inner_key: SecretKey,
+    pub outer_key: SecretKey,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ServerConfig {
+    pub name: String,
+    pub url: Url,
+    pub inner_key: SecretKey,
+    pub outer_key: SecretKey,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ClientConfig {
+    pub ip: Option<IpAddr>,
+    pub netmask: Option<IpAddr>,
+    pub inner_key: SecretKey,
+    pub outer_key: SecretKey,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServiceConfig {
-    pub name: String,
-    pub key: SecretKey,
-    pub server: String,
-    pub port: u16,
+    pub name: Option<String>,
+    pub url: Option<Url>,
+    pub servers: Option<Vec<ServerConfig>>,
+    pub clients: Option<Vec<ClientConfig>>,
+    pub encryption: Option<String>,
 }
 
 impl Display for ServiceConfig {
@@ -70,40 +76,38 @@ impl Display for ServiceConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PeerConfig {
-    pub name: String,
-    pub key: SecretKey,
-    pub server: String,
-    pub port: u16,
-}
-
-impl Display for PeerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt(f)
-    }
-}
-
 impl ServiceConfig {
-    pub fn new(name: String, key: SecretKey, server: String, port: u16) -> Self {
+    pub fn new(name: String, url: Option<Url>) -> Self {
         ServiceConfig {
-            name,
-            key,
-            server,
-            port,
+            name: Some(name),
+            url,
+            servers: None,
+            clients: None,
+            encryption: None,
         }
     }
 
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ServiceConfig {{ name: {}, server: {}, port: {} }}",
-            self.name, self.server, self.port
-        )
+        if !self.is_valid() {
+            return write!(f, "ServiceConfig {{ name: null }}");
+        } else if self.url.is_some() {
+            write!(
+                f,
+                "ServiceConfig {{ name: {}, url: {} }}",
+                self.name.as_ref().unwrap(),
+                self.url.as_ref().unwrap()
+            )
+        } else {
+            write!(
+                f,
+                "ServiceConfig {{ name: {} }}",
+                self.name.as_ref().unwrap()
+            )
+        }
     }
 
     pub fn is_null(&self) -> bool {
-        self.name.is_empty() || self.server.is_empty()
+        self.name.is_none()
     }
 
     pub fn is_valid(&self) -> bool {
@@ -112,98 +116,51 @@ impl ServiceConfig {
 
     pub fn create_null() -> Self {
         ServiceConfig {
-            name: "".to_string(),
-            key: Key::null(),
-            server: "".to_string(),
-            port: 0,
+            name: None,
+            url: None,
+            servers: None,
+            clients: None,
+            encryption: None,
         }
+    }
+
+    pub fn num_clients(&self) -> usize {
+        if self.clients.is_none() {
+            return 0;
+        }
+
+        self.clients.as_ref().unwrap().len()
+    }
+
+    pub fn num_servers(&self) -> usize {
+        if self.servers.is_none() {
+            return 0;
+        }
+
+        self.servers.as_ref().unwrap().len()
+    }
+
+    pub fn get_clients(&self) -> Vec<ClientConfig> {
+        if self.clients.is_none() {
+            return Vec::new();
+        }
+
+        self.clients.as_ref().unwrap().clone()
+    }
+
+    pub fn get_servers(&self) -> Vec<ServerConfig> {
+        if self.servers.is_none() {
+            return Vec::new();
+        }
+
+        self.servers.as_ref().unwrap().clone()
     }
 }
 
-impl PeerConfig {
-    pub fn new(name: String, key: SecretKey, server: String, port: u16) -> Self {
-        PeerConfig {
-            name,
-            key,
-            server,
-            port,
-        }
-    }
-
-    pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "PeerConfig {{ name: {}, server: {}, port: {} }}",
-            self.name, self.server, self.port
-        )
-    }
-
-    pub fn from_service_config(config: ServiceConfig) -> Self {
-        PeerConfig {
-            name: config.name,
-            key: config.key,
-            server: config.server,
-            port: config.port,
-        }
-    }
-
-    pub fn is_null(&self) -> bool {
-        self.name.is_empty() || self.server.is_empty()
-    }
-
-    pub fn is_valid(&self) -> bool {
-        !self.is_null()
-    }
-
-    pub fn create_default() -> Self {
-        PeerConfig {
-            name: "".to_string(),
-            key: Key::null(),
-            server: "".to_string(),
-            port: 0,
-        }
-    }
-}
-
-///
-/// Create a new service configuration in the passed file.
-/// This will return an error if the config file already exists.
-/// The service name, server and port can be passed as arguments.
-/// If they are not passed, default values will be used.
-/// The service name will default to "openportal", the server will default to "localhost"
-/// and the port will default to 8080.
-///
-/// # Arguments
-///
-/// * `config_file` - The in which to create the service configuration
-/// * `service_name` - The name of the service.
-/// * `server` - The server to bind to.
-/// * `port` - The port to bind to.
-///
-/// # Returns
-///
-/// The full service configuration.
-///
-/// # Errors
-///
-/// This function will return an error if the config file already exists.
-///
-/// # Example
-///
-/// ```
-/// use paddington::config;
-///
-/// let config = config::create("/path/to/config_file", "service_name",
-///                             "https://service_url", 8000)?;
-///
-/// println!("Service name: {}", config.name);
-/// ```
-///
 pub fn create(
     config_file: &path::PathBuf,
-    service_name: &Option<String>,
-    server: &Option<String>,
-    port: &Option<u16>,
+    service_name: &String,
+    url: &Option<Url>,
 ) -> Result<ServiceConfig, ConfigError> {
     // see if this config_dir exists - return an error if it does
     let config_file = path::absolute(config_file).with_context(|| {
@@ -217,16 +174,7 @@ pub fn create(
         return Err(ConfigError::ExistsError(config_file));
     }
 
-    let service_name = service_name.clone().unwrap_or("openportal".to_string());
-    let server = server.clone().unwrap_or("localhost".to_string());
-    let port = port.unwrap_or(8080);
-
-    let config = ServiceConfig {
-        name: service_name.clone(),
-        key: Key::generate(),
-        server: server.clone(),
-        port,
-    };
+    let config = ServiceConfig::new(service_name.clone(), url.clone());
 
     // write the config to a json file
     let config_toml =

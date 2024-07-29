@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use std::sync::{Arc, Mutex};
 
-use crate::config::{PeerConfig, ServiceConfig};
+use crate::config::{ClientConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
 
 #[derive(Error, Debug)]
@@ -50,7 +50,7 @@ type Rx = UnboundedReceiver<Message>;
 #[derive(Debug)]
 pub struct Connection {
     pub config: ServiceConfig,
-    pub peer: Arc<Mutex<PeerConfig>>,
+    pub peer: Arc<Mutex<ClientConfig>>,
 
     tx: Arc<Mutex<Tx>>,
     rx: Rx,
@@ -111,7 +111,7 @@ impl Connection {
 
         Connection {
             config,
-            peer: Arc::new(Mutex::new(PeerConfig::create_default())),
+            client: Arc::new(Mutex::new(ClientConfig::create_default())),
             tx: Arc::new(Mutex::new(tx.clone())),
             rx,
         }

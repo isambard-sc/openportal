@@ -42,11 +42,9 @@ pub enum ServerError {
 /// This function will return a ServerError if the server fails to start.
 ///
 pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
-    let addr: String = config.server.clone() + ":" + &config.port.to_string();
-
     // Create the event loop and TCP listener we'll accept connections on.
-    let listener = TcpListener::bind(&addr).await?;
-    println!("Listening on: {}", addr);
+    let listener = TcpListener::bind("127.0.0.1").await?;
+    println!("Listening on: {}", listener.local_addr()?);
 
     // Let's spawn the handling of each connection in a separate task.
     loop {

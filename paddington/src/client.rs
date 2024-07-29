@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Context;
 use anyhow::Error as AnyError;
 use std::io::Error as IOError;
 use thiserror::Error;
 
-use crate::config::{PeerConfig, ServiceConfig};
+use crate::config::ServiceConfig;
 use crate::connection::Connection;
 use crate::crypto;
 
@@ -28,16 +27,8 @@ pub enum ClientError {
     Unknown,
 }
 
-pub async fn run(config: ServiceConfig) -> Result<(), ClientError> {
-    println!("Starting client {}", config.name);
-
-    // create a fake peer
-    let peer = PeerConfig::new(
-        "client".to_string(),
-        crypto::Key::generate(),
-        "localhost".to_string(),
-        8080,
-    );
+pub async fn run(config: &ServiceConfig) -> Result<(), ClientError> {
+    println!("Starting client {:?}", config.name);
 
     let connection = Connection::new(config.clone());
 
@@ -52,12 +43,12 @@ pub async fn run(config: ServiceConfig) -> Result<(), ClientError> {
 
     // connect to the server
     connection
-        .make_connection(peer.clone(), message_handler)
+        .make_connection(config.clone(), message_handler)
         .await
         .with_context(|| {
             format!(
-                "Error with the connection to the server at: {}:{}",
-                peer.server, peer.port
+                "Error with the connection to the server at: {:?}",
+                config.url
             )
         })?;
 

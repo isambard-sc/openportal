@@ -17,6 +17,7 @@ anyhow = { version="1.0.86", features = ["backtrace"] }
 futures = "0.3.30"
 futures-channel = "0.3.30"
 futures-util = "0.3.30"
+hex = {version="0.4.3", features = ["serde"]}
 orion = "0.17.6"
 secrecy = { version = "0.8.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -25,6 +26,7 @@ serde_with = { version="3.9.0", features = ["hex"] }
 thiserror = "1.0.63"
 tokio = { version = "1.0", features = ["full"] }
 tokio-tungstenite = "0.23.1"
+toml = "0.8.16"
 
 [lints.rust]
 unsafe_code = "forbid"

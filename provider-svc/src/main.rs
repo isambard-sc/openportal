@@ -13,13 +13,13 @@ fn version() -> &'static str {
     built_info::GIT_VERSION.unwrap_or(built_info::PKG_VERSION)
 }
 
-fn default_config_dir() -> std::path::PathBuf {
+fn default_config_file() -> std::path::PathBuf {
     dirs::config_local_dir()
         .unwrap_or(
             ".".parse()
                 .expect("Could not parse fallback config directory."),
         )
-        .join("openportal")
+        .join("openportal/service.toml")
 }
 
 #[derive(Parser)]
@@ -29,11 +29,11 @@ struct Args {
         long,
         short='c',
         help=format!(
-            "Path to the openportal config directory [default: {}]",
-            &default_config_dir().display(),
+            "Path to the openportal config file [default: {}]",
+            &default_config_file().display(),
         )
     )]
-    config_dir: Option<std::path::PathBuf>,
+    config_file: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -97,9 +97,9 @@ async fn async_main(config: paddington::config::ServiceConfig) {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let config_dir = absolute(match &args.config_dir {
+    let config_file = absolute(match &args.config_file {
         Some(f) => f.clone(),
-        None => default_config_dir(),
+        None => default_config_file(),
     })?;
 
     // see if we need to initialise the config directory
@@ -110,19 +110,19 @@ fn main() -> Result<()> {
             port,
             force,
         }) => {
-            if config_dir.try_exists()? {
+            if config_file.try_exists()? {
                 if *force {
-                    std::fs::remove_dir_all(&config_dir)
-                        .context("Could not remove existing config directory.")?;
+                    std::fs::remove_file(&config_file)
+                        .context("Could not remove existing config file.")?;
                 } else {
                     anyhow::bail!(
-                        "Config directory {} already exists.\nUse --force to reinitialise.",
-                        config_dir.display()
+                        "Config file {} already exists.\nUse --force to reinitialise.",
+                        config_file.display()
                     );
                 }
             }
 
-            paddington::config::create(&config_dir, service, host, port)?;
+            paddington::config::create(&config_file, service, host, port)?;
         }
         Some(Commands::Client { command }) => match command {
             Some(ClientCommands::Add { client }) => {
@@ -138,7 +138,7 @@ fn main() -> Result<()> {
         _ => {}
     }
 
-    let config = paddington::config::load(&config_dir)?;
+    let config = paddington::config::load(&config_file)?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

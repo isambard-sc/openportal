@@ -9,6 +9,7 @@ use serde_json;
 use std::fmt::{self, Display};
 use std::path;
 use thiserror::Error;
+use toml::{from_str, to_string};
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -165,8 +166,8 @@ impl PeerConfig {
 }
 
 ///
-/// Create a new service configuration in the passed directory.
-/// This will return an error if the config directory already exists.
+/// Create a new service configuration in the passed file.
+/// This will return an error if the config file already exists.
 /// The service name, server and port can be passed as arguments.
 /// If they are not passed, default values will be used.
 /// The service name will default to "openportal", the server will default to "localhost"
@@ -174,7 +175,7 @@ impl PeerConfig {
 ///
 /// # Arguments
 ///
-/// * `config_dir` - The directory to create the service configuration in.
+/// * `config_file` - The in which to create the service configuration
 /// * `service_name` - The name of the service.
 /// * `server` - The server to bind to.
 /// * `port` - The port to bind to.
@@ -185,44 +186,36 @@ impl PeerConfig {
 ///
 /// # Errors
 ///
-/// This function will return an error if the config directory already exists.
+/// This function will return an error if the config file already exists.
 ///
 /// # Example
 ///
 /// ```
 /// use paddington::config;
 ///
-/// let config = config::create("/path/to/config", "service_name",
+/// let config = config::create("/path/to/config_file", "service_name",
 ///                             "https://service_url", 8000)?;
 ///
 /// println!("Service name: {}", config.name);
 /// ```
 ///
 pub fn create(
-    config_dir: &path::PathBuf,
+    config_file: &path::PathBuf,
     service_name: &Option<String>,
     server: &Option<String>,
     port: &Option<u16>,
 ) -> Result<ServiceConfig, ConfigError> {
     // see if this config_dir exists - return an error if it does
-    let config_dir = path::absolute(config_dir).with_context(|| {
+    let config_file = path::absolute(config_file).with_context(|| {
         format!(
-            "Could not get absolute path for config directory: {:?}",
-            config_dir
+            "Could not get absolute path for config file: {:?}",
+            config_file
         )
     })?;
 
-    if config_dir.try_exists()? {
-        return Err(ConfigError::ExistsError(config_dir));
+    if config_file.try_exists()? {
+        return Err(ConfigError::ExistsError(config_file));
     }
-
-    // create the config directory
-    std::fs::create_dir_all(&config_dir).with_context(|| {
-        format!(
-            "Could not create config directory: {:?}",
-            config_dir.to_string_lossy()
-        )
-    })?;
 
     let service_name = service_name.clone().unwrap_or("openportal".to_string());
     let server = server.clone().unwrap_or("localhost".to_string());
@@ -236,33 +229,42 @@ pub fn create(
     };
 
     // write the config to a json file
-    let config_file = config_dir.join("service.json");
-    let config_file_string = config_dir.to_string_lossy();
+    let config_toml =
+        toml::to_string(&config).with_context(|| "Could not serialise config to toml")?;
 
-    let config_json = serde_json::to_string(&config).with_context(|| {
+    let config_file_string = config_file.to_string_lossy();
+
+    let prefix = config_file.parent().with_context(|| {
         format!(
-            "Could not serialise config to json: {:?}",
+            "Could not get parent directory for config file: {:?}",
             config_file_string
         )
     })?;
 
-    std::fs::write(config_file, config_json)
+    std::fs::create_dir_all(prefix).with_context(|| {
+        format!(
+            "Could not create parent directory for config file: {:?}",
+            config_file_string
+        )
+    })?;
+
+    std::fs::write(&config_file, config_toml)
         .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
 
     // read the config and return it
-    let config = load(&config_dir)?;
+    let config = load(&config_file)?;
 
     Ok(config)
 }
 
 ///
-/// Load the full service configuration from the passed directory.
-/// This will return an error if the config directory does not exist
+/// Load the full service configuration from the passed config file.
+/// This will return an error if the config file does not exist
 /// or if the data within cannot be read.
 ///
 /// # Arguments
 ///
-/// * `config_dir` - The directory containing the service configuration.
+/// * `config_file` - The file containing the service configuration.
 ///
 /// # Returns
 ///
@@ -270,7 +272,7 @@ pub fn create(
 ///
 /// # Errors
 ///
-/// This function will return an error if the config directory does not exist
+/// This function will return an error if the config file does not exist
 /// or if the data within cannot be read.
 ///
 /// # Example
@@ -278,30 +280,26 @@ pub fn create(
 /// ```
 /// use paddington::config;
 ///
-/// let config = config::load("/path/to/config")?;
+/// let config = config::load("/path/to/config_file")?;
 ///
 /// println!("Service name: {}", config.name);
 /// ```
 ///
-pub fn load(config_dir: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
-    // see if this config_dir exists - return an error if it doesn't
-    let config_dir = path::absolute(config_dir)?;
+pub fn load(config_file: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
+    // see if this config_dilw exists - return an error if it doesn't
+    let config_file = path::absolute(config_file)?;
 
-    if !config_dir.try_exists()? {
-        return Err(ConfigError::NotExistsError(config_dir));
+    if !config_file.try_exists()? {
+        return Err(ConfigError::NotExistsError(config_file));
     }
-
-    // look for a json config file called "service.json" in the config directory
-    let config_file = config_dir.join("service.json");
-    let config_string = config_file.to_string_lossy();
 
     // read the config file
     let config = std::fs::read_to_string(&config_file)
-        .with_context(|| format!("Could not read config file: {:?}", config_string))?;
+        .with_context(|| format!("Could not read config file: {:?}", config_file))?;
 
     // parse the config file
-    let config: ServiceConfig = serde_json::from_str(&config)
-        .with_context(|| format!("Could not parse config file fron json: {:?}", config_string))?;
+    let config: ServiceConfig = toml::from_str(&config)
+        .with_context(|| format!("Could not parse config file fron toml: {:?}", config_file))?;
 
     Ok(config)
 }

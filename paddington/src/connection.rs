@@ -10,7 +10,7 @@ use futures::{SinkExt, StreamExt};
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
 use secrecy::ExposeSecret;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use std::sync::{Arc, Mutex};
 
 use crate::config::{PeerConfig, ServiceConfig};
-use crate::crypto::{EncryptedData, Key, SecretKey};
+use crate::crypto::{Key, SecretKey};
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -72,9 +72,7 @@ where
         .expose_secret()
         .encrypt(message)
         .with_context(|| "Error encrypting message with the outer key.")?;
-    Ok(Message::text(
-        serde_json::to_string(&message).with_context(|| "Error serialising message to JSON.")?,
-    ))
+    Ok(Message::text(message))
 }
 
 fn deenvelope_message<T>(
@@ -86,17 +84,15 @@ where
     T: DeserializeOwned,
 {
     println!("De-enveloping message: {:?}", message);
-    let message: EncryptedData = serde_json::from_str::<EncryptedData>(
-        message
-            .to_text()
-            .with_context(|| "Error converting message to text.")?,
-    )
-    .with_context(|| "Error deserialising message from JSON.")?;
+    let message: String = message
+        .to_text()
+        .with_context(|| "Error converting message to text.")?
+        .to_string();
 
     println!("Outer key {:?}", message);
     let message = outer_key
         .expose_secret()
-        .decrypt::<EncryptedData>(&message)
+        .decrypt::<String>(&message)
         .with_context(|| "Error decrypting message with the outer key.")?;
 
     println!("Inner key {:?}", message);

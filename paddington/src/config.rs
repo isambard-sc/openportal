@@ -61,10 +61,10 @@ impl Display for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn new(name: String, url: Url) -> Self {
+    pub fn new(name: &str, url: &Url) -> Self {
         ServerConfig {
-            name,
-            url,
+            name: name.to_string(),
+            url: url.clone(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -80,12 +80,12 @@ impl ServerConfig {
     }
 
     pub fn is_null(&self) -> bool {
-        self.name.len() == 0
+        self.name.is_empty()
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-enum IpOrRange {
+pub enum IpOrRange {
     IP(IpAddr),
     Range(String),
 }
@@ -100,19 +100,11 @@ impl Display for IpOrRange {
 }
 
 impl IpOrRange {
-    pub fn new(ip: IpAddr) -> Self {
-        IpOrRange::IP(ip)
-    }
-
-    pub fn new_range(range: IpRange) -> Self {
-        IpOrRange::Range(format!("{:?}", range))
-    }
-
     pub fn matches(&self, addr: &IpAddr) -> bool {
         match self {
             IpOrRange::IP(ip) => ip == addr,
             IpOrRange::Range(range) => match IpRange::new(range, "") {
-                Ok(range) => range.contains(&addr.to_string()).unwrap_or_else(|_| false),
+                Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
                 Err(_) => false,
             },
         }
@@ -128,14 +120,17 @@ pub struct ClientConfig {
 
 impl Display for ClientConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ClientConfig {{ ip: {} }}", self.ip.as_ref().unwrap())
+        match &self.ip {
+            Some(ip) => write!(f, "ClientConfig {{ ip: {} }}", ip),
+            None => write!(f, "ClientConfig {{ ip: None }}"),
+        }
     }
 }
 
 impl ClientConfig {
-    pub fn new(ip: Option<IpOrRange>) -> Self {
+    pub fn new(ip: &Option<IpOrRange>) -> Self {
         ClientConfig {
-            ip,
+            ip: ip.clone(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -154,11 +149,10 @@ impl ClientConfig {
     }
 
     pub fn matches(&self, addr: IpAddr) -> bool {
-        if self.ip.is_none() {
-            return false;
+        match &self.ip {
+            Some(ip) => ip.matches(&addr),
+            None => false,
         }
-
-        self.ip.as_ref().unwrap().matches(&addr)
     }
 }
 
@@ -201,17 +195,11 @@ impl PeerConfig {
     }
 
     pub fn is_client(&self) -> bool {
-        match self {
-            PeerConfig::Client(_) => true,
-            _ => false,
-        }
+        matches!(self, PeerConfig::Client(_))
     }
 
     pub fn is_server(&self) -> bool {
-        match self {
-            PeerConfig::Server(_) => true,
-            _ => false,
-        }
+        matches!(self, PeerConfig::Server(_))
     }
 }
 
@@ -234,10 +222,10 @@ impl Display for ServiceConfig {
 }
 
 impl ServiceConfig {
-    pub fn new(name: String, url: Option<Url>) -> Self {
+    pub fn new(name: &str, url: &Option<Url>) -> Self {
         ServiceConfig {
-            name: Some(name),
-            url,
+            name: Some(name.to_string()),
+            url: url.clone(),
             ip: None,
             port: None,
             servers: None,
@@ -247,21 +235,9 @@ impl ServiceConfig {
     }
 
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.is_valid() {
-            return write!(f, "ServiceConfig {{ name: null }}");
-        } else if self.url.is_some() {
-            write!(
-                f,
-                "ServiceConfig {{ name: {}, url: {} }}",
-                self.name.as_ref().unwrap(),
-                self.url.as_ref().unwrap()
-            )
-        } else {
-            write!(
-                f,
-                "ServiceConfig {{ name: {} }}",
-                self.name.as_ref().unwrap()
-            )
+        match self.name {
+            Some(ref name) => write!(f, "ServiceConfig {{ name: {} }}", name),
+            None => write!(f, "ServiceConfig {{ name: null }}"),
         }
     }
 
@@ -286,57 +262,51 @@ impl ServiceConfig {
     }
 
     pub fn has_clients(&self) -> bool {
-        if self.clients.is_none() {
-            return false;
+        match &self.clients {
+            Some(clients) => !clients.is_empty(),
+            None => false,
         }
-
-        self.clients.as_ref().unwrap().len() > 0
     }
 
     pub fn has_servers(&self) -> bool {
-        if self.servers.is_none() {
-            return false;
+        match &self.servers {
+            Some(servers) => !servers.is_empty(),
+            None => false,
         }
-
-        self.servers.as_ref().unwrap().len() > 0
     }
 
     pub fn num_clients(&self) -> usize {
-        if self.clients.is_none() {
-            return 0;
+        match &self.clients {
+            Some(clients) => clients.len(),
+            None => 0,
         }
-
-        self.clients.as_ref().unwrap().len()
     }
 
     pub fn num_servers(&self) -> usize {
-        if self.servers.is_none() {
-            return 0;
+        match &self.servers {
+            Some(servers) => servers.len(),
+            None => 0,
         }
-
-        self.servers.as_ref().unwrap().len()
     }
 
     pub fn get_clients(&self) -> Vec<ClientConfig> {
-        if self.clients.is_none() {
-            return Vec::new();
+        match &self.clients {
+            Some(clients) => clients.clone(),
+            None => Vec::new(),
         }
-
-        self.clients.as_ref().unwrap().clone()
     }
 
     pub fn get_servers(&self) -> Vec<ServerConfig> {
-        if self.servers.is_none() {
-            return Vec::new();
+        match &self.servers {
+            Some(servers) => servers.clone(),
+            None => Vec::new(),
         }
-
-        self.servers.as_ref().unwrap().clone()
     }
 }
 
 pub fn create(
     config_file: &path::PathBuf,
-    service_name: &String,
+    service_name: &str,
     url: &Option<Url>,
 ) -> Result<ServiceConfig, ConfigError> {
     // see if this config_dir exists - return an error if it does
@@ -351,7 +321,7 @@ pub fn create(
         return Err(ConfigError::ExistsError(config_file));
     }
 
-    let config = ServiceConfig::new(service_name.clone(), url.clone());
+    let config = ServiceConfig::new(service_name, url);
 
     // write the config to a json file
     let config_toml =

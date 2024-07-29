@@ -104,7 +104,7 @@ enum ClientCommands {
     },
 }
 
-async fn process_args(
+pub async fn process_args(
     default_service_name: Option<String>,
 ) -> Result<config::ServiceConfig, ArgsError> {
     let args = Args::parse();

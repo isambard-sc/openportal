@@ -7,30 +7,42 @@ use paddington;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = paddington::args::process_args()
+    let config = paddington::args::process_args("provider.toml".to_string().into())
         .await
         .context("Error processing arguments")?;
 
-    if (config.is_null()) {
+    if config.is_null() {
         eprintln!("No configuration provided.");
         std::process::exit(1);
     }
 
-    let mut handles = vec![];
+    let mut server_handles = vec![];
+    let mut client_handles = vec![];
+
+    let clients = config.get_clients();
 
     if config.has_clients() {
-        handles.append(tokio::spawn(async move {
-            paddington::server::run(config).context("Error running server")?;
+        let my_config = config.clone();
+        server_handles.push(tokio::spawn(async move {
+            paddington::server::run(my_config);
         }));
     }
 
-    for client in config.get_clients().iter() {
-        handles.append(tokio::spawn(async move {
-            paddington::client::run(client).context("Error running client")?
+    for client in clients {
+        let my_config = config.clone();
+        client_handles.push(tokio::spawn(async move {
+            paddington::client::run(
+                my_config.clone(),
+                paddington::config::PeerConfig::from_client(&client),
+            )
         }));
     }
 
-    for handle in handles {
+    for handle in server_handles {
+        handle.await?;
+    }
+
+    for handle in client_handles {
         handle.await?;
     }
 

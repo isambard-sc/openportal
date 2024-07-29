@@ -11,7 +11,9 @@ homepage = "https://github.com/chryswoods/openportal/"
 repository = "https://github.com/chryswoods/openportal/"
 
 [dependencies]
+anyhow = { version="1.0.86", features = ["backtrace"] }
 paddington = { path = "../paddington" }
+tokio = { version = "1.0", features = ["full"] }
 
 [lints.rust]
 unsafe_code = "forbid"

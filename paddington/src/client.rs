@@ -28,7 +28,7 @@ pub enum ClientError {
     Unknown,
 }
 
-pub async fn run(config: &ServiceConfig, peer: &PeerConfig) -> Result<(), ClientError> {
+pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
     println!("Starting service {:?}", config.name);
 
     let connection = Connection::new(config.clone());
@@ -44,7 +44,7 @@ pub async fn run(config: &ServiceConfig, peer: &PeerConfig) -> Result<(), Client
 
     // connect to the server
     connection
-        .make_connection(peer, message_handler)
+        .make_connection(&peer, message_handler)
         .await
         .with_context(|| {
             format!(

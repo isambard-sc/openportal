@@ -136,7 +136,7 @@ impl Connection {
                         )));
                     }
 
-                    self_peer.clone_from(&peer);
+                    self_peer.clone_from(peer);
                     break;
                 }
                 Err(_e) => {

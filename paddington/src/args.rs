@@ -93,10 +93,14 @@ struct Args {
 enum Commands {
     /// Adding and removing clients
     Client {
-        #[arg(long, short = 'a', help = "Client to add to the service")]
+        #[arg(long, short = 'a', help = "Name of a client to add to the service")]
         add: Option<String>,
 
-        #[arg(long, short = 'r', help = "Client to remove from the service")]
+        #[arg(
+            long,
+            short = 'r',
+            help = "Name of a client to remove from the service"
+        )]
         remove: Option<String>,
 
         #[arg(
@@ -105,15 +109,29 @@ enum Commands {
             help = "IP address or IP range that the client can connect from"
         )]
         ip: Option<String>,
+
+        #[arg(long, short = 'l', help = "List all clients added to the service")]
+        list: bool,
     },
 
     /// Adding and removing servers
     Server {
-        #[arg(long, short = 'a', help = "Client to add to the service")]
+        #[arg(
+            long,
+            short = 'a',
+            help = "File containing an invite from a server to add to the service"
+        )]
         add: Option<String>,
 
-        #[arg(long, short = 'r', help = "Client to remove from the service")]
+        #[arg(
+            long,
+            short = 'r',
+            help = "Name of a server to remove from the service"
+        )]
         remove: Option<String>,
+
+        #[arg(long, short = 'l', help = "List all servers added to the service")]
+        list: bool,
     },
 
     /// Initialise the Service
@@ -185,7 +203,24 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
             ServiceConfig::create(&config_file, &service_name, url)?;
             return Ok(ProcessResult::Message("Service initialised.".to_string()));
         }
-        Some(Commands::Client { add, ip, remove }) => {
+        Some(Commands::Client {
+            add,
+            ip,
+            list,
+            remove,
+        }) => {
+            match list {
+                true => {
+                    let config = ServiceConfig::load(&config_file)?;
+                    let clients = config.get_clients();
+                    for client in clients {
+                        println!("{}", client);
+                    }
+                    return Ok(ProcessResult::None);
+                }
+                false => {}
+            }
+
             match add {
                 Some(client) => {
                     if ip.is_none() {
@@ -224,7 +259,19 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
                 }
             }
         }
-        Some(Commands::Server { add, remove }) => {
+        Some(Commands::Server { add, list, remove }) => {
+            match list {
+                true => {
+                    let config = ServiceConfig::load(&config_file)?;
+                    let servers = config.get_servers();
+                    for server in servers {
+                        println!("{}", server);
+                    }
+                    return Ok(ProcessResult::None);
+                }
+                false => {}
+            }
+
             match add {
                 Some(server) => {
                     // read the invitation from the passed toml file

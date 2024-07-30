@@ -54,7 +54,11 @@ pub struct ServerConfig {
 
 impl Display for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ServerConfig {{ name: {} }}", self.name)
+        write!(
+            f,
+            "ServerConfig {{ name: {}, url: {} }}",
+            self.name, self.url
+        )
     }
 }
 
@@ -130,9 +134,14 @@ pub struct ClientConfig {
 
 impl Display for ClientConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.ip {
-            Some(ip) => write!(f, "ClientConfig {{ ip: {} }}", ip),
-            None => write!(f, "ClientConfig {{ ip: None }}"),
+        let ip = match &self.ip {
+            Some(ip) => format!("{}", ip),
+            None => "None".to_string(),
+        };
+
+        match &self.name {
+            Some(name) => write!(f, "ClientConfig {{ name: {}, ip: {} }}", name, ip),
+            None => write!(f, "ClientConfig {{ name: null, ip: {} }}", ip),
         }
     }
 }
@@ -229,7 +238,7 @@ pub struct Invite {
 
 impl Display for Invite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Invite {{ name: {} }}", self.name)
+        write!(f, "Invite {{ name: {}, url: {} }}", self.name, self.url)
     }
 }
 
@@ -275,7 +284,15 @@ pub struct ServiceConfig {
 
 impl Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt(f)
+        let url = match &self.url {
+            Some(url) => format!("{}", url),
+            None => "None".to_string(),
+        };
+
+        match &self.name {
+            Some(name) => write!(f, "ServiceConfig {{ name: {}, url: {} }}", name, url),
+            None => write!(f, "ServiceConfig {{ name: null, url: {} }}", url),
+        }
     }
 }
 

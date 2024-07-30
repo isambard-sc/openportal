@@ -12,7 +12,7 @@ use std::net::IpAddr;
 use std::path;
 use thiserror::Error;
 use toml;
-use url::Url;
+use url::{ParseError as UrlParseError, Url};
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -31,6 +31,9 @@ pub enum ConfigError {
     #[error("{0}")]
     PeerError(String),
 
+    #[error("{0}")]
+    UrlParseError(#[from] UrlParseError),
+
     #[error("Config directory already exists: {0}")]
     ExistsError(path::PathBuf),
 
@@ -47,7 +50,7 @@ pub enum ConfigError {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServerConfig {
     pub name: String,
-    pub url: Url,
+    pub url: String,
     pub inner_key: SecretKey,
     pub outer_key: SecretKey,
 }
@@ -62,11 +65,41 @@ impl Display for ServerConfig {
     }
 }
 
+fn create_websocket_url(url: &Url) -> Result<String, ConfigError> {
+    let mut ws_url = url.clone();
+
+    match ws_url.scheme() {
+        "http" => ws_url.set_scheme("ws").unwrap_or_else(|e| {
+            tracing::warn!("Could not set scheme to ws: {:?}", e);
+        }),
+        "https" => ws_url.set_scheme("wss").unwrap_or_else(|e| {
+            tracing::warn!("Could not set scheme to wss: {:?}", e);
+        }),
+        _ => {
+            ws_url.set_scheme("wss").unwrap_or_else(|e| {
+                tracing::warn!("Could not set scheme to wss: {:?}", e);
+            });
+        }
+    }
+
+    if ws_url.scheme() != "ws" || ws_url.scheme() != "wss" {
+        tracing::warn!("Could not set scheme to ws or wss: {:?}", ws_url.scheme());
+        return Err(ConfigError::UrlParseError(
+            UrlParseError::RelativeUrlWithoutBase,
+        ));
+    }
+
+    Ok(ws_url.to_string())
+}
+
 impl ServerConfig {
     pub fn new(name: &str, url: &Url) -> Self {
         ServerConfig {
             name: name.to_string(),
-            url: url.clone(),
+            url: create_websocket_url(url).unwrap_or_else(|e| {
+                tracing::warn!("Could not create websocket URL {}: {:?}", url, e);
+                "".to_string()
+            }),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -75,7 +108,7 @@ impl ServerConfig {
     pub fn create_null() -> Self {
         ServerConfig {
             name: "".to_string(),
-            url: Url::parse("http://localhost").unwrap(),
+            url: "".to_string(),
             inner_key: Key::null(),
             outer_key: Key::null(),
         }
@@ -87,6 +120,15 @@ impl ServerConfig {
 
     pub fn to_peer(&self) -> PeerConfig {
         PeerConfig::from_server(self)
+    }
+
+    pub fn get_websocket_url(&self) -> Result<Url, ConfigError> {
+        if self.url.is_empty() {
+            tracing::warn!("No URL provided.");
+            return Err(ConfigError::NullError("No URL provided.".to_string()));
+        }
+
+        Ok(Url::parse(&self.url)?)
     }
 }
 
@@ -490,10 +532,18 @@ impl ServiceConfig {
 
         let server = ServerConfig {
             name: invite.name,
-            url: invite.url,
+            url: create_websocket_url(&invite.url).unwrap_or_else(|e| {
+                tracing::warn!("Could not create websocket URL {:?}: {:?}", invite.url, e);
+                "".to_string()
+            }),
             inner_key: invite.inner_key,
             outer_key: invite.outer_key,
         };
+
+        if server.url.is_empty() {
+            tracing::warn!("No valid URL provided for server {}.", server.name);
+            return Err(ConfigError::NullError("No URL provided.".to_string()));
+        }
 
         match &mut self.servers {
             Some(servers) => servers.push(server.clone()),

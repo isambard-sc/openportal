@@ -18,7 +18,7 @@ use tracing;
 
 use std::sync::{Arc, Mutex};
 
-use crate::config::{PeerConfig, ServiceConfig};
+use crate::config::{ConfigError, PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
 
 #[derive(Error, Debug)]
@@ -34,6 +34,9 @@ pub enum ConnectionError {
 
     #[error("{0}")]
     CryptoError(#[from] CryptoError),
+
+    #[error("{0}")]
+    ConfigError(#[from] ConfigError),
 
     #[error("Invalid peer configuration: {0}")]
     InvalidPeer(String),
@@ -122,8 +125,6 @@ impl Connection {
         peer: &PeerConfig,
         message_handler: fn(&str) -> Result<(), anyhow::Error>,
     ) -> Result<(), ConnectionError> {
-        tracing::info!("make_connection");
-
         // Check that we don't already have a connection, if we do,
         // we'll just return an error. This will also store the peer
         // so the peer info can be used later
@@ -131,6 +132,7 @@ impl Connection {
             match self.peer.lock() {
                 Ok(mut self_peer) => {
                     if !self_peer.is_null() {
+                        tracing::warn!("Already handling a connection to {}", self_peer);
                         return Err(ConnectionError::BusyLine(format!(
                             "Already handling a connection to {}",
                             self_peer
@@ -150,14 +152,15 @@ impl Connection {
         let peer = match peer {
             PeerConfig::Server(server) => server,
             _ => {
+                tracing::warn!("Peer {} is not a server", peer);
                 return Err(ConnectionError::InvalidPeer(format!(
                     "Peer {} is not a server",
                     peer
-                )))
+                )));
             }
         };
 
-        let url = peer.url.to_string();
+        let url = peer.get_websocket_url()?.to_string();
 
         tracing::info!("Connecting to WebSocket at: {}", url);
 

@@ -364,6 +364,20 @@ impl ServiceConfig {
         }
     }
 
+    pub fn get_ip(&self) -> IpAddr {
+        match &self.ip {
+            Some(ip) => ip.clone(),
+            None => IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        }
+    }
+
+    pub fn get_port(&self) -> u16 {
+        match &self.port {
+            Some(port) => port.clone(),
+            None => 8080,
+        }
+    }
+
     pub fn get_clients(&self) -> Vec<ClientConfig> {
         match &self.clients {
             Some(clients) => clients.clone(),

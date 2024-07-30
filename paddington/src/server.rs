@@ -42,9 +42,12 @@ pub enum ServerError {
 ///
 /// This function will return a ServerError if the server fails to start.
 ///
-pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
+pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
     // Create the event loop and TCP listener we'll accept connections on.
-    let listener = TcpListener::bind("127.0.0.1").await?;
+
+    let addr = format!("{}:{}", config.get_ip(), config.get_port());
+
+    let listener = TcpListener::bind(addr).await?;
     tracing::info!("Listening on: {}", listener.local_addr()?);
 
     // Let's spawn the handling of each connection in a separate task.
@@ -77,6 +80,25 @@ pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
             }
             Err(e) => {
                 tracing::error!("Error accepting connection: {}", e);
+            }
+        }
+    }
+}
+
+pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
+    loop {
+        let result = run_once(config.clone()).await;
+
+        match result {
+            Ok(_) => {
+                tracing::info!("Server run completed successfully");
+            }
+            Err(e) => {
+                tracing::error!("Error running server: {}", e);
+
+                // sleep for a bit before retrying
+                tracing::info!("Retrying in 5 seconds");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         }
     }

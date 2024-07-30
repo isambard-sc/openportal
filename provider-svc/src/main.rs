@@ -24,9 +24,7 @@ async fn main() -> Result<()> {
         ),
     );
 
-    tracing::info!("Entering event loop");
     let _ = eventloop::run(defaults).await?;
-    tracing::info!("Exiting event loop");
 
     Ok(())
 }

@@ -65,16 +65,14 @@ pub async fn run(defaults: ArgDefaults) -> Result<(), EventLoopError> {
             }
 
             for handle in server_handles {
-                tracing::info!("Awaiting server handle...");
                 let _ = handle.await?;
             }
 
             for handle in client_handles {
-                tracing::info!("Awaiting client handle...");
                 let _ = handle.await?;
             }
 
-            tracing::info!("All handles completed.");
+            tracing::info!("All handles joined.");
         }
         ProcessResult::Invite(invite) => {
             // write the invite to a file

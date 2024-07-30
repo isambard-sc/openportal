@@ -59,11 +59,11 @@ pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientEr
             }
             Err(e) => {
                 tracing::error!("Client exited with error: {:?}", e);
-
-                // sleep for a bit before trying again
-                tracing::info!("Sleeping for 5 seconds before retrying...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
         }
+
+        // sleep for a bit before trying again
+        tracing::info!("Sleeping for 5 seconds before retrying the connection...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }

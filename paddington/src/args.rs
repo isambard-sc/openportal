@@ -5,9 +5,9 @@ use anyhow::Context;
 use anyhow::Error as AnyError;
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
+use std::net::IpAddr;
 use thiserror::Error;
 use tracing;
-use url::Url;
 
 use crate::config::{ConfigError, Invite, ServiceConfig};
 
@@ -47,13 +47,25 @@ fn version() -> &'static str {
 pub struct ArgDefaults {
     pub service_name: Option<String>,
     pub config_file: Option<std::path::PathBuf>,
+    pub url: Option<String>,
+    pub ip: Option<String>,
+    pub port: Option<u16>,
 }
 
 impl ArgDefaults {
-    pub fn new(service_name: Option<String>, config_file: Option<std::path::PathBuf>) -> Self {
+    pub fn new(
+        service_name: Option<String>,
+        config_file: Option<std::path::PathBuf>,
+        url: Option<String>,
+        ip: Option<String>,
+        port: Option<u16>,
+    ) -> Self {
         Self {
             service_name,
             config_file,
+            url,
+            ip,
+            port,
         }
     }
 
@@ -77,6 +89,28 @@ impl ArgDefaults {
             Some(name) => name,
             None => "default_service".to_string(),
         }
+    }
+
+    pub fn default_url(&self) -> String {
+        match self.url.clone() {
+            Some(url) => url,
+            None => "http://localhost:8000".to_string(),
+        }
+    }
+
+    pub fn default_ip(&self) -> IpAddr {
+        self.ip
+            .clone()
+            .unwrap_or("127.0.0.1".to_string())
+            .parse()
+            .unwrap_or_else(|e| {
+                tracing::warn!("Could not parse IP address: {}", e);
+                IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+            })
+    }
+
+    pub fn default_port(&self) -> u16 {
+        self.port.unwrap_or(8042)
     }
 }
 
@@ -144,9 +178,23 @@ enum Commands {
         #[arg(
             long,
             short = 'u',
-            help = "URL of the service (e.g. https://localhost:8080)"
+            help = "URL of the service including port and route (e.g. http://localhost:8080)"
         )]
-        url: Option<Url>,
+        url: Option<String>,
+
+        #[arg(
+            long,
+            short = 'i',
+            help = "IP address on which to listen for connections (e.g. 127.0.0.1)"
+        )]
+        ip: Option<IpAddr>,
+
+        #[arg(
+            long,
+            short = 'p',
+            help = "Port on which to listen for connections (e.g. 8042)"
+        )]
+        port: Option<u16>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,
@@ -176,6 +224,8 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
         Some(Commands::Init {
             service,
             url,
+            ip,
+            port,
             force,
         }) => {
             let service_name = match service {
@@ -202,7 +252,22 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
                 }
             }
 
-            ServiceConfig::create(&config_file, &service_name, url)?;
+            let url = match url {
+                Some(url) => url.clone(),
+                None => defaults.default_url(),
+            };
+
+            let ip = match ip {
+                Some(ip) => *ip,
+                None => defaults.default_ip(),
+            };
+
+            let port = match port {
+                Some(port) => *port,
+                None => defaults.default_port(),
+            };
+
+            ServiceConfig::create(&config_file, &service_name, &url, &ip, port)?;
             tracing::info!("Service initialised.");
             return Ok(ProcessResult::Message("Service initialised.".to_string()));
         }

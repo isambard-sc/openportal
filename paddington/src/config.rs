@@ -29,10 +29,10 @@ pub enum ConfigError {
     CryptoError(#[from] CryptoError),
 
     #[error("{0}")]
-    PeerError(String),
+    UrlParseError(#[from] UrlParseError),
 
     #[error("{0}")]
-    UrlParseError(#[from] UrlParseError),
+    PeerError(String),
 
     #[error("Config directory already exists: {0}")]
     ExistsError(path::PathBuf),
@@ -65,35 +65,28 @@ impl Display for ServerConfig {
     }
 }
 
-fn create_websocket_url(url: &Url) -> Result<String, ConfigError> {
-    let mut ws_url = url.clone();
+fn create_websocket_url(url: &str) -> Result<String, ConfigError> {
+    let url = url
+        .parse::<Url>()
+        .with_context(|| format!("Could not parse URL: {}", url))?;
 
-    match ws_url.scheme() {
-        "http" => ws_url.set_scheme("ws").unwrap_or_else(|e| {
-            tracing::warn!("Could not set scheme to ws: {:?}", e);
-        }),
-        "https" => ws_url.set_scheme("wss").unwrap_or_else(|e| {
-            tracing::warn!("Could not set scheme to wss: {:?}", e);
-        }),
-        _ => {
-            ws_url.set_scheme("wss").unwrap_or_else(|e| {
-                tracing::warn!("Could not set scheme to wss: {:?}", e);
-            });
-        }
-    }
+    let scheme = match url.scheme() {
+        "ws" => "ws",
+        "wss" => "wss",
+        "http" => "ws",
+        "https" => "wss",
+        _ => "wss",
+    };
 
-    if ws_url.scheme() != "ws" || ws_url.scheme() != "wss" {
-        tracing::warn!("Could not set scheme to ws or wss: {:?}", ws_url.scheme());
-        return Err(ConfigError::UrlParseError(
-            UrlParseError::RelativeUrlWithoutBase,
-        ));
-    }
+    let host = url.host_str().unwrap_or("localhost");
+    let port = url.port().unwrap_or(8080);
+    let path = url.path();
 
-    Ok(ws_url.to_string())
+    Ok(format!("{}://{}:{}{}", scheme, host, port, path))
 }
 
 impl ServerConfig {
-    pub fn new(name: &str, url: &Url) -> Self {
+    pub fn new(name: &str, url: &str) -> Self {
         ServerConfig {
             name: name.to_string(),
             url: create_websocket_url(url).unwrap_or_else(|e| {
@@ -122,13 +115,13 @@ impl ServerConfig {
         PeerConfig::from_server(self)
     }
 
-    pub fn get_websocket_url(&self) -> Result<Url, ConfigError> {
+    pub fn get_websocket_url(&self) -> Result<String, ConfigError> {
         if self.url.is_empty() {
             tracing::warn!("No URL provided.");
             return Err(ConfigError::NullError("No URL provided.".to_string()));
         }
 
-        Ok(Url::parse(&self.url)?)
+        Ok(self.url.clone())
     }
 }
 
@@ -273,7 +266,7 @@ impl PeerConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Invite {
     pub name: String,
-    pub url: Url,
+    pub url: String,
     pub inner_key: SecretKey,
     pub outer_key: SecretKey,
 }
@@ -315,7 +308,7 @@ impl Invite {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServiceConfig {
     pub name: Option<String>,
-    pub url: Option<Url>,
+    pub url: Option<String>,
     pub ip: Option<IpAddr>,
     pub port: Option<u16>,
 
@@ -339,16 +332,16 @@ impl Display for ServiceConfig {
 }
 
 impl ServiceConfig {
-    pub fn new(name: &str, url: &Url) -> Self {
-        ServiceConfig {
+    pub fn new(name: &str, url: &str, ip: &IpAddr, port: u16) -> Result<Self, ConfigError> {
+        Ok(ServiceConfig {
             name: Some(name.to_string()),
-            url: Some(url.clone()),
-            ip: None,
-            port: None,
+            url: Some(create_websocket_url(url)?),
+            ip: Some(ip.clone()),
+            port: Some(port),
             servers: None,
             clients: None,
             encryption: None,
-        }
+        })
     }
 
     pub fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -577,7 +570,9 @@ impl ServiceConfig {
     pub fn create(
         config_file: &path::PathBuf,
         service_name: &str,
-        url: &Option<Url>,
+        url: &str,
+        ip: &IpAddr,
+        port: u16,
     ) -> Result<ServiceConfig, ConfigError> {
         // see if this config_dir exists - return an error if it does
         let config_file = path::absolute(config_file).with_context(|| {
@@ -591,12 +586,7 @@ impl ServiceConfig {
             return Err(ConfigError::ExistsError(config_file));
         }
 
-        let url = match url {
-            Some(url) => url.clone(),
-            None => Url::parse("http://localhost").unwrap(),
-        };
-
-        let config = ServiceConfig::new(service_name, &url);
+        let config = ServiceConfig::new(service_name, url, ip, port)?;
         config.save(&config_file)?;
 
         // check we can read the config and return it

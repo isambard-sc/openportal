@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
-use tracing;
-use tracing_subscriber;
 
 use paddington::args::ArgDefaults;
 use paddington::eventloop;
@@ -22,9 +20,12 @@ async fn main() -> Result<()> {
                 .parse()
                 .expect("Could not parse default config file."),
         ),
+        Some("ws://localhost:8042".to_string()),
+        Some("127.0.0.1".to_string()),
+        Some(8042),
     );
 
-    let _ = eventloop::run(defaults).await?;
+    eventloop::run(defaults).await?;
 
     Ok(())
 }

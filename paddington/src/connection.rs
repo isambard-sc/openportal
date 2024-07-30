@@ -14,6 +14,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
+use tracing;
 
 use std::sync::{Arc, Mutex};
 
@@ -82,25 +83,25 @@ fn deenvelope_message<T>(
 where
     T: DeserializeOwned,
 {
-    println!("De-enveloping message: {:?}", message);
+    tracing::info!("De-enveloping message: {:?}", message);
     let message: String = message
         .to_text()
         .with_context(|| "Error converting message to text.")?
         .to_string();
 
-    println!("Outer key {:?}", message);
+    tracing::info!("Outer key {:?}", message);
     let message = outer_key
         .expose_secret()
         .decrypt::<String>(&message)
         .with_context(|| "Error decrypting message with the outer key.")?;
 
-    println!("Inner key {:?}", message);
+    tracing::info!("Inner key {:?}", message);
     let message = inner_key
         .expose_secret()
         .decrypt::<T>(&message)
         .with_context(|| "Error decrypting message with the inner key.")?;
 
-    println!("Done de-enveloping message");
+    tracing::info!("Done de-enveloping message");
     Ok(message)
 }
 
@@ -121,7 +122,7 @@ impl Connection {
         peer: &PeerConfig,
         message_handler: fn(&str) -> Result<(), anyhow::Error>,
     ) -> Result<(), ConnectionError> {
-        println!("make_connection");
+        tracing::info!("make_connection");
 
         // Check that we don't already have a connection, if we do,
         // we'll just return an error. This will also store the peer
@@ -158,30 +159,30 @@ impl Connection {
 
         let url = peer.url.to_string();
 
-        println!("Connecting to WebSocket at: {}", url);
+        tracing::info!("Connecting to WebSocket at: {}", url);
 
         let (mut socket, _) = connect_async(url.clone())
             .await
             .with_context(|| format!("Error connecting to WebSocket at: {}", url))?;
 
-        println!("Successfully connected to the WebSocket");
+        tracing::info!("Successfully connected to the WebSocket");
 
         let message = envelope_message(Key::generate(), &peer.inner_key, &peer.outer_key)?;
 
-        println!("Sending message: {:?}", message);
+        tracing::info!("Sending message: {:?}", message);
 
         if let Err(r) = socket.send(message).await {
             return Err(ConnectionError::AnyError(r.into()));
         }
 
-        println!("Receiving message...");
+        tracing::info!("Receiving message...");
 
         // receive the response
         let response = socket.next().await.with_context(|| {
             "Error receiving response from peer. Ensure the peer is valid and the connection is open."
         })?;
 
-        println!("Received response: {:?}", response);
+        tracing::info!("Received response: {:?}", response);
 
         // we should now loop and await in the message handler
 
@@ -216,7 +217,7 @@ impl Connection {
             .peer_addr()
             .with_context(|| "Error getting the peer address. Ensure the connection is open.")?;
 
-        println!("Accepted connection from peer: {}", addr);
+        tracing::info!("Accepted connection from peer: {}", addr);
 
         let clients = self.config.get_clients();
 
@@ -224,7 +225,7 @@ impl Connection {
         let peer = match clients.iter().find(|client| client.matches(addr.ip())) {
             Some(peer) => peer,
             None => {
-                eprintln!("No clients matching peer: {} - closing connection.", addr);
+                tracing::warn!("No clients matching peer: {} - closing connection.", addr);
                 return Err(ConnectionError::InvalidPeer(format!(
                     "No clients matching peer: {} - closing connection.",
                     addr
@@ -250,7 +251,7 @@ impl Connection {
             .next()
             .await
             .ok_or_else(|| {
-                eprintln!("No peer information received - closing connection.");
+                tracing::warn!("No peer information received - closing connection.");
                 ConnectionError::InvalidPeer(
                     "No peer information received - closing connection.".to_string(),
                 )
@@ -258,13 +259,13 @@ impl Connection {
             .unwrap_or_else(|_| Message::text(""));
 
         if message.is_empty() {
-            eprintln!("No peer information received - closing connection.");
+            tracing::warn!("No peer information received - closing connection.");
             return Err(ConnectionError::InvalidPeer(
                 "No peer information received - closing connection.".to_string(),
             ));
         }
 
-        println!("Received message: {:?}", message);
+        tracing::info!("Received message: {:?}", message);
 
         // de-envelope the message
         let peer_session_key =
@@ -274,7 +275,7 @@ impl Connection {
         // now check that the peer is correct and we are not already handling
         // another connection
 
-        println!("Sending session key");
+        tracing::info!("Sending session key");
 
         // create our own session key and send this to the client
         let session_key = Key::generate();
@@ -287,7 +288,7 @@ impl Connection {
             .await
             .with_context(|| "Error sending response to peer")?;
 
-        println!("Handshake complete!");
+        tracing::info!("Handshake complete!");
 
         // we've now completed the handshake and can use the two session
         // keys to trust and secure both ends of the connection
@@ -296,14 +297,14 @@ impl Connection {
         let send_to_others = incoming.try_for_each(|msg| {
             // If we can't parse the message, we'll just ignore it.
             let msg = msg.to_text().unwrap_or_else(|_| {
-                eprintln!("Error parsing message: {:?}", msg);
+                tracing::warn!("Error parsing message: {:?}", msg);
                 ""
             });
 
-            println!("Received message: {}", msg);
+            tracing::info!("Received message: {}", msg);
 
             message_handler(msg).unwrap_or_else(|e| {
-                eprintln!("Error handling message: {:?}", e);
+                tracing::warn!("Error handling message: {:?}", e);
             });
 
             future::ok(())
@@ -317,7 +318,7 @@ impl Connection {
         pin_mut!(send_to_others, receive_from_others);
         future::select(send_to_others, receive_from_others).await;
 
-        println!("{} disconnected", &addr);
+        tracing::info!("{} disconnected", &addr);
 
         Ok(())
     }

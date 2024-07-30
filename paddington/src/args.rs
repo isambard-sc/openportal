@@ -4,11 +4,10 @@
 use anyhow::Context;
 use anyhow::Error as AnyError;
 use clap::{Parser, Subcommand};
-use std::path::absolute;
 use thiserror::Error;
 use url::Url;
 
-use crate::config;
+use crate::config::{ConfigError, Invite, ServiceConfig};
 
 #[derive(Error, Debug)]
 pub enum ArgsError {
@@ -16,13 +15,25 @@ pub enum ArgsError {
     IOError(#[from] std::io::Error),
 
     #[error("{0}")]
-    ConfigError(#[from] config::ConfigError),
+    ConfigError(#[from] ConfigError),
 
     #[error("{0}")]
     AnyError(#[from] AnyError),
 
     #[error("{0}")]
     ServiceNameError(String),
+
+    #[error("{0}")]
+    ConfigExistsError(String),
+
+    #[error("{0}")]
+    PeerEditError(String),
+
+    #[error("{0:?}")]
+    InviteError(Invite),
+
+    #[error("Removed client {0} from the service.")]
+    UninviteError(String),
 
     #[error("Unknown arguments error")]
     Unknown,
@@ -36,26 +47,47 @@ fn version() -> &'static str {
     built_info::GIT_VERSION.unwrap_or(built_info::PKG_VERSION)
 }
 
-fn default_config_file() -> std::path::PathBuf {
-    dirs::config_local_dir()
-        .unwrap_or(
-            ".".parse()
-                .expect("Could not parse fallback config directory."),
-        )
-        .join("openportal/service.toml")
+#[derive(Debug)]
+pub struct ArgDefaults {
+    pub service_name: Option<String>,
+    pub config_file: Option<std::path::PathBuf>,
+}
+
+impl ArgDefaults {
+    pub fn new(service_name: Option<String>, config_file: Option<std::path::PathBuf>) -> Self {
+        Self {
+            service_name,
+            config_file,
+        }
+    }
+
+    pub fn default_config_file(&self) -> std::path::PathBuf {
+        dirs::config_local_dir()
+            .unwrap_or(
+                ".".parse()
+                    .expect("Could not parse fallback config directory."),
+            )
+            .join("openportal")
+            .join(match self.config_file {
+                Some(ref path) => path.clone(),
+                None => "service.toml"
+                    .parse()
+                    .expect("Could not parse default config file."),
+            })
+    }
+
+    pub fn default_service_name(&self) -> String {
+        match self.service_name.clone() {
+            Some(name) => name,
+            None => "default_service".to_string(),
+        }
+    }
 }
 
 #[derive(Parser)]
 #[command(version = version(), about, long_about = None)]
 struct Args {
-    #[arg(
-        long,
-        short='c',
-        help=format!(
-            "Path to the openportal config file [default: {}]",
-            &default_config_file().display(),
-        )
-    )]
+    #[arg(long, short = 'c', help = "Path to the configuration file")]
     config_file: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
@@ -66,9 +98,27 @@ struct Args {
 enum Commands {
     /// Adding and removing clients
     Client {
-        /// Generate the SSH config snippet
-        #[command(subcommand)]
-        command: Option<ClientCommands>,
+        #[arg(long, short = 'a', help = "Client to add to the service")]
+        add: Option<String>,
+
+        #[arg(long, short = 'r', help = "Client to remove from the service")]
+        remove: Option<String>,
+
+        #[arg(
+            long,
+            short = 'i',
+            help = "IP address or IP range that the client can connect from"
+        )]
+        ip: Option<String>,
+    },
+
+    /// Adding and removing servers
+    Server {
+        #[arg(long, short = 'a', help = "Client to add to the service")]
+        add: Option<String>,
+
+        #[arg(long, short = 'r', help = "Client to remove from the service")]
+        remove: Option<String>,
     },
 
     /// Initialise the Service
@@ -89,30 +139,13 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
-enum ClientCommands {
-    /// Add a client to the service
-    Add {
-        #[arg(long)]
-        client: String,
-    },
-
-    /// Remove a client from the service
-    Remove {
-        #[arg(long)]
-        client: String,
-    },
-}
-
-pub async fn process_args(
-    default_service_name: Option<String>,
-) -> Result<config::ServiceConfig, ArgsError> {
+pub async fn process_args(defaults: &ArgDefaults) -> Result<ServiceConfig, ArgsError> {
     let args = Args::parse();
 
-    let config_file = absolute(match &args.config_file {
-        Some(f) => f.clone(),
-        None => default_config_file(),
-    })?;
+    let config_file = match args.config_file {
+        Some(path) => path,
+        None => defaults.default_config_file(),
+    };
 
     // see if we need to initialise the config directory
     match &args.command {
@@ -121,21 +154,9 @@ pub async fn process_args(
             url,
             force,
         }) => {
-            if config_file.try_exists()? {
-                if *force {
-                    std::fs::remove_file(&config_file)
-                        .context("Could not remove existing config file.")?;
-                } else {
-                    return Err(ArgsError::Unknown);
-                }
-            }
-
             let service_name = match service {
                 Some(name) => name.clone(),
-                None => match default_service_name {
-                    Some(name) => name,
-                    None => "".to_string(),
-                },
+                None => defaults.default_service_name(),
             };
 
             if service_name.is_empty() {
@@ -144,23 +165,54 @@ pub async fn process_args(
                 ));
             }
 
-            config::create(&config_file, &service_name, url)?;
+            if config_file.try_exists()? {
+                if *force {
+                    std::fs::remove_file(&config_file)
+                        .context("Could not remove existing config file.")?;
+                } else {
+                    return Err(ArgsError::ConfigExistsError(format!(
+                        "Config file already exists: {}",
+                        &config_file.display()
+                    )));
+                }
+            }
+
+            ServiceConfig::create(&config_file, &service_name, url)?;
         }
-        Some(Commands::Client { command }) => match command {
-            Some(ClientCommands::Add { client }) => {
-                println!("Adding client: {}", client);
+        Some(Commands::Client { add, ip, remove }) => {
+            let mut config = ServiceConfig::load(&config_file)?;
+
+            match add {
+                Some(client) => {
+                    if ip.is_none() {
+                        return Err(ArgsError::PeerEditError(format!(
+                            "No IP address or IP range provided for client {}.",
+                            client
+                        )));
+                    }
+
+                    let ip = ip.clone().unwrap_or_else(|| "".to_string());
+
+                    let invite = config.add_client(&client, &ip)?;
+                    config.save(&config_file)?;
+                    return Err(ArgsError::InviteError(invite));
+                }
+                None => {}
             }
-            Some(ClientCommands::Remove { client }) => {
-                println!("Removing client: {}", client);
+
+            match remove {
+                Some(client) => {
+                    config.remove_client(client)?;
+                    config.save(&config_file)?;
+                    return Err(ArgsError::UninviteError(client.clone()));
+                }
+                None => {}
             }
-            None => {
-                return Err(ArgsError::Unknown);
-            }
-        },
+        }
         _ => {}
     }
 
-    let config = config::load(&config_file)?;
+    let config = ServiceConfig::load(&config_file)?;
 
     Ok(config)
 }

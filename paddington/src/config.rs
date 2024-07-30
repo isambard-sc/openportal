@@ -28,11 +28,17 @@ pub enum ConfigError {
     #[error("{0}")]
     CryptoError(#[from] CryptoError),
 
+    #[error("{0}")]
+    PeerError(String),
+
     #[error("Config directory already exists: {0}")]
     ExistsError(path::PathBuf),
 
     #[error("Config directory does not exist: {0}")]
     NotExistsError(path::PathBuf),
+
+    #[error("Config file is null: {0}")]
+    NullError(String),
 
     #[error("Unknown config error")]
     Unknown,
@@ -100,6 +106,13 @@ impl Display for IpOrRange {
 }
 
 impl IpOrRange {
+    pub fn new(ip: &str) -> Result<Self, ConfigError> {
+        match ip.parse() {
+            Ok(ip) => Ok(IpOrRange::IP(ip)),
+            Err(_) => Ok(IpOrRange::Range(ip.to_string())),
+        }
+    }
+
     pub fn matches(&self, addr: &IpAddr) -> bool {
         match self {
             IpOrRange::IP(ip) => ip == addr,
@@ -113,6 +126,7 @@ impl IpOrRange {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
+    pub name: Option<String>,
     pub ip: Option<IpOrRange>,
     pub inner_key: SecretKey,
     pub outer_key: SecretKey,
@@ -128,9 +142,10 @@ impl Display for ClientConfig {
 }
 
 impl ClientConfig {
-    pub fn new(ip: &Option<IpOrRange>) -> Self {
+    pub fn new(name: &str, ip: &IpOrRange) -> Self {
         ClientConfig {
-            ip: ip.clone(),
+            name: Some(name.to_string()),
+            ip: Some(ip.clone()),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -138,6 +153,7 @@ impl ClientConfig {
 
     pub fn create_null() -> Self {
         ClientConfig {
+            name: None,
             ip: None,
             inner_key: Key::null(),
             outer_key: Key::null(),
@@ -204,6 +220,14 @@ impl PeerConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Invite {
+    pub name: String,
+    pub url: Url,
+    pub inner_key: SecretKey,
+    pub outer_key: SecretKey,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServiceConfig {
     pub name: Option<String>,
     pub url: Option<Url>,
@@ -222,10 +246,10 @@ impl Display for ServiceConfig {
 }
 
 impl ServiceConfig {
-    pub fn new(name: &str, url: &Option<Url>) -> Self {
+    pub fn new(name: &str, url: &Url) -> Self {
         ServiceConfig {
             name: Some(name.to_string()),
-            url: url.clone(),
+            url: Some(url.clone()),
             ip: None,
             port: None,
             servers: None,
@@ -302,99 +326,164 @@ impl ServiceConfig {
             None => Vec::new(),
         }
     }
-}
 
-pub fn create(
-    config_file: &path::PathBuf,
-    service_name: &str,
-    url: &Option<Url>,
-) -> Result<ServiceConfig, ConfigError> {
-    // see if this config_dir exists - return an error if it does
-    let config_file = path::absolute(config_file).with_context(|| {
-        format!(
-            "Could not get absolute path for config file: {:?}",
-            config_file
-        )
-    })?;
+    pub fn add_client(&mut self, name: &String, ip: &String) -> Result<Invite, ConfigError> {
+        let ip = IpOrRange::new(&ip)
+            .with_context(|| format!("Could not parse into an IP address or IP range: {}", ip))?;
 
-    if config_file.try_exists()? {
-        return Err(ConfigError::ExistsError(config_file));
+        if name.is_empty() {
+            return Err(ConfigError::PeerError(
+                "No client name provided.".to_string(),
+            ));
+        }
+
+        let self_name = match &self.name {
+            Some(name) => name.clone(),
+            None => {
+                return Err(ConfigError::NullError(
+                    "Cannot add a client to a null server (no name).".to_string(),
+                ))
+            }
+        };
+
+        let self_url = match &self.url {
+            Some(url) => url.clone(),
+            None => {
+                return Err(ConfigError::NullError(
+                    "Cannot add a client to a null server (no URL).".to_string(),
+                ))
+            }
+        };
+
+        match &mut self.clients {
+            Some(clients) => {
+                // check if we already have a client with this name
+                for c in clients.iter() {
+                    if c.name == Some(name.clone()) {
+                        return Err(ConfigError::PeerError(format!(
+                            "Client with name {} already exists.",
+                            name
+                        )));
+                    }
+                }
+            }
+            None => {}
+        };
+
+        let client = ClientConfig::new(name, &ip);
+
+        match &mut self.clients {
+            Some(clients) => clients.push(client.clone()),
+            None => {
+                let mut clients = Vec::new();
+                clients.push(client.clone());
+                self.clients = Some(clients);
+            }
+        };
+
+        Ok(Invite {
+            name: self_name,
+            url: self_url,
+            // swap the key order for the invite
+            inner_key: client.outer_key.clone(),
+            outer_key: client.inner_key.clone(),
+        })
     }
 
-    let config = ServiceConfig::new(service_name, url);
+    pub fn remove_client(&mut self, name: &String) -> Result<(), ConfigError> {
+        match &mut self.clients {
+            Some(clients) => {
+                let mut new_clients = Vec::new();
 
-    // write the config to a json file
-    let config_toml =
-        toml::to_string(&config).with_context(|| "Could not serialise config to toml")?;
+                for client in clients.iter() {
+                    if client.name != Some(name.clone()) {
+                        new_clients.push(client.clone());
+                    }
+                }
 
-    let config_file_string = config_file.to_string_lossy();
+                self.clients = Some(new_clients);
+            }
+            None => {}
+        };
 
-    let prefix = config_file.parent().with_context(|| {
-        format!(
-            "Could not get parent directory for config file: {:?}",
-            config_file_string
-        )
-    })?;
-
-    std::fs::create_dir_all(prefix).with_context(|| {
-        format!(
-            "Could not create parent directory for config file: {:?}",
-            config_file_string
-        )
-    })?;
-
-    std::fs::write(&config_file, config_toml)
-        .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
-
-    // read the config and return it
-    let config = load(&config_file)?;
-
-    Ok(config)
-}
-
-///
-/// Load the full service configuration from the passed config file.
-/// This will return an error if the config file does not exist
-/// or if the data within cannot be read.
-///
-/// # Arguments
-///
-/// * `config_file` - The file containing the service configuration.
-///
-/// # Returns
-///
-/// The full service configuration.
-///
-/// # Errors
-///
-/// This function will return an error if the config file does not exist
-/// or if the data within cannot be read.
-///
-/// # Example
-///
-/// ```
-/// use paddington::config;
-///
-/// let config = config::load("/path/to/config_file")?;
-///
-/// println!("Service name: {}", config.name);
-/// ```
-///
-pub fn load(config_file: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
-    // see if this config_dilw exists - return an error if it doesn't
-    let config_file = path::absolute(config_file)?;
-
-    if !config_file.try_exists()? {
-        return Err(ConfigError::NotExistsError(config_file));
+        Ok(())
     }
 
-    // read the config file
-    let config = std::fs::read_to_string(&config_file)
-        .with_context(|| format!("Could not read config file: {:?}", config_file))?;
+    pub fn create(
+        config_file: &path::PathBuf,
+        service_name: &str,
+        url: &Option<Url>,
+    ) -> Result<ServiceConfig, ConfigError> {
+        // see if this config_dir exists - return an error if it does
+        let config_file = path::absolute(config_file).with_context(|| {
+            format!(
+                "Could not get absolute path for config file: {:?}",
+                config_file
+            )
+        })?;
 
-    // parse the config file
-    let config: ServiceConfig = toml::from_str(&config)
-        .with_context(|| format!("Could not parse config file fron toml: {:?}", config_file))?;
+        if config_file.try_exists()? {
+            return Err(ConfigError::ExistsError(config_file));
+        }
 
-    Ok(config)
+        let url = match url {
+            Some(url) => url.clone(),
+            None => Url::parse("http://localhost").unwrap(),
+        };
+
+        let config = ServiceConfig::new(service_name, &url);
+        config.save(&config_file)?;
+
+        // check we can read the config and return it
+        let config = ServiceConfig::load(&config_file)?;
+
+        Ok(config)
+    }
+
+    pub fn load(config_file: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
+        // see if this config_dilw exists - return an error if it doesn't
+        let config_file = path::absolute(config_file)?;
+
+        if !config_file.try_exists()? {
+            return Err(ConfigError::NotExistsError(config_file));
+        }
+
+        // read the config file
+        let config = std::fs::read_to_string(&config_file)
+            .with_context(|| format!("Could not read config file: {:?}", config_file))?;
+
+        // parse the config file
+        let config: ServiceConfig = toml::from_str(&config)
+            .with_context(|| format!("Could not parse config file fron toml: {:?}", config_file))?;
+
+        Ok(config)
+    }
+
+    pub fn save(self, config_file: &path::PathBuf) -> Result<(), ConfigError> {
+        // write the config to a json file
+        // write the config to a toml file
+        let config_toml =
+            toml::to_string(&self).with_context(|| "Could not serialise config to toml")?;
+
+        let config_file_string = config_file.to_string_lossy();
+
+        let prefix = config_file.parent().with_context(|| {
+            format!(
+                "Could not get parent directory for config file: {:?}",
+                config_file_string
+            )
+        })?;
+
+        std::fs::create_dir_all(prefix).with_context(|| {
+            format!(
+                "Could not create parent directory for config file: {:?}",
+                config_file_string
+            )
+        })?;
+
+        std::fs::write(&config_file, config_toml)
+            .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
+
+        Ok(())
+    }
 }

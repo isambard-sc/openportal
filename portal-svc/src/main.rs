@@ -7,13 +7,19 @@ use paddington;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = paddington::args::process_args("provider.toml".to_string().into())
-        .await
-        .context("Error processing arguments")?;
+    let defaults = paddington::args::ArgDefaults::new(
+        Some("portal".to_string()),
+        Some(
+            "portal.toml"
+                .parse()
+                .expect("Could not parse default config file."),
+        ),
+    );
+
+    let config = paddington::args::process_args(&defaults).await?;
 
     if config.is_null() {
-        eprintln!("No configuration provided.");
-        std::process::exit(1);
+        anyhow::bail!("No configuration provided.");
     }
 
     let mut server_handles = vec![];

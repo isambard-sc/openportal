@@ -6,6 +6,7 @@ use anyhow::Error as AnyError;
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use thiserror::Error;
+use tracing;
 use url::Url;
 
 use crate::config::{ConfigError, Invite, ServiceConfig};
@@ -193,6 +194,7 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
                     std::fs::remove_file(&config_file)
                         .context("Could not remove existing config file.")?;
                 } else {
+                    tracing::warn!("Config file already exists: {}", &config_file.display());
                     return Err(ArgsError::ConfigExistsError(format!(
                         "Config file already exists: {}",
                         &config_file.display()
@@ -201,6 +203,7 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
             }
 
             ServiceConfig::create(&config_file, &service_name, url)?;
+            tracing::info!("Service initialised.");
             return Ok(ProcessResult::Message("Service initialised.".to_string()));
         }
         Some(Commands::Client {
@@ -237,6 +240,7 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
 
                     config.save(&config_file)?;
 
+                    tracing::info!("Client '{}' added.", client);
                     return Ok(ProcessResult::Invite(invite));
                 }
                 None => {}
@@ -247,6 +251,7 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
                     let mut config = ServiceConfig::load(&config_file)?;
                     config.remove_client(client)?;
                     config.save(&config_file)?;
+                    tracing::info!("Client '{}' removed.", client);
                     return Ok(ProcessResult::Message(format!(
                         "Client '{}' removed.",
                         client
@@ -279,6 +284,7 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
                     let mut config = ServiceConfig::load(&config_file)?;
                     config.add_server(invite)?;
                     config.save(&config_file)?;
+                    tracing::info!("Server '{}' added.", server);
                     return Ok(ProcessResult::Message(format!(
                         "Server '{}' added.",
                         server
@@ -292,6 +298,7 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
                     let mut config = ServiceConfig::load(&config_file)?;
                     config.remove_server(server)?;
                     config.save(&config_file)?;
+                    tracing::info!("Server '{}' removed.", server);
                     return Ok(ProcessResult::Message(format!(
                         "Server '{}' removed.",
                         server
@@ -306,6 +313,7 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsE
         }
         Some(Commands::Run {}) => {
             let config = ServiceConfig::load(&config_file)?;
+            tracing::info!("Loaded config from {}", &config_file.display());
             return Ok(ProcessResult::ServiceConfig(config));
         }
         _ => {

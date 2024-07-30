@@ -2,12 +2,19 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
+use tracing;
+use tracing_subscriber;
 
 use paddington::args::{process_args, ArgDefaults, ProcessResult};
 use paddington::{client, server};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // construct a subscriber that prints formatted traces to stdout
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    // use that subscriber to process traces emitted after this point
+    tracing::subscriber::set_global_default(subscriber)?;
+
     let defaults = ArgDefaults::new(
         Some("provider".to_string()),
         Some(

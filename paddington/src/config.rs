@@ -379,7 +379,7 @@ impl ServiceConfig {
     }
 
     pub fn add_client(&mut self, name: &String, ip: &String) -> Result<Invite, ConfigError> {
-        let ip = IpOrRange::new(&ip)
+        let ip = IpOrRange::new(ip)
             .with_context(|| format!("Could not parse into an IP address or IP range: {}", ip))?;
 
         if name.is_empty() {
@@ -426,9 +426,7 @@ impl ServiceConfig {
         match &mut self.clients {
             Some(clients) => clients.push(client.clone()),
             None => {
-                let mut clients = Vec::new();
-                clients.push(client.clone());
-                self.clients = Some(clients);
+                self.clients = Some(vec![client.clone()]);
             }
         };
 
@@ -441,13 +439,13 @@ impl ServiceConfig {
         })
     }
 
-    pub fn remove_client(&mut self, name: &String) -> Result<(), ConfigError> {
+    pub fn remove_client(&mut self, name: &str) -> Result<(), ConfigError> {
         match &mut self.clients {
             Some(clients) => {
                 let mut new_clients = Vec::new();
 
                 for client in clients.iter() {
-                    if client.name != Some(name.clone()) {
+                    if client.name != Some(name.to_string()) {
                         new_clients.push(client.clone());
                     }
                 }
@@ -486,22 +484,20 @@ impl ServiceConfig {
         match &mut self.servers {
             Some(servers) => servers.push(server.clone()),
             None => {
-                let mut servers = Vec::new();
-                servers.push(server.clone());
-                self.servers = Some(servers);
+                self.servers = Some(vec![server.clone()]);
             }
         };
 
         Ok(())
     }
 
-    pub fn remove_server(&mut self, name: &String) -> Result<(), ConfigError> {
+    pub fn remove_server(&mut self, name: &str) -> Result<(), ConfigError> {
         match &mut self.servers {
             Some(servers) => {
                 let mut new_servers = Vec::new();
 
                 for server in servers.iter() {
-                    if server.name != name.clone() {
+                    if server.name != name {
                         new_servers.push(server.clone());
                     }
                 }
@@ -586,7 +582,7 @@ impl ServiceConfig {
             )
         })?;
 
-        std::fs::write(&config_file, config_toml)
+        std::fs::write(config_file, config_toml)
             .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
 
         Ok(())

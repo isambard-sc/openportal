@@ -45,14 +45,6 @@ pub enum ConfigError {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ConnectionInvite {
-    pub name: String,
-    pub url: url::Url,
-    pub inner_key: SecretKey,
-    pub outer_key: SecretKey,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServerConfig {
     pub name: String,
     pub url: Url,
@@ -87,6 +79,10 @@ impl ServerConfig {
 
     pub fn is_null(&self) -> bool {
         self.name.is_empty()
+    }
+
+    pub fn to_peer(&self) -> PeerConfig {
+        PeerConfig::from_server(self)
     }
 }
 
@@ -170,6 +166,10 @@ impl ClientConfig {
             None => false,
         }
     }
+
+    pub fn to_peer(&self) -> PeerConfig {
+        PeerConfig::from_client(self)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -225,6 +225,40 @@ pub struct Invite {
     pub url: Url,
     pub inner_key: SecretKey,
     pub outer_key: SecretKey,
+}
+
+impl Display for Invite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Invite {{ name: {} }}", self.name)
+    }
+}
+
+impl Invite {
+    pub fn save(&self) -> Result<String, ConfigError> {
+        // serialise to toml
+        let invite_toml =
+            toml::to_string(&self).with_context(|| "Could not serialise invite to toml")?;
+
+        // write this to a file in the current directory named "invite_<name>.toml"
+        let filename = format!("invite_{}.toml", self.name);
+
+        std::fs::write(&filename, invite_toml)
+            .with_context(|| format!("Could not write invite file: {:?}", filename))?;
+
+        Ok(filename)
+    }
+
+    pub fn load(filename: &str) -> Result<Self, ConfigError> {
+        // read the invite file
+        let invite = std::fs::read_to_string(filename)
+            .with_context(|| format!("Could not read invite file: {:?}", filename))?;
+
+        // parse the invite file
+        let invite: Invite = toml::from_str(&invite)
+            .with_context(|| format!("Could not parse invite file from toml: {:?}", filename))?;
+
+        Ok(invite)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -361,7 +395,7 @@ impl ServiceConfig {
                 for c in clients.iter() {
                     if c.name == Some(name.clone()) {
                         return Err(ConfigError::PeerError(format!(
-                            "Client with name {} already exists.",
+                            "Client with name '{}' already exists.",
                             name
                         )));
                     }
@@ -402,6 +436,60 @@ impl ServiceConfig {
                 }
 
                 self.clients = Some(new_clients);
+            }
+            None => {}
+        };
+
+        Ok(())
+    }
+
+    pub fn add_server(&mut self, invite: Invite) -> Result<(), ConfigError> {
+        // make sure there is no server with this name
+        match &self.servers {
+            Some(servers) => {
+                for server in servers.iter() {
+                    if server.name == invite.name {
+                        return Err(ConfigError::PeerError(format!(
+                            "Server with name '{}' already exists.",
+                            invite.name
+                        )));
+                    }
+                }
+            }
+            None => {}
+        };
+
+        let server = ServerConfig {
+            name: invite.name,
+            url: invite.url,
+            inner_key: invite.inner_key,
+            outer_key: invite.outer_key,
+        };
+
+        match &mut self.servers {
+            Some(servers) => servers.push(server.clone()),
+            None => {
+                let mut servers = Vec::new();
+                servers.push(server.clone());
+                self.servers = Some(servers);
+            }
+        };
+
+        Ok(())
+    }
+
+    pub fn remove_server(&mut self, name: &String) -> Result<(), ConfigError> {
+        match &mut self.servers {
+            Some(servers) => {
+                let mut new_servers = Vec::new();
+
+                for server in servers.iter() {
+                    if server.name != name.clone() {
+                        new_servers.push(server.clone());
+                    }
+                }
+
+                self.servers = Some(new_servers);
             }
             None => {}
         };

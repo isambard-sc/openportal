@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Error as AnyError;
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 use url::Url;
@@ -28,12 +29,6 @@ pub enum ArgsError {
 
     #[error("{0}")]
     PeerEditError(String),
-
-    #[error("{0:?}")]
-    InviteError(Invite),
-
-    #[error("Removed client {0} from the service.")]
-    UninviteError(String),
 
     #[error("Unknown arguments error")]
     Unknown,
@@ -137,9 +132,19 @@ enum Commands {
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,
     },
+
+    /// Run the service
+    Run {},
 }
 
-pub async fn process_args(defaults: &ArgDefaults) -> Result<ServiceConfig, ArgsError> {
+pub enum ProcessResult {
+    ServiceConfig(ServiceConfig),
+    Invite(Invite),
+    Message(String),
+    None,
+}
+
+pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsError> {
     let args = Args::parse();
 
     let config_file = match args.config_file {
@@ -178,10 +183,9 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ServiceConfig, ArgsE
             }
 
             ServiceConfig::create(&config_file, &service_name, url)?;
+            return Ok(ProcessResult::Message("Service initialised.".to_string()));
         }
         Some(Commands::Client { add, ip, remove }) => {
-            let mut config = ServiceConfig::load(&config_file)?;
-
             match add {
                 Some(client) => {
                     if ip.is_none() {
@@ -191,28 +195,76 @@ pub async fn process_args(defaults: &ArgDefaults) -> Result<ServiceConfig, ArgsE
                         )));
                     }
 
-                    let ip = ip.clone().unwrap_or_else(|| "".to_string());
+                    let mut config = ServiceConfig::load(&config_file)?;
 
-                    let invite = config.add_client(&client, &ip)?;
+                    let invite =
+                        config.add_client(client, &ip.clone().unwrap_or_else(|| "".to_string()))?;
+
                     config.save(&config_file)?;
-                    return Err(ArgsError::InviteError(invite));
+
+                    return Ok(ProcessResult::Invite(invite));
                 }
                 None => {}
             }
 
             match remove {
                 Some(client) => {
+                    let mut config = ServiceConfig::load(&config_file)?;
                     config.remove_client(client)?;
                     config.save(&config_file)?;
-                    return Err(ArgsError::UninviteError(client.clone()));
+                    return Ok(ProcessResult::Message(format!(
+                        "Client '{}' removed.",
+                        client
+                    )));
+                }
+                None => {
+                    return Ok(ProcessResult::Message(
+                        "You need to either add '-a' or remove '-r' a client.".to_string(),
+                    ));
+                }
+            }
+        }
+        Some(Commands::Server { add, remove }) => {
+            match add {
+                Some(server) => {
+                    // read the invitation from the passed toml file
+                    let invite = Invite::load(server)?;
+                    let mut config = ServiceConfig::load(&config_file)?;
+                    config.add_server(invite)?;
+                    config.save(&config_file)?;
+                    return Ok(ProcessResult::Message(format!(
+                        "Server '{}' added.",
+                        server
+                    )));
                 }
                 None => {}
             }
+
+            match remove {
+                Some(server) => {
+                    let mut config = ServiceConfig::load(&config_file)?;
+                    config.remove_server(server)?;
+                    config.save(&config_file)?;
+                    return Ok(ProcessResult::Message(format!(
+                        "Server '{}' removed.",
+                        server
+                    )));
+                }
+                None => {
+                    return Ok(ProcessResult::Message(
+                        "You need to either add '-a' or remove '-r' a server.".to_string(),
+                    ));
+                }
+            }
         }
-        _ => {}
+        Some(Commands::Run {}) => {
+            let config = ServiceConfig::load(&config_file)?;
+            return Ok(ProcessResult::ServiceConfig(config));
+        }
+        _ => {
+            let _ = Args::command().print_help();
+        }
     }
 
-    let config = ServiceConfig::load(&config_file)?;
-
-    Ok(config)
+    Ok(ProcessResult::None)
 }

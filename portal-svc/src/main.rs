@@ -3,11 +3,12 @@
 
 use anyhow::{Context, Result};
 
-use paddington;
+use paddington::args::{process_args, ArgDefaults, ProcessResult};
+use paddington::{client, server};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let defaults = paddington::args::ArgDefaults::new(
+    let defaults = ArgDefaults::new(
         Some("portal".to_string()),
         Some(
             "portal.toml"
@@ -16,40 +17,54 @@ async fn main() -> Result<()> {
         ),
     );
 
-    let config = paddington::args::process_args(&defaults).await?;
+    match process_args(&defaults).await? {
+        ProcessResult::ServiceConfig(config) => {
+            if config.is_null() {
+                return Ok(());
+            }
 
-    if config.is_null() {
-        anyhow::bail!("No configuration provided.");
-    }
+            let mut server_handles = vec![];
+            let mut client_handles = vec![];
 
-    let mut server_handles = vec![];
-    let mut client_handles = vec![];
+            let clients = config.get_clients();
 
-    let clients = config.get_clients();
+            if config.has_clients() {
+                let my_config = config.clone();
+                server_handles.push(tokio::spawn(async move {
+                    server::run(my_config);
+                }));
+            }
 
-    if config.has_clients() {
-        let my_config = config.clone();
-        server_handles.push(tokio::spawn(async move {
-            paddington::server::run(my_config);
-        }));
-    }
+            for client in clients {
+                let my_config = config.clone();
+                client_handles.push(tokio::spawn(async move {
+                    client::run(my_config.clone(), client.to_peer())
+                }));
+            }
 
-    for client in clients {
-        let my_config = config.clone();
-        client_handles.push(tokio::spawn(async move {
-            paddington::client::run(
-                my_config.clone(),
-                paddington::config::PeerConfig::from_client(&client),
-            )
-        }));
-    }
+            for handle in server_handles {
+                handle.await?;
+            }
 
-    for handle in server_handles {
-        handle.await?;
-    }
-
-    for handle in client_handles {
-        handle.await?;
+            for handle in client_handles {
+                handle.await?;
+            }
+        }
+        ProcessResult::Invite(invite) => {
+            // write the invite to a file
+            let filename = invite.save()?;
+            println!("Invite saved to {}", filename);
+            println!(
+                "You can load this into the client using the 'server --add {filename}' command."
+            );
+        }
+        ProcessResult::Message(message) => {
+            println!("{}", message);
+        }
+        ProcessResult::None => {
+            // this is the exit condition
+            return Ok(());
+        }
     }
 
     Ok(())

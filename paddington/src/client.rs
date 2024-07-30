@@ -5,6 +5,7 @@ use anyhow::Context;
 use anyhow::Error as AnyError;
 use std::io::Error as IOError;
 use thiserror::Error;
+use tracing;
 
 use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::Connection;
@@ -29,18 +30,18 @@ pub enum ClientError {
 }
 
 pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
-    println!("Starting service {:?}", config.name);
+    tracing::info!("Starting service {:?}", config.name);
 
     let connection = Connection::new(config.clone());
 
     // use a default message handler for now - in the future we could
     // choose this based on the identities of the sides of the connection
     let message_handler = |msg: &str| -> Result<(), anyhow::Error> {
-        println!("Received message: {}", msg);
+        tracing::info!("Received message: {}", msg);
         Ok(())
     };
 
-    println!("Making the connection to the server");
+    tracing::info!("Making the connection to the server");
 
     // connect to the server
     connection

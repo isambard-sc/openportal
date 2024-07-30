@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing;
 use tracing_subscriber;
 
-use paddington::args::{process_args, ArgDefaults, ProcessResult};
-use paddington::{client, server};
+use paddington::args::ArgDefaults;
+use paddington::eventloop;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,55 +24,9 @@ async fn main() -> Result<()> {
         ),
     );
 
-    match process_args(&defaults).await? {
-        ProcessResult::ServiceConfig(config) => {
-            if config.is_null() {
-                return Ok(());
-            }
-
-            let mut server_handles = vec![];
-            let mut client_handles = vec![];
-
-            let clients = config.get_clients();
-
-            if config.has_clients() {
-                let my_config = config.clone();
-                server_handles.push(tokio::spawn(async move {
-                    server::run(my_config);
-                }));
-            }
-
-            for client in clients {
-                let my_config = config.clone();
-                client_handles.push(tokio::spawn(async move {
-                    client::run(my_config.clone(), client.to_peer())
-                }));
-            }
-
-            for handle in server_handles {
-                handle.await?;
-            }
-
-            for handle in client_handles {
-                handle.await?;
-            }
-        }
-        ProcessResult::Invite(invite) => {
-            // write the invite to a file
-            let filename = invite.save()?;
-            println!("Invite saved to {}", filename);
-            println!(
-                "You can load this into the client using the 'server --add {filename}' command."
-            );
-        }
-        ProcessResult::Message(message) => {
-            println!("{}", message);
-        }
-        ProcessResult::None => {
-            // this is the exit condition
-            return Ok(());
-        }
-    }
+    tracing::info!("Entering event loop");
+    let _ = eventloop::run(defaults).await?;
+    tracing::info!("Exiting event loop");
 
     Ok(())
 }

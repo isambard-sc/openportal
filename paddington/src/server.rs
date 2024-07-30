@@ -5,6 +5,7 @@ use crate::crypto::CryptoError;
 use anyhow::Error as AnyError;
 use std::io::Error as IOError;
 use thiserror::Error;
+use tracing;
 
 use tokio::net::TcpListener;
 
@@ -44,22 +45,22 @@ pub enum ServerError {
 pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
     // Create the event loop and TCP listener we'll accept connections on.
     let listener = TcpListener::bind("127.0.0.1").await?;
-    println!("Listening on: {}", listener.local_addr()?);
+    tracing::info!("Listening on: {}", listener.local_addr()?);
 
     // Let's spawn the handling of each connection in a separate task.
     loop {
-        println!("Awaiting the next connection...");
+        tracing::info!("Awaiting the next connection...");
 
         match listener.accept().await {
             Ok((stream, addr)) => {
-                println!("New connection from: {}", addr);
+                tracing::info!("New connection from: {}", addr);
 
                 let connection = Connection::new(config.clone());
 
                 // eventually could look up different handlers based on different
                 // configs and addresses of clients - for now, we will do something basic
                 let message_handler = |msg: &str| -> Result<(), AnyError> {
-                    println!("Handler received message: {}", msg);
+                    tracing::info!("Handler received message: {}", msg);
                     Ok(())
                 };
 
@@ -67,15 +68,15 @@ pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
 
                 match result.await {
                     Ok(_) => {
-                        println!("Spawn: Connection closed");
+                        tracing::info!("Spawn: Connection closed");
                     }
                     Err(e) => {
-                        eprintln!("Error handling connection: {}", e);
+                        tracing::error!("Error handling connection: {}", e);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Error accepting connection: {}", e);
+                tracing::error!("Error accepting connection: {}", e);
             }
         }
     }

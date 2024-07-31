@@ -76,20 +76,11 @@ fn envelope_message<T>(
 where
     T: Serialize,
 {
-    tracing::info!("Enveloping message: {:?}", serde_json::to_string(&message)?);
-    let message = inner_key
-        .expose_secret()
-        .encrypt(message)
-        .with_context(|| "Error encrypting message with the inner key.")?;
-    tracing::info!("Inner key: {:?}", serde_json::to_string(inner_key)?);
-    tracing::info!("Inner key encrypted {:?}", message);
-    let message = outer_key
-        .expose_secret()
-        .encrypt(message)
-        .with_context(|| "Error encrypting message with the outer key.")?;
-    tracing::info!("Outer key: {:?}", serde_json::to_string(outer_key)?);
-    tracing::info!("Outer key encrypted {:?}", message);
-    Ok(Message::text(message))
+    Ok(Message::text(
+        outer_key
+            .expose_secret()
+            .encrypt(inner_key.expose_secret().encrypt(message)?)?,
+    ))
 }
 
 fn deenvelope_message<T>(
@@ -99,35 +90,12 @@ fn deenvelope_message<T>(
 ) -> Result<T, AnyError>
 where
     T: DeserializeOwned,
-    T: Serialize,
 {
-    tracing::info!("De-enveloping message: {:?}", message);
-    tracing::info!("Outer key {:?}", serde_json::to_string(outer_key)?);
-    let message: String = message
-        .to_text()
-        .with_context(|| "Error converting message to text.")?
-        .to_string();
-
-    tracing::info!("Outer key decrypted {:?}", message);
-    tracing::info!("Inner key {:?}", serde_json::to_string(inner_key)?);
-    let message = outer_key
-        .expose_secret()
-        .decrypt::<String>(&message)
-        .with_context(|| "Error decrypting message with the outer key.")?;
-
-    tracing::info!("Inner key decrypted {:?}", message);
-    let message = inner_key
-        .expose_secret()
-        .decrypt::<T>(&message)
-        .with_context(|| "Error decrypting message with the inner key.")?;
-
-    tracing::info!(
-        "De-enveloped message: {:?}",
-        serde_json::to_string(&message)?
-    );
-
-    tracing::info!("Done de-enveloping message");
-    Ok(message)
+    Ok(inner_key.expose_secret().decrypt::<T>(
+        &outer_key
+            .expose_secret()
+            .decrypt::<String>(&message.to_text()?.to_string())?,
+    )?)
 }
 
 impl Connection {
@@ -351,8 +319,6 @@ impl Connection {
                 "No peer information received - closing connection.".to_string(),
             ));
         }
-
-        tracing::info!("Received message: {:?}", message);
 
         // find a client that can de-envelope the message - this is the
         // client that we will be connecting to

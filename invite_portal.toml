@@ -2,7 +2,7 @@ name = "portal"
 url = "ws://localhost:8042/"
 
 [inner_key]
-data = "4e4a3fdc0bdee9e8c0965308fa5edb6bc10d4a0c203ef397a6a97882e4ff6993"
+data = "6cdb06b63ff42e81f641ae1c8b027e98a1386d4b1f4853df1f22804223db3367"
 
 [outer_key]
-data = "27d4c44033653285506d33797ce6240b1a82d0898f6dfeb4e833cd0847060ca4"
+data = "a4e519e381e7aafb369a74b175d7db8492e5edc8b87ddcea261562f454f89508"

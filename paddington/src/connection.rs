@@ -136,7 +136,7 @@ impl Connection {
     pub async fn make_connection(
         self,
         peer: &PeerConfig,
-        message_handler: fn(&str) -> Result<(), anyhow::Error>,
+        _message_handler: fn(&str) -> Result<(), anyhow::Error>,
     ) -> Result<(), ConnectionError> {
         // Check that we don't already have a connection, if we do,
         // we'll just return an error. This will also store the peer
@@ -290,7 +290,7 @@ impl Connection {
 
         // de-envelope the message
         let peer_session_key =
-            deenvelope_message::<SecretKey>(message, &peer.outer_key, &peer.inner_key)
+            deenvelope_message::<SecretKey>(message, &peer.inner_key, &peer.outer_key)
                 .with_context(|| "Error de-enveloping message - closing connection.")?;
 
         // now check that the peer is correct and we are not already handling

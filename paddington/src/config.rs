@@ -482,9 +482,8 @@ impl ServiceConfig {
         Ok(Invite {
             name: self_name,
             url: self_url,
-            // swap the key order for the invite
-            inner_key: client.outer_key.clone(),
-            outer_key: client.inner_key.clone(),
+            inner_key: client.inner_key.clone(),
+            outer_key: client.outer_key.clone(),
         })
     }
 

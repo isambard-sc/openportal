@@ -70,16 +70,21 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
                 let result = tokio::spawn(connection.handle_connection(stream, message_handler));
 
                 match result.await {
-                    Ok(_) => {
-                        tracing::info!("Spawn: Connection closed");
-                    }
+                    Ok(result) => match result {
+                        Ok(_) => {
+                            tracing::info!("Connection closed successfully");
+                        }
+                        Err(e) => {
+                            tracing::error!("Closing connection with error: {:?}", e);
+                        }
+                    },
                     Err(e) => {
-                        tracing::error!("Error handling connection: {}", e);
+                        tracing::error!("Error handling connection: {:?}", e);
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Error accepting connection: {}", e);
+                tracing::error!("Error accepting connection: {:?}", e);
             }
         }
     }

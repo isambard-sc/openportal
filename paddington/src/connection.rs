@@ -162,28 +162,33 @@ impl Connection {
 
         let url = peer.get_websocket_url()?.to_string();
 
-        tracing::info!("Connecting to WebSocket at: {}", url);
+        tracing::info!("Connecting to WebSocket at: {} - initiating handshake", url);
 
         let (mut socket, _) = connect_async(url.clone())
             .await
             .with_context(|| format!("Error connecting to WebSocket at: {}", url))?;
 
-        tracing::info!("Successfully connected to the WebSocket");
-
         let message = envelope_message(Key::generate(), &peer.inner_key, &peer.outer_key)?;
-
-        tracing::info!("Sending message: {:?}", message);
 
         if let Err(r) = socket.send(message).await {
             return Err(ConnectionError::AnyError(r.into()));
         }
 
-        tracing::info!("Receiving message...");
-
         // receive the response
         let response = socket.next().await.with_context(|| {
             "Error receiving response from peer. Ensure the peer is valid and the connection is open."
         })?;
+
+        let response = match response {
+            Ok(response) => {
+                tracing::info!("Received response from peer");
+                response
+            }
+            Err(e) => {
+                tracing::warn!("Error receiving response from peer: {:?}", e);
+                return Err(ConnectionError::AnyError(e.into()));
+            }
+        };
 
         tracing::info!("Received response: {:?}", response);
 

@@ -10,7 +10,7 @@ use tracing;
 use tokio::net::TcpListener;
 
 use crate::config::ServiceConfig;
-use crate::connection::Connection;
+use crate::connection::{Connection, ConnectionError};
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -26,8 +26,29 @@ pub enum ServerError {
     #[error("{0}")]
     CryptoError(#[from] CryptoError),
 
+    #[error("{0}")]
+    ConnectionError(#[from] ConnectionError),
+
     #[error("Unknown config error")]
     Unknown,
+}
+
+///
+/// Internal function used to handle a single connection to the server.
+/// This will enter an event loop to process messages from the client
+///
+async fn handle_connection(
+    stream: tokio::net::TcpStream,
+    config: ServiceConfig,
+    message_handler: fn(&str) -> Result<(), AnyError>,
+) -> Result<(), ServerError> {
+    let mut connection = Connection::new(config);
+
+    connection
+        .handle_connection(stream, message_handler)
+        .await?;
+
+    Ok(())
 }
 
 ///
@@ -58,16 +79,13 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
             Ok((stream, addr)) => {
                 tracing::info!("New connection from: {}", addr);
 
-                let connection = Connection::new(config.clone());
-
-                // eventually could look up different handlers based on different
-                // configs and addresses of clients - for now, we will do something basic
                 let message_handler = |msg: &str| -> Result<(), AnyError> {
                     tracing::info!("Handler received message: {}", msg);
                     Ok(())
                 };
 
-                let result = tokio::spawn(connection.handle_connection(stream, message_handler));
+                let result =
+                    tokio::spawn(handle_connection(stream, config.clone(), message_handler));
 
                 match result.await {
                     Ok(result) => match result {

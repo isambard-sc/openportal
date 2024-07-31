@@ -261,6 +261,14 @@ impl PeerConfig {
     pub fn is_server(&self) -> bool {
         matches!(self, PeerConfig::Server(_))
     }
+
+    pub fn name(&self) -> Option<String> {
+        match self {
+            PeerConfig::Server(server) => Some(server.name.clone()),
+            PeerConfig::Client(client) => client.name.clone(),
+            PeerConfig::None => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -320,7 +328,7 @@ pub struct ServiceConfig {
 impl Display for ServiceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let url = match &self.url {
-            Some(url) => format!("{}", url),
+            Some(url) => url.clone(),
             None => "None".to_string(),
         };
 
@@ -336,7 +344,7 @@ impl ServiceConfig {
         Ok(ServiceConfig {
             name: Some(name.to_string()),
             url: Some(create_websocket_url(url)?),
-            ip: Some(ip.clone()),
+            ip: Some(*ip),
             port: Some(port),
             servers: None,
             clients: None,
@@ -401,14 +409,14 @@ impl ServiceConfig {
 
     pub fn get_ip(&self) -> IpAddr {
         match &self.ip {
-            Some(ip) => ip.clone(),
+            Some(ip) => *ip,
             None => IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
         }
     }
 
     pub fn get_port(&self) -> u16 {
         match &self.port {
-            Some(port) => port.clone(),
+            Some(port) => *port,
             None => 8080,
         }
     }

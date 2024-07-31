@@ -44,8 +44,12 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Cli
     // connect to the server
     tracing::info!("Making the connection to the server");
 
-    let connection = Connection::new(config.clone());
+    // create a connection object to make the connection - these are
+    // mutable as they hold the state of the connection in this
+    // throwaway client
+    let mut connection = Connection::new(config.clone());
 
+    // this will loop until the connection is closed
     connection.make_connection(&peer, message_handler).await?;
 
     Ok(())

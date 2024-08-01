@@ -27,12 +27,29 @@ pub enum ClientError {
     #[error("{0}")]
     ConnectionError(#[from] ConnectionError),
 
+    #[error("{0}")]
+    UnknownPeerError(String),
+
     #[error("Unknown config error")]
     Unknown,
 }
 
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
-    tracing::info!("Starting service {:?}", config.name);
+    let service_name = config.name.clone().unwrap_or_default();
+
+    if service_name.is_empty() {
+        return Err(ClientError::UnknownPeerError(
+            "Cannot connect as service must have a name".to_string(),
+        ));
+    }
+
+    let peer_name = peer.name().clone().unwrap_or_default();
+
+    if peer_name.is_empty() {
+        return Err(ClientError::UnknownPeerError(
+            "Cannot connect as peer must have a name".to_string(),
+        ));
+    }
 
     // use a default message handler for now - in the future we could
     // choose this based on the identities of the sides of the connection
@@ -41,8 +58,11 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Cli
         Ok(())
     };
 
-    // connect to the server
-    tracing::info!("Making the connection to the server");
+    tracing::info!(
+        "Initiating connection: {:?} <=> {:?}",
+        service_name,
+        peer_name
+    );
 
     // create a connection object to make the connection - these are
     // mutable as they hold the state of the connection in this

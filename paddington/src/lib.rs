@@ -7,4 +7,5 @@ pub mod config;
 pub mod connection;
 pub mod crypto;
 pub mod eventloop;
+pub mod exchange;
 pub mod server;

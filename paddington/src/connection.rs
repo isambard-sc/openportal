@@ -58,7 +58,7 @@ enum ConnectionState {
     Error,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Connection {
     state: Arc<TokioMutex<ConnectionState>>,
     config: ServiceConfig,
@@ -111,6 +111,32 @@ impl Connection {
     }
 
     ///
+    /// Return the name of the connection - this is the name of the peer
+    /// that the connection is connected to.
+    ///
+    pub fn name(&self) -> Option<String> {
+        self.peer.as_ref().unwrap_or(&PeerConfig::None).name()
+    }
+
+    ///
+    /// Send a message to the peer on the other end of the connection.
+    ///
+    pub async fn send_message(&self, message: &str) -> Result<(), ConnectionError> {
+        let tx = self.tx.as_ref().ok_or_else(|| {
+            tracing::warn!("No connection to send message to!");
+            ConnectionError::InvalidPeer("No connection to send message to!".to_string())
+        })?;
+
+        let mut tx = tx.lock().await;
+
+        tx.send(Message::text(message.to_string()))
+            .await
+            .with_context(|| "Error sending message to peer")?;
+
+        Ok(())
+    }
+
+    ///
     /// This function should be called by the handler of errors raised
     /// by the make_connection or handle_connection functions, when
     /// an error is detected. This sets the state of the connection
@@ -146,7 +172,7 @@ impl Connection {
     pub async fn make_connection(
         &mut self,
         peer: &PeerConfig,
-        _message_handler: fn(&str) -> Result<(), anyhow::Error>,
+        message_handler: fn(&str) -> Result<(), anyhow::Error>,
     ) -> Result<(), ConnectionError> {
         // first, check that the peer is a server
         let server = match peer {
@@ -182,9 +208,12 @@ impl Connection {
 
         tracing::info!("Connecting to WebSocket at: {} - initiating handshake", url);
 
-        let (mut socket, _) = connect_async(url.clone())
+        let (socket, _) = connect_async(url.clone())
             .await
             .with_context(|| format!("Error connecting to WebSocket at: {}", url))?;
+
+        // Split the WebSocket stream into incoming and outgoing parts
+        let (mut outgoing, mut incoming) = socket.split();
 
         // the client generates the new session outer key, and sends this to the server
         // using the pre-shared client/server inner and outer keys
@@ -192,20 +221,17 @@ impl Connection {
 
         let message = envelope_message(outer_key.clone(), &server.inner_key, &server.outer_key)?;
 
-        if let Err(r) = socket.send(message).await {
+        if let Err(r) = outgoing.send(message).await {
             return Err(ConnectionError::AnyError(r.into()));
         }
 
         // receive the response
-        let response = socket.next().await.with_context(|| {
+        let response = incoming.next().await.with_context(|| {
             "Error receiving response from peer. Ensure the peer is valid and the connection is open."
         })?;
 
         let response = match response {
-            Ok(response) => {
-                tracing::info!("Received response from peer");
-                response
-            }
+            Ok(response) => response,
             Err(e) => {
                 tracing::warn!("Error receiving response from peer: {:?}", e);
                 return Err(ConnectionError::AnyError(e.into()));
@@ -217,12 +243,14 @@ impl Connection {
         let inner_key: SecretKey = deenvelope_message(response, &server.inner_key, &outer_key)
             .with_context(|| "Error de-enveloping message - closing connection.")?;
 
+        tracing::info!("Handshake complete!");
+
         // we can now save these keys as the new session keys for the connection
         self.inner_key = Some(inner_key.clone());
         self.outer_key = Some(outer_key.clone());
 
         // finally, we need to create a new channel for sending messages
-        let (tx, _rx) = unbounded::<Message>();
+        let (tx, rx) = unbounded::<Message>();
 
         // save this with the connection
         self.tx = Some(Arc::new(TokioMutex::new(tx)));
@@ -234,6 +262,30 @@ impl Connection {
         }
 
         // and now we can start the message handling loop - make sure to
+        // handle the sending of messages to others
+        let send_to_others = incoming.try_for_each(|msg| {
+            // If we can't parse the message, we'll just ignore it.
+            let msg = msg.to_text().unwrap_or_else(|_| {
+                tracing::warn!("Error parsing message: {:?}", msg);
+                ""
+            });
+
+            tracing::info!("Received message: {}", msg);
+
+            message_handler(msg).unwrap_or_else(|e| {
+                tracing::warn!("Error handling message: {:?}", e);
+            });
+
+            future::ok(())
+        });
+
+        // handle messages that should be sent to the client (received locally
+        // from other services that should be forwarded to the client via the
+        // outgoing stream)
+        let receive_from_others = rx.map(Ok).forward(outgoing);
+
+        pin_mut!(send_to_others, receive_from_others);
+        future::select(send_to_others, receive_from_others).await;
 
         // we've exited, meaning that this connection is now closed
         self.closed_connection().await;
@@ -251,6 +303,15 @@ impl Connection {
         stream: TcpStream,
         message_handler: fn(&str) -> Result<(), anyhow::Error>,
     ) -> Result<(), ConnectionError> {
+        let service_name = self.config.name.clone().unwrap_or_default();
+
+        if service_name.is_empty() {
+            tracing::warn!("Service must have a name to handle a connection.");
+            return Err(ConnectionError::InvalidPeer(
+                "Service must have a name to handle a connection.".to_string(),
+            ));
+        }
+
         // check we aren't handling another connection
         {
             let mut state = self.state.lock().await;
@@ -338,7 +399,7 @@ impl Connection {
                     Ok(_) => {
                         tracing::info!(
                             "Client {:?} authenticated for address: {}",
-                            client.name,
+                            client.name.clone().unwrap_or_default(),
                             addr
                         );
                         true
@@ -347,7 +408,7 @@ impl Connection {
                         tracing::warn!(
                             "Client {:?} could not authenticate for address: {} - \
                              Error: {:?}",
-                            client.name,
+                            client.name.clone().unwrap_or_default(),
                             addr,
                             e
                         );
@@ -376,12 +437,25 @@ impl Connection {
 
         let peer = clients[0].clone();
 
+        let peer_name = peer.name.clone().unwrap_or_default();
+
+        if peer_name.is_empty() {
+            tracing::warn!("Peer must have a name to handle a connection.");
+            return Err(ConnectionError::InvalidPeer(
+                "Peer must have a name to handle a connection.".to_string(),
+            ));
+        }
+
+        tracing::info!(
+            "Initiating connection: {:?} <=> {:?}",
+            service_name,
+            peer_name
+        );
+
         // the peer has sent us the new session outer key that should be used,
         // wrapped in the client/server inner and outer keys
         let outer_key = deenvelope_message::<SecretKey>(message, &peer.inner_key, &peer.outer_key)
             .with_context(|| "Error de-enveloping message - closing connection.")?;
-
-        tracing::info!("Sending session key");
 
         // we will create a new session inner key and send it back to the
         // client, wrapped in the client/server inner key and session outer key

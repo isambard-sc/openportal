@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 
 use crate::config::ServiceConfig;
 use crate::connection::{Connection, ConnectionError};
+use crate::exchange::Exchange;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -40,13 +41,11 @@ pub enum ServerError {
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     config: ServiceConfig,
-    message_handler: fn(&str) -> Result<(), AnyError>,
+    exchange: Exchange,
 ) -> Result<(), ServerError> {
     let mut connection = Connection::new(config);
 
-    connection
-        .handle_connection(stream, message_handler)
-        .await?;
+    connection.handle_connection(stream, exchange).await?;
 
     Ok(())
 }
@@ -63,7 +62,7 @@ async fn handle_connection(
 ///
 /// This function will return a ServerError if the server fails to start.
 ///
-pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
+pub async fn run_once(config: ServiceConfig, exchange: Exchange) -> Result<(), ServerError> {
     // Create the event loop and TCP listener we'll accept connections on.
 
     let addr = format!("{}:{}", config.get_ip(), config.get_port());
@@ -79,13 +78,8 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
             Ok((stream, addr)) => {
                 tracing::info!("New connection from: {}", addr);
 
-                let message_handler = |msg: &str| -> Result<(), AnyError> {
-                    tracing::info!("Handler received message: {}", msg);
-                    Ok(())
-                };
-
                 let result =
-                    tokio::spawn(handle_connection(stream, config.clone(), message_handler));
+                    tokio::spawn(handle_connection(stream, config.clone(), exchange.clone()));
 
                 match result.await {
                     Ok(result) => match result {
@@ -108,9 +102,9 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
     }
 }
 
-pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
+pub async fn run(config: ServiceConfig, exchange: Exchange) -> Result<(), ServerError> {
     loop {
-        let result = run_once(config.clone()).await;
+        let result = run_once(config.clone(), exchange.clone()).await;
 
         match result {
             Ok(_) => {

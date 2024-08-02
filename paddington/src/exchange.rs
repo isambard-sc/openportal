@@ -42,7 +42,7 @@ impl Exchange {
         }
     }
 
-    pub async fn add_connection(&self, connection: Connection) -> Result<(), ExchangeError> {
+    pub async fn register(&self, connection: Connection) -> Result<(), ExchangeError> {
         let name = connection.name().unwrap_or_default();
 
         if name.is_empty() {
@@ -56,7 +56,7 @@ impl Exchange {
         Ok(())
     }
 
-    pub async fn send_message(&self, name: &str, message: &str) -> Result<(), ExchangeError> {
+    pub async fn send(&self, name: &str, message: &str) -> Result<(), ExchangeError> {
         let connection = self.connections.lock().await.get(name).cloned();
 
         if let Some(connection) = connection {
@@ -68,5 +68,13 @@ impl Exchange {
                 name
             )))
         }
+    }
+
+    pub fn handle(&self, message: &str) -> Result<(), ExchangeError> {
+        tracing::info!("Received message: {}", message);
+
+        // self.send_message(from, "Hello!").await?;
+
+        Ok(())
     }
 }

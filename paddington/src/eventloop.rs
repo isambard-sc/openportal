@@ -8,6 +8,7 @@ use tracing;
 
 use crate::args::{process_args, ArgDefaults, ArgsError, ProcessResult};
 use crate::config::ConfigError;
+use crate::exchange::Exchange;
 use crate::{client, server};
 
 #[derive(Error, Debug)]
@@ -35,20 +36,26 @@ pub async fn run(defaults: ArgDefaults) -> Result<(), EventLoopError> {
                 return Ok(());
             }
 
+            let exchange = Exchange::new();
+
             let mut server_handles = vec![];
             let mut client_handles = vec![];
 
             if config.has_clients() {
                 let my_config = config.clone();
-                server_handles.push(tokio::spawn(async move { server::run(my_config).await }));
+                let my_exchange = exchange.clone();
+                server_handles.push(tokio::spawn(async move {
+                    server::run(my_config, my_exchange).await
+                }));
             }
 
             let servers = config.get_servers();
 
             for server in servers {
                 let my_config = config.clone();
+                let my_exchange = exchange.clone();
                 client_handles.push(tokio::spawn(async move {
-                    client::run(my_config.clone(), server.to_peer()).await
+                    client::run(my_config.clone(), server.to_peer(), my_exchange.clone()).await
                 }));
             }
 

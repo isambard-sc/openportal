@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use crate::config::{ClientConfig, ConfigError, PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
+use crate::exchange::Exchange;
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -172,7 +173,7 @@ impl Connection {
     pub async fn make_connection(
         &mut self,
         peer: &PeerConfig,
-        message_handler: fn(&str) -> Result<(), anyhow::Error>,
+        exchange: Exchange,
     ) -> Result<(), ConnectionError> {
         // first, check that the peer is a server
         let server = match peer {
@@ -249,6 +250,12 @@ impl Connection {
         self.inner_key = Some(inner_key.clone());
         self.outer_key = Some(outer_key.clone());
 
+        // and we can register this connection
+        exchange
+            .register(self.clone())
+            .await
+            .with_context(|| "Error registering connection with exchange")?;
+
         // finally, we need to create a new channel for sending messages
         let (tx, rx) = unbounded::<Message>();
 
@@ -272,7 +279,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            message_handler(msg).unwrap_or_else(|e| {
+            exchange.handle(msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -301,7 +308,7 @@ impl Connection {
     pub async fn handle_connection(
         &mut self,
         stream: TcpStream,
-        message_handler: fn(&str) -> Result<(), anyhow::Error>,
+        exchange: Exchange,
     ) -> Result<(), ConnectionError> {
         let service_name = self.config.name.clone().unwrap_or_default();
 
@@ -471,9 +478,6 @@ impl Connection {
 
         tracing::info!("Handshake complete!");
 
-        // we've now completed the handshake and can use the two session
-        // keys to trust and secure both ends of the connection
-
         // create a new channel for sending messages
         let (tx, rx) = unbounded::<Message>();
 
@@ -487,6 +491,14 @@ impl Connection {
             *state = ConnectionState::Connected;
         }
 
+        // we've now completed the handshake and can use the two session
+        // keys to trust and secure both ends of the connection - we can
+        // register this connection
+        exchange
+            .register(self.clone())
+            .await
+            .with_context(|| "Error registering connection with exchange")?;
+
         // handle the sending of messages to others
         let send_to_others = incoming.try_for_each(|msg| {
             // If we can't parse the message, we'll just ignore it.
@@ -497,12 +509,17 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            message_handler(msg).unwrap_or_else(|e| {
+            exchange.handle(msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
             future::ok(())
         });
+
+        // send a test message
+        exchange.send("provider", "Hello!").await.with_context(|| {
+            "Error sending test message to provider. Ensure the connection is open."
+        })?;
 
         // handle messages that should be sent to the client (received locally
         // from other services that should be forwarded to the client via the

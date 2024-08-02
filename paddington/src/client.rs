@@ -9,6 +9,7 @@ use tracing;
 use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::{Connection, ConnectionError};
 use crate::crypto;
+use crate::exchange::Exchange;
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -34,7 +35,11 @@ pub enum ClientError {
     Unknown,
 }
 
-pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
+pub async fn run_once(
+    config: ServiceConfig,
+    peer: PeerConfig,
+    exchange: Exchange,
+) -> Result<(), ClientError> {
     let service_name = config.name.clone().unwrap_or_default();
 
     if service_name.is_empty() {
@@ -51,13 +56,6 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Cli
         ));
     }
 
-    // use a default message handler for now - in the future we could
-    // choose this based on the identities of the sides of the connection
-    let message_handler = |msg: &str| -> Result<(), anyhow::Error> {
-        tracing::info!("Received message: {}", msg);
-        Ok(())
-    };
-
     tracing::info!(
         "Initiating connection: {:?} <=> {:?}",
         service_name,
@@ -70,14 +68,18 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Cli
     let mut connection = Connection::new(config.clone());
 
     // this will loop until the connection is closed
-    connection.make_connection(&peer, message_handler).await?;
+    connection.make_connection(&peer, exchange).await?;
 
     Ok(())
 }
 
-pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
+pub async fn run(
+    config: ServiceConfig,
+    peer: PeerConfig,
+    exchange: Exchange,
+) -> Result<(), ClientError> {
     loop {
-        match run_once(config.clone(), peer.clone()).await {
+        match run_once(config.clone(), peer.clone(), exchange.clone()).await {
             Ok(_) => {
                 tracing::info!("Client exited successfully.");
             }

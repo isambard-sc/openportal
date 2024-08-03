@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use anyhow::Context;
 use anyhow::Error as AnyError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::connection::{Connection, ConnectionError};
@@ -27,6 +29,7 @@ pub enum ExchangeError {
 #[derive(Debug, Clone)]
 pub struct Exchange {
     connections: Arc<TokioMutex<HashMap<String, Connection>>>,
+    tx: Option<Arc<UnboundedSender<String>>>,
 }
 
 impl Default for Exchange {
@@ -35,10 +38,23 @@ impl Default for Exchange {
     }
 }
 
+async fn run_work_queue(mut rx: UnboundedReceiver<String>) {
+    tracing::info!("Starting work queue");
+
+    while let Some(message) = rx.recv().await {
+        tracing::info!("Received message: {}", message);
+    }
+}
+
 impl Exchange {
     pub fn new() -> Self {
+        let (tx, rx) = unbounded_channel::<String>();
+
+        tokio::spawn(run_work_queue(rx));
+
         Self {
             connections: Arc::new(TokioMutex::new(HashMap::new())),
+            tx: Some(Arc::new(tx)),
         }
     }
 
@@ -52,7 +68,17 @@ impl Exchange {
         }
 
         let mut connections = self.connections.lock().await;
-        connections.insert(name.clone(), connection);
+
+        let key = name.clone();
+
+        if connections.contains_key(&key) {
+            return Err(ExchangeError::UnnamedConnectionError(format!(
+                "Connection {} already exists",
+                name
+            )));
+        }
+
+        connections.insert(key, connection);
         Ok(())
     }
 
@@ -70,10 +96,16 @@ impl Exchange {
         }
     }
 
-    pub fn handle(&self, message: &str) -> Result<(), ExchangeError> {
-        tracing::info!("Received message: {}", message);
+    pub fn post(&self, message: &str) -> Result<(), ExchangeError> {
+        tracing::info!("Posting message: {}", message);
 
-        // self.send_message(from, "Hello!").await?;
+        let tx = self.tx.as_ref().ok_or_else(|| {
+            tracing::warn!("No work queue to send message to!");
+            ConnectionError::InvalidPeer("No work queue to send message to!".to_string())
+        })?;
+
+        tx.send(message.to_string())
+            .with_context(|| "Error sending job to work queue")?;
 
         Ok(())
     }

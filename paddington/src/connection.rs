@@ -270,7 +270,7 @@ impl Connection {
 
         // and now we can start the message handling loop - make sure to
         // handle the sending of messages to others
-        let send_to_others = incoming.try_for_each(|msg| {
+        let received_from_peer = incoming.try_for_each(|msg| {
             // If we can't parse the message, we'll just ignore it.
             let msg = msg.to_text().unwrap_or_else(|_| {
                 tracing::warn!("Error parsing message: {:?}", msg);
@@ -279,7 +279,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange.handle(msg).unwrap_or_else(|e| {
+            exchange.post(msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -289,10 +289,10 @@ impl Connection {
         // handle messages that should be sent to the client (received locally
         // from other services that should be forwarded to the client via the
         // outgoing stream)
-        let receive_from_others = rx.map(Ok).forward(outgoing);
+        let send_to_peer = rx.map(Ok).forward(outgoing);
 
-        pin_mut!(send_to_others, receive_from_others);
-        future::select(send_to_others, receive_from_others).await;
+        pin_mut!(received_from_peer, send_to_peer);
+        future::select(received_from_peer, send_to_peer).await;
 
         // we've exited, meaning that this connection is now closed
         self.closed_connection().await;
@@ -500,7 +500,7 @@ impl Connection {
             .with_context(|| "Error registering connection with exchange")?;
 
         // handle the sending of messages to others
-        let send_to_others = incoming.try_for_each(|msg| {
+        let received_from_peer = incoming.try_for_each(|msg| {
             // If we can't parse the message, we'll just ignore it.
             let msg = msg.to_text().unwrap_or_else(|_| {
                 tracing::warn!("Error parsing message: {:?}", msg);
@@ -509,7 +509,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange.handle(msg).unwrap_or_else(|e| {
+            exchange.post(msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -524,10 +524,10 @@ impl Connection {
         // handle messages that should be sent to the client (received locally
         // from other services that should be forwarded to the client via the
         // outgoing stream)
-        let receive_from_others = rx.map(Ok).forward(outgoing);
+        let send_to_peer = rx.map(Ok).forward(outgoing);
 
-        pin_mut!(send_to_others, receive_from_others);
-        future::select(send_to_others, receive_from_others).await;
+        pin_mut!(received_from_peer, send_to_peer);
+        future::select(received_from_peer, send_to_peer).await;
 
         tracing::info!("{} disconnected", &addr);
 

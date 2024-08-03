@@ -29,14 +29,14 @@ pub enum EventLoopError {
     Unknown,
 }
 
-pub async fn run(defaults: ArgDefaults) -> Result<(), EventLoopError> {
+pub async fn run(defaults: ArgDefaults, exchange: Option<Exchange>) -> Result<(), EventLoopError> {
     match process_args(&defaults).await? {
         ProcessResult::ServiceConfig(config) => {
             if config.is_null() {
                 return Ok(());
             }
 
-            let exchange = Exchange::new();
+            let exchange = exchange.unwrap_or_else(Exchange::create_default_workqueue);
 
             let mut server_handles = vec![];
             let mut client_handles = vec![];

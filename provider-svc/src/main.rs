@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         Some(8043),
     );
 
-    eventloop::run(defaults).await?;
+    eventloop::run(defaults, None).await?;
 
     Ok(())
 }

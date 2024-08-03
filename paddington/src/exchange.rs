@@ -27,9 +27,15 @@ pub enum ExchangeError {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExchangeMessage {
+    from: String,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Exchange {
     connections: Arc<TokioMutex<HashMap<String, Connection>>>,
-    tx: Option<Arc<UnboundedSender<String>>>,
+    tx: Option<Arc<UnboundedSender<ExchangeMessage>>>,
 }
 
 impl Default for Exchange {
@@ -38,24 +44,56 @@ impl Default for Exchange {
     }
 }
 
-async fn run_work_queue(mut rx: UnboundedReceiver<String>) {
-    tracing::info!("Starting work queue");
-
-    while let Some(message) = rx.recv().await {
-        tracing::info!("Received message: {}", message);
-    }
-}
-
 impl Exchange {
     pub fn new() -> Self {
-        let (tx, rx) = unbounded_channel::<String>();
-
-        tokio::spawn(run_work_queue(rx));
-
         Self {
             connections: Arc::new(TokioMutex::new(HashMap::new())),
-            tx: Some(Arc::new(tx)),
+            tx: None,
         }
+    }
+
+    pub fn create_default_workqueue() -> Exchange {
+        let mut exchange = Exchange::new();
+
+        let mut rx = exchange.create_channel();
+
+        let workqueue_exchange = exchange.clone();
+
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                tracing::info!(
+                    "Received message: {} from: {}",
+                    message.message,
+                    message.from
+                );
+
+                let from = message.from.clone();
+
+                if from == "portal" {
+                    workqueue_exchange
+                        .send(&from, "Hello from the provider")
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::error!("Error sending message: {}", e);
+                        });
+                } else if from == "provider" {
+                    workqueue_exchange
+                        .send(&from, "Hello from the portal")
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::error!("Error sending message: {}", e);
+                        });
+                }
+            }
+        });
+
+        exchange
+    }
+
+    pub fn create_channel(&mut self) -> UnboundedReceiver<ExchangeMessage> {
+        let (tx, rx) = unbounded_channel();
+        self.tx = Some(Arc::new(tx));
+        rx
     }
 
     pub async fn unregister(&self, connection: &Connection) -> Result<(), ExchangeError> {
@@ -120,7 +158,7 @@ impl Exchange {
         }
     }
 
-    pub fn post(&self, message: &str) -> Result<(), ExchangeError> {
+    pub fn post(&self, from: &str, message: &str) -> Result<(), ExchangeError> {
         tracing::info!("Posting message: {}", message);
 
         let tx = self.tx.as_ref().ok_or_else(|| {
@@ -128,7 +166,12 @@ impl Exchange {
             ConnectionError::InvalidPeer("No work queue to send message to!".to_string())
         })?;
 
-        tx.send(message.to_string())
+        let message = ExchangeMessage {
+            from: from.to_string(),
+            message: message.to_string(),
+        };
+
+        tx.send(message)
             .with_context(|| "Error sending job to work queue")?;
 
         Ok(())

@@ -214,6 +214,7 @@ impl Connection {
 
         // save the peer we are connecting to
         self.peer = Some(peer.clone());
+        let peer_name = peer.name().unwrap_or_default();
 
         let url = server.get_websocket_url()?.to_string();
 
@@ -289,7 +290,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange.post(msg).unwrap_or_else(|e| {
+            exchange.post(&peer_name, msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -519,7 +520,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange.post(msg).unwrap_or_else(|e| {
+            exchange.post(&peer_name, msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 

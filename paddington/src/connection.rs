@@ -261,17 +261,17 @@ impl Connection {
         self.inner_key = Some(inner_key.clone());
         self.outer_key = Some(outer_key.clone());
 
-        // and we can register this connection - need to unregister when disconnected
-        exchange
-            .register(self.clone())
-            .await
-            .with_context(|| "Error registering connection with exchange")?;
-
         // finally, we need to create a new channel for sending messages
         let (tx, rx) = unbounded::<Message>();
 
         // save this with the connection
         self.tx = Some(Arc::new(TokioMutex::new(tx)));
+
+        // and we can register this connection - need to unregister when disconnected
+        exchange
+            .register(self.clone())
+            .await
+            .with_context(|| "Error registering connection with exchange")?;
 
         // we have now connected :-)
         {

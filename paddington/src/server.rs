@@ -45,7 +45,14 @@ async fn handle_connection(
 ) -> Result<(), ServerError> {
     let mut connection = Connection::new(config);
 
-    connection.handle_connection(stream, exchange).await?;
+    match connection.handle_connection(stream, exchange).await {
+        Ok(_) => {
+            tracing::info!("Connection handled successfully");
+        }
+        Err(e) => {
+            tracing::error!("Error handling connection: {}", e);
+        }
+    }
 
     Ok(())
 }
@@ -78,22 +85,10 @@ pub async fn run_once(config: ServiceConfig, exchange: Exchange) -> Result<(), S
             Ok((stream, addr)) => {
                 tracing::info!("New connection from: {}", addr);
 
-                let result =
-                    tokio::spawn(handle_connection(stream, config.clone(), exchange.clone()));
-
-                match result.await {
-                    Ok(result) => match result {
-                        Ok(_) => {
-                            tracing::info!("Connection closed successfully");
-                        }
-                        Err(e) => {
-                            tracing::error!("Closing connection with error: {:?}", e);
-                        }
-                    },
-                    Err(e) => {
-                        tracing::error!("Error handling connection: {:?}", e);
-                    }
-                }
+                // spawn a new task to handle the connection, and don't
+                // wait for it to finish - the function will handle all
+                // the processing and errors itself
+                tokio::spawn(handle_connection(stream, config.clone(), exchange.clone()));
             }
             Err(e) => {
                 tracing::error!("Error accepting connection: {:?}", e);

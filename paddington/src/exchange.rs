@@ -58,6 +58,30 @@ impl Exchange {
         }
     }
 
+    pub async fn unregister(&self, connection: &Connection) -> Result<(), ExchangeError> {
+        let name = connection.name().unwrap_or_default();
+
+        if name.is_empty() {
+            return Err(ExchangeError::UnnamedConnectionError(
+                "Connection must have a name".to_string(),
+            ));
+        }
+
+        let mut connections = self.connections.lock().await;
+
+        let key = name.clone();
+
+        if connections.contains_key(&key) {
+            connections.remove(&key);
+            Ok(())
+        } else {
+            Err(ExchangeError::UnnamedConnectionError(format!(
+                "Connection {} not found",
+                name
+            )))
+        }
+    }
+
     pub async fn register(&self, connection: Connection) -> Result<(), ExchangeError> {
         let name = connection.name().unwrap_or_default();
 

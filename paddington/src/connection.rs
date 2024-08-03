@@ -156,7 +156,17 @@ impl Connection {
     /// Internal function called to indicate that the connection has
     /// been correctly closed.
     ///
-    async fn closed_connection(&mut self) {
+    async fn closed_connection(&mut self, exchange: Exchange) {
+        exchange
+            .unregister(self)
+            .await
+            .with_context(|| {
+                "Error unregistering connection with exchange. Ensure the connection is open."
+            })
+            .unwrap_or_else(|e| {
+                tracing::error!("Error unregistering connection with exchange: {:?}", e);
+            });
+
         let mut state = self.state.lock().await;
         *state = ConnectionState::Disconnected;
         self.tx = None;
@@ -250,7 +260,7 @@ impl Connection {
         self.inner_key = Some(inner_key.clone());
         self.outer_key = Some(outer_key.clone());
 
-        // and we can register this connection
+        // and we can register this connection - need to unregister when disconnected
         exchange
             .register(self.clone())
             .await
@@ -295,7 +305,7 @@ impl Connection {
         future::select(received_from_peer, send_to_peer).await;
 
         // we've exited, meaning that this connection is now closed
-        self.closed_connection().await;
+        self.closed_connection(exchange).await;
 
         Ok(())
     }
@@ -493,7 +503,7 @@ impl Connection {
 
         // we've now completed the handshake and can use the two session
         // keys to trust and secure both ends of the connection - we can
-        // register this connection
+        // register this connection - must unregister when we close
         exchange
             .register(self.clone())
             .await
@@ -517,9 +527,15 @@ impl Connection {
         });
 
         // send a test message
-        exchange.send("provider", "Hello!").await.with_context(|| {
-            "Error sending test message to provider. Ensure the connection is open."
-        })?;
+        exchange
+            .send("provider", "Hello!")
+            .await
+            .with_context(|| {
+                "Error sending test message to provider. Ensure the connection is open."
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!("Error sending test message to provider: {:?}", e);
+            });
 
         // handle messages that should be sent to the client (received locally
         // from other services that should be forwarded to the client via the
@@ -532,7 +548,7 @@ impl Connection {
         tracing::info!("{} disconnected", &addr);
 
         // we've exited, meaning that this connection is now closed
-        self.closed_connection().await;
+        self.closed_connection(exchange).await;
 
         Ok(())
     }

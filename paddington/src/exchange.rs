@@ -4,6 +4,8 @@
 use anyhow::Error as AnyError;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -12,7 +14,7 @@ use tokio::task::JoinSet;
 use crate::connection::{Connection, ConnectionError};
 
 #[derive(Error, Debug)]
-pub enum ExchangeError {
+pub enum Error {
     #[error("{0}")]
     AnyError(#[from] AnyError),
 
@@ -33,9 +35,9 @@ pub enum ExchangeError {
 }
 
 #[derive(Debug, Clone)]
-pub struct ExchangeMessage {
-    from: String,
-    message: String,
+pub struct Message {
+    pub from: String,
+    pub message: String,
 }
 
 // We use the singleton pattern for the exchange data, as there can only
@@ -43,10 +45,41 @@ pub struct ExchangeMessage {
 // directly
 static SINGLETON_EXCHANGE: Lazy<RwLock<Exchange>> = Lazy::new(|| RwLock::new(Exchange::new()));
 
-#[derive(Debug)]
+#[macro_export]
+macro_rules! dyn_async {(
+    $( #[$attr:meta] )* // includes doc strings
+    $pub:vis
+    async
+    fn $fname:ident ( $($args:tt)* ) $(-> $Ret:ty)?
+    {
+        $($body:tt)*
+    }
+) => (
+    $( #[$attr] )*
+    #[allow(unused_parens)]
+    $pub
+    fn $fname ( $($args)* ) -> ::std::pin::Pin<::std::boxed::Box<
+        dyn Send + ::std::future::Future<Output = ($($Ret)?)>
+    >>
+    {
+        Box::pin(async move { $($body)* })
+    }
+)}
+
+type AsyncMessageHandler = fn(
+    Message,
+) -> Pin<
+    Box<
+        dyn Future<Output = Result<(), Error>> // future API / pollable
+            + Send, // required by non-single-threaded executors
+    >,
+>;
+
 pub struct Exchange {
     connections: HashMap<String, Connection>,
-    tx: UnboundedSender<ExchangeMessage>,
+    tx: UnboundedSender<Message>,
+    // handler holds object that implements the MessageHandler trait
+    handler: Option<AsyncMessageHandler>,
 }
 
 impl Default for Exchange {
@@ -55,33 +88,7 @@ impl Default for Exchange {
     }
 }
 
-async fn process_message(message: ExchangeMessage) -> Result<(), ExchangeError> {
-    tracing::info!(
-        "Received message: {} from: {}",
-        message.message,
-        message.from
-    );
-
-    let from = message.from.clone();
-
-    if from == "portal" {
-        send(&from, "Hello from the provider")
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Error sending message: {}", e);
-            });
-    } else if from == "provider" {
-        send(&from, "Hello from the portal")
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Error sending message: {}", e);
-            });
-    }
-
-    Ok(())
-}
-
-async fn event_loop(mut rx: UnboundedReceiver<ExchangeMessage>) -> Result<(), ExchangeError> {
+async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
     let mut workers = JoinSet::new();
 
     static MAX_WORKERS: usize = 10;
@@ -102,8 +109,19 @@ async fn event_loop(mut rx: UnboundedReceiver<ExchangeMessage>) -> Result<(), Ex
             }
         }
 
+        let handler = match SINGLETON_EXCHANGE.read() {
+            Ok(exchange) => exchange.handler,
+            Err(e) => {
+                return Err(Error::PoisonError(format!(
+                    "Error getting read lock: {}",
+                    e
+                )));
+            }
+        }
+        .unwrap();
+
         workers.spawn(async move {
-            process_message(message).await.unwrap_or_else(|e| {
+            handler(message).await.unwrap_or_else(|e| {
                 tracing::error!("Error processing message: {}", e);
             });
         });
@@ -121,17 +139,32 @@ impl Exchange {
         Self {
             connections: HashMap::new(),
             tx,
+            handler: None,
         }
     }
 }
 
-pub fn create_default_workqueue() {}
+pub async fn set_handler(handler: AsyncMessageHandler) -> Result<(), Error> {
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::PoisonError(format!(
+                "Error getting write lock: {}",
+                e
+            )));
+        }
+    };
 
-pub async fn unregister(connection: &Connection) -> Result<(), ExchangeError> {
+    exchange.handler = Some(handler);
+
+    Ok(())
+}
+
+pub async fn unregister(connection: &Connection) -> Result<(), Error> {
     let name = connection.name().unwrap_or_default();
 
     if name.is_empty() {
-        return Err(ExchangeError::UnnamedConnectionError(
+        return Err(Error::UnnamedConnectionError(
             "Connection must have a name".to_string(),
         ));
     }
@@ -139,7 +172,7 @@ pub async fn unregister(connection: &Connection) -> Result<(), ExchangeError> {
     let mut exchange = match SINGLETON_EXCHANGE.write() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(ExchangeError::PoisonError(format!(
+            return Err(Error::PoisonError(format!(
                 "Error getting write lock: {}",
                 e
             )));
@@ -152,18 +185,18 @@ pub async fn unregister(connection: &Connection) -> Result<(), ExchangeError> {
         exchange.connections.remove(&key);
         Ok(())
     } else {
-        Err(ExchangeError::UnnamedConnectionError(format!(
+        Err(Error::UnnamedConnectionError(format!(
             "Connection {} not found",
             name
         )))
     }
 }
 
-pub async fn register(connection: Connection) -> Result<(), ExchangeError> {
+pub async fn register(connection: Connection) -> Result<(), Error> {
     let name = connection.name().unwrap_or_default();
 
     if name.is_empty() {
-        return Err(ExchangeError::UnnamedConnectionError(
+        return Err(Error::UnnamedConnectionError(
             "Connection must have a name".to_string(),
         ));
     }
@@ -171,7 +204,7 @@ pub async fn register(connection: Connection) -> Result<(), ExchangeError> {
     let mut exchange = match SINGLETON_EXCHANGE.write() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(ExchangeError::PoisonError(format!(
+            return Err(Error::PoisonError(format!(
                 "Error getting write lock: {}",
                 e
             )));
@@ -181,7 +214,7 @@ pub async fn register(connection: Connection) -> Result<(), ExchangeError> {
     let key = name.clone();
 
     if exchange.connections.contains_key(&key) {
-        return Err(ExchangeError::UnnamedConnectionError(format!(
+        return Err(Error::UnnamedConnectionError(format!(
             "Connection {} already exists",
             name
         )));
@@ -191,11 +224,11 @@ pub async fn register(connection: Connection) -> Result<(), ExchangeError> {
     Ok(())
 }
 
-pub async fn send(name: &str, message: &str) -> Result<(), ExchangeError> {
+pub async fn send(name: &str, message: &str) -> Result<(), Error> {
     let connection = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(ExchangeError::PoisonError(format!(
+            return Err(Error::PoisonError(format!(
                 "Error getting read lock: {}",
                 e
             )));
@@ -209,33 +242,33 @@ pub async fn send(name: &str, message: &str) -> Result<(), ExchangeError> {
         connection.send_message(message).await?;
         Ok(())
     } else {
-        Err(ExchangeError::UnnamedConnectionError(format!(
+        Err(Error::UnnamedConnectionError(format!(
             "Connection {} not found",
             name
         )))
     }
 }
 
-pub fn received(from: &str, message: &str) -> Result<(), ExchangeError> {
+pub fn received(from: &str, message: &str) -> Result<(), Error> {
     tracing::info!("Posting message: {}", message);
 
     let exchange = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(ExchangeError::PoisonError(format!(
+            return Err(Error::PoisonError(format!(
                 "Error getting read lock: {}",
                 e
             )));
         }
     };
 
-    let message = ExchangeMessage {
+    let message = Message {
         from: from.to_string(),
         message: message.to_string(),
     };
 
     exchange.tx.send(message).map_err(|e| {
         tracing::error!("Error sending message: {}", e);
-        ExchangeError::SendError(format!("Error sending message: {}", e))
+        Error::SendError(format!("Error sending message: {}", e))
     })
 }

@@ -4,7 +4,23 @@
 use anyhow::Result;
 
 use paddington::args::ArgDefaults;
+use paddington::dyn_async;
 use paddington::eventloop;
+use paddington::exchange;
+
+dyn_async! {
+    async fn process_message(message: exchange::Message) -> Result<(), exchange::Error> {
+        tracing::info!(
+            "Received message: {} from: {}",
+            message.message,
+            message.from
+        );
+
+        exchange::send(&message.from, "Hello from the provider!!!").await?;
+
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,6 +40,8 @@ async fn main() -> Result<()> {
         Some("127.0.0.1".to_string()),
         Some(8043),
     );
+
+    exchange::set_handler(process_message).await?;
 
     eventloop::run(defaults).await?;
 

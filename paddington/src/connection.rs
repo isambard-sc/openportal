@@ -511,8 +511,8 @@ impl Connection {
             future::ok(())
         });
 
-        // send a test message
-        exchange::send("provider", "Hello!")
+        // Send the "initiate_connection" message to the peer
+        exchange::send(&peer_name, "initiate_connection")
             .await
             .with_context(|| {
                 "Error sending test message to provider. Ensure the connection is open."

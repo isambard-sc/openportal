@@ -13,6 +13,9 @@ paddington::async_message_handler! {
 
         paddington::send(&message.from, "Hello from the provider!!!").await?;
 
+        // sleep for 1 second
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
         Ok(())
     }
 }

@@ -4,11 +4,11 @@
 use anyhow::Result;
 
 use paddington::args::ArgDefaults;
-use paddington::dyn_async;
+use paddington::async_message_handler;
 use paddington::eventloop;
 use paddington::exchange;
 
-dyn_async! {
+async_message_handler! {
     async fn process_message(message: exchange::Message) -> Result<(), exchange::Error> {
         tracing::info!(
             "Received message: {} from: {}",

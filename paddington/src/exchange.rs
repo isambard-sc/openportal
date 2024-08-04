@@ -46,7 +46,7 @@ pub struct Message {
 static SINGLETON_EXCHANGE: Lazy<RwLock<Exchange>> = Lazy::new(|| RwLock::new(Exchange::new()));
 
 #[macro_export]
-macro_rules! dyn_async {(
+macro_rules! async_message_handler {(
     $( #[$attr:meta] )* // includes doc strings
     $pub:vis
     async
@@ -74,6 +74,19 @@ type AsyncMessageHandler = fn(
             + Send, // required by non-single-threaded executors
     >,
 >;
+
+async_message_handler! {
+    async fn default_message_handler(message: Message) -> Result<(), Error>
+    {
+        tracing::info!(
+            "Default message handler received message: {} from: {}",
+            message.message,
+            message.from
+        );
+
+        Ok(())
+    }
+}
 
 pub struct Exchange {
     connections: HashMap<String, Connection>,
@@ -118,7 +131,7 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                 )));
             }
         }
-        .unwrap();
+        .unwrap_or(default_message_handler);
 
         workers.spawn(async move {
             handler(message).await.unwrap_or_else(|e| {

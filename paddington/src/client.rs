@@ -4,7 +4,6 @@
 use anyhow::Error as AnyError;
 use std::io::Error as IOError;
 use thiserror::Error;
-use tracing;
 
 use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::{Connection, ConnectionError};
@@ -13,32 +12,29 @@ use crate::crypto;
 #[derive(Error, Debug)]
 pub enum ClientError {
     #[error("{0}")]
-    IOError(#[from] IOError),
+    IO(#[from] IOError),
 
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    TungsteniteError(#[from] tokio_tungstenite::tungstenite::error::Error),
+    Tungstenite(#[from] tokio_tungstenite::tungstenite::error::Error),
 
     #[error("{0}")]
-    CryptoError(#[from] crypto::CryptoError),
+    Crypto(#[from] crypto::CryptoError),
 
     #[error("{0}")]
-    ConnectionError(#[from] ConnectionError),
+    Connection(#[from] ConnectionError),
 
     #[error("{0}")]
-    UnknownPeerError(String),
-
-    #[error("Unknown config error")]
-    Unknown,
+    UnknownPeer(String),
 }
 
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
     let service_name = config.name.clone().unwrap_or_default();
 
     if service_name.is_empty() {
-        return Err(ClientError::UnknownPeerError(
+        return Err(ClientError::UnknownPeer(
             "Cannot connect as service must have a name".to_string(),
         ));
     }
@@ -46,7 +42,7 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Cli
     let peer_name = peer.name().clone().unwrap_or_default();
 
     if peer_name.is_empty() {
-        return Err(ClientError::UnknownPeerError(
+        return Err(ClientError::UnknownPeer(
             "Cannot connect as peer must have a name".to_string(),
         ));
     }

@@ -44,7 +44,7 @@ fn version() -> &'static str {
 }
 
 #[derive(Debug)]
-pub struct ArgDefaults {
+pub struct Defaults {
     pub service_name: Option<String>,
     pub config_file: Option<std::path::PathBuf>,
     pub url: Option<String>,
@@ -52,7 +52,7 @@ pub struct ArgDefaults {
     pub port: Option<u16>,
 }
 
-impl ArgDefaults {
+impl Defaults {
     pub fn new(
         service_name: Option<String>,
         config_file: Option<std::path::PathBuf>,
@@ -211,7 +211,7 @@ pub enum ProcessResult {
     None,
 }
 
-pub async fn process_args(defaults: &ArgDefaults) -> Result<ProcessResult, ArgsError> {
+pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, ArgsError> {
     let args = Args::parse();
 
     let config_file = match args.config_file {

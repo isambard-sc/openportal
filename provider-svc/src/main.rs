@@ -3,20 +3,15 @@
 
 use anyhow::Result;
 
-use paddington::args::ArgDefaults;
-use paddington::async_message_handler;
-use paddington::eventloop;
-use paddington::exchange;
-
-async_message_handler! {
-    async fn process_message(message: exchange::Message) -> Result<(), exchange::Error> {
+paddington::async_message_handler! {
+    async fn process_message(message: paddington::Message) -> Result<(), paddington::Error> {
         tracing::info!(
             "Received message: {} from: {}",
             message.message,
             message.from
         );
 
-        exchange::send(&message.from, "Hello from the provider!!!").await?;
+        paddington::send(&message.from, "Hello from the provider!!!").await?;
 
         Ok(())
     }
@@ -29,7 +24,7 @@ async fn main() -> Result<()> {
     // use that subscriber to process traces emitted after this point
     tracing::subscriber::set_global_default(subscriber)?;
 
-    let defaults = ArgDefaults::new(
+    let defaults = paddington::Defaults::new(
         Some("provider".to_string()),
         Some(
             "provider.toml"
@@ -41,9 +36,8 @@ async fn main() -> Result<()> {
         Some(8043),
     );
 
-    exchange::set_handler(process_message).await?;
-
-    eventloop::run(defaults).await?;
+    paddington::set_handler(process_message).await?;
+    paddington::run(defaults).await?;
 
     Ok(())
 }

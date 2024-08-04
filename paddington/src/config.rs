@@ -6,42 +6,40 @@ use anyhow::Context;
 use anyhow::Error as AnyError;
 use iptools::iprange::IpRange;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::fmt::{self, Display};
 use std::net::IpAddr;
 use std::path;
 use thiserror::Error;
-use toml;
 use url::{ParseError as UrlParseError, Url};
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("{0}")]
-    IOError(#[from] std::io::Error),
+    IO(#[from] std::io::Error),
 
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    SerdeError(#[from] serde_json::Error),
+    Serde(#[from] serde_json::Error),
 
     #[error("{0}")]
-    CryptoError(#[from] CryptoError),
+    Crypto(#[from] CryptoError),
 
     #[error("{0}")]
-    UrlParseError(#[from] UrlParseError),
+    UrlParse(#[from] UrlParseError),
 
     #[error("{0}")]
-    PeerError(String),
+    Peer(String),
 
     #[error("Config directory already exists: {0}")]
-    ExistsError(path::PathBuf),
+    Exists(path::PathBuf),
 
     #[error("Config directory does not exist: {0}")]
-    NotExistsError(path::PathBuf),
+    NotExists(path::PathBuf),
 
     #[error("Config file is null: {0}")]
-    NullError(String),
+    Null(String),
 
     #[error("Unknown config error")]
     Unknown,
@@ -118,7 +116,7 @@ impl ServerConfig {
     pub fn get_websocket_url(&self) -> Result<String, ConfigError> {
         if self.url.is_empty() {
             tracing::warn!("No URL provided.");
-            return Err(ConfigError::NullError("No URL provided.".to_string()));
+            return Err(ConfigError::Null("No URL provided.".to_string()));
         }
 
         Ok(self.url.clone())
@@ -440,15 +438,13 @@ impl ServiceConfig {
             .with_context(|| format!("Could not parse into an IP address or IP range: {}", ip))?;
 
         if name.is_empty() {
-            return Err(ConfigError::PeerError(
-                "No client name provided.".to_string(),
-            ));
+            return Err(ConfigError::Peer("No client name provided.".to_string()));
         }
 
         let self_name = match &self.name {
             Some(name) => name.clone(),
             None => {
-                return Err(ConfigError::NullError(
+                return Err(ConfigError::Null(
                     "Cannot add a client to a null server (no name).".to_string(),
                 ))
             }
@@ -457,7 +453,7 @@ impl ServiceConfig {
         let self_url = match &self.url {
             Some(url) => url.clone(),
             None => {
-                return Err(ConfigError::NullError(
+                return Err(ConfigError::Null(
                     "Cannot add a client to a null server (no URL).".to_string(),
                 ))
             }
@@ -468,7 +464,7 @@ impl ServiceConfig {
                 // check if we already have a client with this name
                 for c in clients.iter() {
                     if c.name == Some(name.clone()) {
-                        return Err(ConfigError::PeerError(format!(
+                        return Err(ConfigError::Peer(format!(
                             "Client with name '{}' already exists.",
                             name
                         )));
@@ -520,7 +516,7 @@ impl ServiceConfig {
             Some(servers) => {
                 for server in servers.iter() {
                     if server.name == invite.name {
-                        return Err(ConfigError::PeerError(format!(
+                        return Err(ConfigError::Peer(format!(
                             "Server with name '{}' already exists.",
                             invite.name
                         )));
@@ -542,7 +538,7 @@ impl ServiceConfig {
 
         if server.url.is_empty() {
             tracing::warn!("No valid URL provided for server {}.", server.name);
-            return Err(ConfigError::NullError("No URL provided.".to_string()));
+            return Err(ConfigError::Null("No URL provided.".to_string()));
         }
 
         match &mut self.servers {
@@ -590,7 +586,7 @@ impl ServiceConfig {
         })?;
 
         if config_file.try_exists()? {
-            return Err(ConfigError::ExistsError(config_file));
+            return Err(ConfigError::Exists(config_file));
         }
 
         let config = ServiceConfig::new(service_name, url, ip, port)?;
@@ -607,7 +603,7 @@ impl ServiceConfig {
         let config_file = path::absolute(config_file)?;
 
         if !config_file.try_exists()? {
-            return Err(ConfigError::NotExistsError(config_file));
+            return Err(ConfigError::NotExists(config_file));
         }
 
         // read the config file

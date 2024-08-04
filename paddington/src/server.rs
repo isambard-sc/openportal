@@ -5,7 +5,6 @@ use crate::crypto::CryptoError;
 use anyhow::Error as AnyError;
 use std::io::Error as IOError;
 use thiserror::Error;
-use tracing;
 
 use tokio::net::TcpListener;
 
@@ -15,22 +14,19 @@ use crate::connection::{Connection, ConnectionError};
 #[derive(Error, Debug)]
 pub enum ServerError {
     #[error("{0}")]
-    IOError(#[from] IOError),
+    IO(#[from] IOError),
 
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    TungsteniteError(#[from] tokio_tungstenite::tungstenite::error::Error),
+    Tungstenite(#[from] tokio_tungstenite::tungstenite::error::Error),
 
     #[error("{0}")]
-    CryptoError(#[from] CryptoError),
+    Crypto(#[from] CryptoError),
 
     #[error("{0}")]
-    ConnectionError(#[from] ConnectionError),
-
-    #[error("Unknown config error")]
-    Unknown,
+    Connection(#[from] ConnectionError),
 }
 
 ///

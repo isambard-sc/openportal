@@ -15,7 +15,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tracing;
 
 use std::sync::Arc;
 

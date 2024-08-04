@@ -6,7 +6,7 @@ use anyhow::Result;
 use thiserror::Error;
 use tracing;
 
-use crate::args::{process_args, ArgDefaults, ArgsError, ProcessResult};
+use crate::args::{process_args, ArgsError, Defaults, ProcessResult};
 use crate::config::ConfigError;
 use crate::{client, server};
 
@@ -28,7 +28,7 @@ pub enum EventLoopError {
     Unknown,
 }
 
-pub async fn run(defaults: ArgDefaults) -> Result<(), EventLoopError> {
+pub async fn run(defaults: Defaults) -> Result<(), EventLoopError> {
     match process_args(&defaults).await? {
         ProcessResult::ServiceConfig(config) => {
             if config.is_null() {

@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Context;
 use anyhow::Error as AnyError;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Mutex as TokioMutex;
 
 use crate::connection::{Connection, ConnectionError};
 
@@ -18,6 +17,12 @@ pub enum ExchangeError {
 
     #[error("{0}")]
     ConnectionError(#[from] ConnectionError),
+
+    #[error("{0}")]
+    PoisonError(String),
+
+    #[error("{0}")]
+    SendError(String),
 
     #[error("{0}")]
     UnnamedConnectionError(String),
@@ -32,10 +37,15 @@ pub struct ExchangeMessage {
     message: String,
 }
 
-#[derive(Debug, Clone)]
+// We use the singleton pattern for the exchange data, as there can only
+// be one in the program, and this will let us expose the exchange functions
+// directly
+static SINGLETON_EXCHANGE: Lazy<RwLock<Exchange>> = Lazy::new(|| RwLock::new(Exchange::new()));
+
+#[derive(Debug)]
 pub struct Exchange {
-    connections: Arc<TokioMutex<HashMap<String, Connection>>>,
-    tx: Option<Arc<UnboundedSender<ExchangeMessage>>>,
+    connections: HashMap<String, Connection>,
+    tx: UnboundedSender<ExchangeMessage>,
 }
 
 impl Default for Exchange {
@@ -44,136 +54,166 @@ impl Default for Exchange {
     }
 }
 
+async fn process_message(message: ExchangeMessage) -> Result<(), ExchangeError> {
+    tracing::info!(
+        "Received message: {} from: {}",
+        message.message,
+        message.from
+    );
+
+    let from = message.from.clone();
+
+    if from == "portal" {
+        send(&from, "Hello from the provider")
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Error sending message: {}", e);
+            });
+    } else if from == "provider" {
+        send(&from, "Hello from the portal")
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Error sending message: {}", e);
+            });
+    }
+
+    Ok(())
+}
+
+async fn event_loop(mut rx: UnboundedReceiver<ExchangeMessage>) -> Result<(), ExchangeError> {
+    while let Some(message) = rx.recv().await {
+        process_message(message).await.unwrap_or_else(|e| {
+            tracing::error!("Error processing message: {}", e);
+        });
+    }
+
+    Ok(())
+}
+
 impl Exchange {
     pub fn new() -> Self {
-        Self {
-            connections: Arc::new(TokioMutex::new(HashMap::new())),
-            tx: None,
-        }
-    }
-
-    pub fn create_default_workqueue() -> Exchange {
-        let mut exchange = Exchange::new();
-
-        let mut rx = exchange.create_channel();
-
-        let workqueue_exchange = exchange.clone();
-
-        tokio::spawn(async move {
-            while let Some(message) = rx.recv().await {
-                tracing::info!(
-                    "Received message: {} from: {}",
-                    message.message,
-                    message.from
-                );
-
-                let from = message.from.clone();
-
-                if from == "portal" {
-                    workqueue_exchange
-                        .send(&from, "Hello from the provider")
-                        .await
-                        .unwrap_or_else(|e| {
-                            tracing::error!("Error sending message: {}", e);
-                        });
-                } else if from == "provider" {
-                    workqueue_exchange
-                        .send(&from, "Hello from the portal")
-                        .await
-                        .unwrap_or_else(|e| {
-                            tracing::error!("Error sending message: {}", e);
-                        });
-                }
-            }
-        });
-
-        exchange
-    }
-
-    pub fn create_channel(&mut self) -> UnboundedReceiver<ExchangeMessage> {
         let (tx, rx) = unbounded_channel();
-        self.tx = Some(Arc::new(tx));
-        rx
-    }
 
-    pub async fn unregister(&self, connection: &Connection) -> Result<(), ExchangeError> {
-        let name = connection.name().unwrap_or_default();
+        tokio::spawn(event_loop(rx));
 
-        if name.is_empty() {
-            return Err(ExchangeError::UnnamedConnectionError(
-                "Connection must have a name".to_string(),
-            ));
-        }
-
-        let mut connections = self.connections.lock().await;
-
-        let key = name.clone();
-
-        if connections.contains_key(&key) {
-            connections.remove(&key);
-            Ok(())
-        } else {
-            Err(ExchangeError::UnnamedConnectionError(format!(
-                "Connection {} not found",
-                name
-            )))
+        Self {
+            connections: HashMap::new(),
+            tx,
         }
     }
+}
 
-    pub async fn register(&self, connection: Connection) -> Result<(), ExchangeError> {
-        let name = connection.name().unwrap_or_default();
+pub fn create_default_workqueue() {}
 
-        if name.is_empty() {
-            return Err(ExchangeError::UnnamedConnectionError(
-                "Connection must have a name".to_string(),
-            ));
-        }
+pub async fn unregister(connection: &Connection) -> Result<(), ExchangeError> {
+    let name = connection.name().unwrap_or_default();
 
-        let mut connections = self.connections.lock().await;
+    if name.is_empty() {
+        return Err(ExchangeError::UnnamedConnectionError(
+            "Connection must have a name".to_string(),
+        ));
+    }
 
-        let key = name.clone();
-
-        if connections.contains_key(&key) {
-            return Err(ExchangeError::UnnamedConnectionError(format!(
-                "Connection {} already exists",
-                name
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(ExchangeError::PoisonError(format!(
+                "Error getting write lock: {}",
+                e
             )));
         }
+    };
 
-        connections.insert(key, connection);
+    let key = name.clone();
+
+    if exchange.connections.contains_key(&key) {
+        exchange.connections.remove(&key);
         Ok(())
+    } else {
+        Err(ExchangeError::UnnamedConnectionError(format!(
+            "Connection {} not found",
+            name
+        )))
+    }
+}
+
+pub async fn register(connection: Connection) -> Result<(), ExchangeError> {
+    let name = connection.name().unwrap_or_default();
+
+    if name.is_empty() {
+        return Err(ExchangeError::UnnamedConnectionError(
+            "Connection must have a name".to_string(),
+        ));
     }
 
-    pub async fn send(&self, name: &str, message: &str) -> Result<(), ExchangeError> {
-        let connection = self.connections.lock().await.get(name).cloned();
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(ExchangeError::PoisonError(format!(
+                "Error getting write lock: {}",
+                e
+            )));
+        }
+    };
 
-        if let Some(connection) = connection {
-            connection.send_message(message).await?;
-            Ok(())
-        } else {
-            Err(ExchangeError::UnnamedConnectionError(format!(
-                "Connection {} not found",
-                name
-            )))
+    let key = name.clone();
+
+    if exchange.connections.contains_key(&key) {
+        return Err(ExchangeError::UnnamedConnectionError(format!(
+            "Connection {} already exists",
+            name
+        )));
+    }
+
+    exchange.connections.insert(key, connection);
+    Ok(())
+}
+
+pub async fn send(name: &str, message: &str) -> Result<(), ExchangeError> {
+    let connection = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(ExchangeError::PoisonError(format!(
+                "Error getting read lock: {}",
+                e
+            )));
         }
     }
+    .connections
+    .get(name)
+    .cloned();
 
-    pub fn post(&self, from: &str, message: &str) -> Result<(), ExchangeError> {
-        tracing::info!("Posting message: {}", message);
-
-        let tx = self.tx.as_ref().ok_or_else(|| {
-            tracing::warn!("No work queue to send message to!");
-            ConnectionError::InvalidPeer("No work queue to send message to!".to_string())
-        })?;
-
-        let message = ExchangeMessage {
-            from: from.to_string(),
-            message: message.to_string(),
-        };
-
-        tx.send(message)
-            .with_context(|| "Error sending job to work queue")?;
-
+    if let Some(connection) = connection {
+        connection.send_message(message).await?;
         Ok(())
+    } else {
+        Err(ExchangeError::UnnamedConnectionError(format!(
+            "Connection {} not found",
+            name
+        )))
     }
+}
+
+pub fn post(from: &str, message: &str) -> Result<(), ExchangeError> {
+    tracing::info!("Posting message: {}", message);
+
+    let exchange = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(ExchangeError::PoisonError(format!(
+                "Error getting read lock: {}",
+                e
+            )));
+        }
+    };
+
+    let message = ExchangeMessage {
+        from: from.to_string(),
+        message: message.to_string(),
+    };
+
+    exchange.tx.send(message).map_err(|e| {
+        tracing::error!("Error sending message: {}", e);
+        ExchangeError::SendError(format!("Error sending message: {}", e))
+    })
 }

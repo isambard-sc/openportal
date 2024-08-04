@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::config::{ClientConfig, ConfigError, PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
-use crate::exchange::Exchange;
+use crate::exchange;
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -156,9 +156,8 @@ impl Connection {
     /// Internal function called to indicate that the connection has
     /// been correctly closed.
     ///
-    async fn closed_connection(&mut self, exchange: Exchange) {
-        exchange
-            .unregister(self)
+    async fn closed_connection(&mut self) {
+        exchange::unregister(self)
             .await
             .with_context(|| {
                 "Error unregistering connection with exchange. Ensure the connection is open."
@@ -180,11 +179,7 @@ impl Connection {
     /// peer. This will initiate the connection and then enter an event
     /// loop to handle the sending and receiving of messages.
     ///
-    pub async fn make_connection(
-        &mut self,
-        peer: &PeerConfig,
-        exchange: Exchange,
-    ) -> Result<(), ConnectionError> {
+    pub async fn make_connection(&mut self, peer: &PeerConfig) -> Result<(), ConnectionError> {
         // first, check that the peer is a server
         let server = match peer {
             PeerConfig::Server(server) => server,
@@ -268,8 +263,7 @@ impl Connection {
         self.tx = Some(Arc::new(TokioMutex::new(tx)));
 
         // and we can register this connection - need to unregister when disconnected
-        exchange
-            .register(self.clone())
+        exchange::register(self.clone())
             .await
             .with_context(|| "Error registering connection with exchange")?;
 
@@ -290,7 +284,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange.post(&peer_name, msg).unwrap_or_else(|e| {
+            exchange::post(&peer_name, msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -306,7 +300,7 @@ impl Connection {
         future::select(received_from_peer, send_to_peer).await;
 
         // we've exited, meaning that this connection is now closed
-        self.closed_connection(exchange).await;
+        self.closed_connection().await;
 
         Ok(())
     }
@@ -316,11 +310,7 @@ impl Connection {
     /// This function will handle the handshake and then enter an event
     /// loop to handle the sending and receiving of messages.
     ///
-    pub async fn handle_connection(
-        &mut self,
-        stream: TcpStream,
-        exchange: Exchange,
-    ) -> Result<(), ConnectionError> {
+    pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), ConnectionError> {
         let service_name = self.config.name.clone().unwrap_or_default();
 
         if service_name.is_empty() {
@@ -505,8 +495,7 @@ impl Connection {
         // we've now completed the handshake and can use the two session
         // keys to trust and secure both ends of the connection - we can
         // register this connection - must unregister when we close
-        exchange
-            .register(self.clone())
+        exchange::register(self.clone())
             .await
             .with_context(|| "Error registering connection with exchange")?;
 
@@ -520,7 +509,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange.post(&peer_name, msg).unwrap_or_else(|e| {
+            exchange::post(&peer_name, msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -528,8 +517,7 @@ impl Connection {
         });
 
         // send a test message
-        exchange
-            .send("provider", "Hello!")
+        exchange::send("provider", "Hello!")
             .await
             .with_context(|| {
                 "Error sending test message to provider. Ensure the connection is open."
@@ -549,7 +537,7 @@ impl Connection {
         tracing::info!("{} disconnected", &addr);
 
         // we've exited, meaning that this connection is now closed
-        self.closed_connection(exchange).await;
+        self.closed_connection().await;
 
         Ok(())
     }

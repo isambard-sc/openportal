@@ -11,7 +11,6 @@ use tokio::net::TcpListener;
 
 use crate::config::ServiceConfig;
 use crate::connection::{Connection, ConnectionError};
-use crate::exchange::Exchange;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -41,11 +40,10 @@ pub enum ServerError {
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     config: ServiceConfig,
-    exchange: Exchange,
 ) -> Result<(), ServerError> {
     let mut connection = Connection::new(config);
 
-    match connection.handle_connection(stream, exchange).await {
+    match connection.handle_connection(stream).await {
         Ok(_) => {
             tracing::info!("Connection handled successfully");
         }
@@ -69,7 +67,7 @@ async fn handle_connection(
 ///
 /// This function will return a ServerError if the server fails to start.
 ///
-pub async fn run_once(config: ServiceConfig, exchange: Exchange) -> Result<(), ServerError> {
+pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
     // Create the event loop and TCP listener we'll accept connections on.
 
     let addr = format!("{}:{}", config.get_ip(), config.get_port());
@@ -88,7 +86,7 @@ pub async fn run_once(config: ServiceConfig, exchange: Exchange) -> Result<(), S
                 // spawn a new task to handle the connection, and don't
                 // wait for it to finish - the function will handle all
                 // the processing and errors itself
-                tokio::spawn(handle_connection(stream, config.clone(), exchange.clone()));
+                tokio::spawn(handle_connection(stream, config.clone()));
             }
             Err(e) => {
                 tracing::error!("Error accepting connection: {:?}", e);
@@ -97,9 +95,9 @@ pub async fn run_once(config: ServiceConfig, exchange: Exchange) -> Result<(), S
     }
 }
 
-pub async fn run(config: ServiceConfig, exchange: Exchange) -> Result<(), ServerError> {
+pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
     loop {
-        let result = run_once(config.clone(), exchange.clone()).await;
+        let result = run_once(config.clone()).await;
 
         match result {
             Ok(_) => {

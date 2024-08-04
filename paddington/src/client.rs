@@ -9,7 +9,6 @@ use tracing;
 use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::{Connection, ConnectionError};
 use crate::crypto;
-use crate::exchange::Exchange;
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -35,11 +34,7 @@ pub enum ClientError {
     Unknown,
 }
 
-pub async fn run_once(
-    config: ServiceConfig,
-    peer: PeerConfig,
-    exchange: Exchange,
-) -> Result<(), ClientError> {
+pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
     let service_name = config.name.clone().unwrap_or_default();
 
     if service_name.is_empty() {
@@ -68,18 +63,14 @@ pub async fn run_once(
     let mut connection = Connection::new(config.clone());
 
     // this will loop until the connection is closed
-    connection.make_connection(&peer, exchange).await?;
+    connection.make_connection(&peer).await?;
 
     Ok(())
 }
 
-pub async fn run(
-    config: ServiceConfig,
-    peer: PeerConfig,
-    exchange: Exchange,
-) -> Result<(), ClientError> {
+pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
     loop {
-        match run_once(config.clone(), peer.clone(), exchange.clone()).await {
+        match run_once(config.clone(), peer.clone()).await {
             Ok(_) => {
                 tracing::info!("Client exited successfully.");
             }

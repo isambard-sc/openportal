@@ -263,8 +263,6 @@ pub async fn send(name: &str, message: &str) -> Result<(), Error> {
 }
 
 pub fn received(from: &str, message: &str) -> Result<(), Error> {
-    tracing::info!("Posting message: {}", message);
-
     let exchange = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
         Err(e) => {

@@ -284,7 +284,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange::post(&peer_name, msg).unwrap_or_else(|e| {
+            exchange::received(&peer_name, msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -509,7 +509,7 @@ impl Connection {
 
             tracing::info!("Received message: {}", msg);
 
-            exchange::post(&peer_name, msg).unwrap_or_else(|e| {
+            exchange::received(&peer_name, msg).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 

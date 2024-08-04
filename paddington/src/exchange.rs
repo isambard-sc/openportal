@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinSet;
 
 use crate::connection::{Connection, ConnectionError};
 
@@ -81,9 +82,30 @@ async fn process_message(message: ExchangeMessage) -> Result<(), ExchangeError> 
 }
 
 async fn event_loop(mut rx: UnboundedReceiver<ExchangeMessage>) -> Result<(), ExchangeError> {
+    let mut workers = JoinSet::new();
+
+    static MAX_WORKERS: usize = 10;
+
     while let Some(message) = rx.recv().await {
-        process_message(message).await.unwrap_or_else(|e| {
-            tracing::error!("Error processing message: {}", e);
+        // make sure we don't exceed the requested number of workers
+        if workers.len() >= MAX_WORKERS {
+            let result = workers.join_next().await;
+
+            match result {
+                Some(Ok(())) => {}
+                Some(Err(e)) => {
+                    tracing::error!("Error processing message: {}", e);
+                }
+                None => {
+                    tracing::error!("Error processing message: None");
+                }
+            }
+        }
+
+        workers.spawn(async move {
+            process_message(message).await.unwrap_or_else(|e| {
+                tracing::error!("Error processing message: {}", e);
+            });
         });
     }
 
@@ -194,7 +216,7 @@ pub async fn send(name: &str, message: &str) -> Result<(), ExchangeError> {
     }
 }
 
-pub fn post(from: &str, message: &str) -> Result<(), ExchangeError> {
+pub fn received(from: &str, message: &str) -> Result<(), ExchangeError> {
     tracing::info!("Posting message: {}", message);
 
     let exchange = match SINGLETON_EXCHANGE.read() {

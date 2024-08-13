@@ -3,23 +3,6 @@
 
 use anyhow::Result;
 
-paddington::async_message_handler! {
-    async fn process_message(message: paddington::Message) -> Result<(), paddington::Error> {
-        tracing::info!(
-            "Received message: {} from: {}",
-            message.message,
-            message.from
-        );
-
-        // sleep for 1 second
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        paddington::send(&message.from, "Hello from the portal!!!").await?;
-
-        Ok(())
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // construct a subscriber that prints formatted traces to stdout
@@ -39,8 +22,7 @@ async fn main() -> Result<()> {
         Some(8042),
     );
 
-    paddington::set_handler(process_message).await?;
-    paddington::run(defaults).await?;
+    templemeads::agent::run(defaults).await?;
 
     Ok(())
 }

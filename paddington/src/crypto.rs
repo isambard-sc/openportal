@@ -154,7 +154,7 @@ pub enum CryptoError {
     IOError(#[from] std::io::Error),
 
     #[error("{0}")]
-    UnknownCryptoError(#[from] orion::errors::UnknownCryptoError),
+    UnknownCrypto(#[from] orion::errors::UnknownCryptoError),
 
     #[error("{0}")]
     AnyError(#[from] AnyError),

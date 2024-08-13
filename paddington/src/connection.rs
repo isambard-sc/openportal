@@ -22,33 +22,6 @@ use crate::config::{ClientConfig, ConfigError, PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
 use crate::exchange;
 
-#[derive(Error, Debug)]
-pub enum ConnectionError {
-    #[error("{0}")]
-    IOError(#[from] std::io::Error),
-
-    #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    SerdeError(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    CryptoError(#[from] CryptoError),
-
-    #[error("{0}")]
-    ConfigError(#[from] ConfigError),
-
-    #[error("Invalid peer configuration: {0}")]
-    InvalidPeer(String),
-
-    #[error("Busy line: {0}")]
-    BusyLine(String),
-
-    #[error("Unknown config error")]
-    Unknown,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 enum ConnectionState {
     None,
@@ -536,4 +509,33 @@ impl Connection {
 
         Ok(())
     }
+}
+
+/// Errors
+
+#[derive(Error, Debug)]
+pub enum ConnectionError {
+    #[error("{0}")]
+    IOError(#[from] std::io::Error),
+
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    SerdeError(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    CryptoError(#[from] CryptoError),
+
+    #[error("{0}")]
+    ConfigError(#[from] ConfigError),
+
+    #[error("Invalid peer configuration: {0}")]
+    InvalidPeer(String),
+
+    #[error("Busy line: {0}")]
+    BusyLine(String),
+
+    #[error("Unknown config error")]
+    Unknown,
 }

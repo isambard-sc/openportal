@@ -4,29 +4,10 @@
 use anyhow::Error as AnyError;
 use anyhow::Result;
 use thiserror::Error;
-use tracing;
 
 use crate::args::{process_args, ArgsError, Defaults, ProcessResult};
 use crate::config::ConfigError;
 use crate::{client, server};
-
-#[derive(Error, Debug)]
-pub enum EventLoopError {
-    #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    ArgsError(#[from] ArgsError),
-
-    #[error("{0}")]
-    ConfigError(#[from] ConfigError),
-
-    #[error("{0}")]
-    JoinError(#[from] tokio::task::JoinError),
-
-    #[error("Unknown config error")]
-    Unknown,
-}
 
 pub async fn run(defaults: Defaults) -> Result<(), EventLoopError> {
     match process_args(&defaults).await? {
@@ -92,4 +73,24 @@ pub async fn run(defaults: Defaults) -> Result<(), EventLoopError> {
     }
 
     Ok(())
+}
+
+/// Errors
+
+#[derive(Error, Debug)]
+pub enum EventLoopError {
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    ArgsError(#[from] ArgsError),
+
+    #[error("{0}")]
+    ConfigError(#[from] ConfigError),
+
+    #[error("{0}")]
+    JoinError(#[from] tokio::task::JoinError),
+
+    #[error("Unknown config error")]
+    Unknown,
 }

@@ -11,10 +11,10 @@ paddington::async_message_handler! {
             message.from
         );
 
-        paddington::send(&message.from, "Hello from the portal!!!").await?;
-
         // sleep for 1 second
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        paddington::send(&message.from, "Hello from the portal!!!").await?;
 
         Ok(())
     }

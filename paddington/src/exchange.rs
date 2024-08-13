@@ -13,27 +13,6 @@ use tokio::task::JoinSet;
 
 use crate::connection::{Connection, ConnectionError};
 
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    ConnectionError(#[from] ConnectionError),
-
-    #[error("{0}")]
-    PoisonError(String),
-
-    #[error("{0}")]
-    SendError(String),
-
-    #[error("{0}")]
-    UnnamedConnectionError(String),
-
-    #[error("Unknown error")]
-    Unknown,
-}
-
 #[derive(Debug, Clone)]
 pub struct Message {
     pub from: String,
@@ -282,4 +261,27 @@ pub fn received(from: &str, message: &str) -> Result<(), Error> {
         tracing::error!("Error sending message: {}", e);
         Error::SendError(format!("Error sending message: {}", e))
     })
+}
+
+/// Errors
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    ConnectionError(#[from] ConnectionError),
+
+    #[error("{0}")]
+    PoisonError(String),
+
+    #[error("{0}")]
+    SendError(String),
+
+    #[error("{0}")]
+    UnnamedConnectionError(String),
+
+    #[error("Unknown error")]
+    Unknown,
 }

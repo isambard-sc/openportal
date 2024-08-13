@@ -3,32 +3,12 @@
 
 use anyhow::Context;
 use anyhow::Error as AnyError;
-use hex;
 use orion::aead;
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json;
 use serde_with::serde_as;
 use std::{str, vec};
 use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum CryptoError {
-    #[error("{0}")]
-    IOError(#[from] std::io::Error),
-
-    #[error("{0}")]
-    UnknownCryptoError(#[from] orion::errors::UnknownCryptoError),
-
-    #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    SerdeError(#[from] serde_json::Error),
-
-    #[error("Unknown config error")]
-    Unknown,
-}
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,4 +144,24 @@ impl Key {
 
         Ok(obj)
     }
+}
+
+/// Errors
+
+#[derive(Error, Debug)]
+pub enum CryptoError {
+    #[error("{0}")]
+    IOError(#[from] std::io::Error),
+
+    #[error("{0}")]
+    UnknownCryptoError(#[from] orion::errors::UnknownCryptoError),
+
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    SerdeError(#[from] serde_json::Error),
+
+    #[error("Unknown config error")]
+    Unknown,
 }

@@ -12,39 +12,6 @@ use std::path;
 use thiserror::Error;
 use url::{ParseError as UrlParseError, Url};
 
-#[derive(Error, Debug)]
-pub enum ConfigError {
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    Crypto(#[from] CryptoError),
-
-    #[error("{0}")]
-    UrlParse(#[from] UrlParseError),
-
-    #[error("{0}")]
-    Peer(String),
-
-    #[error("Config directory already exists: {0}")]
-    Exists(path::PathBuf),
-
-    #[error("Config directory does not exist: {0}")]
-    NotExists(path::PathBuf),
-
-    #[error("Config file is null: {0}")]
-    Null(String),
-
-    #[error("Unknown config error")]
-    Unknown,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServerConfig {
     pub name: String,
@@ -644,4 +611,39 @@ impl ServiceConfig {
 
         Ok(())
     }
+}
+
+/// Errors
+
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("{0}")]
+    IO(#[from] std::io::Error),
+
+    #[error("{0}")]
+    Any(#[from] AnyError),
+
+    #[error("{0}")]
+    Serde(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    Crypto(#[from] CryptoError),
+
+    #[error("{0}")]
+    UrlParse(#[from] UrlParseError),
+
+    #[error("{0}")]
+    Peer(String),
+
+    #[error("Config directory already exists: {0}")]
+    Exists(path::PathBuf),
+
+    #[error("Config directory does not exist: {0}")]
+    NotExists(path::PathBuf),
+
+    #[error("Config file is null: {0}")]
+    Null(String),
+
+    #[error("Unknown config error")]
+    Unknown,
 }

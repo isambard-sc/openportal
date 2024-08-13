@@ -7,33 +7,8 @@ use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use std::net::IpAddr;
 use thiserror::Error;
-use tracing;
 
 use crate::config::{ConfigError, Invite, ServiceConfig};
-
-#[derive(Error, Debug)]
-pub enum ArgsError {
-    #[error("{0}")]
-    IOError(#[from] std::io::Error),
-
-    #[error("{0}")]
-    ConfigError(#[from] ConfigError),
-
-    #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    ServiceNameError(String),
-
-    #[error("{0}")]
-    ConfigExistsError(String),
-
-    #[error("{0}")]
-    PeerEditError(String),
-
-    #[error("Unknown arguments error")]
-    Unknown,
-}
 
 pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -387,4 +362,30 @@ pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, ArgsErro
     }
 
     Ok(ProcessResult::None)
+}
+
+/// Errors
+
+#[derive(Error, Debug)]
+pub enum ArgsError {
+    #[error("{0}")]
+    IOError(#[from] std::io::Error),
+
+    #[error("{0}")]
+    ConfigError(#[from] ConfigError),
+
+    #[error("{0}")]
+    AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    ServiceNameError(String),
+
+    #[error("{0}")]
+    ConfigExistsError(String),
+
+    #[error("{0}")]
+    PeerEditError(String),
+
+    #[error("Unknown arguments error")]
+    Unknown,
 }

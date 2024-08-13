@@ -9,27 +9,6 @@ use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::{Connection, ConnectionError};
 use crate::crypto;
 
-#[derive(Error, Debug)]
-pub enum ClientError {
-    #[error("{0}")]
-    IO(#[from] IOError),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Tungstenite(#[from] tokio_tungstenite::tungstenite::error::Error),
-
-    #[error("{0}")]
-    Crypto(#[from] crypto::CryptoError),
-
-    #[error("{0}")]
-    Connection(#[from] ConnectionError),
-
-    #[error("{0}")]
-    UnknownPeer(String),
-}
-
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
     let service_name = config.name.clone().unwrap_or_default();
 
@@ -79,4 +58,27 @@ pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientEr
         tracing::info!("Sleeping for 5 seconds before retrying the connection...");
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
+}
+
+/// Errors
+
+#[derive(Error, Debug)]
+pub enum ClientError {
+    #[error("{0}")]
+    IO(#[from] IOError),
+
+    #[error("{0}")]
+    Any(#[from] AnyError),
+
+    #[error("{0}")]
+    Tungstenite(#[from] tokio_tungstenite::tungstenite::error::Error),
+
+    #[error("{0}")]
+    Crypto(#[from] crypto::CryptoError),
+
+    #[error("{0}")]
+    Connection(#[from] ConnectionError),
+
+    #[error("{0}")]
+    UnknownPeer(String),
 }

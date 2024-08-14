@@ -26,3 +26,7 @@ pub async fn run(defaults: paddington::Defaults) -> Result<(), AnyError> {
 
     Ok(())
 }
+
+pub fn test_function() -> String {
+    "Hello from Rust!".to_string()
+}

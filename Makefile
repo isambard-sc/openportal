@@ -1,6 +1,9 @@
 build:
 	@cargo build --release
 
+python:
+	@maturin develop -m python/Cargo.toml
+
 clean:
 	@cargo clean
 
@@ -25,4 +28,4 @@ dev-portal:
 dev-provider:
 	cargo run --bin provider-svc
 
-.PHONY: build test docs style-check lint
+.PHONY: build python test docs style-check lint

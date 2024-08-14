@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
+[package]
+name = "openportal"
+description = "Python wrappers for OpenPortal"
+edition = "2021"
+license = "MIT"
+homepage = "https://github.com/chryswoods/openportal/"
+repository = "https://github.com/chryswoods/openportal/"
+
+[lib]
+name = "openportal"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version="0.22.2" }

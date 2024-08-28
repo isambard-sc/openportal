@@ -4,7 +4,7 @@
 [workspace]
 
 members = [
-    "paddington", "portal-svc", "provider-svc", "templemeads", "python"
+    "client", "paddington", "portal", "provider", "python", "templemeads"
 ]
 
 resolver = "2"

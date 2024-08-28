@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: CC0-1.0
 
 [package]
-name = "provider-svc"
+name = "op-portal"
 version = "0.1.0"
-description = "An example of an OpenPortal provider interface service"
+description = "An example of an OpenPortal portal interface service"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/chryswoods/openportal/"

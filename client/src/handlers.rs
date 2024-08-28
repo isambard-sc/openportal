@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 
 #[tracing::instrument(skip_all)]
 pub async fn health() -> Result<Json<serde_json::Value>, HandlerError> {
-    Ok(Json(json!({})))
+    Ok(Json(json!({"status": "healthy"})))
 }
 
 #[tracing::instrument(skip_all)]

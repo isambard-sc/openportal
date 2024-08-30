@@ -9,7 +9,7 @@ use axum::{
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    routing::put,
+    routing::post,
     Json, RequestPartsExt as _, Router,
 };
 use axum_extra::{
@@ -65,19 +65,23 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
         .route("/health", get(health))
+        .route(
+            "/add_user_to_instance_in_project",
+            post(handlers::add_user_to_instance_in_project),
+        )
         .route("/list_accounts", get(list_accounts))
         .route("/get_account", get(get_account))
-        .route("/create_account", put(create_account))
-        .route("/delete_account", put(delete_account))
+        .route("/create_account", post(create_account))
+        .route("/delete_account", post(delete_account))
         .route(
             "/delete_all_users_from_account",
-            put(delete_all_users_from_account),
+            post(delete_all_users_from_account),
         )
         .route("/account_has_users", get(account_has_users))
-        .route("/set_resource_limits", put(set_resource_limits))
+        .route("/set_resource_limits", post(set_resource_limits))
         .route("/get_association", get(get_association))
-        .route("/create_association", put(create_association))
-        .route("/delete_association", put(delete_association))
+        .route("/create_association", post(create_association))
+        .route("/delete_association", post(delete_association))
         .route("/get_resource_limits", get(get_resource_limits))
         .route("/list_account_users", get(list_account_users));
 

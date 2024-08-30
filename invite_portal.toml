@@ -1,8 +1,0 @@
-name = "portal"
-url = "ws://localhost:8042/"
-
-[inner_key]
-data = "0bf69f6d3a968262adabb350072cefb8214e54e67d4fa9637d4fb3a450c3cfb3"
-
-[outer_key]
-data = "4d025911d4f78fd08737843db967efe124424d14b36ddd2cc36aca2dc7edfc77"

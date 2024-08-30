@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+// SPDX-License-Identifier: MIT
+
 use anyhow::{anyhow, Context, Result};
 
 use axum::{
@@ -19,6 +22,11 @@ use tokio::net::TcpListener;
 #[tracing::instrument(skip_all)]
 pub async fn health() -> Result<Json<serde_json::Value>, HandlerError> {
     Ok(Json(json!({"status": "healthy"})))
+}
+
+#[tracing::instrument(skip_all)]
+pub async fn add_user_to_instance_in_project() -> Result<Json<serde_json::Value>, HandlerError> {
+    Ok(Json(json!({})))
 }
 
 #[tracing::instrument(skip_all)]

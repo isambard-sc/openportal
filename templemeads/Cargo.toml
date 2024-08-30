@@ -15,7 +15,9 @@ repository = "https://github.com/chryswoods/openportal/"
 
 [dependencies]
 anyhow = { version="1.0.86", features = ["backtrace"] }
+once_cell = "1.19.0"
 paddington = { path = "../paddington" }
+thiserror = "1.0.63"
 tokio = { version = "1.0", features = ["full", "tracing"] }
 tracing = "0.1.40"
 

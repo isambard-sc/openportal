@@ -99,11 +99,13 @@ where
 {
     let config = get_config()?;
 
+    tracing::info!("{}", config.function_path(&func)?);
+
     let result = reqwest::blocking::Client::new()
         .put(config.function_path(&func)?)
-        .query(&[("openportal-version", "0.01")])
         .header("Accept", "application/json")
-        .header("Authorization", config.auth_header())
+        .header("Content-Type", "application/json")
+        //.header("Authorization", config.auth_header())
         .json(&body)
         .send()
         .with_context(|| format!("Could not call function: {}", func))?;
@@ -148,15 +150,8 @@ fn health() -> PyResult<String> {
 }
 
 #[pyfunction]
-fn add_user_to_instance_in_project(
-    user: String,
-    instance: String,
-    project: String,
-) -> PyResult<String> {
-    match call_put::<HandleResponse>(
-        "add_user_to_instance_in_project".to_string(),
-        serde_json::json!({"user": user, "instance": instance, "project": project}),
-    ) {
+fn run(command: String) -> PyResult<String> {
+    match call_put::<HandleResponse>("run".to_owned(), serde_json::json!({"command": command})) {
         Ok(response) => Ok(response.id),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -166,7 +161,7 @@ fn add_user_to_instance_in_project(
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
-    m.add_function(wrap_pyfunction!(add_user_to_instance_in_project, m)?)?;
+    m.add_function(wrap_pyfunction!(run, m)?)?;
     Ok(())
 }
 

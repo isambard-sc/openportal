@@ -4,29 +4,18 @@
 use anyhow::{anyhow, Context, Result};
 
 use axum::{
-    async_trait,
-    extract::{FromRequestParts, Query, State},
-    http::{request::Parts, StatusCode},
+    extract::Json,
+    handler::Handler,
+    http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
-    routing::post,
-    Json, RequestPartsExt as _, Router,
+    routing::{get, post},
+    Router,
 };
-use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
-    TypedHeader,
-};
-
+use serde::Deserialize;
 use serde_json::json;
+
+use std::sync::Arc;
 use tokio::net::TcpListener;
-
-mod handlers;
-
-use crate::handlers::{
-    account_has_users, create_account, create_association, delete_account,
-    delete_all_users_from_account, delete_association, get_account, get_association,
-    get_resource_limits, health, list_account_users, list_accounts, set_resource_limits,
-};
 
 async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
     match axum::serve(listener, app).await {
@@ -39,6 +28,26 @@ async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct AppState {
+    something: String,
+}
+
+#[tracing::instrument(skip_all)]
+pub async fn health() {
+    tracing::info!("Health check");
+}
+
+#[derive(Deserialize, Debug)]
+struct RunRequest {
+    command: String,
+}
+
+#[tracing::instrument(skip_all)]
+async fn run(Json(payload): Json<RunRequest>) {
+    tracing::info!("Running command: {}", payload.command);
 }
 
 #[tokio::main]
@@ -60,30 +69,17 @@ async fn main() -> Result<()> {
         Some(8041),
     );
 
+    let state = Arc::new(AppState {
+        something: "hello".to_string(),
+    });
+
     let port = 3000;
 
     let app = Router::new()
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
         .route("/health", get(health))
-        .route(
-            "/add_user_to_instance_in_project",
-            post(handlers::add_user_to_instance_in_project),
-        )
-        .route("/list_accounts", get(list_accounts))
-        .route("/get_account", get(get_account))
-        .route("/create_account", post(create_account))
-        .route("/delete_account", post(delete_account))
-        .route(
-            "/delete_all_users_from_account",
-            post(delete_all_users_from_account),
-        )
-        .route("/account_has_users", get(account_has_users))
-        .route("/set_resource_limits", post(set_resource_limits))
-        .route("/get_association", get(get_association))
-        .route("/create_association", post(create_association))
-        .route("/delete_association", post(delete_association))
-        .route("/get_resource_limits", get(get_resource_limits))
-        .route("/list_account_users", get(list_account_users));
+        .route("/run", post(run))
+        .with_state(state);
 
     let listener =
         tokio::net::TcpListener::bind(&std::net::SocketAddr::new("::".parse()?, port)).await?;

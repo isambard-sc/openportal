@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Error as AnyError;
+use chrono::Utc;
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
@@ -10,16 +11,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::RwLock;
 use thiserror::Error;
 use tracing_subscriber;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthResponse {
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandleResponse {
-    pub id: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -73,9 +64,13 @@ where
 
     let result = reqwest::blocking::Client::new()
         .get(config.function_path(&func)?)
-        .query(&[("openportal-version", "0.01")])
+        .query(&[("openportal-version", "0.1")])
         .header("Accept", "application/json")
         .header("Authorization", config.auth_header())
+        .header(
+            "Date",
+            Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+        )
         .send()
         .with_context(|| format!("Could not call function: {}", func))?;
 
@@ -97,15 +92,21 @@ fn call_put<T>(func: String, body: serde_json::Value) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
+    tracing::info!("Calling /run with body: {:?}", body);
+
     let config = get_config()?;
 
     tracing::info!("{}", config.function_path(&func)?);
 
     let result = reqwest::blocking::Client::new()
-        .put(config.function_path(&func)?)
+        .post(config.function_path(&func)?)
+        .query(&[("openportal-version", "0.1")])
         .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        //.header("Authorization", config.auth_header())
+        .header("Authorization", config.auth_header())
+        .header(
+            "Date",
+            Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+        )
         .json(&body)
         .send()
         .with_context(|| format!("Could not call function: {}", func))?;
@@ -130,29 +131,43 @@ fn initialize_tracing() -> PyResult<()> {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set global default subscriber");
+    tracing::info!("Tracing initialized");
     Ok(())
 }
 
 #[pyfunction]
 fn set_client_config(api_url: String, token: String) -> PyResult<()> {
+    tracing::info!("Updating the client config: {}", api_url);
     let mut config = SINGLETON_CONFIG.write().unwrap();
     config.api_url = url::Url::parse(&api_url).unwrap();
     config.token = token;
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub status: String,
+}
+
 #[pyfunction]
 fn health() -> PyResult<String> {
+    tracing::info!("Calling /health");
     match call_get::<HealthResponse>("health".to_string()) {
-        Ok(response) => Ok(response.status),
+        Ok(response) => Ok(format!("Health: {:?}", response)),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunResponse {
+    pub id: String,
+    pub status: String,
+}
+
 #[pyfunction]
 fn run(command: String) -> PyResult<String> {
-    match call_put::<HandleResponse>("run".to_owned(), serde_json::json!({"command": command})) {
-        Ok(response) => Ok(response.id),
+    match call_put::<RunResponse>("run".to_owned(), serde_json::json!({"command": command})) {
+        Ok(response) => Ok(format!("Run: {:?}", response)),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }

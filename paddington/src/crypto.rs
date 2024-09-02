@@ -7,7 +7,8 @@ use orion::{aead, auth};
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
-use std::{str, vec};
+use std::fmt::Display;
+use std::{fmt, str, vec};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,17 +32,20 @@ impl<'de> Deserialize<'de> for Signature {
     {
         let s = String::deserialize(deserializer)?;
         let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
-        Ok(Signature {
-            sig: orion::auth::Tag::from_slice(&bytes).unwrap(),
-        })
+        match orion::auth::Tag::from_slice(&bytes) {
+            Ok(sig) => Ok(Signature { sig }),
+            Err(_) => Err(serde::de::Error::custom("Failed to create Signature.")),
+        }
+    }
+}
+
+impl Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", hex::encode(self.sig.unprotected_as_bytes()))
     }
 }
 
 impl Signature {
-    pub fn to_string(&self) -> String {
-        hex::encode(self.sig.unprotected_as_bytes())
-    }
-
     pub fn from_string(s: &str) -> Result<Signature, CryptoError> {
         let bytes = hex::decode(s).with_context(|| "Failed to decode the signature.")?;
         Ok(Signature {

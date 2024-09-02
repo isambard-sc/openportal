@@ -5,135 +5,193 @@ use anyhow::Context;
 use anyhow::Error as AnyError;
 use chrono::Utc;
 use once_cell::sync::Lazy;
-use paddington::{CryptoError, Key, Signature};
+use paddington::{CryptoError, Key, SecretKey, Signature};
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::error;
+use std::fmt::Result;
+use std::path;
 use std::sync::RwLock;
+use templemeads::sign_api_call;
 use thiserror::Error;
 use tracing_subscriber;
+use url::Url;
 
-#[derive(Debug, Clone)]
-pub struct ClientConfig {
-    pub api_url: url::Url,
-    pub token: String,
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct BridgeConfig {
+    api_url: Option<Url>,
+    key: Option<SecretKey>,
 }
 
-impl ClientConfig {
+impl BridgeConfig {
     pub fn new() -> Self {
         Self {
-            api_url: url::Url::parse("http://localhost:3000/").unwrap(),
-            token: "123456789".to_string(),
+            api_url: None,
+            key: None,
         }
-    }
-
-    pub fn function_path(&self, func: &str) -> Result<url::Url, Error> {
-        match self.api_url.join(func) {
-            Ok(url) => Ok(url),
-            Err(e) => Err(Error::CallError(format!(
-                "Could not join function path: {}. Error: {:?}",
-                func, e
-            ))),
-        }
-    }
-
-    pub fn auth_header(&self) -> String {
-        format!("Token {}", self.token)
     }
 }
 
-fn get_config() -> Result<ClientConfig, Error> {
+fn get_config() -> Result<BridgeConfig, OPError> {
     match SINGLETON_CONFIG.read() {
         Ok(config) => Ok(config.clone()),
-        Err(e) => Err(Error::CallError(format!(
+        Err(e) => Err(OPError::InvalidConfig(format!(
             "Could not get a lock on the config. Error: {:?}",
             e
         ))),
     }
 }
 
-// We use the singleton pattern for the Client Config, as we only need to set
+// We use the singleton pattern for the BridgeConfig, as we only need to set
 // this once, and it will be used by all functions
-static SINGLETON_CONFIG: Lazy<RwLock<ClientConfig>> =
-    Lazy::new(|| RwLock::new(ClientConfig::new()));
+static SINGLETON_CONFIG: Lazy<RwLock<BridgeConfig>> =
+    Lazy::new(|| RwLock::new(BridgeConfig::default()));
 
-fn call_get<T>(func: String) -> Result<T, Error>
+fn call_get<T>(function: String) -> Result<T, OPError>
 where
     T: DeserializeOwned,
 {
+    tracing::info!("Calling get /{}", function);
+
     let config = get_config()?;
+    let date = Utc::now();
+
+    let protocol = "get".to_string();
+
+    let api_url = format!(
+        "{}/{}",
+        config
+            .api_url
+            .ok_or(OPError::InvalidConfig(format!("Missing config URL")))?,
+        function
+    );
+
+    let auth_token = sign_api_call(
+        &config
+            .key
+            .ok_or(OPError::InvalidConfig(format!("Missing config key")))?,
+        date,
+        protocol,
+        function,
+        None,
+    )?;
 
     let result = reqwest::blocking::Client::new()
-        .get(config.function_path(&func)?)
+        .get(api_url)
         .query(&[("openportal-version", "0.1")])
         .header("Accept", "application/json")
-        .header("Authorization", config.auth_header())
-        .header(
-            "Date",
-            Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
-        )
+        .header("Authorization", auth_token)
+        .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
         .send()
-        .with_context(|| format!("Could not call function: {}", func))?;
+        .with_context(|| format!("Could not call function: {}", function))?;
 
     tracing::info!("Response: {:?}", result);
 
     if result.status().is_success() {
         Ok(result.json::<T>().context("Could not decode from json")?)
     } else {
-        Err(Error::CallError(format!(
+        Err(OPError::CallError(format!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
-            func,
+            function,
             result.status(),
             result
         )))
     }
 }
 
-fn call_put<T>(func: String, body: serde_json::Value) -> Result<T, Error>
+fn call_post<T>(function: String, arguments: serde_json::Value) -> Result<T, OPError>
 where
     T: DeserializeOwned,
 {
-    tracing::info!("Calling /run with body: {:?}", body);
+    tracing::info!("Calling post /{} with arguments: {:?}", function, arguments);
+
+    tracing::info!("Calling get /{}", function);
 
     let config = get_config()?;
+    let date = Utc::now();
 
-    let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-    let call_string = format!("put\napplication/json\n{}\n{}\n{}", date, func, body);
+    let protocol = "put".to_string();
 
-    let key = Key::generate();
+    let api_url = format!(
+        "{}/{}",
+        config
+            .api_url
+            .ok_or(OPError::InvalidConfig(format!("Missing config URL")))?,
+        function
+    );
 
-    let signature = key.expose_secret().sign(call_string.clone())?;
-
-    tracing::info!("Call string: {}", call_string);
-    tracing::info!("Signature: {:?}", signature.to_string());
-
-    tracing::info!("{}", config.function_path(&func)?);
+    let auth_token = sign_api_call(
+        &config
+            .key
+            .ok_or(OPError::InvalidConfig(format!("Missing config key")))?,
+        date,
+        protocol,
+        function,
+        Some(arguments),
+    )?;
 
     let result = reqwest::blocking::Client::new()
-        .post(config.function_path(&func)?)
+        .post(api_url)
         .query(&[("openportal-version", "0.1")])
         .header("Accept", "application/json")
-        .header(
-            "Authorization",
-            format!("OpenPortal {}", signature.to_string()),
-        )
-        .header("Date", date)
-        .json(&body)
+        .header("Authorization", auth_token)
+        .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+        .json(&arguments)
         .send()
-        .with_context(|| format!("Could not call function: {}", func))?;
+        .with_context(|| format!("Could not call function: {}", function))?;
 
     tracing::info!("Response: {:?}", result);
 
     if result.status().is_success() {
         Ok(result.json::<T>().context("Could not decode from json")?)
     } else {
-        Err(Error::CallError(format!(
+        Err(OPError::CallError(format!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
-            func,
+            function,
             result.status(),
             result
         )))
+    }
+}
+
+///
+/// Load the client configuration from the passed filename.
+///
+fn local_load_config(config_file: &path::PathBuf) -> Result<(), OPError> {
+    // see if this config_file exists - return an error if it doesn't
+    let config_file = path::absolute(config_file)?;
+
+    // read the config file
+    let config = std::fs::read_to_string(&config_file)
+        .with_context(|| format!("Could not read config file: {:?}", config_file))?;
+
+    // parse the config file
+    let config: BridgeConfig = toml::from_str(&config)
+        .with_context(|| format!("Could not parse config file fron toml: {:?}", config_file))?;
+
+    let mut singleton_config = match SINGLETON_CONFIG.write() {
+        Ok(guard) => guard,
+        Err(e) => {
+            return Err(OPError::LockError(format!(
+                "Could not get a lock on the config. Error: {:?}",
+                e
+            )))
+        }
+    };
+
+    // update the singleton config
+    *singleton_config = config;
+
+    Ok(())
+}
+
+#[pyfunction]
+fn load_config(config_file: path::PathBuf) -> PyResult<()> {
+    match local_load_config(&config_file) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }
 
@@ -144,15 +202,6 @@ fn initialize_tracing() -> PyResult<()> {
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set global default subscriber");
     tracing::info!("Tracing initialized");
-    Ok(())
-}
-
-#[pyfunction]
-fn set_client_config(api_url: String, token: String) -> PyResult<()> {
-    tracing::info!("Updating the client config: {}", api_url);
-    let mut config = SINGLETON_CONFIG.write().unwrap();
-    config.api_url = url::Url::parse(&api_url).unwrap();
-    config.token = token;
     Ok(())
 }
 
@@ -221,7 +270,7 @@ impl Job {
 
 #[pyfunction]
 fn run(command: String) -> PyResult<Job> {
-    match call_put::<Job>("run".to_owned(), serde_json::json!({"command": command})) {
+    match call_post::<Job>("run".to_owned(), serde_json::json!({"command": command})) {
         Ok(response) => Ok(response),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -229,6 +278,7 @@ fn run(command: String) -> PyResult<Job> {
 
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(load_config, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
@@ -238,15 +288,24 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum OPError {
     #[error("{0}")]
     AnyError(#[from] AnyError),
 
     #[error("{0}")]
-    CallError(String),
+    IOError(#[from] std::io::Error),
 
     #[error("{0}")]
-    CryptoError(#[from] CryptoError),
+    CallError(String),
+
+    #[error("File does not exist: {0}")]
+    NotExists(path::PathBuf),
+
+    #[error("{0}")]
+    InvalidConfig(String),
+
+    #[error("{0}")]
+    LockError(String),
 
     #[error("Unknown error")]
     Unknown,

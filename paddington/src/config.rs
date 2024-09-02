@@ -566,7 +566,7 @@ impl ServiceConfig {
     }
 
     pub fn load(config_file: &path::PathBuf) -> Result<ServiceConfig, ConfigError> {
-        // see if this config_dilw exists - return an error if it doesn't
+        // see if this config_file exists - return an error if it doesn't
         let config_file = path::absolute(config_file)?;
 
         if !config_file.try_exists()? {

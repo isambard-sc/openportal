@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: CC0-1.0
 
 [package]
-name = "op-client"
+name = "op-bridge"
 version = "0.1.0"
-description = "An example of an OpenPortal portal client"
+description = "An example of an OpenPortal user portal to OpenPortal bridge"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/chryswoods/openportal/"

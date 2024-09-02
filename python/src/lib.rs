@@ -144,30 +144,73 @@ fn set_client_config(api_url: String, token: String) -> PyResult<()> {
     Ok(())
 }
 
+#[pyclass]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthResponse {
+pub struct Health {
     pub status: String,
 }
 
+#[pymethods]
+impl Health {
+    #[getter]
+    fn status(&self) -> PyResult<String> {
+        Ok(self.status.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!("Health( status: {} )", self.status))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn is_healthy(&self) -> PyResult<bool> {
+        Ok(self.status == "ok")
+    }
+}
+
 #[pyfunction]
-fn health() -> PyResult<String> {
+fn health() -> PyResult<Health> {
     tracing::info!("Calling /health");
-    match call_get::<HealthResponse>("health".to_string()) {
-        Ok(response) => Ok(format!("Health: {:?}", response)),
+    match call_get::<Health>("health".to_string()) {
+        Ok(response) => Ok(response),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }
 
+#[pyclass]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunResponse {
-    pub id: String,
-    pub status: String,
+pub struct Job {
+    id: String,
+    status: String,
+}
+
+#[pymethods]
+impl Job {
+    #[getter]
+    fn id(&self) -> PyResult<String> {
+        Ok(self.id.clone())
+    }
+
+    #[getter]
+    fn status(&self) -> PyResult<String> {
+        Ok(self.status.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!("Job( id: {}, status: {} )", self.id, self.status))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
 }
 
 #[pyfunction]
-fn run(command: String) -> PyResult<String> {
-    match call_put::<RunResponse>("run".to_owned(), serde_json::json!({"command": command})) {
-        Ok(response) => Ok(format!("Run: {:?}", response)),
+fn run(command: String) -> PyResult<Job> {
+    match call_put::<Job>("run".to_owned(), serde_json::json!({"command": command})) {
+        Ok(response) => Ok(response),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }

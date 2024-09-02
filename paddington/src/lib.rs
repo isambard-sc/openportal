@@ -13,6 +13,7 @@ mod server;
 
 // public API
 pub use args::Defaults;
+pub use crypto::{CryptoError, Key, Signature};
 pub use eventloop::run;
 pub use exchange::send;
 pub use exchange::set_handler;

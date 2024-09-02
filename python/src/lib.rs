@@ -5,8 +5,10 @@ use anyhow::Context;
 use anyhow::Error as AnyError;
 use chrono::Utc;
 use once_cell::sync::Lazy;
+use paddington::{CryptoError, Key, Signature};
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
+use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::RwLock;
 use thiserror::Error;
@@ -96,17 +98,27 @@ where
 
     let config = get_config()?;
 
+    let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    let call_string = format!("put\napplication/json\n{}\n{}\n{}", date, func, body);
+
+    let key = Key::generate();
+
+    let signature = key.expose_secret().sign(call_string.clone())?;
+
+    tracing::info!("Call string: {}", call_string);
+    tracing::info!("Signature: {:?}", signature.to_string());
+
     tracing::info!("{}", config.function_path(&func)?);
 
     let result = reqwest::blocking::Client::new()
         .post(config.function_path(&func)?)
         .query(&[("openportal-version", "0.1")])
         .header("Accept", "application/json")
-        .header("Authorization", config.auth_header())
         .header(
-            "Date",
-            Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+            "Authorization",
+            format!("OpenPortal {}", signature.to_string()),
         )
+        .header("Date", date)
         .json(&body)
         .send()
         .with_context(|| format!("Could not call function: {}", func))?;
@@ -232,6 +244,9 @@ pub enum Error {
 
     #[error("{0}")]
     CallError(String),
+
+    #[error("{0}")]
+    CryptoError(#[from] CryptoError),
 
     #[error("Unknown error")]
     Unknown,

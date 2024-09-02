@@ -3,12 +3,53 @@
 
 use anyhow::Context;
 use anyhow::Error as AnyError;
-use orion::aead;
+use orion::{aead, auth};
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{str, vec};
 use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Signature {
+    sig: orion::auth::Tag,
+}
+
+impl Serialize for Signature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        hex::encode(self.sig.unprotected_as_bytes()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+        Ok(Signature {
+            sig: orion::auth::Tag::from_slice(&bytes).unwrap(),
+        })
+    }
+}
+
+impl Signature {
+    pub fn to_string(&self) -> String {
+        hex::encode(self.sig.unprotected_as_bytes())
+    }
+
+    pub fn from_string(s: &str) -> Result<Signature, CryptoError> {
+        let bytes = hex::decode(s).with_context(|| "Failed to decode the signature.")?;
+        Ok(Signature {
+            sig: orion::auth::Tag::from_slice(&bytes)
+                .with_context(|| "Failed to create signature.")?,
+        })
+    }
+}
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +119,7 @@ impl Key {
     /// # Example
     ///
     /// ```
-    /// use paddington::crypto::{Key, SecretKey};
+    /// use paddington::crypto::Key;
     ///
     /// let key = Key::generate();
     ///
@@ -115,7 +156,7 @@ impl Key {
     /// Example
     ///
     /// ```
-    /// use paddington::crypto::{Key, SecretKey};
+    /// use paddington::crypto::Key;
     ///
     /// let key = Key::generate();
     ///
@@ -143,6 +184,86 @@ impl Key {
             .with_context(|| "Failed to deserialise the decrypted data from JSON.")?;
 
         Ok(obj)
+    }
+
+    ///
+    /// Sign (authenticate) the passed data with this key.
+    /// This will return the signed data as a hex-encoded string.
+    ///
+    /// Arguments
+    ///
+    /// * `data` - The data to sign.
+    ///
+    /// Returns
+    ///
+    /// A Signature object containing the signature.
+    ///
+    /// Example
+    ///
+    /// ```
+    /// use paddington::crypto::Key;
+    ///
+    /// let key = Key::generate();
+    ///
+    /// let signature = key.expose_secret().sign("Hello, World!".to_string());
+    /// ```
+    ///
+    pub fn sign<T>(&self, data: T) -> Result<Signature, CryptoError>
+    where
+        T: Serialize,
+    {
+        let orion_key = aead::SecretKey::from_slice(&self.data)
+            .with_context(|| "Failed to create a secret key from the secret key data.")?;
+        let json_data = serde_json::to_string(&data).with_context(|| {
+            "Failed to serialise the data to JSON. Ensure that the data is serialisable by serde."
+        })?;
+
+        let signature = auth::authenticate(&orion_key, json_data.as_bytes())
+            .with_context(|| "Failed to sign the data.")?;
+
+        Ok(Signature { sig: signature })
+    }
+
+    ///
+    /// Verify the passed data matches the signature with this key.
+    /// This will return true if the data matches the signature, false otherwise.
+    ///
+    /// Arguments
+    ///
+    /// * `data` - The data to verify.
+    /// * `signature` - The signature to verify against.
+    ///
+    /// Returns
+    ///
+    /// An error if the data does not match the signature, else Ok(())
+    ///
+    /// Example
+    ///
+    /// ```
+    /// use paddington::crypto::Key;
+    ///
+    /// let key = Key::generate();
+    ///
+    /// let signature = key.expose_secret().sign("Hello, World!".to_string());
+    ///
+    /// key.expose_secret().verify("Hello, World!".to_string(), &signature)?;
+    /// ```
+    ///
+    pub fn verify<T>(&self, data: T, signature: &Signature) -> Result<(), CryptoError>
+    where
+        T: Serialize,
+    {
+        let orion_key = aead::SecretKey::from_slice(&self.data)
+            .with_context(|| "Failed to create a secret key from the secret key data.")?;
+
+        let data = serde_json::to_string(&data).with_context(|| {
+            "Failed to serialise the data to JSON. Ensure that the data is serialisable by serde."
+        })?;
+
+        auth::authenticate_verify(&signature.sig, &orion_key, data.as_bytes())
+            .with_context(|| "Failed to verify the data.")?;
+
+        Ok(())
     }
 }
 

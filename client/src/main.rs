@@ -4,59 +4,106 @@
 use anyhow::{anyhow, Context, Result};
 
 use axum::{
-    extract::Json,
+    extract::{Json, Query, State},
     handler::Handler,
+    http::header::HeaderMap,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
-async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
-    match axum::serve(listener, app).await {
-        Ok(_) => {
-            tracing::info!("Server ran successfully");
-        }
-        Err(e) => {
-            tracing::error!("Error starting server: {}", e);
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Debug)]
+//
+// Shared state for the web API - simple key-value store protected
+// by a tokio Mutex.
+//
+#[derive(Clone, Debug)]
 struct AppState {
-    something: String,
+    data: Arc<Mutex<HashMap<String, String>>>,
 }
 
+//
+// Health check endpoint for the web API
+//
 #[tracing::instrument(skip_all)]
-pub async fn health() {
+pub async fn health() -> Result<Json<serde_json::Value>, AppError> {
     tracing::info!("Health check");
+    Ok(Json(json!({"status": "ok"})))
 }
 
+//
+// Struct to represent the requests to the 'run' endpoint
+//
 #[derive(Deserialize, Debug)]
 struct RunRequest {
     command: String,
 }
 
-#[tracing::instrument(skip_all)]
-async fn run(Json(payload): Json<RunRequest>) {
-    tracing::info!("Running command: {}", payload.command);
+//
+// Struct representing the Job that is created when a command is
+// run - this is returned to the caller of the 'run' endpoint,
+// and can be used as a future to get the results of the command.
+//
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    pub id: String,
+    pub status: String,
 }
 
+//
+// The 'run' endpoint for the web API. This is the main entry point
+// to which commands are submitted to OpenPortal. This will return
+// a JSON object that represents the Job that has been created.
+//
+#[tracing::instrument(skip_all)]
+async fn run(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    Json(payload): Json<RunRequest>,
+) -> Result<Json<Job>, AppError> {
+    tracing::info!("Running command: {}", payload.command);
+    tracing::info!("Params: {:?}", params);
+    tracing::info!("Headers: {:?}", headers);
+    tracing::info!("State: {:?}", state);
+
+    let mut data = state.data.lock().await;
+
+    data.insert("command".to_string(), payload.command);
+
+    Ok(Json(Job {
+        id: "1234".to_string(),
+        status: "running".to_string(),
+    }))
+}
+
+///
+/// Main function for the bridge application
+///
+/// The purpose of this application is to bridge between the user portal
+/// (e.g. Waldur) and OpenPortal.
+///
+/// It does this by providing a "Client" agent in OpenPortal that can be
+/// used to make requests over the OpenPortal protocol.
+///
+/// It also provides a web API that can be called by the user portal to
+/// submit and get information about those requests. This API is designed
+/// to be called via, e.g. the openportal Python client.
+///
 #[tokio::main]
 async fn main() -> Result<()> {
-    // construct a subscriber that prints formatted traces to stdout
+    // start tracing
     let subscriber = tracing_subscriber::FmtSubscriber::new();
-    // use that subscriber to process traces emitted after this point
     tracing::subscriber::set_global_default(subscriber)?;
 
+    // process command line arguments and get info about the Client
     let defaults = paddington::Defaults::new(
         Some("client".to_string()),
         Some(
@@ -69,25 +116,46 @@ async fn main() -> Result<()> {
         Some(8041),
     );
 
-    let state = Arc::new(AppState {
-        something: "hello".to_string(),
-    });
+    // create a global state object for the web API
+    let state = AppState {
+        data: Arc::new(Mutex::new(HashMap::new())),
+    };
 
+    // this should be configurable
     let port = 3000;
 
+    // create the web API
     let app = Router::new()
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
         .route("/health", get(health))
         .route("/run", post(run))
         .with_state(state);
 
+    // create a TCP listener on the specified port
     let listener =
         tokio::net::TcpListener::bind(&std::net::SocketAddr::new("::".parse()?, port)).await?;
 
     // spawn a new task to run the web server to listen for requests
     tokio::spawn(run_server(app, listener));
 
+    // run the Client agent
     templemeads::agent::run(defaults).await?;
+
+    Ok(())
+}
+
+///
+/// Function spawned to run the API server in a background thread
+///
+async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
+    match axum::serve(listener, app).await {
+        Ok(_) => {
+            tracing::info!("Server ran successfully");
+        }
+        Err(e) => {
+            tracing::error!("Error starting server: {}", e);
+        }
+    }
 
     Ok(())
 }

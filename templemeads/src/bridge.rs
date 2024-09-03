@@ -75,8 +75,6 @@ pub fn sign_api_call(
         None => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
     };
 
-    tracing::info!("Signing: {}", call_string);
-
     let signature = key.expose_secret().sign(call_string)?;
     Ok(format!("OpenPortal {}", signature))
 }

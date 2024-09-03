@@ -1,15 +1,17 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::bridge::sign_api_call;
 use anyhow::{Context, Error as AnyError, Result};
 use axum::{
-    extract::{Json, Query, State},
+    extract::{Json, State},
     http::header::HeaderMap,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Duration, Utc};
 use paddington::{Key, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -98,12 +100,97 @@ impl Invite {
     }
 }
 
+///
+/// Verify the headers for the request - this checks the API key
+///
+fn verify_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+    protocol: &str,
+    function: &str,
+    arguments: Option<serde_json::Value>,
+) -> Result<(), AppError> {
+    let key = match headers.get("Authorization") {
+        Some(key) => key,
+        None => {
+            tracing::error!("No API key in headers {:?}", headers);
+            return Err(AppError(
+                anyhow::anyhow!("No API key in headers"),
+                Some(StatusCode::UNAUTHORIZED),
+            ));
+        }
+    }
+    .to_str()
+    .unwrap_or_default()
+    .to_string();
+
+    let date = match headers.get("Date") {
+        Some(date) => date,
+        None => {
+            tracing::error!("No date in headers {:?}", headers);
+            return Err(AppError(
+                anyhow::anyhow!("No date in headers"),
+                Some(StatusCode::UNAUTHORIZED),
+            ));
+        }
+    }
+    .to_str()
+    .map_err(|e| {
+        tracing::error!("Could not parse date: {:?}", e);
+        AppError(
+            anyhow::anyhow!("Could not parse date"),
+            Some(StatusCode::UNAUTHORIZED),
+        )
+    })?;
+
+    let date = DateTime::parse_from_rfc2822(date)
+        .map_err(|e| {
+            tracing::error!("Could not parse date: {:?}", e);
+            AppError(
+                anyhow::anyhow!("Could not parse date"),
+                Some(StatusCode::UNAUTHORIZED),
+            )
+        })?
+        .with_timezone(&Utc);
+
+    // make sure that this date is within the last 5 minutes
+    let now = Utc::now();
+
+    if now - date > Duration::minutes(5) || date - now > Duration::minutes(5) {
+        tracing::error!("Date is too old");
+        return Err(AppError(
+            anyhow::anyhow!("Date is too old"),
+            Some(StatusCode::UNAUTHORIZED),
+        ));
+    }
+
+    // now generate the expected key
+    let expected_key = sign_api_call(&state.config.key, &date, protocol, function, &arguments)?;
+
+    if key != expected_key {
+        tracing::error!("API key does not match the expected key");
+        tracing::error!("Expected: {}", expected_key);
+        tracing::error!("Got: {}", key);
+        tracing::error!("Signed for date: {:?}", date);
+        tracing::error!("Protocol: {}", protocol);
+        tracing::error!("Function: {}", function);
+        tracing::error!("Arguments: {:?}", arguments);
+        return Err(AppError(
+            anyhow::anyhow!("API key is invalid!"),
+            Some(StatusCode::UNAUTHORIZED),
+        ));
+    }
+
+    Ok(())
+}
+
 //
 // Shared state for the web API - simple key-value store protected
 // by a tokio Mutex.
 //
 #[derive(Clone, Debug)]
 struct AppState {
+    config: Config,
     data: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -111,7 +198,11 @@ struct AppState {
 // Health check endpoint for the web API
 //
 #[tracing::instrument(skip_all)]
-async fn health() -> Result<Json<serde_json::Value>, AppError> {
+async fn health(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    verify_headers(&state, &headers, "get", "health", None)?;
     tracing::info!("Health check");
     Ok(Json(json!({"status": "ok"})))
 }
@@ -144,13 +235,18 @@ struct Job {
 async fn run(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
+    //Query(params): Query<HashMap<String, String>>,
     Json(payload): Json<RunRequest>,
 ) -> Result<Json<Job>, AppError> {
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "run",
+        Some(serde_json::json!({"command": payload.command})),
+    )?;
+
     tracing::info!("Running command: {}", payload.command);
-    tracing::info!("Params: {:?}", params);
-    tracing::info!("Headers: {:?}", headers);
-    tracing::info!("State: {:?}", state);
 
     let mut data = state.data.lock().await;
 
@@ -183,6 +279,7 @@ async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
 pub async fn spawn(config: Config) -> Result<(), Error> {
     // create a global state object for the web API
     let state = AppState {
+        config: config.clone(),
         data: Arc::new(Mutex::new(HashMap::new())),
     };
 

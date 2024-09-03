@@ -17,7 +17,7 @@ use url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
-    api_url: Url,
+    url: Url,
     key: SecretKey,
 }
 
@@ -92,15 +92,12 @@ where
     let config = get_config()?;
     let date = Utc::now();
 
-    let api_url = config
-        .api_url
-        .join(function)
-        .context("Could not join URL")?;
+    let url = config.url.join(function).context("Could not join URL")?;
 
     let auth_token = sign_api_call(&config.key, &date, "get", function, &None)?;
 
     let result = reqwest::blocking::Client::new()
-        .get(api_url)
+        .get(url)
         .query(&[("openportal-version", "0.1")])
         .header("Accept", "application/json")
         .header("Authorization", auth_token)
@@ -131,10 +128,7 @@ where
     let config = get_config()?;
     let date = Utc::now();
 
-    let api_url = config
-        .api_url
-        .join(function)
-        .context("Could not join URL")?;
+    let url = config.url.join(function).context("Could not join URL")?;
 
     let auth_token = sign_api_call(
         &config.key,
@@ -145,7 +139,7 @@ where
     )?;
 
     let result = reqwest::blocking::Client::new()
-        .post(api_url)
+        .post(url)
         .query(&[("openportal-version", "0.1")])
         .header("Accept", "application/json")
         .header("Authorization", auth_token)

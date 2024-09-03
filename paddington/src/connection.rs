@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::CryptoError;
+use crate::crypto::Error as CryptoError;
 use anyhow::Context;
 use anyhow::Error as AnyError;
 use thiserror::Error;
@@ -94,10 +94,10 @@ impl Connection {
     ///
     /// Send a message to the peer on the other end of the connection.
     ///
-    pub async fn send_message(&self, message: &str) -> Result<(), ConnectionError> {
+    pub async fn send_message(&self, message: &str) -> Result<(), Error> {
         let tx = self.tx.as_ref().ok_or_else(|| {
             tracing::warn!("No connection to send message to!");
-            ConnectionError::InvalidPeer("No connection to send message to!".to_string())
+            Error::InvalidPeer("No connection to send message to!".to_string())
         })?;
 
         let mut tx = tx.lock().await;
@@ -151,13 +151,13 @@ impl Connection {
     /// peer. This will initiate the connection and then enter an event
     /// loop to handle the sending and receiving of messages.
     ///
-    pub async fn make_connection(&mut self, peer: &PeerConfig) -> Result<(), ConnectionError> {
+    pub async fn make_connection(&mut self, peer: &PeerConfig) -> Result<(), Error> {
         // first, check that the peer is a server
         let server = match peer {
             PeerConfig::Server(server) => server,
             _ => {
                 tracing::warn!("Peer '{}' must be a server to make a connection.", peer);
-                return Err(ConnectionError::InvalidPeer(
+                return Err(Error::InvalidPeer(
                     "Peer must be a server to make a connection.".to_string(),
                 ));
             }
@@ -168,7 +168,7 @@ impl Connection {
             let mut state = self.state.lock().await;
             if *state != ConnectionState::None {
                 tracing::warn!("Already handling a connection - closing new connection.");
-                return Err(ConnectionError::BusyLine(format!(
+                return Err(Error::BusyLine(format!(
                     "Already handling a connection {:?} - closing new connection.",
                     state
                 )));
@@ -201,7 +201,7 @@ impl Connection {
         let message = envelope_message(outer_key.clone(), &server.inner_key, &server.outer_key)?;
 
         if let Err(r) = outgoing.send(message).await {
-            return Err(ConnectionError::AnyError(r.into()));
+            return Err(Error::Any(r.into()));
         }
 
         // receive the response
@@ -213,7 +213,7 @@ impl Connection {
             Ok(response) => response,
             Err(e) => {
                 tracing::warn!("Error receiving response from peer: {:?}", e);
-                return Err(ConnectionError::AnyError(e.into()));
+                return Err(Error::Any(e.into()));
             }
         };
 
@@ -280,12 +280,12 @@ impl Connection {
     /// This function will handle the handshake and then enter an event
     /// loop to handle the sending and receiving of messages.
     ///
-    pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), ConnectionError> {
+    pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
         let service_name = self.config.name.clone().unwrap_or_default();
 
         if service_name.is_empty() {
             tracing::warn!("Service must have a name to handle a connection.");
-            return Err(ConnectionError::InvalidPeer(
+            return Err(Error::InvalidPeer(
                 "Service must have a name to handle a connection.".to_string(),
             ));
         }
@@ -295,7 +295,7 @@ impl Connection {
             let mut state = self.state.lock().await;
             if *state != ConnectionState::None {
                 tracing::warn!("Already handling a connection - closing new connection.");
-                return Err(ConnectionError::BusyLine(format!(
+                return Err(Error::BusyLine(format!(
                     "Already handling a connection {:?} - closing new connection.",
                     state
                 )));
@@ -322,7 +322,7 @@ impl Connection {
 
         if clients.is_empty() {
             tracing::warn!("No matching peer found for address: {}", addr);
-            return Err(ConnectionError::InvalidPeer(
+            return Err(Error::InvalidPeer(
                 "No matching peer found for address.".to_string(),
             ));
         }
@@ -346,15 +346,13 @@ impl Connection {
             .await
             .ok_or_else(|| {
                 tracing::warn!("No peer information received - closing connection.");
-                ConnectionError::InvalidPeer(
-                    "No peer information received - closing connection.".to_string(),
-                )
+                Error::InvalidPeer("No peer information received - closing connection.".to_string())
             })?
             .unwrap_or_else(|_| Message::text(""));
 
         if message.is_empty() {
             tracing::warn!("No peer information received - closing connection.");
-            return Err(ConnectionError::InvalidPeer(
+            return Err(Error::InvalidPeer(
                 "No peer information received - closing connection.".to_string(),
             ));
         }
@@ -399,7 +397,7 @@ impl Connection {
 
         if clients.is_empty() {
             tracing::warn!("No matching peer could authenticate for address: {}", addr);
-            return Err(ConnectionError::InvalidPeer(
+            return Err(Error::InvalidPeer(
                 "No matching peer could authenticate for address.".to_string(),
             ));
         }
@@ -419,7 +417,7 @@ impl Connection {
 
         if peer_name.is_empty() {
             tracing::warn!("Peer must have a name to handle a connection.");
-            return Err(ConnectionError::InvalidPeer(
+            return Err(Error::InvalidPeer(
                 "Peer must have a name to handle a connection.".to_string(),
             ));
         }
@@ -514,21 +512,21 @@ impl Connection {
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum ConnectionError {
+pub enum Error {
     #[error("{0}")]
-    IOError(#[from] std::io::Error),
+    IO(#[from] std::io::Error),
 
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    SerdeError(#[from] serde_json::Error),
+    Serde(#[from] serde_json::Error),
 
     #[error("{0}")]
-    CryptoError(#[from] CryptoError),
+    Crypto(#[from] CryptoError),
 
     #[error("{0}")]
-    ConfigError(#[from] ConfigError),
+    Config(#[from] ConfigError),
 
     #[error("Invalid peer configuration: {0}")]
     InvalidPeer(String),

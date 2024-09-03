@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::{CryptoError, Key, SecretKey};
+use crate::crypto::{Error as CryptoError, Key, SecretKey};
 use anyhow::Context;
 use anyhow::Error as AnyError;
 use iptools::iprange::IpRange;

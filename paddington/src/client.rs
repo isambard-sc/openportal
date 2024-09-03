@@ -6,14 +6,14 @@ use std::io::Error as IOError;
 use thiserror::Error;
 
 use crate::config::{PeerConfig, ServiceConfig};
-use crate::connection::{Connection, ConnectionError};
+use crate::connection::{Connection, Error as ConnectionError};
 use crate::crypto;
 
-pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
+pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
     let service_name = config.name.clone().unwrap_or_default();
 
     if service_name.is_empty() {
-        return Err(ClientError::UnknownPeer(
+        return Err(Error::UnknownPeer(
             "Cannot connect as service must have a name".to_string(),
         ));
     }
@@ -21,7 +21,7 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Cli
     let peer_name = peer.name().clone().unwrap_or_default();
 
     if peer_name.is_empty() {
-        return Err(ClientError::UnknownPeer(
+        return Err(Error::UnknownPeer(
             "Cannot connect as peer must have a name".to_string(),
         ));
     }
@@ -43,7 +43,7 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Cli
     Ok(())
 }
 
-pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientError> {
+pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
     loop {
         match run_once(config.clone(), peer.clone()).await {
             Ok(_) => {
@@ -63,7 +63,7 @@ pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), ClientEr
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum ClientError {
+pub enum Error {
     #[error("{0}")]
     IO(#[from] IOError),
 
@@ -74,7 +74,7 @@ pub enum ClientError {
     Tungstenite(#[from] tokio_tungstenite::tungstenite::error::Error),
 
     #[error("{0}")]
-    Crypto(#[from] crypto::CryptoError),
+    Crypto(#[from] crypto::Error),
 
     #[error("{0}")]
     Connection(#[from] ConnectionError),

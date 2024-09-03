@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::CryptoError;
+use crate::crypto::Error as CryptoError;
 use anyhow::Error as AnyError;
 use std::io::Error as IOError;
 use thiserror::Error;
@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::config::ServiceConfig;
-use crate::connection::{Connection, ConnectionError};
+use crate::connection::{Connection, Error as ConnectionError};
 
 ///
 /// Internal function used to handle a single connection to the server.
@@ -18,7 +18,7 @@ use crate::connection::{Connection, ConnectionError};
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     config: ServiceConfig,
-) -> Result<(), ServerError> {
+) -> Result<(), Error> {
     let mut connection = Connection::new(config);
 
     match connection.handle_connection(stream).await {
@@ -43,9 +43,9 @@ async fn handle_connection(
 ///
 /// # Returns
 ///
-/// This function will return a ServerError if the server fails to start.
+/// This function will return a Error if the server fails to start.
 ///
-pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
+pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
     // Create the event loop and TCP listener we'll accept connections on.
 
     let addr = format!("{}:{}", config.get_ip(), config.get_port());
@@ -73,7 +73,7 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), ServerError> {
     }
 }
 
-pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
+pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     loop {
         let result = run_once(config.clone()).await;
 
@@ -95,7 +95,7 @@ pub async fn run(config: ServiceConfig) -> Result<(), ServerError> {
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum ServerError {
+pub enum Error {
     #[error("{0}")]
     IO(#[from] IOError),
 

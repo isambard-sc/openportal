@@ -5,11 +5,11 @@ use anyhow::Error as AnyError;
 use anyhow::Result;
 use thiserror::Error;
 
-use crate::args::{process_args, ArgsError, Defaults, ProcessResult};
+use crate::args::{process_args, Defaults, Error as ArgsError, ProcessResult};
 use crate::config::ConfigError;
 use crate::{client, server};
 
-pub async fn run(defaults: Defaults) -> Result<(), EventLoopError> {
+pub async fn run(defaults: Defaults) -> Result<(), Error> {
     match process_args(&defaults).await? {
         ProcessResult::ServiceConfig(config) => {
             if config.is_null() {
@@ -78,18 +78,18 @@ pub async fn run(defaults: Defaults) -> Result<(), EventLoopError> {
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum EventLoopError {
+pub enum Error {
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    ArgsError(#[from] ArgsError),
+    Args(#[from] ArgsError),
 
     #[error("{0}")]
-    ConfigError(#[from] ConfigError),
+    Config(#[from] ConfigError),
 
     #[error("{0}")]
-    JoinError(#[from] tokio::task::JoinError),
+    Join(#[from] tokio::task::JoinError),
 
     #[error("Unknown config error")]
     Unknown,

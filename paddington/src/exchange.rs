@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 
-use crate::connection::{Connection, ConnectionError};
+use crate::connection::{Connection, Error as ConnectionError};
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -104,10 +104,7 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
         let handler = match SINGLETON_EXCHANGE.read() {
             Ok(exchange) => exchange.handler,
             Err(e) => {
-                return Err(Error::PoisonError(format!(
-                    "Error getting read lock: {}",
-                    e
-                )));
+                return Err(Error::Poison(format!("Error getting read lock: {}", e)));
             }
         }
         .unwrap_or(default_message_handler);
@@ -140,10 +137,7 @@ pub async fn set_handler(handler: AsyncMessageHandler) -> Result<(), Error> {
     let mut exchange = match SINGLETON_EXCHANGE.write() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(Error::PoisonError(format!(
-                "Error getting write lock: {}",
-                e
-            )));
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
         }
     };
 
@@ -156,7 +150,7 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
     let name = connection.name().unwrap_or_default();
 
     if name.is_empty() {
-        return Err(Error::UnnamedConnectionError(
+        return Err(Error::UnnamedConnection(
             "Connection must have a name".to_string(),
         ));
     }
@@ -164,10 +158,7 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
     let mut exchange = match SINGLETON_EXCHANGE.write() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(Error::PoisonError(format!(
-                "Error getting write lock: {}",
-                e
-            )));
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
         }
     };
 
@@ -177,7 +168,7 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
         exchange.connections.remove(&key);
         Ok(())
     } else {
-        Err(Error::UnnamedConnectionError(format!(
+        Err(Error::UnnamedConnection(format!(
             "Connection {} not found",
             name
         )))
@@ -188,7 +179,7 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
     let name = connection.name().unwrap_or_default();
 
     if name.is_empty() {
-        return Err(Error::UnnamedConnectionError(
+        return Err(Error::UnnamedConnection(
             "Connection must have a name".to_string(),
         ));
     }
@@ -196,17 +187,14 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
     let mut exchange = match SINGLETON_EXCHANGE.write() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(Error::PoisonError(format!(
-                "Error getting write lock: {}",
-                e
-            )));
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
         }
     };
 
     let key = name.clone();
 
     if exchange.connections.contains_key(&key) {
-        return Err(Error::UnnamedConnectionError(format!(
+        return Err(Error::UnnamedConnection(format!(
             "Connection {} already exists",
             name
         )));
@@ -220,10 +208,7 @@ pub async fn send(name: &str, message: &str) -> Result<(), Error> {
     let connection = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(Error::PoisonError(format!(
-                "Error getting read lock: {}",
-                e
-            )));
+            return Err(Error::Poison(format!("Error getting read lock: {}", e)));
         }
     }
     .connections
@@ -234,7 +219,7 @@ pub async fn send(name: &str, message: &str) -> Result<(), Error> {
         connection.send_message(message).await?;
         Ok(())
     } else {
-        Err(Error::UnnamedConnectionError(format!(
+        Err(Error::UnnamedConnection(format!(
             "Connection {} not found",
             name
         )))
@@ -245,10 +230,7 @@ pub fn received(from: &str, message: &str) -> Result<(), Error> {
     let exchange = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
         Err(e) => {
-            return Err(Error::PoisonError(format!(
-                "Error getting read lock: {}",
-                e
-            )));
+            return Err(Error::Poison(format!("Error getting read lock: {}", e)));
         }
     };
 
@@ -259,7 +241,7 @@ pub fn received(from: &str, message: &str) -> Result<(), Error> {
 
     exchange.tx.send(message).map_err(|e| {
         tracing::error!("Error sending message: {}", e);
-        Error::SendError(format!("Error sending message: {}", e))
+        Error::Send(format!("Error sending message: {}", e))
     })
 }
 
@@ -268,19 +250,19 @@ pub fn received(from: &str, message: &str) -> Result<(), Error> {
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    ConnectionError(#[from] ConnectionError),
+    Connection(#[from] ConnectionError),
 
     #[error("{0}")]
-    PoisonError(String),
+    Poison(String),
 
     #[error("{0}")]
-    SendError(String),
+    Send(String),
 
     #[error("{0}")]
-    UnnamedConnectionError(String),
+    UnnamedConnection(String),
 
     #[error("Unknown error")]
     Unknown,

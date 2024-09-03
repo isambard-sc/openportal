@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::{anyhow, Context, Result};
-
+use anyhow::Result;
 use axum::{
     extract::{Json, Query, State},
-    handler::Handler,
     http::header::HeaderMap,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -14,7 +12,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;

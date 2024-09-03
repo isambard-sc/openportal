@@ -46,7 +46,7 @@ impl Display for Signature {
 }
 
 impl Signature {
-    pub fn from_string(s: &str) -> Result<Signature, CryptoError> {
+    pub fn from_string(s: &str) -> Result<Signature, Error> {
         let bytes = hex::decode(s).with_context(|| "Failed to decode the signature.")?;
         Ok(Signature {
             sig: orion::auth::Tag::from_slice(&bytes)
@@ -129,7 +129,7 @@ impl Key {
     ///
     /// let encrypted_data = key.expose_secret().encrypt("Hello, World!".to_string());
     /// ```
-    pub fn encrypt<T>(&self, data: T) -> Result<String, CryptoError>
+    pub fn encrypt<T>(&self, data: T) -> Result<String, Error>
     where
         T: Serialize,
     {
@@ -169,7 +169,7 @@ impl Key {
     ///
     /// assert_eq!(decrypted_data, "Hello, World!".to_string());
     /// ```
-    pub fn decrypt<T>(&self, data: &String) -> Result<T, CryptoError>
+    pub fn decrypt<T>(&self, data: &String) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {
@@ -212,7 +212,7 @@ impl Key {
     /// let signature = key.expose_secret().sign("Hello, World!".to_string());
     /// ```
     ///
-    pub fn sign<T>(&self, data: T) -> Result<Signature, CryptoError>
+    pub fn sign<T>(&self, data: T) -> Result<Signature, Error>
     where
         T: Serialize,
     {
@@ -253,7 +253,7 @@ impl Key {
     /// key.expose_secret().verify("Hello, World!".to_string(), &signature)?;
     /// ```
     ///
-    pub fn verify<T>(&self, data: T, signature: &Signature) -> Result<(), CryptoError>
+    pub fn verify<T>(&self, data: T, signature: &Signature) -> Result<(), Error>
     where
         T: Serialize,
     {
@@ -274,18 +274,17 @@ impl Key {
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum CryptoError {
+pub enum Error {
     #[error("{0}")]
-    IOError(#[from] std::io::Error),
+    IO(#[from] std::io::Error),
+
+    //#[error("{0}")]
+    //UnknownCrypto(#[from] orion::errors::UnknownError),
+    #[error("{0}")]
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    UnknownCrypto(#[from] orion::errors::UnknownCryptoError),
-
-    #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    SerdeError(#[from] serde_json::Error),
+    Serde(#[from] serde_json::Error),
 
     #[error("Unknown config error")]
     Unknown,

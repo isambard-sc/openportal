@@ -28,7 +28,11 @@ pub struct Board {
 }
 
 pub async fn submit(job: Job) -> Result<Handle, Error> {
-    let mut board = SINGLETON_BOARD.write().unwrap();
+    let mut board = match SINGLETON_BOARD.write() {
+        Ok(board) => board,
+        Err(e) => return Err(Error::Poison(format!("Error getting read lock: {}", e))),
+    };
+
     let handle = Handle {
         id: "123".to_string(),
     };
@@ -50,6 +54,9 @@ impl Board {
 pub enum Error {
     #[error("{0}")]
     AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    Poison(String),
 
     #[error("Unknown error")]
     Unknown,

@@ -13,7 +13,6 @@ repository = "https://github.com/chryswoods/openportal/"
 [dependencies]
 anyhow = { version="1.0.86", features = ["backtrace"] }
 axum = { version = "0.7", features = ["tracing", "query"] }
-axum-extra = { version = "0.9.3", features = ["typed-header"] }
 paddington = { path = "../paddington" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.122"

@@ -186,7 +186,7 @@ pub enum ProcessResult {
     None,
 }
 
-pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, ArgsError> {
+pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, Error> {
     let args = Args::parse();
 
     let config_file = match args.config_file {
@@ -209,9 +209,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, ArgsErro
             };
 
             if service_name.is_empty() {
-                return Err(ArgsError::ServiceNameError(
-                    "No service name provided.".to_string(),
-                ));
+                return Err(Error::ServiceName("No service name provided.".to_string()));
             }
 
             if config_file.try_exists()? {
@@ -220,7 +218,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, ArgsErro
                         .context("Could not remove existing config file.")?;
                 } else {
                     tracing::warn!("Config file already exists: {}", &config_file.display());
-                    return Err(ArgsError::ConfigExistsError(format!(
+                    return Err(Error::ConfigExists(format!(
                         "Config file already exists: {}",
                         &config_file.display()
                     )));
@@ -267,7 +265,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, ArgsErro
             match add {
                 Some(client) => {
                     if ip.is_none() {
-                        return Err(ArgsError::PeerEditError(format!(
+                        return Err(Error::PeerEdit(format!(
                             "No IP address or IP range provided for client {}.",
                             client
                         )));
@@ -367,24 +365,24 @@ pub async fn process_args(defaults: &Defaults) -> Result<ProcessResult, ArgsErro
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum ArgsError {
+pub enum Error {
     #[error("{0}")]
-    IOError(#[from] std::io::Error),
+    IO(#[from] std::io::Error),
 
     #[error("{0}")]
-    ConfigError(#[from] ConfigError),
+    Config(#[from] ConfigError),
 
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    ServiceNameError(String),
+    ServiceName(String),
 
     #[error("{0}")]
-    ConfigExistsError(String),
+    ConfigExists(String),
 
     #[error("{0}")]
-    PeerEditError(String),
+    PeerEdit(String),
 
     #[error("Unknown arguments error")]
     Unknown,

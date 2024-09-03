@@ -10,7 +10,7 @@ use crate::connection::{Connection, Error as ConnectionError};
 use crate::crypto;
 
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
-    let service_name = config.name.clone().unwrap_or_default();
+    let service_name = config.name.clone();
 
     if service_name.is_empty() {
         return Err(Error::UnknownPeer(

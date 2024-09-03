@@ -48,7 +48,7 @@ async fn handle_connection(
 pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
     // Create the event loop and TCP listener we'll accept connections on.
 
-    let addr = format!("{}:{}", config.get_ip(), config.get_port());
+    let addr = format!("{}:{}", config.ip, config.port);
 
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Listening on: {}", listener.local_addr()?);

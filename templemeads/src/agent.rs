@@ -1,33 +1,13 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Error as AnyError;
-use paddington::args::Defaults as CoreDefaults;
+use serde::{Deserialize, Serialize};
 
-paddington::async_message_handler! {
-    async fn process_message(message: paddington::Message) -> Result<(), paddington::Error> {
-        tracing::info!(
-            "Received message: {} from: {}",
-            message.message,
-            message.from
-        );
-
-        // sleep for 1 second
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        paddington::send(&message.from, "Hello from an agent!").await?;
-
-        Ok(())
-    }
-}
-
-pub async fn run(defaults: CoreDefaults) -> Result<(), AnyError> {
-    paddington::set_handler(process_message).await?;
-    paddington::run(defaults).await?;
-
-    Ok(())
-}
-
-pub fn test_function() -> String {
-    "Hello from Rust!".to_string()
+#[derive(Debug, Clone, Serialize, PartialEq, Deserialize)]
+pub enum Type {
+    Portal,
+    Provider,
+    Platform,
+    Instance,
+    Bridge,
 }

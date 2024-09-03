@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use std::sync::Arc;
 
-use crate::config::{ClientConfig, ConfigError, PeerConfig, ServiceConfig};
+use crate::config::{ClientConfig, Error as ConfigError, PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
 use crate::exchange;
 
@@ -281,7 +281,7 @@ impl Connection {
     /// loop to handle the sending and receiving of messages.
     ///
     pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
-        let service_name = self.config.name.clone().unwrap_or_default();
+        let service_name = self.config.name.clone();
 
         if service_name.is_empty() {
             tracing::warn!("Service must have a name to handle a connection.");
@@ -314,7 +314,7 @@ impl Connection {
 
         let clients: Vec<ClientConfig> = self
             .config
-            .get_clients()
+            .clients
             .iter()
             .filter(|client| client.matches(addr.ip()))
             .cloned()

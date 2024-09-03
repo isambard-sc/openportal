@@ -2,28 +2,54 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
-use paddington::args::Defaults as CoreDefaults;
 
+use templemeads::bridge::{process_args, run, Defaults};
+
+///
+/// Main function for the bridge application
+///
+/// The purpose of this application is to bridge between the user portal
+/// (e.g. Waldur) and OpenPortal.
+///
+/// It does this by providing a "Client" agent in OpenPortal that can be
+/// used to make requests over the OpenPortal protocol.
+///
+/// It also provides a web API that can be called by the user portal to
+/// submit and get information about those requests. This API is designed
+/// to be called via, e.g. the openportal Python client.
+///
 #[tokio::main]
 async fn main() -> Result<()> {
-    // construct a subscriber that prints formatted traces to stdout
+    // start tracing
     let subscriber = tracing_subscriber::FmtSubscriber::new();
-    // use that subscriber to process traces emitted after this point
     tracing::subscriber::set_global_default(subscriber)?;
 
-    let defaults = CoreDefaults::new(
-        Some("portal".to_string()),
+    // create the OpenPortal paddington defaults
+    let defaults = Defaults::parse(
+        Some("bridge".to_owned()),
         Some(
-            "portal.toml"
+            "bridge-config.toml"
                 .parse()
                 .expect("Could not parse default config file."),
         ),
-        Some("ws://localhost:8042".to_string()),
-        Some("127.0.0.1".to_string()),
-        Some(8042),
+        Some("ws://localhost:8041".to_owned()),
+        Some("127.0.0.1".to_owned()),
+        Some(8041),
+        Some("::".to_owned()),
+        Some(3000),
     );
 
-    templemeads::agent::run(defaults).await?;
+    // now parse the command line arguments to get the service configuration
+    let config = match process_args(&defaults).await? {
+        Some(config) => config,
+        None => {
+            // Not running the service, so can safely exit
+            return Ok(());
+        }
+    };
+
+    // run the Bridge agent
+    run(config).await?;
 
     Ok(())
 }

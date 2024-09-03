@@ -5,17 +5,14 @@ use anyhow::Error as AnyError;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use once_cell::sync::Lazy;
-use paddington::{CryptoError, Key, SecretKey, Signature};
+use paddington::SecretKey;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
-use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::error;
 use std::path;
 use std::sync::RwLock;
-use templemeads::sign_api_call;
+use templemeads::bridge::sign_api_call;
 use thiserror::Error;
-use tracing_subscriber;
 use url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,12 +3,12 @@
 
 // internal API
 mod board;
-mod bridge;
+mod bridge_server;
 mod job;
 mod provider;
 
 // public API
 pub mod agent;
-pub use bridge::sign_api_call;
+pub mod bridge;
 pub mod client;
 pub use job::Job;

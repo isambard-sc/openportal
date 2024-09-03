@@ -12,7 +12,6 @@ repository = "https://github.com/chryswoods/openportal/"
 
 [dependencies]
 anyhow = { version="1.0.86", features = ["backtrace"] }
-paddington = { path = "../paddington" }
 templemeads = { path = "../templemeads" }
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1.40"

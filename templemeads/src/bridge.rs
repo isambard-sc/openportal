@@ -13,10 +13,10 @@ use secrecy::ExposeSecret;
 ///
 pub fn sign_api_call(
     key: &SecretKey,
-    date: DateTime<Utc>,
-    protocol: String,
-    function: String,
-    arguments: Option<serde_json::Value>,
+    date: &DateTime<Utc>,
+    protocol: &str,
+    function: &str,
+    arguments: &Option<serde_json::Value>,
 ) -> Result<String, anyhow::Error> {
     let date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
 

@@ -187,9 +187,14 @@ impl Connection {
 
         tracing::info!("Connecting to WebSocket at: {} - initiating handshake", url);
 
-        let (socket, _) = connect_async(url.clone())
-            .await
-            .with_context(|| format!("Error connecting to WebSocket at: {}", url))?;
+        let socket = match connect_async(url.clone()).await {
+            Ok((socket, _)) => socket,
+            Err(e) => {
+                tracing::warn!("Error connecting to WebSocket at: {} - {:?}", url, e);
+                self.set_error().await;
+                return Err(Error::Any(e.into()));
+            }
+        };
 
         // Split the WebSocket stream into incoming and outgoing parts
         let (mut outgoing, mut incoming) = socket.split();
@@ -198,29 +203,53 @@ impl Connection {
         // using the pre-shared client/server inner and outer keys
         let outer_key = Key::generate();
 
-        let message = envelope_message(outer_key.clone(), &server.inner_key, &server.outer_key)?;
+        let message =
+            match envelope_message(outer_key.clone(), &server.inner_key, &server.outer_key) {
+                Ok(message) => message,
+                Err(e) => {
+                    tracing::warn!("Error enveloping message: {:?}", e);
+                    self.set_error().await;
+                    return Err(e.into());
+                }
+            };
 
         if let Err(r) = outgoing.send(message).await {
+            self.set_error().await;
             return Err(Error::Any(r.into()));
         }
 
         // receive the response
-        let response = incoming.next().await.with_context(|| {
-            "Error receiving response from peer. Ensure the peer is valid and the connection is open."
-        })?;
+        let response = match incoming.next().await {
+            Some(response) => response,
+            None => {
+                tracing::warn!("Error receiving response from peer. Ensure the peer is valid and the connection is open.");
+                self.set_error().await;
+                return Err(Error::InvalidPeer(
+                    "Error receiving response from peer. Ensure the peer is valid and the connection is open.".to_string(),
+                ));
+            }
+        };
 
         let response = match response {
             Ok(response) => response,
             Err(e) => {
                 tracing::warn!("Error receiving response from peer: {:?}", e);
+                self.set_error().await;
                 return Err(Error::Any(e.into()));
             }
         };
 
         // the server has generated a new session inner key, and has sent that
         // wrapped using the client/server inner key and the new session outer key
-        let inner_key: SecretKey = deenvelope_message(response, &server.inner_key, &outer_key)
-            .with_context(|| "Error de-enveloping message - closing connection.")?;
+        let inner_key: SecretKey = match deenvelope_message(response, &server.inner_key, &outer_key)
+        {
+            Ok(inner_key) => inner_key,
+            Err(e) => {
+                tracing::warn!("Error de-enveloping message: {:?}", e);
+                self.set_error().await;
+                return Err(e.into());
+            }
+        };
 
         tracing::info!("Handshake complete!");
 
@@ -235,9 +264,14 @@ impl Connection {
         self.tx = Some(Arc::new(TokioMutex::new(tx)));
 
         // and we can register this connection - need to unregister when disconnected
-        exchange::register(self.clone())
-            .await
-            .with_context(|| "Error registering connection with exchange")?;
+        match exchange::register(self.clone()).await {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::warn!("Error registering connection with exchange: {:?}", e);
+                self.set_error().await;
+                return Err(Error::Any(e.into()));
+            }
+        };
 
         // we have now connected :-)
         {

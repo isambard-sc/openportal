@@ -36,9 +36,9 @@ async fn main() -> Result<()> {
                 .join("openportal")
                 .join("portal-config.toml"),
         ),
-        Some("ws://localhost:8042".to_owned()),
+        Some("ws://localhost:8040".to_owned()),
         Some("127.0.0.1".to_owned()),
-        Some(8041),
+        Some(8040),
         Some(AgentType::Portal),
     );
 

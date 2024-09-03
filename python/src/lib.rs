@@ -70,9 +70,9 @@ fn get_config() -> Result<BridgeConfig, Error> {
     let config = match locked_config.as_ref() {
         Some(config) => config,
         None => {
-            return Err(Error::InvalidConfig(format!(
-                "Config has not been loaded. Please call load_config() first."
-            )))
+            return Err(Error::InvalidConfig(
+                "Config has not been loaded. Please call load_config() first.".to_owned(),
+            ))
         }
     };
 
@@ -94,7 +94,7 @@ where
 
     let api_url = config
         .api_url
-        .join(&function)
+        .join(function)
         .context("Could not join URL")?;
 
     let auth_token = sign_api_call(&config.key, &date, "get", function, &None)?;
@@ -133,7 +133,7 @@ where
 
     let api_url = config
         .api_url
-        .join(&function)
+        .join(function)
         .context("Could not join URL")?;
 
     let auth_token = sign_api_call(

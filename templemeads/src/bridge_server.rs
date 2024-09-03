@@ -171,17 +171,6 @@ impl IntoResponse for AppError {
     }
 }
 
-trait Status<T> {
-    /// Add a HTTP status code to an error.
-    fn status(self, status: axum::http::StatusCode) -> Result<T, AppError>;
-}
-
-impl<T> Status<T> for anyhow::Result<T> {
-    fn status(self, status: axum::http::StatusCode) -> Result<T, AppError> {
-        self.map_err(|e| AppError(e, Some(status)))
-    }
-}
-
 impl<E> From<E> for AppError
 where
     E: Into<anyhow::Error>,
@@ -203,7 +192,4 @@ pub enum Error {
 
     #[error("{0}")]
     Serde(#[from] serde_json::Error),
-
-    #[error("Unknown config error")]
-    Unknown,
 }

@@ -36,10 +36,10 @@ async fn main() -> Result<()> {
                 .join("openportal")
                 .join("bridge-config.toml"),
         ),
-        Some("ws://localhost:8041".to_owned()),
+        Some("ws://localhost:8044".to_owned()),
         Some("127.0.0.1".to_owned()),
-        Some(8041),
-        Some("::".to_owned()),
+        Some(8044),
+        Some("127.0.0.1".to_owned()),
         Some(3000),
     );
 

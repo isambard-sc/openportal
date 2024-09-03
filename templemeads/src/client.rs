@@ -7,16 +7,23 @@ use thiserror::Error;
 use crate::board::Handle;
 
 pub fn add_user_to_instance_in_project(
-    user: &String,
-    instance: &String,
-    project: &String,
+    user: &str,
+    instance: &str,
+    project: &str,
 ) -> Result<Handle, Error> {
+    tracing::info!(
+        "Adding user {} to instance {} in project {}",
+        user,
+        instance,
+        project
+    );
     Ok(Handle {
         id: "123".to_string(),
     })
 }
 
-pub fn add_user_to_project(user: &String, project: &String) -> Result<Handle, Error> {
+pub fn add_user_to_project(user: &str, project: &str) -> Result<Handle, Error> {
+    tracing::info!("Adding user {} to project {}", user, project);
     Ok(Handle {
         id: "456".to_string(),
     })

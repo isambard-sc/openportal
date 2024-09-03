@@ -23,6 +23,7 @@ static SINGLETON_BOARD: Lazy<RwLock<Board>> = Lazy::new(|| RwLock::new(Board::ne
 /// Each agent has a single board that holds all of the jobs that it is
 /// responsible for.
 ///
+#[derive(Clone, Default)]
 pub struct Board {
     jobs: HashMap<Handle, Job>,
 }

@@ -17,7 +17,6 @@ built = { version = "0.7", default-features = false, features = ["git2"] }
 
 [dependencies]
 anyhow = { version="1.0.86", features = ["backtrace"] }
-clap = { version = "4.5.11", default-features = false, features = ["derive", "color", "help", "usage", "error-context","suggestions", "env", "std", "string"] }
 dirs = "5.0.1"
 futures = "0.3.30"
 futures-channel = "0.3.30"

@@ -1,16 +1,14 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::{Error as CryptoError, Key, SecretKey};
+use crate::crypto::{Error as CryptoError, SecretKey};
 use anyhow::Context;
 use anyhow::Error as AnyError;
-use iptools::iprange::IpRange;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
-use std::net::IpAddr;
 use std::path;
 use thiserror::Error;
-use url::{ParseError as UrlParseError, Url};
+use url::ParseError as UrlParseError;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Invite {
@@ -64,7 +62,7 @@ pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
         )
     })?;
 
-    std::fs::write(&invite_file, invite_toml)
+    std::fs::write(invite_file, invite_toml)
         .with_context(|| format!("Could not write invite file: {:?}", invite_file))?;
 
     Ok(())

@@ -3,8 +3,19 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use clap::CommandFactory;
+use clap::{Parser, Subcommand};
+use paddington::args as coreargs;
 use paddington::SecretKey;
 use secrecy::ExposeSecret;
+
+///
+/// Extend the paddington::Defaults to include options and defaults
+/// for the OpenPortal Bridge
+///
+pub struct Defaults {
+    pub core: coreargs::Defaults,
+}
 
 ///
 /// Return the OpenPortal authorisation header for the passed datetime,

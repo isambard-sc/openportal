@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use paddington::args::Defaults as CoreDefaults;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -10,7 +11,7 @@ async fn main() -> Result<()> {
     // use that subscriber to process traces emitted after this point
     tracing::subscriber::set_global_default(subscriber)?;
 
-    let defaults = paddington::Defaults::new(
+    let defaults = CoreDefaults::new(
         Some("portal".to_string()),
         Some(
             "portal.toml"

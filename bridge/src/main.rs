@@ -10,6 +10,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use paddington::args::Defaults as CoreDefaults;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -101,7 +102,7 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     // process command line arguments and get info about the Client
-    let defaults = paddington::Defaults::new(
+    let defaults = CoreDefaults::new(
         Some("client".to_string()),
         Some(
             "client.toml"

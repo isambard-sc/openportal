@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Error as AnyError;
+use paddington::args::Defaults as CoreDefaults;
 
 paddington::async_message_handler! {
     async fn process_message(message: paddington::Message) -> Result<(), paddington::Error> {
@@ -20,7 +21,7 @@ paddington::async_message_handler! {
     }
 }
 
-pub async fn run(defaults: paddington::Defaults) -> Result<(), AnyError> {
+pub async fn run(defaults: CoreDefaults) -> Result<(), AnyError> {
     paddington::set_handler(process_message).await?;
     paddington::run(defaults).await?;
 

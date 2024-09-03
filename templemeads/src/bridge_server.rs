@@ -10,6 +10,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use paddington::{Key, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -23,11 +24,16 @@ use tokio::sync::Mutex;
 pub struct Config {
     pub ip: IpAddr,
     pub port: u16,
+    pub key: SecretKey,
 }
 
 impl Config {
     pub fn parse(ip: IpAddr, port: u16) -> Self {
-        Self { ip, port }
+        Self {
+            ip,
+            port,
+            key: Key::generate(),
+        }
     }
 }
 

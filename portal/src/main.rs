@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use templemeads::bridge::{process_args, run, Defaults};
+use templemeads::agent::{process_args, run, Defaults, Type as AgentType};
 
 ///
 /// Main function for the bridge application
@@ -26,17 +26,20 @@ async fn main() -> Result<()> {
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
-        Some("bridge".to_owned()),
+        Some("portal".to_owned()),
         Some(
-            "bridge-config.toml"
-                .parse()
-                .expect("Could not parse default config file."),
+            dirs::config_local_dir()
+                .unwrap_or(
+                    ".".parse()
+                        .expect("Could not parse fallback config directory."),
+                )
+                .join("openportal")
+                .join("portal-config.toml"),
         ),
-        Some("ws://localhost:8041".to_owned()),
+        Some("ws://localhost:8042".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8041),
-        Some("::".to_owned()),
-        Some(3000),
+        Some(AgentType::Portal),
     );
 
     // now parse the command line arguments to get the service configuration
@@ -48,7 +51,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    // run the Bridge agent
+    // run the portal agent
     run(config).await?;
 
     Ok(())

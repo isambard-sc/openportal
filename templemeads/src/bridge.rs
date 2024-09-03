@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent::Type as AgentType;
 use crate::bridge_server::{spawn, Config as BridgeConfig, Defaults as BridgeDefaults};
 use anyhow::Context;
 use anyhow::{Error as AnyError, Result};
@@ -22,6 +23,7 @@ use thiserror::Error;
 pub struct Config {
     pub service: ServiceConfig,
     pub bridge: BridgeConfig,
+    pub agent: AgentType,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -142,10 +144,10 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             let config = Config {
                 service: {
                     ServiceConfig::parse(
-                        service.clone().unwrap_or_else(|| defaults.service.name),
-                        url.clone().unwrap_or_else(|| defaults.service.url),
+                        service.clone().unwrap_or(defaults.service.name),
+                        url.clone().unwrap_or(defaults.service.url),
                         ip.clone()
-                            .unwrap_or_else(|| defaults.service.ip)
+                            .unwrap_or(defaults.service.ip)
                             .parse::<IpAddr>()?,
                         port.unwrap_or_else(|| defaults.service.port),
                     )?
@@ -153,10 +155,11 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 bridge: BridgeConfig::parse(
                     bridge_ip
                         .clone()
-                        .unwrap_or_else(|| defaults.bridge.ip)
+                        .unwrap_or(defaults.bridge.ip)
                         .parse::<IpAddr>()?,
                     bridge_port.unwrap_or_else(|| defaults.bridge.port),
                 ),
+                agent: AgentType::Bridge,
             };
 
             if config_file.try_exists()? {
@@ -175,7 +178,10 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             // save the config to the requested file
             save_config(config, &config_file)?;
 
-            tracing::info!("Service initialised.");
+            tracing::info!(
+                "Service initialised. Config file written to {}",
+                &config_file.display()
+            );
             return Ok(None);
         }
         Some(Commands::Client {

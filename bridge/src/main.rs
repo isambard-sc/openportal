@@ -28,9 +28,13 @@ async fn main() -> Result<()> {
     let defaults = Defaults::parse(
         Some("bridge".to_owned()),
         Some(
-            "bridge-config.toml"
-                .parse()
-                .expect("Could not parse default config file."),
+            dirs::config_local_dir()
+                .unwrap_or(
+                    ".".parse()
+                        .expect("Could not parse fallback config directory."),
+                )
+                .join("openportal")
+                .join("bridge-config.toml"),
         ),
         Some("ws://localhost:8041".to_owned()),
         Some("127.0.0.1".to_owned()),

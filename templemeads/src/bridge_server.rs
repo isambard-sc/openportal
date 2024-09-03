@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::{Error as AnyError, Result};
+use anyhow::{Context, Error as AnyError, Result};
 use axum::{
     extract::{Json, Query, State},
     http::header::HeaderMap,
@@ -19,17 +19,46 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use url::{ParseError, Url};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
+    pub url: Url,
     pub ip: IpAddr,
     pub port: u16,
     pub key: SecretKey,
 }
 
+fn create_webserver_url(url: &str) -> Result<Url, Error> {
+    let url = url
+        .parse::<Url>()
+        .with_context(|| format!("Could not parse URL: {}", url))?;
+
+    let scheme = match url.scheme() {
+        "http" => "http",
+        "https" => "https",
+        _ => "https",
+    };
+
+    let host = url.host_str().unwrap_or("localhost");
+    let port = url.port().unwrap_or(3000);
+    let path = url.path();
+
+    Ok(format!("{}://{}:{}{}", scheme, host, port, path).parse::<Url>()?)
+}
+
 impl Config {
-    pub fn parse(ip: IpAddr, port: u16) -> Self {
+    pub fn parse(url: &str, ip: IpAddr, port: u16) -> Self {
         Self {
+            url: create_webserver_url(url).unwrap_or_else(|e| {
+                tracing::error!(
+                    "Could not parse URL: {} because {}. Using http://localhost:3000 instead.",
+                    e,
+                    url
+                );
+                #[allow(clippy::unwrap_used)]
+                "http://localhost:3000".parse().unwrap()
+            }),
             ip,
             port,
             key: Key::generate(),
@@ -39,15 +68,32 @@ impl Config {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Defaults {
+    pub url: String,
     pub ip: String,
     pub port: u16,
 }
 
 impl Defaults {
-    pub fn parse(ip: Option<String>, port: Option<u16>) -> Self {
+    pub fn parse(url: Option<String>, ip: Option<String>, port: Option<u16>) -> Self {
         Self {
+            url: url.unwrap_or("http://localhost:3000".to_owned()),
             ip: ip.unwrap_or("127.0.0.1".to_owned()),
             port: port.unwrap_or(8042),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Invite {
+    pub url: Url,
+    pub key: SecretKey,
+}
+
+impl Invite {
+    pub fn parse(url: &Url, key: &SecretKey) -> Self {
+        Self {
+            url: url.clone(),
+            key: key.clone(),
         }
     }
 }
@@ -189,6 +235,9 @@ pub enum Error {
 
     #[error("{0}")]
     Any(#[from] AnyError),
+
+    #[error("{0}")]
+    URLParse(#[from] ParseError),
 
     #[error("{0}")]
     Serde(#[from] serde_json::Error),

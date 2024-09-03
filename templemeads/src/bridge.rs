@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Type as AgentType;
-use crate::bridge_server::{spawn, Config as BridgeConfig, Defaults as BridgeDefaults};
+use crate::bridge_server::{
+    spawn, Config as BridgeConfig, Defaults as BridgeDefaults, Invite as BridgeInvite,
+};
 use anyhow::Context;
 use anyhow::{Error as AnyError, Result};
 use chrono::{DateTime, Utc};
@@ -12,7 +14,7 @@ use paddington::config::{
     ServiceConfig,
 };
 use paddington::invite::{load as load_invite, save as save_invite, Error as InviteError, Invite};
-use paddington::SecretKey;
+use paddington::{Key, SecretKey};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
@@ -33,18 +35,20 @@ pub struct Defaults {
 }
 
 impl Defaults {
+    #[allow(clippy::too_many_arguments)]
     pub fn parse(
         name: Option<String>,
         config_file: Option<PathBuf>,
         url: Option<String>,
         ip: Option<String>,
         port: Option<u16>,
+        bridge_url: Option<String>,
         bridge_ip: Option<String>,
         bridge_port: Option<u16>,
     ) -> Self {
         Self {
             service: ServiceDefaults::parse(name, config_file, url, ip, port),
-            bridge: BridgeDefaults::parse(bridge_ip, bridge_port),
+            bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port),
         }
     }
 }
@@ -153,6 +157,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     )?
                 },
                 bridge: BridgeConfig::parse(
+                    &bridge_ip.clone().unwrap_or(defaults.bridge.url),
                     bridge_ip
                         .clone()
                         .unwrap_or(defaults.bridge.ip)
@@ -275,6 +280,29 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
             }
         }
+        Some(Commands::Bridge { invite, regenerate }) => {
+            match invite {
+                Some(invite_file) => {
+                    let config = load_config::<Config>(&config_file)?;
+                    let invite = BridgeInvite::parse(&config.bridge.url, &config.bridge.key);
+                    save_invite(invite, invite_file)?;
+                    tracing::info!("Invite written to {}", invite_file.display());
+                    return Ok(None);
+                }
+                None => {}
+            }
+
+            match regenerate {
+                true => {
+                    let mut config = load_config::<Config>(&config_file)?;
+                    config.bridge.key = Key::generate();
+                    save_config(config, &config_file)?;
+                    tracing::info!("API key regenerated.");
+                    return Ok(None);
+                }
+                false => {}
+            }
+        }
         Some(Commands::Run {}) => {
             let config = load_config::<Config>(&config_file)?;
             tracing::info!("Loaded config from {}", &config_file.display());
@@ -345,7 +373,6 @@ enum Commands {
 
     /// Initialise the Service
     Init {
-        /// Initialise the service
         #[arg(long, short = 'n', help = "Name of the service to initialise")]
         service: Option<String>,
 
@@ -388,6 +415,7 @@ enum Commands {
         force: bool,
     },
 
+    /// Handling connections to the bridge API webserver
     Bridge {
         #[arg(
             long,

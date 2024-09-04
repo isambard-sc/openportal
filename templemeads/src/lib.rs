@@ -2,12 +2,23 @@
 // SPDX-License-Identifier: MIT
 
 // internal API
+mod agent_bridge;
+mod agent_core;
 mod bridge_server;
-mod job;
 
 // public API
-pub mod agent;
+pub mod agent {
+    pub mod bridge {
+        pub use crate::agent_bridge::*;
+    }
+
+    pub use crate::agent_core::*;
+}
+
 pub mod board;
 pub mod bridge;
-pub mod client;
-pub use job::Job;
+pub mod job;
+
+pub mod server {
+    pub use crate::bridge_server::sign_api_call;
+}

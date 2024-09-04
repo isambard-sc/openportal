@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent::Type as AgentType;
+use crate::bridge::process_message;
+use crate::bridge_server::{
+    spawn, Config as BridgeConfig, Defaults as BridgeDefaults, Invite as BridgeInvite,
+};
 use anyhow::Context;
 use anyhow::{Error as AnyError, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -9,71 +14,60 @@ use paddington::config::{
     ServiceConfig,
 };
 use paddington::invite::{load as load_invite, save as save_invite, Error as InviteError, Invite};
+use paddington::Key;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Deserialize)]
-pub enum Type {
-    Portal,
-    Provider,
-    Platform,
-    Instance,
-    Bridge,
+///
+/// Run the Bridge Agent.
+/// This listens for requests from the bridge http server and
+/// bridges those to the other Agents in the OpenPortal system.
+///
+pub async fn run(config: Config) -> Result<(), AnyError> {
+    // spawn the bridge server
+    spawn(config.bridge).await?;
+
+    // now run the bridge OpenPortal agent
+    paddington::set_handler(process_message).await?;
+    paddington::run(config.service).await?;
+
+    Ok(())
 }
+
+// Configuration
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     pub service: ServiceConfig,
-    pub agent: Type,
+    pub bridge: BridgeConfig,
+    pub agent: AgentType,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Defaults {
     pub service: ServiceDefaults,
-    pub agent: Type,
+    pub bridge: BridgeDefaults,
 }
 
 impl Defaults {
+    #[allow(clippy::too_many_arguments)]
     pub fn parse(
         name: Option<String>,
         config_file: Option<PathBuf>,
         url: Option<String>,
         ip: Option<String>,
         port: Option<u16>,
-        agent: Option<Type>,
+        bridge_url: Option<String>,
+        bridge_ip: Option<String>,
+        bridge_port: Option<u16>,
     ) -> Self {
         Self {
             service: ServiceDefaults::parse(name, config_file, url, ip, port),
-            agent: agent.unwrap_or(Type::Portal),
+            bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port),
         }
     }
-}
-
-paddington::async_message_handler! {
-    async fn process_message(message: paddington::Message) -> Result<(), paddington::Error> {
-        tracing::info!(
-            "Received message: {} from: {}",
-            message.message,
-            message.from
-        );
-
-        // sleep for 1 second
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        paddington::send(&message.from, "Hello from an agent!").await?;
-
-        Ok(())
-    }
-}
-
-pub async fn run(config: Config) -> Result<(), AnyError> {
-    // run the bridge OpenPortal agent
-    paddington::set_handler(process_message).await?;
-    paddington::run(config.service).await?;
-
-    Ok(())
 }
 
 // Command line parsing
@@ -108,6 +102,8 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             url,
             ip,
             port,
+            bridge_ip,
+            bridge_port,
             force,
         }) => {
             let config = Config {
@@ -121,7 +117,15 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                         port.unwrap_or_else(|| defaults.service.port),
                     )?
                 },
-                agent: defaults.agent.clone(),
+                bridge: BridgeConfig::parse(
+                    &bridge_ip.clone().unwrap_or(defaults.bridge.url),
+                    bridge_ip
+                        .clone()
+                        .unwrap_or(defaults.bridge.ip)
+                        .parse::<IpAddr>()?,
+                    bridge_port.unwrap_or_else(|| defaults.bridge.port),
+                ),
+                agent: AgentType::Bridge,
             };
 
             if config_file.try_exists()? {
@@ -237,6 +241,29 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
             }
         }
+        Some(Commands::Bridge { invite, regenerate }) => {
+            match invite {
+                Some(invite_file) => {
+                    let config = load_config::<Config>(&config_file)?;
+                    let invite = BridgeInvite::parse(&config.bridge.url, &config.bridge.key);
+                    save_invite(invite, invite_file)?;
+                    tracing::info!("Invite written to {}", invite_file.display());
+                    return Ok(None);
+                }
+                None => {}
+            }
+
+            match regenerate {
+                true => {
+                    let mut config = load_config::<Config>(&config_file)?;
+                    config.bridge.key = Key::generate();
+                    save_config(config, &config_file)?;
+                    tracing::info!("API key regenerated.");
+                    return Ok(None);
+                }
+                false => {}
+            }
+        }
         Some(Commands::Run {}) => {
             let config = load_config::<Config>(&config_file)?;
             tracing::info!("Loaded config from {}", &config_file.display());
@@ -307,7 +334,6 @@ enum Commands {
 
     /// Initialise the Service
     Init {
-        /// Initialise the service
         #[arg(long, short = 'n', help = "Name of the service to initialise")]
         service: Option<String>,
 
@@ -332,8 +358,39 @@ enum Commands {
         )]
         port: Option<u16>,
 
+        #[arg(
+            long,
+            short = 'b',
+            help = "IP address on which to listen for bridge connections (e.g. '::')"
+        )]
+        bridge_ip: Option<String>,
+
+        #[arg(
+            long,
+            short = 'q',
+            help = "Port on which to listen for bridge connections (e.g. 3000)"
+        )]
+        bridge_port: Option<u16>,
+
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,
+    },
+
+    /// Handling connections to the bridge API webserver
+    Bridge {
+        #[arg(
+            long,
+            short = 'i',
+            help = "File name in which to write an invite for a bridge client to connect to the service."
+        )]
+        invite: Option<std::path::PathBuf>,
+
+        #[arg(
+            long,
+            short = 'r',
+            help = "Re-generate the API key used by bridge clients to connect to the service."
+        )]
+        regenerate: bool,
     },
 
     /// Run the service

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::bridge::sign_api_call;
+use crate::bridge::run as bridge_run;
+use crate::job::Job;
 use anyhow::{Context, Error as AnyError, Result};
 use axum::{
     extract::{Json, State},
@@ -13,15 +14,39 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use paddington::{Key, SecretKey};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use url::{ParseError, Url};
+
+///
+/// Return the OpenPortal authorisation header for the passed datetime,
+/// protocol, function and (optional) arguments, signed with the passed
+/// key.
+///
+pub fn sign_api_call(
+    key: &SecretKey,
+    date: &DateTime<Utc>,
+    protocol: &str,
+    function: &str,
+    arguments: &Option<serde_json::Value>,
+) -> Result<String, anyhow::Error> {
+    let date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+
+    let call_string = match arguments {
+        Some(args) => format!(
+            "{}\napplication/json\n{}\n{}\n{}",
+            protocol, date, function, args
+        ),
+        None => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
+    };
+
+    let signature = key.expose_secret().sign(call_string)?;
+    Ok(format!("OpenPortal {}", signature))
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -191,7 +216,7 @@ fn verify_headers(
 #[derive(Clone, Debug)]
 struct AppState {
     config: Config,
-    data: Arc<Mutex<HashMap<String, String>>>,
+    // data: Arc<Mutex<HashMap<String, String>>>, <- this is how to have shared state
 }
 
 //
@@ -216,17 +241,6 @@ struct RunRequest {
 }
 
 //
-// Struct representing the Job that is created when a command is
-// run - this is returned to the caller of the 'run' endpoint,
-// and can be used as a future to get the results of the command.
-//
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Job {
-    pub id: String,
-    pub status: String,
-}
-
-//
 // The 'run' endpoint for the web API. This is the main entry point
 // to which commands are submitted to OpenPortal. This will return
 // a JSON object that represents the Job that has been created.
@@ -248,14 +262,7 @@ async fn run(
 
     tracing::info!("Running command: {}", payload.command);
 
-    let mut data = state.data.lock().await;
-
-    data.insert("command".to_string(), payload.command);
-
-    Ok(Json(Job {
-        id: "1234".to_string(),
-        status: "running".to_string(),
-    }))
+    Ok(Json(bridge_run(&payload.command).await?))
 }
 
 /// Functions for the Bridge server
@@ -280,7 +287,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
     // create a global state object for the web API
     let state = AppState {
         config: config.clone(),
-        data: Arc::new(Mutex::new(HashMap::new())),
+        // data: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // create the web API

@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use templemeads::bridge::{process_args, run, Defaults};
+use templemeads::agent::bridge::{process_args, run, Defaults};
 
 ///
 /// Main function for the bridge application

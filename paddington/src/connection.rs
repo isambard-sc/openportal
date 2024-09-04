@@ -414,16 +414,7 @@ impl Connection {
                         );
                         true
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Client {:?} could not authenticate for address: {} - \
-                             Error: {:?}",
-                            client.name.clone().unwrap_or_default(),
-                            addr,
-                            e
-                        );
-                        false
-                    }
+                    Err(_) => false,
                 }
             })
             .cloned()
@@ -515,16 +506,6 @@ impl Connection {
 
             future::ok(())
         });
-
-        // Send the "initiate_connection" message to the peer
-        exchange::send(&peer_name, "initiate_connection")
-            .await
-            .with_context(|| {
-                "Error sending test message to provider. Ensure the connection is open."
-            })
-            .unwrap_or_else(|e| {
-                tracing::warn!("Error sending test message to provider: {:?}", e);
-            });
 
         // handle messages that should be sent to the client (received locally
         // from other services that should be forwarded to the client via the

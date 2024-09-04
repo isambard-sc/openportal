@@ -2,50 +2,22 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Error as AnyError;
-use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::RwLock;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::job::Job;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct Handle {
-    pub id: String,
-}
-
-// We use the singleton pattern for the board data, as there can only
-// be one in the program, and this will let us expose the board functions
-// directly
-static SINGLETON_BOARD: Lazy<RwLock<Board>> = Lazy::new(|| RwLock::new(Board::new()));
-
-///
-/// Each agent has a single board that holds all of the jobs that it is
-/// responsible for.
-///
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Board {
-    jobs: HashMap<Handle, Job>,
-}
-
-pub async fn submit(job: Job) -> Result<Handle, Error> {
-    let mut board = match SINGLETON_BOARD.write() {
-        Ok(board) => board,
-        Err(e) => return Err(Error::Poison(format!("Error getting read lock: {}", e))),
-    };
-
-    let handle = Handle {
-        id: "123".to_string(),
-    };
-    board.jobs.insert(handle.clone(), job);
-    Ok(handle)
+    jobs: HashMap<Uuid, Job>,
 }
 
 impl Board {
-    pub fn new() -> Self {
-        Self {
-            jobs: HashMap::new(),
-        }
+    pub async fn add_job(&mut self, job: Job) -> Result<(), Error> {
+        self.jobs.insert(job.id(), job);
+        Ok(())
     }
 }
 
@@ -55,9 +27,6 @@ impl Board {
 pub enum Error {
     #[error("{0}")]
     AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    Poison(String),
 
     #[error("Unknown error")]
     Unknown,

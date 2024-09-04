@@ -3,6 +3,7 @@
 
 use anyhow::Error as AnyError;
 use anyhow::{Context, Result};
+use chrono::serde::ts_seconds;
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use paddington::SecretKey;
@@ -11,9 +12,11 @@ use pyo3::prelude::*;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path;
 use std::sync::RwLock;
-use templemeads::bridge::sign_api_call;
+use templemeads::job::Status;
+use templemeads::server::sign_api_call;
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
@@ -236,25 +239,64 @@ fn health() -> PyResult<Health> {
 ///
 #[pyclass]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    id: String,
-    status: String,
+struct Job {
+    id: Uuid,
+    #[serde(with = "ts_seconds")]
+    created: chrono::DateTime<Utc>,
+    #[serde(with = "ts_seconds")]
+    updated: chrono::DateTime<Utc>,
+    version: u64,
+    command: String,
+    state: Status,
+    result: Option<String>,
 }
 
 #[pymethods]
 impl Job {
     #[getter]
     fn id(&self) -> PyResult<String> {
-        Ok(self.id.clone())
+        Ok(self.id.to_string())
     }
 
     #[getter]
-    fn status(&self) -> PyResult<String> {
-        Ok(self.status.clone())
+    fn state(&self) -> PyResult<String> {
+        match self.state {
+            Status::Pending => Ok("Pending".to_owned()),
+            Status::Complete => Ok("Complete".to_owned()),
+            Status::Error => Ok("Error".to_owned()),
+        }
+    }
+
+    #[getter]
+    fn command(&self) -> PyResult<String> {
+        Ok(self.command.clone())
+    }
+
+    #[getter]
+    fn created(&self) -> PyResult<String> {
+        Ok(self.created.to_rfc3339())
+    }
+
+    #[getter]
+    fn updated(&self) -> PyResult<String> {
+        Ok(self.updated.to_rfc3339())
+    }
+
+    #[getter]
+    fn result(&self) -> PyResult<Option<String>> {
+        Ok(self.result.clone())
+    }
+
+    #[getter]
+    fn version(&self) -> PyResult<u64> {
+        Ok(self.version)
     }
 
     fn __str__(&self) -> PyResult<String> {
-        Ok(format!("Job( id: {}, status: {} )", self.id, self.status))
+        Ok(format!(
+            "Job( command: {}, status: {:?} )",
+            self.command, self.state
+        ))
     }
 
     fn __repr__(&self) -> PyResult<String> {

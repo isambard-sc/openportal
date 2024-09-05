@@ -3,7 +3,8 @@
 
 use anyhow::Result;
 
-use templemeads::agent::{process_args, run, Defaults, Type as AgentType};
+use templemeads::agent::provider::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
 
 ///
 /// Main function for the bridge application
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
         Some("ws://localhost:8041".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8041),
-        Some(AgentType::Portal),
+        Some(AgentType::Provider),
     );
 
     // now parse the command line arguments to get the service configuration

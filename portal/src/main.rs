@@ -3,7 +3,8 @@
 
 use anyhow::Result;
 
-use templemeads::agent::portal::{process_args, run, Defaults, Type as AgentType};
+use templemeads::agent::portal::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
 
 ///
 /// Main function for the bridge application

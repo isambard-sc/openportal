@@ -1,47 +1,39 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent;
 use crate::agent_core::Config;
-use crate::board::{Board, Error as BoardError};
+use crate::board::Error as BoardError;
 use crate::command::Command;
+use crate::control_message::process_control_message;
+use crate::state;
 use anyhow::{Error as AnyError, Result};
-use once_cell::sync::Lazy;
-use paddington::command::Command as ControlCommand;
 use paddington::message::Message;
 use paddington::{async_message_handler, Error as PaddingtonError};
 use serde_json::Error as SerdeError;
-use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::RwLock;
 
-///
-/// Shared state for the Bridge Agent.
-///
-struct State {
-    board: Arc<RwLock<Board>>,
-}
-
-impl State {
-    fn new() -> Self {
-        Self {
-            board: Arc::new(RwLock::new(Board::default())),
-        }
-    }
-}
-
-static STATE: Lazy<RwLock<State>> = Lazy::new(|| RwLock::new(State::new()));
-
-pub async fn process_control_message(command: ControlCommand) -> Result<(), Error> {
+async fn process_command(peer: &str, command: &Command) -> Result<(), Error> {
     match command {
-        ControlCommand::Connected { agent } => {
-            tracing::info!("Connected to agent: {}", agent);
+        Command::Register { agent } => {
+            tracing::info!("Registering agent: {:?}", agent);
+            agent::register(peer, agent).await;
         }
-        ControlCommand::Disconnected { agent } => {
-            tracing::info!("Disconnected from agent: {}", agent);
+        Command::Update { job } => {
+            // update the board with the updated job
+            tracing::info!("Update job: {:?}", job);
+
+            let board = state::get(peer).await?.board().await;
+            let mut board = board.write().await;
+            board.update(job).await?;
         }
-        ControlCommand::Error { error } => {
-            tracing::error!("Received error: {}", error);
+        Command::Put { job } => {
+            // save the job in our board for the caller
+            tracing::info!("Received job: {:?}", job);
+
+            // find the provider for the job
         }
+        _ => {}
     }
 
     Ok(())
@@ -49,22 +41,18 @@ pub async fn process_control_message(command: ControlCommand) -> Result<(), Erro
 
 async_message_handler! {
     ///
-    /// Message handler for the Bridge Agent.
+    /// Message handler for the Portal Agent.
     ///
     pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
-        tracing::info!("Received message: {:?}", message);
-
-        tracing::info!("Received message: {:?}", message);
-
         match message.is_control() {
-            true => Ok(process_control_message(message.into()).await?),
+            true => Ok(process_control_message(&agent::Type::Portal, message.into()).await?),
             false => {
                 let peer: String = message.peer.clone();
                 let command: Command = message.into();
 
                 tracing::info!("Received command: {:?} from {}", command, peer);
 
-                Ok(())
+                Ok(process_command(&peer, &command).await?)
             }
         }
     }
@@ -84,9 +72,9 @@ pub async fn run(config: Config) -> Result<(), AnyError> {
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum Error {
+enum Error {
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
     Board(#[from] BoardError),
@@ -97,8 +85,8 @@ pub enum Error {
     #[error("{0}")]
     Serde(#[from] SerdeError),
 
-    #[error("Unknown error")]
-    Unknown,
+    #[error("{0}")]
+    State(#[from] state::Error),
 }
 
 impl From<Error> for paddington::Error {

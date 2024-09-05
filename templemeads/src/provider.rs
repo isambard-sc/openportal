@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent;
+use crate::agent_core::Config;
 use crate::board::Error as BoardError;
 use crate::command::Command;
 use crate::control_message::process_control_message;
-use crate::job::{Error as JobError, Job};
 use crate::state;
 use anyhow::{Error as AnyError, Result};
 use paddington::message::Message;
@@ -27,6 +27,12 @@ async fn process_command(peer: &str, command: &Command) -> Result<(), Error> {
             let mut board = board.write().await;
             board.update(job).await?;
         }
+        Command::Put { job } => {
+            // save the job in our board for the caller
+            tracing::info!("Received job: {:?}", job);
+
+            // find the platform for the job
+        }
         _ => {}
     }
 
@@ -35,11 +41,11 @@ async fn process_command(peer: &str, command: &Command) -> Result<(), Error> {
 
 async_message_handler! {
     ///
-    /// Message handler for the Bridge Agent.
+    /// Message handler for the Provider Agent.
     ///
     pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
         match message.is_control() {
-            true => Ok(process_control_message(&agent::Type::Bridge, message.into()).await?),
+            true => Ok(process_control_message(&agent::Type::Provider, message.into()).await?),
             false => {
                 let peer: String = message.peer.clone();
                 let command: Command = message.into();
@@ -52,34 +58,26 @@ async_message_handler! {
     }
 }
 
-pub async fn run(command: &str) -> Result<Job, Error> {
-    let job = Job::new(command.to_string());
+///
+/// Run the agent service
+///
+pub async fn run(config: Config) -> Result<(), AnyError> {
+    // run the Provider OpenPortal agent
+    paddington::set_handler(process_message).await?;
+    paddington::run(config.service).await?;
 
-    // get the name of the portal agent
-    if let Some(portal) = agent::portal().await {
-        // get the (shared) board for the portal
-        let board = state::get(&portal).await?.board().await;
-
-        // get the mutable board from the Arc<RwLock> board - this is the
-        // blocking operation
-        let mut board = board.write().await;
-
-        // add the job to the board - this will send it to the portal
-        board.add(&job).await?;
-    }
-
-    Ok(job)
+    Ok(())
 }
 
 /// Errors
 
 #[derive(Error, Debug)]
-pub enum Error {
+enum Error {
     #[error("{0}")]
     Any(#[from] AnyError),
 
     #[error("{0}")]
-    Job(#[from] JobError),
+    Board(#[from] BoardError),
 
     #[error("{0}")]
     Paddington(#[from] PaddingtonError),
@@ -89,9 +87,6 @@ pub enum Error {
 
     #[error("{0}")]
     State(#[from] state::Error),
-
-    #[error("{0}")]
-    Board(#[from] BoardError),
 }
 
 impl From<Error> for paddington::Error {

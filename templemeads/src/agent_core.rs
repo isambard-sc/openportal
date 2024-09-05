@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent::Type as AgentType;
 use anyhow::Context;
 use anyhow::{Error as AnyError, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -9,61 +10,23 @@ use paddington::config::{
     ServiceConfig,
 };
 use paddington::invite::{load as load_invite, save as save_invite, Error as InviteError, Invite};
-use paddington::message::Message;
-use paddington::Error as PaddingtonError;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use thiserror::Error;
-
-#[derive(Debug, Clone, Serialize, PartialEq, Deserialize)]
-pub enum Type {
-    Portal,
-    Provider,
-    Platform,
-    Instance,
-    Bridge,
-}
-
-paddington::async_message_handler! {
-    ///
-    /// Message handler for the default agent
-    ///
-    async fn process_message(message: Message) -> Result<(), PaddingtonError> {
-        tracing::info!("Received message: {:?}", message);
-
-        // sleep for 1 second
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        paddington::send(Message::new(&message.peer, "Hello from agent!")).await?;
-
-        Ok(())
-    }
-}
-
-///
-/// Run the agent service
-///
-pub async fn run(config: Config) -> Result<(), AnyError> {
-    // run the bridge OpenPortal agent
-    paddington::set_handler(process_message).await?;
-    paddington::run(config.service).await?;
-
-    Ok(())
-}
 
 // Configuration
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     pub service: ServiceConfig,
-    pub agent: Type,
+    pub agent: AgentType,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Defaults {
     pub service: ServiceDefaults,
-    pub agent: Type,
+    pub agent: AgentType,
 }
 
 impl Defaults {
@@ -73,11 +36,11 @@ impl Defaults {
         url: Option<String>,
         ip: Option<String>,
         port: Option<u16>,
-        agent: Option<Type>,
+        agent: Option<AgentType>,
     ) -> Self {
         Self {
             service: ServiceDefaults::parse(name, config_file, url, ip, port),
-            agent: agent.unwrap_or(Type::Portal),
+            agent: agent.unwrap_or(AgentType::Portal),
         }
     }
 }

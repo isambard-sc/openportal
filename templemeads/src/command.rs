@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent::Type as AgentType;
 use crate::job::Job;
 use anyhow::Error;
 use anyhow::Result;
@@ -14,6 +15,7 @@ pub enum Command {
     Put { job: Job },
     Update { job: Job },
     Delete { job: Job },
+    Register { agent: AgentType },
 }
 
 impl Command {
@@ -29,20 +31,26 @@ impl Command {
         Self::Delete { job }
     }
 
-    pub fn error(error: String) -> Self {
-        Self::Error { error }
+    pub fn error(error: &str) -> Self {
+        Self::Error {
+            error: error.to_owned(),
+        }
+    }
+
+    pub fn register(agent: &AgentType) -> Self {
+        Self::Register {
+            agent: agent.clone(),
+        }
     }
 
     pub async fn send_to(&self, peer: &str) -> Result<(), Error> {
-        send_to_peer(Message::new(peer, &serde_json::to_string(self)?)).await;
-
-        Ok(())
+        Ok(send_to_peer(Message::new(peer, &serde_json::to_string(self)?)).await?)
     }
 }
 
 impl From<Message> for Command {
     fn from(m: Message) -> Self {
         serde_json::from_str(&m.payload)
-            .unwrap_or(Command::error(format!("Could not parse command: {:?}", m)))
+            .unwrap_or(Command::error(&format!("Could not parse command: {:?}", m)))
     }
 }

@@ -9,6 +9,8 @@ use paddington::config::{
     ServiceConfig,
 };
 use paddington::invite::{load as load_invite, save as save_invite, Error as InviteError, Invite};
+use paddington::message::Message;
+use paddington::Error as PaddingtonError;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -27,17 +29,13 @@ paddington::async_message_handler! {
     ///
     /// Message handler for the default agent
     ///
-    async fn process_message(message: paddington::Message) -> Result<(), paddington::Error> {
-        tracing::info!(
-            "Received message: {} from: {}",
-            message.message,
-            message.from
-        );
+    async fn process_message(message: Message) -> Result<(), PaddingtonError> {
+        tracing::info!("Received message: {:?}", message);
 
         // sleep for 1 second
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        paddington::send(&message.from, "Hello from an agent!").await?;
+        paddington::send(Message::new(&message.peer, "Hello from agent!")).await?;
 
         Ok(())
     }

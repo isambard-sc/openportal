@@ -12,12 +12,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 
 use crate::connection::{Connection, Error as ConnectionError};
-
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub from: String,
-    pub message: String,
-}
+use crate::message::Message;
 
 // We use the singleton pattern for the exchange data, as there can only
 // be one in the program, and this will let us expose the exchange functions
@@ -58,10 +53,7 @@ async_message_handler! {
     async fn default_message_handler(message: Message) -> Result<(), Error>
     {
         tracing::info!(
-            "Default message handler received message: {} from: {}",
-            message.message,
-            message.from
-        );
+            "Default handler received {:?}", message);
 
         Ok(())
     }
@@ -204,7 +196,7 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn send(name: &str, message: &str) -> Result<(), Error> {
+pub async fn send(message: Message) -> Result<(), Error> {
     let connection = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
         Err(e) => {
@@ -212,31 +204,26 @@ pub async fn send(name: &str, message: &str) -> Result<(), Error> {
         }
     }
     .connections
-    .get(name)
+    .get(&message.peer)
     .cloned();
 
     if let Some(connection) = connection {
-        connection.send_message(message).await?;
+        connection.send_message(&message.payload).await?;
         Ok(())
     } else {
         Err(Error::UnnamedConnection(format!(
             "Connection {} not found",
-            name
+            message.peer
         )))
     }
 }
 
-pub fn received(from: &str, message: &str) -> Result<(), Error> {
+pub fn received(message: Message) -> Result<(), Error> {
     let exchange = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
         Err(e) => {
             return Err(Error::Poison(format!("Error getting read lock: {}", e)));
         }
-    };
-
-    let message = Message {
-        from: from.to_string(),
-        message: message.to_string(),
     };
 
     exchange.tx.send(message).map_err(|e| {

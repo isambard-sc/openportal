@@ -3,10 +3,12 @@
 
 use crate::agent_core::Config;
 use crate::board::{Board, Error as BoardError};
-use crate::job::{Error as JobError, Job};
+use crate::command::Command;
 use anyhow::{Error as AnyError, Result};
 use once_cell::sync::Lazy;
-use paddington::{async_message_handler, Error as PaddingtonError, Message};
+use paddington::command::Command as ControlCommand;
+use paddington::message::Message;
+use paddington::{async_message_handler, Error as PaddingtonError};
 use serde_json::Error as SerdeError;
 use std::sync::Arc;
 use thiserror::Error;
@@ -29,6 +31,22 @@ impl State {
 
 static STATE: Lazy<RwLock<State>> = Lazy::new(|| RwLock::new(State::new()));
 
+pub async fn process_control_message(command: ControlCommand) -> Result<(), Error> {
+    match command {
+        ControlCommand::Connected { agent } => {
+            tracing::info!("Connected to agent: {}", agent);
+        }
+        ControlCommand::Disconnected { agent } => {
+            tracing::info!("Disconnected from agent: {}", agent);
+        }
+        ControlCommand::Error { error } => {
+            tracing::error!("Received error: {}", error);
+        }
+    }
+
+    Ok(())
+}
+
 async_message_handler! {
     ///
     /// Message handler for the Bridge Agent.
@@ -36,18 +54,19 @@ async_message_handler! {
     pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
         tracing::info!("Received message: {:?}", message);
 
-        // try to parse the message as a Job
-        let job: Job = match serde_json::from_str(&message.message) {
-            Ok(job) => job,
-            Err(e) => {
-                tracing::error!("Could not parse message as Job: {:?}", e);
-                return Ok(()); // ignore the message
+        tracing::info!("Received message: {:?}", message);
+
+        match message.is_control() {
+            true => Ok(process_control_message(message.into()).await?),
+            false => {
+                let peer: String = message.peer.clone();
+                let command: Command = message.into();
+
+                tracing::info!("Received command: {:?} from {}", command, peer);
+
+                Ok(())
             }
-        };
-
-        tracing::info!("Received job: {:?}", job);
-
-        Ok(())
+        }
     }
 }
 
@@ -70,9 +89,6 @@ pub enum Error {
     AnyError(#[from] AnyError),
 
     #[error("{0}")]
-    Job(#[from] JobError),
-
-    #[error("{0}")]
     Board(#[from] BoardError),
 
     #[error("{0}")]
@@ -83,4 +99,10 @@ pub enum Error {
 
     #[error("Unknown error")]
     Unknown,
+}
+
+impl From<Error> for paddington::Error {
+    fn from(error: Error) -> paddington::Error {
+        paddington::Error::Any(error.into())
+    }
 }

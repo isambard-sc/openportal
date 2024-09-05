@@ -5,6 +5,7 @@
 mod agent_bridge;
 mod agent_core;
 mod bridge_server;
+mod command;
 
 // public API
 pub mod agent {

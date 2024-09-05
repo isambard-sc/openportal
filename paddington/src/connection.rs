@@ -14,13 +14,15 @@ use serde::{de::DeserializeOwned, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
 
 use std::sync::Arc;
 
+use crate::command::Command;
 use crate::config::{ClientConfig, Error as ConfigError, PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
 use crate::exchange;
+use crate::message::Message;
 
 #[derive(Debug, Clone, PartialEq)]
 enum ConnectionState {
@@ -38,18 +40,18 @@ pub struct Connection {
     inner_key: Option<SecretKey>,
     outer_key: Option<SecretKey>,
     peer: Option<PeerConfig>,
-    tx: Option<Arc<TokioMutex<UnboundedSender<Message>>>>,
+    tx: Option<Arc<TokioMutex<UnboundedSender<TokioMessage>>>>,
 }
 
 fn envelope_message<T>(
     message: T,
     inner_key: &SecretKey,
     outer_key: &SecretKey,
-) -> Result<Message, AnyError>
+) -> Result<TokioMessage, AnyError>
 where
     T: Serialize,
 {
-    Ok(Message::text(
+    Ok(TokioMessage::text(
         outer_key
             .expose_secret()
             .encrypt(inner_key.expose_secret().encrypt(message)?)?,
@@ -57,7 +59,7 @@ where
 }
 
 fn deenvelope_message<T>(
-    message: Message,
+    message: TokioMessage,
     inner_key: &SecretKey,
     outer_key: &SecretKey,
 ) -> Result<T, AnyError>
@@ -102,7 +104,7 @@ impl Connection {
 
         let mut tx = tx.lock().await;
 
-        tx.send(Message::text(message.to_string()))
+        tx.send(TokioMessage::text(message.to_string()))
             .await
             .with_context(|| "Error sending message to peer")?;
 
@@ -258,7 +260,7 @@ impl Connection {
         self.outer_key = Some(outer_key.clone());
 
         // finally, we need to create a new channel for sending messages
-        let (tx, rx) = unbounded::<Message>();
+        let (tx, rx) = unbounded::<TokioMessage>();
 
         // save this with the connection
         self.tx = Some(Arc::new(TokioMutex::new(tx)));
@@ -288,7 +290,7 @@ impl Connection {
                 ""
             });
 
-            exchange::received(&peer_name, msg).unwrap_or_else(|e| {
+            exchange::received(Message::new(&peer_name, msg)).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -299,6 +301,10 @@ impl Connection {
         // from other services that should be forwarded to the client via the
         // outgoing stream)
         let send_to_peer = rx.map(Ok).forward(outgoing);
+
+        // now tell ourselves who has connected
+        exchange::received(Command::connected(peer_name.clone()).into())
+            .with_context(|| "Error triggering /connected control message")?;
 
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;
@@ -382,7 +388,7 @@ impl Connection {
                 tracing::warn!("No peer information received - closing connection.");
                 Error::InvalidPeer("No peer information received - closing connection.".to_string())
             })?
-            .unwrap_or_else(|_| Message::text(""));
+            .unwrap_or_else(|_| TokioMessage::text(""));
 
         if message.is_empty() {
             tracing::warn!("No peer information received - closing connection.");
@@ -473,7 +479,7 @@ impl Connection {
         tracing::info!("Handshake complete!");
 
         // create a new channel for sending messages
-        let (tx, rx) = unbounded::<Message>();
+        let (tx, rx) = unbounded::<TokioMessage>();
 
         // save this with the connection
         self.tx = Some(Arc::new(TokioMutex::new(tx)));
@@ -500,7 +506,7 @@ impl Connection {
                 ""
             });
 
-            exchange::received(&peer_name, msg).unwrap_or_else(|e| {
+            exchange::received(Message::new(&peer_name, msg)).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -511,6 +517,10 @@ impl Connection {
         // from other services that should be forwarded to the client via the
         // outgoing stream)
         let send_to_peer = rx.map(Ok).forward(outgoing);
+
+        // now tell ourselves who has connected
+        exchange::received(Command::connected(peer_name.clone()).into())
+            .with_context(|| "Error triggering /connected control message")?;
 
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;

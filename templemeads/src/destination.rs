@@ -8,6 +8,13 @@ pub struct Destination {
     agents: Vec<String>,
 }
 
+pub enum Position {
+    Upstream,
+    Downstream,
+    Endpoint,
+    Error,
+}
+
 impl Destination {
     pub fn new(destination: &str) -> Self {
         Self {
@@ -25,6 +32,27 @@ impl Destination {
 
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
+    }
+
+    pub fn position(&self, agent: &str, previous: &str) -> Position {
+        if let Some(index) = self.agents.iter().position(|c| c == agent) {
+            if index == self.agents.len() - 1 {
+                return Position::Endpoint;
+            } else if let Some(previous_index) = self.agents.iter().position(|c| c == previous) {
+                if index < previous_index {
+                    Position::Upstream
+                } else if index > previous_index {
+                    Position::Downstream
+                } else {
+                    // cannot have the same index as the previous
+                    Position::Error
+                }
+            } else {
+                Position::Error
+            }
+        } else {
+            Position::Error
+        }
     }
 
     pub fn is_endpoint(&self, agent: &str) -> bool {

@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 
 use crate::config::ServiceConfig;
 use crate::connection::{Connection, Error as ConnectionError};
+use crate::exchange;
 
 ///
 /// Internal function used to handle a single connection to the server.
@@ -74,6 +75,9 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
 }
 
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
+    // set the name of the service in the exchange
+    exchange::set_name(&config.name).await?;
+
     loop {
         let result = run_once(config.clone()).await;
 
@@ -110,4 +114,7 @@ pub enum Error {
 
     #[error("{0}")]
     Connection(#[from] ConnectionError),
+
+    #[error("{0}")]
+    Exchange(#[from] exchange::Error),
 }

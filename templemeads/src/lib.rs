@@ -7,6 +7,7 @@ mod agent_core;
 mod bridge_server;
 mod command;
 mod control_message;
+mod handler;
 mod portal;
 mod provider;
 mod state;

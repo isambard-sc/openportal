@@ -50,7 +50,7 @@ impl Command {
 
 impl From<Message> for Command {
     fn from(m: Message) -> Self {
-        serde_json::from_str(&m.payload)
+        serde_json::from_str(m.payload())
             .unwrap_or(Command::error(&format!("Could not parse command: {:?}", m)))
     }
 }

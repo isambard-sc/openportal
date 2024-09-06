@@ -5,26 +5,45 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
-    pub peer: String,
-    pub payload: String,
+    sender: String,
+    recipient: String,
+    payload: String,
 }
 
 impl Message {
-    pub fn new(peer: &str, payload: &str) -> Self {
+    pub fn new(sender: &str, payload: &str) -> Self {
         Self {
-            peer: peer.to_owned(),
+            sender: sender.to_owned(),
+            recipient: "".to_owned(),
             payload: payload.to_owned(),
         }
     }
 
     pub fn control(payload: &str) -> Self {
         Self {
-            peer: "".to_owned(),
+            sender: "".to_owned(),
+            recipient: "".to_owned(),
             payload: payload.to_owned(),
         }
     }
 
     pub fn is_control(&self) -> bool {
-        self.peer.is_empty()
+        self.sender.is_empty()
+    }
+
+    pub fn set_recipient(&mut self, recipient: &str) {
+        self.recipient = recipient.to_owned();
+    }
+
+    pub fn sender(&self) -> &str {
+        &self.sender
+    }
+
+    pub fn recipient(&self) -> &str {
+        &self.recipient
+    }
+
+    pub fn payload(&self) -> &str {
+        &self.payload
     }
 }

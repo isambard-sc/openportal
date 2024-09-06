@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Type as AgentType;
-use crate::bridge::process_message;
 use crate::bridge_server::{
     spawn, Config as BridgeConfig, Defaults as BridgeDefaults, Invite as BridgeInvite,
 };
+use crate::handler::{process_message, set_service_details};
 use anyhow::Context;
 use anyhow::{Error as AnyError, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -26,6 +26,17 @@ use thiserror::Error;
 /// bridges those to the other Agents in the OpenPortal system.
 ///
 pub async fn run(config: Config) -> Result<(), AnyError> {
+    if config.service.name.is_empty() {
+        return Err(Error::Misconfigured("Service name is empty".to_string()).into());
+    }
+
+    if config.agent != AgentType::Bridge {
+        return Err(Error::Misconfigured("Service agent is not a Bridge".to_string()).into());
+    }
+
+    // pass the service details onto the handler
+    set_service_details(&config.service.name, &config.agent).await?;
+
     // spawn the bridge server
     spawn(config.bridge).await?;
 
@@ -427,4 +438,7 @@ pub enum Error {
 
     #[error("{0}")]
     ConfigExists(String),
+
+    #[error("{0}")]
+    Misconfigured(String),
 }

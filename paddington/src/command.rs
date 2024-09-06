@@ -28,11 +28,11 @@ impl Command {
 impl From<Message> for Command {
     fn from(m: Message) -> Self {
         match m.is_control() {
-            true => serde_json::from_str(&m.payload).unwrap_or(Command::error(format!(
+            true => serde_json::from_str(m.payload()).unwrap_or(Command::error(format!(
                 "Could not parse command: {}",
-                m.payload
+                m.payload()
             ))),
-            false => Command::error(format!("Invalid control message: {}", m.payload)),
+            false => Command::error(format!("Invalid control message: {}", m.payload())),
         }
     }
 }

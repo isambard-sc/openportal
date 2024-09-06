@@ -27,27 +27,64 @@ impl Destination {
         self.agents.is_empty()
     }
 
-    pub fn next(&self, agent: &str, previous: &str) -> Option<String> {
+    pub fn is_endpoint(&self, agent: &str) -> bool {
+        if let Some(last) = self.agents.last() {
+            last == agent
+        } else {
+            false
+        }
+    }
+
+    pub fn is_downstream(&self, agent: &str, previous: &str) -> bool {
+        if let Some(index) = self.agents.iter().position(|c| c == agent) {
+            if let Some(previous_index) = self.agents.iter().position(|c| c == previous) {
+                index > previous_index
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn is_upstream(&self, agent: &str, previous: &str) -> bool {
+        if let Some(index) = self.agents.iter().position(|c| c == agent) {
+            if let Some(previous_index) = self.agents.iter().position(|c| c == previous) {
+                index < previous_index
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn next(&self, agent: &str) -> Option<String> {
         // find the index of the agent in the components
         if let Some(index) = self.agents.iter().position(|c| c == agent) {
-            // is the previous agent before or after us - this sets the direction of travel
-            if let Some(previous_index) = self.agents.iter().position(|c| c == previous) {
-                if index > previous_index {
-                    // we are after the previous agent - return the agent after us
-                    if let Some(next) = self.agents.get(index + 1) {
-                        return Some(next.clone());
-                    }
-                } else {
-                    // we are before the previous agent - return the agent before us
-                    if let Some(next) = self.agents.get(index - 1) {
-                        return Some(next.clone());
-                    }
-                }
+            // if the index is not the last one
+            if index < self.agents.len() - 1 {
+                Some(self.agents[index + 1].clone())
+            } else {
+                None
             }
+        } else {
+            None
         }
+    }
 
-        // nothing matched, there is no "next" agent
-        None
+    pub fn previous(&self, agent: &str) -> Option<String> {
+        // find the index of the agent in the components
+        if let Some(index) = self.agents.iter().position(|c| c == agent) {
+            // if the index is not the first one
+            if index > 0 {
+                Some(self.agents[index - 1].clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 

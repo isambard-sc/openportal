@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::{Connection, Error as ConnectionError};
 use crate::crypto;
+use crate::exchange;
 
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
     let service_name = config.name.clone();
@@ -44,6 +45,9 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Err
 }
 
 pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
+    // set the name of the service in the exchange
+    exchange::set_name(&config.name).await?;
+
     loop {
         match run_once(config.clone(), peer.clone()).await {
             Ok(_) => {
@@ -81,4 +85,7 @@ pub enum Error {
 
     #[error("{0}")]
     UnknownPeer(String),
+
+    #[error("{0}")]
+    Exchange(#[from] exchange::Error),
 }

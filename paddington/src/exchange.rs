@@ -60,6 +60,7 @@ async_message_handler! {
 }
 
 pub struct Exchange {
+    name: String,
     connections: HashMap<String, Connection>,
     tx: UnboundedSender<Message>,
     // handler holds object that implements the MessageHandler trait
@@ -77,7 +78,7 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
 
     static MAX_WORKERS: usize = 10;
 
-    while let Some(message) = rx.recv().await {
+    while let Some(mut message) = rx.recv().await {
         // make sure we don't exceed the requested number of workers
         if workers.len() >= MAX_WORKERS {
             let result = workers.join_next().await;
@@ -93,13 +94,17 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
             }
         }
 
-        let handler = match SINGLETON_EXCHANGE.read() {
-            Ok(exchange) => exchange.handler,
+        let (handler, name) = match SINGLETON_EXCHANGE.read() {
+            Ok(exchange) => (exchange.handler, exchange.name.clone()),
             Err(e) => {
                 return Err(Error::Poison(format!("Error getting read lock: {}", e)));
             }
-        }
-        .unwrap_or(default_message_handler);
+        };
+
+        let handler = handler.unwrap_or(default_message_handler);
+
+        // it is only now that we know who is receiving the message
+        message.set_recipient(&name);
 
         workers.spawn(async move {
             handler(message).await.unwrap_or_else(|e| {
@@ -118,11 +123,25 @@ impl Exchange {
         tokio::spawn(event_loop(rx));
 
         Self {
+            name: "".to_string(),
             connections: HashMap::new(),
             tx,
             handler: None,
         }
     }
+}
+
+pub async fn set_name(name: &str) -> Result<(), Error> {
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
+        }
+    };
+
+    exchange.name = name.to_string();
+
+    Ok(())
 }
 
 pub async fn set_handler(handler: AsyncMessageHandler) -> Result<(), Error> {
@@ -204,16 +223,16 @@ pub async fn send(message: Message) -> Result<(), Error> {
         }
     }
     .connections
-    .get(&message.peer)
+    .get(message.sender())
     .cloned();
 
     if let Some(connection) = connection {
-        connection.send_message(&message.payload).await?;
+        connection.send_message(message.payload()).await?;
         Ok(())
     } else {
         Err(Error::UnnamedConnection(format!(
             "Connection {} not found",
-            message.peer
+            message.sender()
         )))
     }
 }

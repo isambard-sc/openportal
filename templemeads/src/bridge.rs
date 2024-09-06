@@ -53,7 +53,7 @@ async_message_handler! {
 }
 
 pub async fn run(command: &str) -> Result<Job, Error> {
-    let job = Job::new(command.to_string());
+    let job = Job::new(command);
 
     // get the name of the portal agent
     if let Some(portal) = agent::portal().await {

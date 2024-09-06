@@ -15,6 +15,7 @@ mod state;
 pub mod agent;
 pub mod board;
 pub mod bridge;
+pub mod destination;
 pub mod job;
 
 pub mod server {

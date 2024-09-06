@@ -24,6 +24,18 @@ impl Board {
         }
     }
 
+    ///
+    /// Register that the passed job has been received from our peer
+    ///
+    pub async fn received(&mut self, job: &Job) -> Result<(), Error> {
+        self.jobs.insert(job.id(), job.clone());
+
+        Ok(())
+    }
+
+    ///
+    /// Add the passed job to our board and send it to our peer
+    ///
     pub async fn add(&mut self, job: &Job) -> Result<(), Error> {
         self.jobs.insert(job.id(), job.clone());
 
@@ -33,6 +45,10 @@ impl Board {
         Ok(())
     }
 
+    ///
+    /// Update the job on our board - this will only update if
+    /// the job is newer than the one we have
+    ///
     pub async fn update(&mut self, job: &Job) -> Result<(), Error> {
         if let Some(j) = self.jobs.get_mut(&job.id()) {
             // only update if newer

@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::agent;
 use crate::agent_core::Config;
 use crate::board::Error as BoardError;
 use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::state;
+use crate::{agent, board};
 use anyhow::{Error as AnyError, Result};
 use paddington::message::Message;
 use paddington::{async_message_handler, Error as PaddingtonError};
@@ -30,8 +30,6 @@ async fn process_command(peer: &str, command: &Command) -> Result<(), Error> {
         Command::Put { job } => {
             // save the job in our board for the caller
             tracing::info!("Received job: {:?}", job);
-
-            // find the provider for the job
         }
         _ => {}
     }

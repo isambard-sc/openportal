@@ -241,13 +241,16 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
             }
         }
-        Some(Commands::Bridge { invite, regenerate }) => {
-            match invite {
-                Some(invite_file) => {
+        Some(Commands::Bridge { config, regenerate }) => {
+            match config {
+                Some(py_config_file) => {
                     let config = load_config::<Config>(&config_file)?;
-                    let invite = BridgeInvite::parse(&config.bridge.url, &config.bridge.key);
-                    save_invite(invite, invite_file)?;
-                    tracing::info!("Invite written to {}", invite_file.display());
+                    let py_config = BridgeInvite::parse(&config.bridge.url, &config.bridge.key);
+                    save_invite(py_config, py_config_file)?;
+                    tracing::info!(
+                        "Python configuration file written to {}",
+                        py_config_file.display()
+                    );
                     return Ok(None);
                 }
                 None => {}
@@ -380,15 +383,15 @@ enum Commands {
     Bridge {
         #[arg(
             long,
-            short = 'i',
-            help = "File name in which to write an invite for a bridge client to connect to the service."
+            short = 'c',
+            help = "File name in which to write the configuration file for a Python client that wants to connect to the bridge."
         )]
-        invite: Option<std::path::PathBuf>,
+        config: Option<std::path::PathBuf>,
 
         #[arg(
             long,
             short = 'r',
-            help = "Re-generate the API key used by bridge clients to connect to the service."
+            help = "Re-generate the API key used by bridge clients to connect to the service. Note you will need to generate a new configuration file for any Python clients."
         )]
         regenerate: bool,
     },

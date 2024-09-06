@@ -292,6 +292,16 @@ impl Job {
         Ok(self.version)
     }
 
+    fn update(&mut self) -> PyResult<()> {
+        match status(self.clone()) {
+            Ok(updated) => {
+                *self = updated;
+                Ok(())
+            }
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(format!(
             "Job( command: {}, status: {:?} )",
@@ -317,12 +327,25 @@ fn run(command: String) -> PyResult<Job> {
     }
 }
 
+///
+/// Get the status of the passed job on the OpenPortal System
+/// This will return the job updated to the latest version.
+///
+#[pyfunction]
+fn status(job: Job) -> PyResult<Job> {
+    match call_post::<Job>("status", serde_json::json!({"job": job.id})) {
+        Ok(response) => Ok(response),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
+    m.add_function(wrap_pyfunction!(status, m)?)?;
     Ok(())
 }
 

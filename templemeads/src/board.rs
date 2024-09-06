@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::command::Command;
 use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,39 +24,44 @@ impl Board {
     }
 
     ///
-    /// Register that the passed job has been received from our peer
-    ///
-    pub async fn received(&mut self, job: &Job) -> Result<(), Error> {
-        self.jobs.insert(job.id(), job.clone());
-
-        Ok(())
-    }
-
-    ///
-    /// Add the passed job to our board and send it to our peer
+    /// Add the passed job to our board - this will update the
+    /// job if it already exists and the new job has a newer
+    /// version
     ///
     pub async fn add(&mut self, job: &Job) -> Result<(), Error> {
-        self.jobs.insert(job.id(), job.clone());
-
-        // send the job to our peer
-        Command::put(job.clone()).send_to(&self.peer).await?;
-
-        Ok(())
-    }
-
-    ///
-    /// Update the job on our board - this will only update if
-    /// the job is newer than the one we have
-    ///
-    pub async fn update(&mut self, job: &Job) -> Result<(), Error> {
-        if let Some(j) = self.jobs.get_mut(&job.id()) {
-            // only update if newer
-            if job.version() > j.version() {
-                *j = job.clone();
+        match self.jobs.get_mut(&job.id()) {
+            Some(j) => {
+                // only update if newer
+                if job.version() > j.version() {
+                    *j = job.clone();
+                }
+            }
+            None => {
+                self.jobs.insert(job.id(), job.clone());
             }
         }
 
         Ok(())
+    }
+
+    ///
+    /// Remove the passed job from our board
+    /// If the job doesn't exist then we fail silently
+    ///
+    pub async fn remove(&mut self, job: &Job) -> Result<(), Error> {
+        self.jobs.remove(&job.id());
+        Ok(())
+    }
+
+    ///
+    /// Get the job with the passed id
+    /// If the job doesn't exist then we return an error
+    ///
+    pub async fn get(&self, id: &Uuid) -> Result<Job, Error> {
+        match self.jobs.get(id) {
+            Some(j) => Ok(j.clone()),
+            None => Err(Error::NotFound(format!("Job not found: {:?}", id))),
+        }
     }
 }
 
@@ -67,6 +71,9 @@ impl Board {
 pub enum Error {
     #[error("{0}")]
     AnyError(#[from] AnyError),
+
+    #[error("{0}")]
+    NotFound(String),
 
     #[error("Unknown error")]
     Unknown,

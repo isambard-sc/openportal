@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: MIT
 
 use serde::{Deserialize, Serialize};
+use std::cmp::{Ord, Ordering};
 
 #[derive(Clone, PartialEq)]
 pub struct Destination {
     agents: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Position {
     Upstream,
     Downstream,
-    Endpoint,
+    Destination,
     Error,
 }
 
@@ -26,64 +28,28 @@ impl Destination {
         self.agents.clone()
     }
 
-    pub fn contains(&self, agent: &str) -> bool {
-        self.agents.iter().any(|c| c == agent)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.agents.is_empty()
-    }
-
     pub fn position(&self, agent: &str, previous: &str) -> Position {
-        if let Some(index) = self.agents.iter().position(|c| c == agent) {
-            if index == self.agents.len() - 1 {
-                return Position::Endpoint;
-            } else if let Some(previous_index) = self.agents.iter().position(|c| c == previous) {
-                if index < previous_index {
-                    Position::Upstream
-                } else if index > previous_index {
-                    Position::Downstream
+        match self.agents.last() {
+            Some(last) => {
+                if last == agent {
+                    Position::Destination
                 } else {
-                    // cannot have the same index as the previous
-                    Position::Error
+                    let agent_index = self.agents.iter().position(|c| c == agent);
+                    let previous_index = self.agents.iter().position(|c| c == previous);
+
+                    match (agent_index, previous_index) {
+                        (Some(agent_index), Some(previous_index)) => {
+                            match Ord::cmp(&agent_index, &previous_index) {
+                                Ordering::Greater => Position::Downstream,
+                                Ordering::Less => Position::Upstream,
+                                Ordering::Equal => Position::Error,
+                            }
+                        }
+                        _ => Position::Error,
+                    }
                 }
-            } else {
-                Position::Error
             }
-        } else {
-            Position::Error
-        }
-    }
-
-    pub fn is_endpoint(&self, agent: &str) -> bool {
-        if let Some(last) = self.agents.last() {
-            last == agent
-        } else {
-            false
-        }
-    }
-
-    pub fn is_downstream(&self, agent: &str, previous: &str) -> bool {
-        if let Some(index) = self.agents.iter().position(|c| c == agent) {
-            if let Some(previous_index) = self.agents.iter().position(|c| c == previous) {
-                index > previous_index
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    pub fn is_upstream(&self, agent: &str, previous: &str) -> bool {
-        if let Some(index) = self.agents.iter().position(|c| c == agent) {
-            if let Some(previous_index) = self.agents.iter().position(|c| c == previous) {
-                index < previous_index
-            } else {
-                false
-            }
-        } else {
-            false
+            None => Position::Error,
         }
     }
 

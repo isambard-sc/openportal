@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::bridge::run as bridge_run;
+use crate::bridge::{run as bridge_run, status as bridge_status};
 use crate::job::Job;
 use anyhow::{Context, Error as AnyError, Result};
 use axum::{
@@ -21,6 +21,7 @@ use std::net::IpAddr;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use url::{ParseError, Url};
+use uuid::Uuid;
 
 ///
 /// Return the OpenPortal authorisation header for the passed datetime,
@@ -262,7 +263,51 @@ async fn run(
 
     tracing::info!("Running command: {}", payload.command);
 
-    Ok(Json(bridge_run(&payload.command).await?))
+    match bridge_run(&payload.command).await {
+        Ok(job) => Ok(Json(job)),
+        Err(e) => {
+            tracing::error!("Error running command: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+//
+// Struct to represent the requests to the 'run' endpoint
+//
+#[derive(Deserialize, Debug)]
+struct StatusRequest {
+    job: Uuid,
+}
+
+///
+/// The 'status' endpoint for the web API. This will return the status
+/// of the requested Job in the OpenPortal system
+///
+#[tracing::instrument(skip_all)]
+async fn status(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    //Query(params): Query<HashMap<String, String>>,
+    Json(payload): Json<StatusRequest>,
+) -> Result<Json<Job>, AppError> {
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "status",
+        Some(serde_json::json!({"job": payload.job})),
+    )?;
+
+    tracing::info!("Status request for job: {:?}", payload);
+
+    match bridge_status(&payload.job).await {
+        Ok(job) => Ok(Json(job)),
+        Err(e) => {
+            tracing::error!("Error getting status: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
 }
 
 /// Functions for the Bridge server
@@ -295,6 +340,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
         .route("/health", get(health))
         .route("/run", post(run))
+        .route("/status", post(status))
         .with_state(state);
 
     // create a TCP listener on the specified port

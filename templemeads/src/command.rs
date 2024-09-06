@@ -19,16 +19,16 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn put(job: Job) -> Self {
-        Self::Put { job }
+    pub fn put(job: &Job) -> Self {
+        Self::Put { job: job.clone() }
     }
 
-    pub fn update(job: Job) -> Self {
-        Self::Update { job }
+    pub fn update(job: &Job) -> Self {
+        Self::Update { job: job.clone() }
     }
 
-    pub fn delete(job: Job) -> Self {
-        Self::Delete { job }
+    pub fn delete(job: &Job) -> Self {
+        Self::Delete { job: job.clone() }
     }
 
     pub fn error(error: &str) -> Self {

@@ -44,18 +44,18 @@ pub async fn set_service_details(service: &str, agent_type: &agent::Type) -> Res
     Ok(())
 }
 
-async fn board_update(sender: &str, job: &Job) -> Result<(), Error> {
-    let board = state::get(sender).await?.board().await;
+async fn add_job(agent: &str, job: &Job) -> Result<(), Error> {
+    let board = state::get(agent).await?.board().await;
     let mut board = board.write().await;
-    board.update(job).await?;
+    board.add(job).await?;
 
     Ok(())
 }
 
-async fn board_received(sender: &str, job: &Job) -> Result<(), Error> {
-    let board = state::get(sender).await?.board().await;
+async fn delete_job(agent: &str, job: &Job) -> Result<(), Error> {
+    let board = state::get(agent).await?.board().await;
     let mut board = board.write().await;
-    board.received(job).await?;
+    board.remove(job).await?;
 
     Ok(())
 }
@@ -66,102 +66,103 @@ async fn board_received(sender: &str, job: &Job) -> Result<(), Error> {
 /// its destination it will take action
 ///
 async fn process_command(recipient: &str, sender: &str, command: &Command) -> Result<(), Error> {
-    tracing::info!(
-        "Processing command: {:?} to {} from {}",
-        command,
-        recipient,
-        sender
-    );
-
     match command {
         Command::Register { agent } => {
             tracing::info!("Registering agent: {:?}", agent);
             agent::register(sender, agent).await;
         }
         Command::Update { job } => {
-            // update the board with the updated job
             tracing::info!("Update job: {:?} to {} from {}", job, recipient, sender);
 
+            // update the sender's board with the updated job
+            add_job(sender, job).await?;
+
+            // now see if we need to send this to the next agent
             match job.destination().position(recipient, sender) {
                 Position::Upstream => {
-                    board_update(sender, job).await?;
-
-                    // if we are upstream, then we need to send the job to the next agent
-                    if let Some(next_agent) = job.destination().next(recipient) {
-                        Command::update(job.clone()).send_to(&next_agent).await?;
+                    // if we are upstream, then the job is moving backwards so we need to
+                    // send it to the previous agent
+                    if let Some(agent) = job.destination().previous(recipient) {
+                        add_job(&agent, job).await?;
+                        Command::update(job).send_to(&agent).await?;
                     }
                 }
                 Position::Downstream => {
-                    board_update(sender, job).await?;
-
-                    // if we are downstream, then we need to send the job to the previous agent
-                    if let Some(previous_agent) = job.destination().previous(recipient) {
-                        Command::update(job.clone())
-                            .send_to(&previous_agent)
-                            .await?;
+                    // if we are downstream, then we continue to let the job
+                    // flow downstream
+                    if let Some(agent) = job.destination().next(recipient) {
+                        add_job(&agent, job).await?;
+                        Command::update(job).send_to(&agent).await?;
                     }
                 }
-                Position::Endpoint => {
-                    // if we are at the endpoint, then there is nothing for us to do (we should have been the updated?)
-                    tracing::warn!(
-                        "Received update for endpoint job: {:?}. Ignoring the UPDATE",
-                        job
-                    );
-                }
-                Position::Error => {
-                    tracing::error!(
-                        "Error finding position for job {:?} when sent from {} to {}",
-                        job,
-                        sender,
-                        recipient
-                    );
-                    return Err(Error::Delivery(format!(
-                        "Error finding position for job {:?} when sent from {} to {}",
-                        job, sender, recipient
-                    )));
+                _ => {
+                    tracing::warn!("Job {:?} is being updated, but is not moving?", job);
                 }
             }
         }
         Command::Put { job } => {
-            // update the board with the updated job
             tracing::info!("Put job: {:?} to {} from {}", job, recipient, sender);
 
+            // update the sender's board with the updated job
+            add_job(sender, job).await?;
+
             match job.destination().position(recipient, sender) {
-                Position::Upstream => {
-                    board_received(sender, job).await?;
-
-                    // if we are upstream, then we need to send the job to the next agent
-                    if let Some(next_agent) = job.destination().next(recipient) {
-                        Command::put(job.clone()).send_to(&next_agent).await?;
-                    }
-                }
                 Position::Downstream => {
-                    board_received(sender, job).await?;
-
-                    // if we are downstream, then we need to send the job to the previous agent
-                    if let Some(previous_agent) = job.destination().previous(recipient) {
-                        Command::put(job.clone()).send_to(&previous_agent).await?;
+                    // if we are downstream, then we continue to let the job
+                    // flow downstream
+                    if let Some(agent) = job.destination().next(recipient) {
+                        add_job(&agent, job).await?;
+                        Command::put(job).send_to(&agent).await?;
                     }
                 }
-                Position::Endpoint => {
-                    // we are the endpoint, so we only need to receive the job into our board
-                    board_received(sender, job).await?;
+                Position::Destination => {
+                    // we are the destination, so we need to take action
+                    let job = job.execute().await?;
+
+                    tracing::info!("Job has finished: {:?}", job);
+
+                    // now the job has finished, update our board
+                    add_job(sender, &job).await?;
+
+                    // and now send this back to the sender
+                    Command::update(&job).send_to(sender).await?;
                 }
-                Position::Error => {
-                    tracing::error!(
-                        "Error finding position for job {:?} when sent from {} to {}",
-                        job,
-                        sender,
-                        recipient
-                    );
-                    return Err(Error::Delivery(format!(
-                        "Error finding position for job {:?} when sent from {} to {}",
-                        job, sender, recipient
-                    )));
+                _ => {
+                    tracing::warn!("Job {:?} is being put, but is not moving?", job);
                 }
             }
         }
-        _ => {}
+        Command::Delete { job } => {
+            tracing::info!("Delete job: {:?} to {} from {}", job, recipient, sender);
+
+            // remove the job from the sender's board
+            delete_job(sender, job).await?;
+
+            match job.destination().position(recipient, sender) {
+                Position::Upstream => {
+                    // if we are upstream, then the job is moving backwards so we need to
+                    // send it to the previous agent
+                    if let Some(agent) = job.destination().previous(recipient) {
+                        delete_job(&agent, job).await?;
+                        Command::delete(job).send_to(&agent).await?;
+                    }
+                }
+                Position::Downstream => {
+                    // if we are downstream, then we continue to let the job
+                    // flow downstream
+                    if let Some(agent) = job.destination().next(recipient) {
+                        delete_job(&agent, job).await?;
+                        Command::delete(job).send_to(&agent).await?;
+                    }
+                }
+                _ => {
+                    tracing::warn!("Job {:?} is being deleted, but is not moving?", job);
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("Command {:?} not recognised", command);
+        }
     }
 
     Ok(())

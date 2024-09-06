@@ -212,6 +212,17 @@ impl Job {
             },
         }
     }
+
+    pub async fn execute(&self) -> Result<Job, Error> {
+        // execute the command
+        tracing::info!("Running job.execute() for job: {:?}", self);
+
+        let mut job = self.clone();
+
+        job.completed("Hello, World! - we have run!")?;
+
+        Ok(job)
+    }
 }
 
 // Errors

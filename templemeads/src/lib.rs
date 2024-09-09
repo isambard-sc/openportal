@@ -18,6 +18,7 @@ pub mod board;
 pub mod bridge;
 pub mod destination;
 pub mod job;
+pub mod runnable;
 
 pub mod server {
     pub use crate::bridge_server::sign_api_call;

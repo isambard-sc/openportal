@@ -35,7 +35,7 @@ pub async fn run(config: Config) -> Result<(), AnyError> {
     }
 
     // pass the service details onto the handler
-    set_service_details(&config.service.name, &config.agent).await?;
+    set_service_details(&config.service.name, &config.agent, None).await?;
 
     // spawn the bridge server
     spawn(config.bridge).await?;

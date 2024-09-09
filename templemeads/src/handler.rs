@@ -8,12 +8,14 @@ use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
 use crate::job::{Error as JobError, Job};
+use crate::runnable::{default_runner, AsyncRunnable, Error as RunnableError};
 use crate::state;
 use anyhow::{Error as AnyError, Result};
 use once_cell::sync::Lazy;
 use paddington::message::Message;
 use paddington::{async_message_handler, Error as PaddingtonError};
 use serde_json::Error as SerdeError;
+use std::boxed::Box;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -21,6 +23,7 @@ use tokio::sync::RwLock;
 struct ServiceDetails {
     service: String,
     agent_type: AgentType,
+    runner: AsyncRunnable,
 }
 
 impl Default for ServiceDetails {
@@ -28,6 +31,7 @@ impl Default for ServiceDetails {
         ServiceDetails {
             service: String::new(),
             agent_type: agent::Type::Portal,
+            runner: default_runner,
         }
     }
 }
@@ -35,11 +39,20 @@ impl Default for ServiceDetails {
 static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
     Lazy::new(|| RwLock::new(ServiceDetails::default()));
 
-pub async fn set_service_details(service: &str, agent_type: &agent::Type) -> Result<()> {
+pub async fn set_service_details(
+    service: &str,
+    agent_type: &agent::Type,
+    runner: Option<AsyncRunnable>,
+) -> Result<()> {
     agent::register(service, agent_type).await;
     let mut service_details = SERVICE_DETAILS.write().await;
     service_details.service = service.to_string();
     service_details.agent_type = agent_type.clone();
+
+    if let Some(runner) = runner {
+        // only change this if a runner has been passed
+        service_details.runner = runner;
+    }
 
     Ok(())
 }
@@ -65,7 +78,12 @@ async fn delete_job(agent: &str, job: &Job) -> Result<(), Error> {
 /// This will either route the command to the right place, or if the command has reached
 /// its destination it will take action
 ///
-async fn process_command(recipient: &str, sender: &str, command: &Command) -> Result<(), Error> {
+async fn process_command(
+    recipient: &str,
+    sender: &str,
+    command: &Command,
+    runner: &AsyncRunnable,
+) -> Result<(), Error> {
     match command {
         Command::Register { agent } => {
             tracing::info!("Registering agent: {:?}", agent);
@@ -117,7 +135,7 @@ async fn process_command(recipient: &str, sender: &str, command: &Command) -> Re
                 }
                 Position::Destination => {
                     // we are the destination, so we need to take action
-                    let job = job.execute().await?;
+                    let job = runner(job.clone()).await?;
 
                     tracing::info!("Job has finished: {:?}", job);
 
@@ -186,7 +204,7 @@ async_message_handler! {
                     return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
                 }
 
-                Ok(process_command(&recipient, &sender, &command).await?)
+                Ok(process_command(&recipient, &sender, &command, &service_info.runner).await?)
             }
         }
     }
@@ -201,6 +219,9 @@ pub enum Error {
 
     #[error("{0}")]
     Job(#[from] JobError),
+
+    #[error("{0}")]
+    Runnable(#[from] RunnableError),
 
     #[error("{0}")]
     Paddington(#[from] PaddingtonError),

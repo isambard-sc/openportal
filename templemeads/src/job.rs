@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use crate::destination::Destination;
+use crate::grammar::Instruction;
+
 use anyhow::Error as AnyError;
 use anyhow::Result;
 use thiserror::Error;
@@ -26,8 +28,7 @@ pub enum Status {
 #[derive(Clone, PartialEq)]
 struct Command {
     destination: Destination,
-    command: String,
-    arguments: Vec<String>,
+    instruction: Instruction,
 }
 
 impl Command {
@@ -35,13 +36,11 @@ impl Command {
         // the format of commands is "destination command arguments..."
         let mut parts = command.split_whitespace();
         let destination = Destination::new(parts.next().unwrap_or(""));
-        let command = parts.next().unwrap_or("").to_string();
-        let arguments = parts.map(|s| s.to_string()).collect();
+        let instruction = Instruction::new(&parts.collect::<Vec<&str>>().join(" "));
 
         Self {
             destination,
-            command,
-            arguments,
+            instruction,
         }
     }
 
@@ -49,36 +48,24 @@ impl Command {
         self.destination.clone()
     }
 
-    pub fn command(&self) -> String {
-        self.command.clone()
+    pub fn instruction(&self) -> Instruction {
+        self.instruction.clone()
     }
 
-    pub fn arguments(&self) -> Vec<String> {
-        self.arguments.clone()
+    pub fn is_valid(&self) -> bool {
+        self.destination.is_valid() && self.instruction.is_valid()
     }
 }
 
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{} {} {}",
-            self.destination,
-            self.command,
-            self.arguments.join(" ")
-        )
+        write!(f, "{} {}", self.destination, self.instruction)
     }
 }
 
 impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{} {} {}",
-            self.destination,
-            self.command,
-            self.arguments.join(" ")
-        )
+        write!(f, "{} {}", self.destination, self.instruction,)
     }
 }
 
@@ -131,6 +118,16 @@ impl Job {
         }
     }
 
+    pub fn parse(command: &str) -> Result<Self, Error> {
+        let job = Self::new(command);
+
+        if !job.command.is_valid() {
+            return Err(Error::Parse("Invalid command".to_owned()));
+        }
+
+        Ok(job)
+    }
+
     pub fn id(&self) -> Uuid {
         self.id
     }
@@ -139,12 +136,8 @@ impl Job {
         self.command.destination()
     }
 
-    pub fn command(&self) -> String {
-        self.command.command()
-    }
-
-    pub fn arguments(&self) -> Vec<String> {
-        self.command.arguments()
+    pub fn instruction(&self) -> Instruction {
+        self.command.instruction()
     }
 
     pub fn state(&self) -> Status {
@@ -240,6 +233,9 @@ pub enum Error {
 
     #[error("Invalid state: {0}")]
     InvalidState(String),
+
+    #[error("{0}")]
+    Parse(String),
 
     #[error("{0}")]
     Unknown(String),

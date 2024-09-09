@@ -43,7 +43,7 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
 
 pub async fn run(command: &str) -> Result<Job, Error> {
     tracing::info!("Received command: {}", command);
-    let job = Job::new(command);
+    let job = Job::parse(command)?;
 
     match agent::portal().await {
         Some(portal) => {

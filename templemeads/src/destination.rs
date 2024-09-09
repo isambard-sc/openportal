@@ -80,6 +80,14 @@ impl Destination {
             None
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.agents.is_empty()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.agents.is_empty()
+    }
 }
 
 impl std::fmt::Debug for Destination {

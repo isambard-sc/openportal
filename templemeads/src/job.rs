@@ -16,6 +16,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Status {
     Pending,
+    Blocked,
     Complete,
     Error,
 }
@@ -156,7 +157,25 @@ impl Job {
         self.version
     }
 
-    pub fn completed<T>(&mut self, result: T) -> Result<(), Error>
+    pub fn blocked_by(&self, job: &Job) -> Result<Job, Error> {
+        if self.state != Status::Pending {
+            return Err(Error::InvalidState(
+                "Cannot set blocked status on a non-pending job".to_owned(),
+            ));
+        }
+
+        Ok(Job {
+            id: self.id,
+            created: self.created,
+            updated: Utc::now(),
+            version: self.version + 1,
+            command: self.command.clone(),
+            state: Status::Blocked,
+            result: Some(job.id.to_string()),
+        })
+    }
+
+    pub fn completed<T>(&self, result: T) -> Result<Job, Error>
     where
         T: serde::Serialize,
     {
@@ -166,27 +185,33 @@ impl Job {
             ));
         }
 
-        self.state = Status::Complete;
-        self.result = Some(serde_json::to_string(&result)?);
-        self.updated = Utc::now();
-        self.version += 1;
-
-        Ok(())
+        Ok(Job {
+            id: self.id,
+            created: self.created,
+            updated: Utc::now(),
+            version: self.version + 1,
+            command: self.command.clone(),
+            state: Status::Complete,
+            result: Some(serde_json::to_string(&result)?),
+        })
     }
 
-    pub fn errored(&mut self, message: &str) -> Result<(), Error> {
+    pub fn errored(&self, message: &str) -> Result<Job, Error> {
         if self.state != Status::Pending {
             return Err(Error::InvalidState(
                 "Cannot set error on non-pending job".to_owned(),
             ));
         }
 
-        self.state = Status::Error;
-        self.result = Some(message.to_owned());
-        self.updated = Utc::now();
-        self.version += 1;
-
-        Ok(())
+        Ok(Job {
+            id: self.id,
+            created: self.created,
+            updated: Utc::now(),
+            version: self.version + 1,
+            command: self.command.clone(),
+            state: Status::Error,
+            result: Some(message.to_owned()),
+        })
     }
 
     pub fn result<T>(&self) -> Result<Option<T>, Error>
@@ -195,6 +220,7 @@ impl Job {
     {
         match self.state {
             Status::Pending => Ok(None),
+            Status::Blocked => Ok(None),
             Status::Error => match &self.result {
                 Some(result) => Err(Error::RunError(result.clone())),
                 None => Err(Error::InvalidState("Unknown error".to_owned())),
@@ -210,11 +236,7 @@ impl Job {
         // execute the command
         tracing::info!("Running job.execute() for job: {:?}", self);
 
-        let mut job = self.clone();
-
-        job.completed("Hello, World! - we have run!")?;
-
-        Ok(job)
+        self.errored(format!("No default runner for job: {:?}", self).as_str())
     }
 }
 

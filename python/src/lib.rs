@@ -262,6 +262,7 @@ impl Job {
     fn state(&self) -> PyResult<String> {
         match self.state {
             Status::Pending => Ok("Pending".to_owned()),
+            Status::Blocked => Ok("Blocked".to_owned()),
             Status::Complete => Ok("Complete".to_owned()),
             Status::Error => Ok("Error".to_owned()),
         }

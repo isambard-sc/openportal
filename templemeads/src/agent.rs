@@ -93,9 +93,21 @@ impl Registrar {
             .unwrap_or_default()
     }
 
+    ///
+    /// Return the name of the first portal agent in the system
+    ///
     fn portal(&self) -> Option<String> {
         self.by_type
             .get(&Type::Portal)
+            .and_then(|v| v.first().cloned())
+    }
+
+    ///
+    /// Return the name of the first account agent in the system
+    ///
+    fn account(&self) -> Option<String> {
+        self.by_type
+            .get(&Type::Account)
             .and_then(|v| v.first().cloned())
     }
 }
@@ -128,6 +140,13 @@ pub async fn get_all(agent_type: &Type) -> Vec<String> {
 ///
 pub async fn portal() -> Option<String> {
     REGISTAR.read().await.portal()
+}
+
+///
+/// Return the name of the first account agent in the system
+///
+pub async fn account() -> Option<String> {
+    REGISTAR.read().await.account()
 }
 
 /// Errors

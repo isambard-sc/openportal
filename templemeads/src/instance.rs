@@ -4,13 +4,14 @@
 use crate::agent::Type as AgentType;
 use crate::agent_core::Config;
 use crate::handler::{process_message, set_service_details};
+use crate::runnable::AsyncRunnable;
 use anyhow::{Error as AnyError, Result};
 use thiserror::Error;
 
 ///
 /// Run the agent service
 ///
-pub async fn run(config: Config) -> Result<(), AnyError> {
+pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), AnyError> {
     if config.service.name.is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()).into());
     }
@@ -20,7 +21,7 @@ pub async fn run(config: Config) -> Result<(), AnyError> {
     }
 
     // pass the service details onto the handler
-    set_service_details(&config.service.name, &config.agent, None).await?;
+    set_service_details(&config.service.name, &config.agent, Some(runner)).await?;
 
     // run the Provider OpenPortal agent
     paddington::set_handler(process_message).await?;

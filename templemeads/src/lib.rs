@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 // internal API
+mod account;
 mod agent_bridge;
 mod agent_core;
 mod bridge_server;
 mod command;
 mod control_message;
 mod handler;
+mod instance;
+mod platform;
 mod portal;
 mod provider;
 mod state;

@@ -15,10 +15,32 @@ pub enum Type {
     Platform,
     Instance,
     Bridge,
+    Account,
+}
+
+pub mod account {
+    pub use crate::account::run;
+    pub use crate::agent_core::process_args;
+    pub use crate::agent_core::Config;
+    pub use crate::agent_core::Defaults;
 }
 
 pub mod bridge {
     pub use crate::agent_bridge::*;
+}
+
+pub mod instance {
+    pub use crate::agent_core::process_args;
+    pub use crate::agent_core::Config;
+    pub use crate::agent_core::Defaults;
+    pub use crate::instance::run;
+}
+
+pub mod platform {
+    pub use crate::agent_core::process_args;
+    pub use crate::agent_core::Config;
+    pub use crate::agent_core::Defaults;
+    pub use crate::platform::run;
 }
 
 pub mod portal {

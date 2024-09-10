@@ -14,9 +14,38 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Envelope {
+    recipient: String,
+    sender: String,
+    job: Job,
+}
+
+impl Envelope {
+    pub fn new(recipient: &str, sender: &str, job: &Job) -> Self {
+        Self {
+            recipient: recipient.to_owned(),
+            sender: sender.to_owned(),
+            job: job.clone(),
+        }
+    }
+
+    pub fn recipient(&self) -> String {
+        self.recipient.clone()
+    }
+
+    pub fn sender(&self) -> String {
+        self.sender.clone()
+    }
+
+    pub fn job(&self) -> Job {
+        self.job.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Status {
     Pending,
-    Blocked,
+    Running,
     Complete,
     Error,
 }
@@ -141,6 +170,10 @@ impl Job {
         self.command.instruction()
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.state == Status::Complete || self.state == Status::Error
+    }
+
     pub fn state(&self) -> Status {
         self.state.clone()
     }
@@ -157,10 +190,10 @@ impl Job {
         self.version
     }
 
-    pub fn blocked_by(&self, job: &Job) -> Result<Job, Error> {
+    pub fn running(&self, progress: Option<String>) -> Result<Job, Error> {
         if self.state != Status::Pending {
             return Err(Error::InvalidState(
-                "Cannot set blocked status on a non-pending job".to_owned(),
+                "Cannot set running on non-pending job".to_owned(),
             ));
         }
 
@@ -170,8 +203,8 @@ impl Job {
             updated: Utc::now(),
             version: self.version + 1,
             command: self.command.clone(),
-            state: Status::Blocked,
-            result: Some(job.id.to_string()),
+            state: Status::Running,
+            result: progress,
         })
     }
 
@@ -179,9 +212,10 @@ impl Job {
     where
         T: serde::Serialize,
     {
-        if self.state != Status::Pending {
+        // can only do this from the pending or running state
+        if self.state != Status::Pending && self.state != Status::Running {
             return Err(Error::InvalidState(
-                "Cannot set result on non-pending job".to_owned(),
+                "Cannot set complete on non-pending or non-running job".to_owned(),
             ));
         }
 
@@ -197,7 +231,7 @@ impl Job {
     }
 
     pub fn errored(&self, message: &str) -> Result<Job, Error> {
-        if self.state != Status::Pending {
+        if self.state != Status::Pending && self.state != Status::Running {
             return Err(Error::InvalidState(
                 "Cannot set error on non-pending job".to_owned(),
             ));
@@ -214,13 +248,39 @@ impl Job {
         })
     }
 
+    pub fn is_error(&self) -> bool {
+        self.state == Status::Error
+    }
+
+    pub fn error_message(&self) -> Option<String> {
+        match self.state {
+            Status::Error => self.result.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn progress_message(&self) -> Option<String> {
+        match self.state {
+            Status::Running => {
+                if let Some(result) = &self.result {
+                    Some(result.clone())
+                } else {
+                    Some("Running".to_owned())
+                }
+            }
+            Status::Pending => Some("Pending".to_owned()),
+            Status::Complete => Some("Complete".to_owned()),
+            Status::Error => Some("Error".to_owned()),
+        }
+    }
+
     pub fn result<T>(&self) -> Result<Option<T>, Error>
     where
         T: serde::de::DeserializeOwned,
     {
         match self.state {
             Status::Pending => Ok(None),
-            Status::Blocked => Ok(None),
+            Status::Running => Ok(None),
             Status::Error => match &self.result {
                 Some(result) => Err(Error::RunError(result.clone())),
                 None => Err(Error::InvalidState("Unknown error".to_owned())),

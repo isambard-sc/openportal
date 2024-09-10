@@ -30,7 +30,7 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
             let board = board.read().await;
 
             // get the job from the board
-            Ok(board.get(job).await?.clone())
+            Ok(board.get(job)?.clone())
         }
         None => {
             tracing::error!("No portal agent found");
@@ -62,7 +62,7 @@ pub async fn run(command: &str) -> Result<Job, Error> {
                 let mut board = board.write().await;
 
                 // add the job to the board
-                match board.add(&job).await {
+                match board.add(&job) {
                     Ok(_) => (),
                     Err(e) => {
                         tracing::error!("Error adding job to board: {:?}", e);

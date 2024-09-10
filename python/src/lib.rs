@@ -262,7 +262,7 @@ impl Job {
     fn state(&self) -> PyResult<String> {
         match self.state {
             Status::Pending => Ok("Pending".to_owned()),
-            Status::Blocked => Ok("Blocked".to_owned()),
+            Status::Running => Ok("Running".to_owned()),
             Status::Complete => Ok("Complete".to_owned()),
             Status::Error => Ok("Error".to_owned()),
         }
@@ -286,6 +286,41 @@ impl Job {
     #[getter]
     fn result(&self) -> PyResult<Option<String>> {
         Ok(self.result.clone())
+    }
+
+    #[getter]
+    fn is_finished(&self) -> PyResult<bool> {
+        Ok(self.state == Status::Complete || self.state == Status::Error)
+    }
+
+    #[getter]
+    fn is_error(&self) -> PyResult<bool> {
+        Ok(self.state == Status::Error)
+    }
+
+    #[getter]
+    fn error_message(&self) -> PyResult<Option<String>> {
+        if self.state == Status::Error {
+            Ok(self.result.clone())
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[getter]
+    fn progress_message(&self) -> PyResult<String> {
+        match self.state {
+            Status::Running => {
+                if let Some(result) = &self.result {
+                    Ok(result.clone())
+                } else {
+                    Ok("Running".to_owned())
+                }
+            }
+            Status::Pending => Ok("Pending".to_owned()),
+            Status::Complete => Ok("Complete".to_owned()),
+            Status::Error => Ok("Error".to_owned()),
+        }
     }
 
     #[getter]

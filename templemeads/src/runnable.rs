@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::job::{Error as JobError, Job};
+use crate::job::{Envelope, Error as JobError, Job};
 
 use anyhow::Error as AnyError;
 use anyhow::Result;
@@ -31,7 +31,7 @@ macro_rules! async_runnable {(
 )}
 
 pub type AsyncRunnable = fn(
-    Job,
+    Envelope,
 ) -> Pin<
     Box<
         dyn Future<Output = Result<Job, Error>> // future API / pollable
@@ -40,10 +40,10 @@ pub type AsyncRunnable = fn(
 >;
 
 async_runnable! {
-    pub async fn default_runner(job: Job) -> Result<Job, Error>
+    pub async fn default_runner(envelope: Envelope) -> Result<Job, Error>
     {
-        tracing::info!("Using the default runner");
-        Ok(job.execute().await?)
+        tracing::info!("Using the default runner for job from {} to {}", envelope.sender(), envelope.recipient());
+        Ok(envelope.job().execute().await?)
     }
 }
 

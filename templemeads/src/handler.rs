@@ -7,7 +7,7 @@ use crate::board::Error as BoardError;
 use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
-use crate::job::{Error as JobError, Job};
+use crate::job::{Envelope, Error as JobError, Job};
 use crate::runnable::{default_runner, AsyncRunnable, Error as RunnableError};
 use crate::state;
 use anyhow::{Error as AnyError, Result};
@@ -60,7 +60,7 @@ pub async fn set_service_details(
 async fn add_job(agent: &str, job: &Job) -> Result<(), Error> {
     let board = state::get(agent).await?.board().await;
     let mut board = board.write().await;
-    board.add(job).await?;
+    board.add(job)?;
 
     Ok(())
 }
@@ -68,7 +68,7 @@ async fn add_job(agent: &str, job: &Job) -> Result<(), Error> {
 async fn delete_job(agent: &str, job: &Job) -> Result<(), Error> {
     let board = state::get(agent).await?.board().await;
     let mut board = board.write().await;
-    board.remove(job).await?;
+    board.remove(job)?;
 
     Ok(())
 }
@@ -135,7 +135,7 @@ async fn process_command(
                 }
                 Position::Destination => {
                     // we are the destination, so we need to take action
-                    let job = runner(job.clone()).await?;
+                    let job = runner(Envelope::new(recipient, sender, job)).await?;
 
                     tracing::info!("Job has finished: {:?}", job);
 

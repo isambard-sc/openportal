@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::board::Waiter;
+use crate::command::Command as ControlCommand;
 use crate::destination::Destination;
 use crate::grammar::Instruction;
+use crate::state;
 
 use anyhow::Error as AnyError;
 use anyhow::Result;
@@ -44,6 +47,7 @@ impl Envelope {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Status {
+    Created,
     Pending,
     Running,
     Complete,
@@ -127,11 +131,13 @@ pub struct Job {
     #[serde(with = "ts_seconds")]
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    updated: chrono::DateTime<Utc>,
+    changed: chrono::DateTime<Utc>,
     version: u64,
     command: Command,
     state: Status,
     result: Option<String>,
+    #[serde(skip)]
+    board: Option<String>,
 }
 
 impl Job {
@@ -140,11 +146,12 @@ impl Job {
         Self {
             id: Uuid::new_v4(),
             created: now,
-            updated: now,
+            changed: now,
             version: 1,
             command: Command::new(command),
-            state: Status::Pending,
+            state: Status::Created,
             result: None,
+            board: None,
         }
     }
 
@@ -182,70 +189,110 @@ impl Job {
         self.created
     }
 
-    pub fn updated(&self) -> chrono::DateTime<Utc> {
-        self.updated
+    pub fn changed(&self) -> chrono::DateTime<Utc> {
+        self.changed
     }
 
     pub fn version(&self) -> u64 {
         self.version
     }
 
-    pub fn running(&self, progress: Option<String>) -> Result<Job, Error> {
-        if self.state != Status::Pending {
-            return Err(Error::InvalidState(
-                "Cannot set running on non-pending job".to_owned(),
-            ));
+    pub fn assert_is_for_board(&self, agent: &str) -> Result<(), Error> {
+        match &self.board {
+            Some(b) => {
+                if b == agent {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidBoard(
+                        format!("Job {} is on board {}, not board {}", self.id, b, agent)
+                            .to_owned(),
+                    ))
+                }
+            }
+            None => Err(Error::InvalidBoard(
+                format!(
+                    "Job {} is not on any board, so is not on board {}",
+                    self.id, agent
+                )
+                .to_owned(),
+            )),
         }
+    }
 
-        Ok(Job {
-            id: self.id,
-            created: self.created,
-            updated: Utc::now(),
-            version: self.version + 1,
-            command: self.command.clone(),
-            state: Status::Running,
-            result: progress,
-        })
+    pub fn pending(&self) -> Result<Job, Error> {
+        match self.state {
+            Status::Created => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                version: self.version + 1,
+                command: self.command.clone(),
+                state: Status::Pending,
+                result: self.result.clone(),
+                board: self.board.clone(),
+            }),
+            Status::Pending => Ok(self.clone()),
+            _ => Err(Error::InvalidState(
+                format!("Cannot set pending on job in state: {:?}", self.state).to_owned(),
+            )),
+        }
+    }
+
+    pub fn running(&self, progress: Option<String>) -> Result<Job, Error> {
+        match self.state {
+            Status::Pending | Status::Running => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                version: self.version + 1,
+                command: self.command.clone(),
+                state: Status::Running,
+                result: progress,
+                board: self.board.clone(),
+            }),
+            _ => Err(Error::InvalidState(
+                format!("Cannot set running on job in state: {:?}", self.state).to_owned(),
+            )),
+        }
     }
 
     pub fn completed<T>(&self, result: T) -> Result<Job, Error>
     where
         T: serde::Serialize,
     {
-        // can only do this from the pending or running state
-        if self.state != Status::Pending && self.state != Status::Running {
-            return Err(Error::InvalidState(
-                "Cannot set complete on non-pending or non-running job".to_owned(),
-            ));
+        match self.state {
+            Status::Pending | Status::Running => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                version: self.version + 1,
+                command: self.command.clone(),
+                state: Status::Complete,
+                result: Some(serde_json::to_string(&result)?),
+                board: self.board.clone(),
+            }),
+            _ => Err(Error::InvalidState(
+                format!("Cannot set complete on job in state: {:?}", self.state).to_owned(),
+            )),
         }
-
-        Ok(Job {
-            id: self.id,
-            created: self.created,
-            updated: Utc::now(),
-            version: self.version + 1,
-            command: self.command.clone(),
-            state: Status::Complete,
-            result: Some(serde_json::to_string(&result)?),
-        })
     }
 
     pub fn errored(&self, message: &str) -> Result<Job, Error> {
-        if self.state != Status::Pending && self.state != Status::Running {
-            return Err(Error::InvalidState(
-                "Cannot set error on non-pending job".to_owned(),
-            ));
+        match self.state {
+            Status::Pending | Status::Running => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                version: self.version + 1,
+                command: self.command.clone(),
+                state: Status::Error,
+                result: Some(message.to_owned()),
+                board: self.board.clone(),
+            }),
+            _ => Err(Error::InvalidState(
+                format!("Cannot set error on job in state: {:?}", self.state).to_owned(),
+            )),
         }
-
-        Ok(Job {
-            id: self.id,
-            created: self.created,
-            updated: Utc::now(),
-            version: self.version + 1,
-            command: self.command.clone(),
-            state: Status::Error,
-            result: Some(message.to_owned()),
-        })
     }
 
     pub fn is_error(&self) -> bool {
@@ -268,6 +315,7 @@ impl Job {
                     Some("Running".to_owned())
                 }
             }
+            Status::Created => Some("Created".to_owned()),
             Status::Pending => Some("Pending".to_owned()),
             Status::Complete => Some("Complete".to_owned()),
             Status::Error => Some("Error".to_owned()),
@@ -279,6 +327,7 @@ impl Job {
         T: serde::de::DeserializeOwned,
     {
         match self.state {
+            Status::Created => Ok(None),
             Status::Pending => Ok(None),
             Status::Running => Ok(None),
             Status::Error => match &self.result {
@@ -293,10 +342,259 @@ impl Job {
     }
 
     pub async fn execute(&self) -> Result<Job, Error> {
-        // execute the command
-        tracing::info!("Running job.execute() for job: {:?}", self);
+        match self.state() {
+            Status::Pending => {
+                tracing::info!("Running job.execute() for job: {:?}", self);
+                self.errored(format!("No default runner for job: {:?}", self).as_str())
+            }
+            _ => Err(Error::InvalidState(
+                format!("Cannot execute job in state: {:?}", self.state).to_owned(),
+            )),
+        }
+    }
 
-        self.errored(format!("No default runner for job: {:?}", self).as_str())
+    pub async fn received(&self, agent: &str) -> Result<Job, Error> {
+        if self.state == Status::Created {
+            return Err(Error::InvalidState(
+                format!("A created job should not have been received? {:?}", self).to_owned(),
+            ));
+        }
+
+        let mut job = self.clone();
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // add the job to the board - we need to set our board to the agent
+            // first, so that the board can check it is correct
+            job.board = Some(agent.to_owned());
+            board.add(&job)?;
+        }
+
+        Ok(job)
+    }
+
+    pub async fn put(&self, agent: &str) -> Result<Job, Error> {
+        // transition the job to pending, recording where it was sent
+        let mut job = self.pending()?;
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // add the job to the board - we need to set our board to the agent
+            // first, so that the board can check it is correct
+            job.board = Some(agent.to_owned());
+            board.add(&job)?;
+        }
+
+        // now send it to the agent for processing
+        ControlCommand::put(&job).send_to(agent).await?;
+
+        Ok(job)
+    }
+
+    pub async fn updated(&self) -> Result<Job, Error> {
+        let agent = match self.board {
+            Some(ref a) => a,
+            None => {
+                return Err(Error::InvalidBoard(
+                    "Job has no board, so cannot be updated".to_owned(),
+                ))
+            }
+        };
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // add the job to the board - we need to set our board to the agent
+            // first, so that the board can check it is correct
+            board.add(self)?;
+        }
+
+        Ok(self.clone())
+    }
+
+    pub async fn update(&self, agent: &str) -> Result<Job, Error> {
+        let mut job = self.clone();
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // add the job to the board - we need to set our board to the agent
+            // first, so that the board can check it is correct
+            job.board = Some(agent.to_owned());
+            board.add(&job)?;
+        }
+
+        // now send it to the agent for processing
+        ControlCommand::update(&job).send_to(agent).await?;
+
+        Ok(job)
+    }
+
+    pub async fn deleted(&self, agent: &str) -> Result<Job, Error> {
+        let mut job = self.clone();
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // remove the job to the board
+            job.board = Some(agent.to_owned());
+            board.remove(&job)?;
+            job.board = None;
+        }
+
+        Ok(job)
+    }
+
+    pub async fn delete(&self, agent: &str) -> Result<Job, Error> {
+        let mut job = self.clone();
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // remove the job from the board
+            job.board = Some(agent.to_owned());
+            board.remove(&job)?;
+            job.board = None;
+        }
+
+        // now send it to the agent for processing
+        ControlCommand::delete(&job).send_to(agent).await?;
+
+        Ok(job)
+    }
+
+    pub async fn wait(&self) -> Result<Job, Error> {
+        if self.is_finished() {
+            return Ok(self.clone());
+        }
+
+        let agent = match self.board {
+            Some(ref a) => a,
+            None => {
+                return Err(Error::InvalidBoard(
+                    "Job has no board, so cannot waited upon".to_owned(),
+                ))
+            }
+        };
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e.into());
+            }
+        };
+
+        let waiter: Waiter;
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // return a waiter for the job constructed from the board
+            waiter = board.get_waiter(self)?;
+        }
+
+        // wait for the job to finish
+        Ok(waiter.result().await?)
     }
 }
 
@@ -305,7 +603,7 @@ impl Job {
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
     SerdeJson(#[from] serde_json::Error),
@@ -313,7 +611,10 @@ pub enum Error {
     #[error("{0}")]
     RunError(String),
 
-    #[error("Invalid state: {0}")]
+    #[error("{0}")]
+    InvalidBoard(String),
+
+    #[error("{0}")]
     InvalidState(String),
 
     #[error("{0}")]
@@ -321,4 +622,11 @@ pub enum Error {
 
     #[error("{0}")]
     Unknown(String),
+}
+
+// auto convert from StateError to JobError
+impl From<state::Error> for Error {
+    fn from(e: state::Error) -> Error {
+        Error::Any(e.into())
+    }
 }

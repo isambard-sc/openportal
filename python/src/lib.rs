@@ -244,7 +244,7 @@ struct Job {
     #[serde(with = "ts_seconds")]
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    updated: chrono::DateTime<Utc>,
+    changed: chrono::DateTime<Utc>,
     version: u64,
     command: String,
     state: Status,
@@ -261,6 +261,7 @@ impl Job {
     #[getter]
     fn state(&self) -> PyResult<String> {
         match self.state {
+            Status::Created => Ok("Created".to_owned()),
             Status::Pending => Ok("Pending".to_owned()),
             Status::Running => Ok("Running".to_owned()),
             Status::Complete => Ok("Complete".to_owned()),
@@ -279,8 +280,8 @@ impl Job {
     }
 
     #[getter]
-    fn updated(&self) -> PyResult<String> {
-        Ok(self.updated.to_rfc3339())
+    fn changed(&self) -> PyResult<String> {
+        Ok(self.changed.to_rfc3339())
     }
 
     #[getter]
@@ -317,6 +318,7 @@ impl Job {
                     Ok("Running".to_owned())
                 }
             }
+            Status::Created => Ok("Created".to_owned()),
             Status::Pending => Ok("Pending".to_owned()),
             Status::Complete => Ok("Complete".to_owned()),
             Status::Error => Ok("Error".to_owned()),

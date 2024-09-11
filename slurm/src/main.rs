@@ -9,8 +9,6 @@ use templemeads::agent;
 use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::board::{Error as BoardError, Waiter};
-use templemeads::command::Command;
 use templemeads::grammar::Instruction::{AddUser, RemoveUser};
 use templemeads::job::{Envelope, Error as JobError, Job};
 use templemeads::runnable::Error as RunnableError;
@@ -96,61 +94,24 @@ async fn runner(envelope: &Envelope) -> Result<Job, Error> {
             // find the Account agent
             match agent::account().await {
                 Some(account) => {
-                    // create a new job to tell the account agent to add the user
+                    // send the add_job to the account agent
                     let add_job = Job::parse(&format!(
                         "{}.{} add_user {}",
                         envelope.recipient(),
                         account,
                         user
-                    ))?;
+                    ))?
+                    .put(&account)
+                    .await?;
 
-                    // get the (shared) board for the account
-                    let board = match state::get(&account).await {
-                        Ok(b) => b.board().await,
-                        Err(e) => {
-                            tracing::error!("Error getting board for account: {:?}", e);
-                            return Err(Error::State(e));
-                        }
-                    };
+                    // update the submitted job we are processing to say that the account is being created
+                    job = job
+                        .running(Some("Account being created".to_owned()))?
+                        .updated()
+                        .await?;
 
-                    // Put the job on the board
-                    {
-                        // get the mutable board from the Arc<RwLock> board - this is the
-                        // blocking operation
-                        let mut board = board.write().await;
-
-                        // add the job to the board
-                        match board.add(&job) {
-                            Ok(_) => (),
-                            Err(e) => {
-                                tracing::error!("Error adding job to board: {:?}", e);
-                                return Err(Error::Board(e));
-                            }
-                        }
-                    }
-
-                    // now send it to the account for processing
-                    Command::put(&add_job).send_to(&account).await?;
-
-                    // update the job we are processing to say that the account is being created
-                    job = job.running(Some("Account being created".to_owned()))?;
-
-                    Command::update(&job).send_to(&envelope.sender()).await?;
-
-                    // now ask the board to block until this job has returned or errored
-                    let waiter: Waiter;
-                    {
-                        let mut board = board.write().await;
-                        waiter = board.wait_for(&job)?;
-                    }
-
-                    // wait for the job to complete
-                    tracing::info!("Waiting for job to complete");
-                    let add_job = waiter.result().await?;
-                    tracing::info!("Job completed: {:?}", add_job);
-
-                    // update the job we are processing to say that the account has been created
-                    match add_job.result::<String>() {
+                    // Wait for the add_job to complete, then set our job as complete
+                    match add_job.wait().await?.result::<String>() {
                         Ok(r) => {
                             job = job.completed(&r)?;
                         }
@@ -159,19 +120,7 @@ async fn runner(envelope: &Envelope) -> Result<Job, Error> {
                         }
                     }
 
-                    tracing::info!("Job updated: {:?}", job);
-
-                    // update the job on the board
-                    {
-                        let mut board = board.write().await;
-                        board.add(&job)?;
-                    }
-
-                    tracing::info!("Job added to board");
-
-                    // send the updated job back to the sender
-                    Command::update(&job).send_to(&envelope.sender()).await?;
-
+                    // log the result
                     if job.is_error() {
                         tracing::error!(
                             "Not adding user {} because of error {:?}",
@@ -179,6 +128,9 @@ async fn runner(envelope: &Envelope) -> Result<Job, Error> {
                             job.error_message()
                         );
                     }
+
+                    // communicate the change
+                    job = job.updated().await?;
 
                     tracing::info!("User added to slurm cluster: {}", user);
                 }
@@ -215,9 +167,6 @@ pub enum Error {
 
     #[error("{0}")]
     State(#[from] state::Error),
-
-    #[error("{0}")]
-    Board(#[from] BoardError),
 
     #[error("{0}")]
     NoAccount(String),

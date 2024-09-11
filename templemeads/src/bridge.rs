@@ -3,7 +3,6 @@
 
 use crate::agent;
 use crate::board::Error as BoardError;
-use crate::command::Command;
 use crate::job::{Error as JobError, Job};
 use crate::state;
 use anyhow::{Error as AnyError, Result};
@@ -43,39 +42,9 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
 
 pub async fn run(command: &str) -> Result<Job, Error> {
     tracing::info!("Received command: {}", command);
-    let job = Job::parse(command)?;
 
     match agent::portal().await {
-        Some(portal) => {
-            // get the (shared) board for the portal
-            let board = match state::get(&portal).await {
-                Ok(b) => b.board().await,
-                Err(e) => {
-                    tracing::error!("Error getting board for portal: {:?}", e);
-                    return Err(Error::State(e));
-                }
-            };
-
-            // get the mutable board from the Arc<RwLock> board - this is the
-            // blocking operation
-            {
-                let mut board = board.write().await;
-
-                // add the job to the board
-                match board.add(&job) {
-                    Ok(_) => (),
-                    Err(e) => {
-                        tracing::error!("Error adding job to board: {:?}", e);
-                        return Err(Error::Board(e));
-                    }
-                }
-            }
-
-            // now send it to the portal
-            Command::put(&job).send_to(&portal).await?;
-
-            Ok(job)
-        }
+        Some(portal) => Ok(Job::parse(command)?.put(&portal).await?),
         None => {
             tracing::error!("No portal agent found");
             Err(Error::NoPortal(

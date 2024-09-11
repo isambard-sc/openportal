@@ -46,7 +46,7 @@ impl Board {
     /// the passed job transitions into one of those states,
     /// and it will return the new version of the job
     ///
-    pub fn wait_for(&mut self, job: &Job) -> Result<Waiter, Error> {
+    pub fn get_waiter(&mut self, job: &Job) -> Result<Waiter, Error> {
         // check that we have this job on the board
         match self.jobs.get(&job.id()) {
             Some(j) => {
@@ -80,22 +80,21 @@ impl Board {
     /// job if it already exists and the new job has a newer
     /// version
     ///
+    /// The indicated board for the job must match the name of this board
+    ///
+    /// This returns the job (it may be updated to be on a new board)
+    ///
     pub fn add(&mut self, job: &Job) -> Result<(), Error> {
-        let mut updated: bool = false;
+        job.assert_is_for_board(&self.peer)?;
+
+        let mut updated = false;
 
         match self.jobs.get_mut(&job.id()) {
             Some(j) => {
                 // only update if newer
                 if job.version() > j.version() {
-                    tracing::info!("NEW JOB VERSION {} vs {}", job.version(), j.version());
                     *j = job.clone();
                     updated = true;
-                } else {
-                    tracing::info!(
-                        "NOT UPDATING! OLD JOB VERSION {} vs {}",
-                        job.version(),
-                        j.version()
-                    );
                 }
             }
             None => {
@@ -104,16 +103,11 @@ impl Board {
             }
         }
 
-        tracing::info!("JOB UPDATED");
-
         // if we have any waiters for this job then notify them if the
         // job has been updated and it is in a finished state
         if updated && job.is_finished() {
-            tracing::info!("UPDATED AND FINISHED");
             if let Some(listeners) = self.waiters.remove(&job.id()) {
-                tracing::info!("NOTIFYING LISTENERS");
                 for listener in listeners {
-                    tracing::info!("..NOTIFYING LISTENER");
                     listener.notify(job.clone());
                 }
             }
@@ -125,8 +119,11 @@ impl Board {
     ///
     /// Remove the passed job from our board
     /// If the job doesn't exist then we fail silently
+    /// This returns the removed job
     ///
     pub fn remove(&mut self, job: &Job) -> Result<(), Error> {
+        job.assert_is_for_board(&self.peer)?;
+
         // if we have any waiters for this job then notify them with an error
         if let Some(listeners) = self.waiters.remove(&job.id()) {
             let mut notify_job = job.clone();
@@ -166,7 +163,7 @@ impl Board {
 #[derive(Debug)]
 pub enum Waiter {
     Pending(oneshot::Receiver<Job>),
-    Finished(Job),
+    Finished(Box<Job>),
 }
 
 impl Waiter {
@@ -175,7 +172,7 @@ impl Waiter {
     }
 
     pub fn finished(job: Job) -> Self {
-        Waiter::Finished(job)
+        Waiter::Finished(Box::new(job))
     }
 
     pub async fn result(self) -> Result<Job, Error> {
@@ -184,7 +181,7 @@ impl Waiter {
                 Ok(job) => Ok(job),
                 Err(_) => Err(Error::Unknown),
             },
-            Waiter::Finished(job) => Ok(job),
+            Waiter::Finished(job) => Ok(*job),
         }
     }
 }
@@ -213,14 +210,25 @@ impl Listener {
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    Job(#[from] JobError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
     NotFound(String),
 
     #[error("Unknown error")]
     Unknown,
+}
+
+// automatically convert to JobError
+impl From<Error> for JobError {
+    fn from(e: Error) -> JobError {
+        JobError::Any(e.into())
+    }
+}
+
+// automatically convert JobError to BoardError
+impl From<JobError> for Error {
+    fn from(e: JobError) -> Error {
+        Error::Any(e.into())
+    }
 }

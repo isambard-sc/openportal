@@ -3,9 +3,8 @@
 
 use anyhow::Result;
 use anyhow::{Context, Error as AnyError};
-use reqwest::{cookie::Jar, header::HeaderMap, header::HeaderValue, Client};
+use reqwest::{cookie::Jar, Client};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::json;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -27,7 +26,7 @@ where
             .await
             .context("Could not decode from json")?)
     } else {
-        Err(Error::CallError(format!(
+        Err(Error::Call(format!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
             url,
             result.status(),
@@ -58,84 +57,82 @@ curl -v  \
 
 */
 
-async fn call_post(url: &str) -> Result<String, Error> {
-    let server = "https://ipa.demo1.freeipa.org/ipa";
+struct FreeAuth {
+    server: String,
+    jar: Arc<Jar>,
+}
 
-    tracing::info!("Calling post {}", url);
-
-    let url = format!("{}/{}", server, url);
-
+///
+/// Login to the FreeIPA server using the passed username and password.
+/// This returns a cookie jar that will contain the resulting authorisation
+/// cookie, and which can be used for subsequent calls to the server.
+///
+async fn login(server: &str, user: &str, password: &str) -> Result<FreeAuth, Error> {
     let jar = Arc::new(Jar::default());
 
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "Content-Type",
-        HeaderValue::from_static("application/x-www-form-urlencoded"),
-    );
-    headers.insert("Accept", HeaderValue::from_static("text/plain"));
-    headers.insert("Referer", HeaderValue::from_static(server));
-
     let client = Client::builder()
-        .default_headers(headers)
         .cookie_provider(Arc::clone(&jar))
         .build()
         .context("Could not build client")?;
 
+    let url = format!("{}/ipa/session/login_password", server);
+
     let result = client
         .post(&url)
-        .body("user=admin&password=Secret123")
+        .header("Referer", format!("{}/ipa", server))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "text/plain")
+        .body(format!("user={}&password={}", user, password))
         .send()
         .await
-        .with_context(|| format!("Could not call function: {}", url))?;
+        .with_context(|| format!("Could not login calling URL: {}", url))?;
 
-    tracing::info!("Response: {:?}", result);
-
-    tracing::info!("Cookies: {:?}", jar);
-
-    if result.status().is_success() {
-        let text = result.text().await.context("Could not get response?")?;
-        tracing::info!("Response: {:?}", text);
-    } else {
-        return Err(Error::CallError(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
+    match result.status() {
+        status if status.is_success() => Ok(FreeAuth {
+            server: server.to_string(),
+            jar,
+        }),
+        _ => Err(Error::Login(format!(
+            "Could not login to server: {}. Status: {}. Response: {:?}",
+            server,
             result.status(),
             result
-        )));
+        ))),
     }
+}
 
-    // now make an API call
-    let mut headers = HeaderMap::new();
-    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-    headers.insert("Accept", HeaderValue::from_static("application/json"));
-    headers.insert("Referer", HeaderValue::from_static(server));
+///
+/// Call a post URL on the FreeIPA server described in 'auth'.
+///
+async fn call_post<T>(auth: &FreeAuth, payload: serde_json::Value) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
+    tracing::info!("Calling post {}", payload);
+
+    let url = format!("{}/ipa/session/json", &auth.server);
 
     let client = Client::builder()
-        .default_headers(headers)
-        .cookie_provider(Arc::clone(&jar))
+        .cookie_provider(Arc::clone(&auth.jar))
         .build()
         .context("Could not build client")?;
 
-    let url = format!("{}/session/json", server);
-    tracing::info!("Calling post {}", url);
-
-    let json_data = "{\"method\":\"user_find\",\"params\":[[\"\"],{}],\"id\":0}";
-
-    // turn the above string into a serde_json value
-    let json_data: serde_json::Value =
-        serde_json::from_str(json_data).context("Could not parse json")?;
-
     let result = client
         .post(&url)
-        .json(&json_data)
+        .header("Referer", format!("{}/ipa", &auth.server))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&payload)
         .send()
         .await
-        .with_context(|| format!("Could not call function: {}", url))?;
-
-    tracing::info!("Response: {:?}", result);
+        .with_context(|| format!("Could not call function: {}", payload))?;
 
     if result.status().is_success() {
-        Ok(result.text().await.context("Could not get response?")?)
+        tracing::info!("Response: {:?}", result);
+        Ok(result
+            .json::<T>()
+            .await
+            .context("Could not decode from json")?)
     } else {
         tracing::error!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
@@ -143,17 +140,28 @@ async fn call_post(url: &str) -> Result<String, Error> {
             result.status(),
             result
         );
-        Err(Error::CallError(format!(
+        Err(Error::Call(format!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
+            payload,
             result.status(),
             result
         )))
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IPAResponse {
+    result: serde_json::Value,
+}
+
 pub async fn connect() -> Result<(), Error> {
-    let result = call_post("session/login_password").await?;
+    let auth = login("https://ipa.demo1.freeipa.org", "admin", "Secret123").await?;
+
+    let result = call_post::<IPAResponse>(
+        &auth,
+        serde_json::json!({"method":"user_find","params":[[""],{}],"id":0}),
+    )
+    .await?;
 
     tracing::info!("Result: {:?}", result);
 
@@ -165,20 +173,11 @@ pub async fn connect() -> Result<(), Error> {
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("{0}")]
-    AnyError(#[from] AnyError),
+    Any(#[from] AnyError),
 
     #[error("{0}")]
-    IOError(#[from] std::io::Error),
+    Call(String),
 
     #[error("{0}")]
-    CallError(String),
-
-    #[error("{0}")]
-    InvalidConfig(String),
-
-    #[error("{0}")]
-    LockError(String),
-
-    #[error("Unknown error")]
-    Unknown,
+    Login(String),
 }

@@ -4,58 +4,47 @@
 use anyhow::Result;
 use anyhow::{Context, Error as AnyError};
 use reqwest::{cookie::Jar, Client};
+use serde::ser;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
-async fn call_get<T>(url: &str) -> Result<T, Error>
-where
-    T: DeserializeOwned,
-{
-    let result = Client::new()
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("Could not call function: {}", url))?;
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct IPAUserForDeserialize {
+    uid: Vec<String>,
+    givenname: Vec<String>,
+    userclass: Vec<String>,
+    version: Vec<String>,
+}
 
-    tracing::info!("Response: {:?}", result);
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(default)]
+struct IPAUser {
+    uid: String,
+    givenname: String,
+    userclass: String,
+}
 
-    if result.status().is_success() {
-        Ok(result
-            .json::<T>()
-            .await
-            .context("Could not decode from json")?)
-    } else {
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
-            result.status(),
-            result
-        )))
+impl From<IPAUserForDeserialize> for IPAUser {
+    fn from(user: IPAUserForDeserialize) -> Self {
+        IPAUser {
+            // extract the first item or use an empty string
+            uid: user.uid.first().unwrap_or(&"".to_string()).clone(),
+            givenname: user.givenname.first().unwrap_or(&"".to_string()).clone(),
+            userclass: user.userclass.first().unwrap_or(&"".to_string()).clone(),
+        }
     }
 }
 
-/*
+fn deserialize_users<'de, D>(deserializer: D) -> Result<Vec<IPAUser>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let users: Vec<IPAUserForDeserialize> = Vec::deserialize(deserializer)?;
 
-curl -v  \
-        -H referer:https://$IPAHOSTNAME/ipa  \
-        -H "Content-Type:application/x-www-form-urlencoded" \
-        -H "Accept:text/plain"\
-        -c $COOKIEJAR -b $COOKIEJAR \
-        --data "user=admin&password=Secret123" \
-        -X POST \
-        https://$IPAHOSTNAME/ipa/session/login_password
-
-curl -v  \
-    -H referer:https://$IPAHOSTNAME/ipa  \
-        -H "Content-Type:application/json" \
-        -H "Accept:applicaton/json"\
-        -c $COOKIEJAR -b $COOKIEJAR \
-        -d  '{"method":"user_find","params":[[""],{}],"id":0}' \
-        -X POST \
-        https://$IPAHOSTNAME/ipa/session/json
-
-*/
+    Ok(users.into_iter().map(|u| u.into()).collect())
+}
 
 struct FreeAuth {
     server: String,
@@ -126,7 +115,7 @@ where
     // will be passed back to us in the response.
     let payload = serde_json::json!({
         "method": func,
-        "params": [params.unwrap_or_default(), {}],
+        "params": [params.unwrap_or_default(), {"version": "2.251"}],
         "id": id,
     });
 
@@ -185,10 +174,23 @@ where
     }
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct UserFindResponse {
+    count: u32,
+    messages: serde_json::Value,
+    summary: String,
+    /// have serde deserialize this as a Vec<IPAUserForDeserialize> and then
+    /// convert it to a Vec<IPAUser>
+    #[serde(deserialize_with = "deserialize_users")]
+    result: Vec<IPAUser>,
+    truncated: bool,
+}
+
 pub async fn connect() -> Result<(), Error> {
     let auth = login("https://ipa.demo1.freeipa.org", "admin", "Secret123").await?;
 
-    let result = call_post::<serde_json::Value>(&auth, "user_find", None).await?;
+    let result = call_post::<UserFindResponse>(&auth, "user_find", None).await?;
 
     tracing::info!("Result: {:?}", result);
 

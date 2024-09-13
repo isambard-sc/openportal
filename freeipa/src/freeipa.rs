@@ -101,16 +101,34 @@ async fn login(server: &str, user: &str, password: &str) -> Result<FreeAuth, Err
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FreeResponse {
+    result: serde_json::Value,
+    principal: serde_json::Value,
+    error: serde_json::Value,
+    id: u16,
+}
+
 ///
 /// Call a post URL on the FreeIPA server described in 'auth'.
 ///
-async fn call_post<T>(auth: &FreeAuth, payload: serde_json::Value) -> Result<T, Error>
+async fn call_post<T>(auth: &FreeAuth, func: &str, params: Option<Vec<String>>) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
-    tracing::info!("Calling post {}", payload);
-
     let url = format!("{}/ipa/session/json", &auth.server);
+
+    // make id a random integer between 1 and 1000
+    let id = rand::random::<u16>() % 1000;
+
+    // the payload is a json object that contains the method, the parameters
+    // (as an array, plus a dict of the version) and a random id. The id
+    // will be passed back to us in the response.
+    let payload = serde_json::json!({
+        "method": func,
+        "params": [params.unwrap_or_default(), {}],
+        "id": id,
+    });
 
     let client = Client::builder()
         .cookie_provider(Arc::clone(&auth.jar))
@@ -128,11 +146,29 @@ where
         .with_context(|| format!("Could not call function: {}", payload))?;
 
     if result.status().is_success() {
-        tracing::info!("Response: {:?}", result);
-        Ok(result
-            .json::<T>()
+        let result = result
+            .json::<FreeResponse>()
             .await
-            .context("Could not decode from json")?)
+            .context("Could not decode from json")?;
+
+        // assert that the id numbers match
+        if result.id != id {
+            return Err(Error::Call(format!(
+                "ID mismatch: expected {}, got {}",
+                id, result.id
+            )));
+        }
+
+        // if there is an error, return it
+        if !result.error.is_null() {
+            return Err(Error::Call(format!(
+                "Error in response: {:?}",
+                result.error
+            )));
+        }
+
+        // return the result, encoded to the type T
+        Ok(serde_json::from_value(result.result).context("Could not decode result")?)
     } else {
         tracing::error!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
@@ -149,19 +185,10 @@ where
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct IPAResponse {
-    result: serde_json::Value,
-}
-
 pub async fn connect() -> Result<(), Error> {
     let auth = login("https://ipa.demo1.freeipa.org", "admin", "Secret123").await?;
 
-    let result = call_post::<IPAResponse>(
-        &auth,
-        serde_json::json!({"method":"user_find","params":[[""],{}],"id":0}),
-    )
-    .await?;
+    let result = call_post::<serde_json::Value>(&auth, "user_find", None).await?;
 
     tracing::info!("Result: {:?}", result);
 

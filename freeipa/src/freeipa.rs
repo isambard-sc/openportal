@@ -8,41 +8,72 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-struct IPAUserForDeserialize {
-    uid: Vec<String>,
-    givenname: Vec<String>,
-    userclass: Vec<String>,
-    version: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default)]
 pub struct IPAUser {
     uid: String,
     givenname: String,
     userclass: String,
 }
 
-impl From<IPAUserForDeserialize> for IPAUser {
-    fn from(user: IPAUserForDeserialize) -> Self {
-        IPAUser {
-            // extract the first item or use an empty string
-            uid: user.uid.first().unwrap_or(&"".to_string()).clone(),
-            givenname: user.givenname.first().unwrap_or(&"".to_string()).clone(),
-            userclass: user.userclass.first().unwrap_or(&"".to_string()).clone(),
+impl IPAUser {
+    fn construct(result: &serde_json::Value) -> Result<Vec<IPAUser>, Error> {
+        let mut users = Vec::new();
+
+        // convert result into an array if it isn't already
+        let result = match result.as_array() {
+            Some(result) => result.clone(),
+            None => vec![result.clone()],
+        };
+
+        for user in result {
+            tracing::info!("User: {:?}", user);
+
+            // uid is a list of strings - just get the first one
+            let uid = user
+                .get("uid")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let givenname = user
+                .get("givenname")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let userclass = user
+                .get("userclass")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            users.push(IPAUser {
+                uid,
+                givenname,
+                userclass,
+            });
         }
+
+        Ok(users)
     }
-}
 
-fn deserialize_users<'de, D>(deserializer: D) -> Result<Vec<IPAUser>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let users: Vec<IPAUserForDeserialize> = Vec::deserialize(deserializer)?;
+    pub fn username(&self) -> &str {
+        &self.uid
+    }
 
-    Ok(users.into_iter().map(|u| u.into()).collect())
+    pub fn givenname(&self) -> &str {
+        &self.givenname
+    }
+
+    pub fn userclass(&self) -> &str {
+        &self.userclass
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -187,14 +218,17 @@ where
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct UserFindResponse {
-    count: u32,
-    messages: serde_json::Value,
-    summary: String,
-    /// have serde deserialize either a vector or single IPAUser, and clean
-    /// them up into a single vector
-    #[serde(deserialize_with = "deserialize_users")]
-    result: Vec<IPAUser>,
-    truncated: bool,
+    count: Option<u32>,
+    messages: Option<serde_json::Value>,
+    summary: Option<String>,
+    result: Option<serde_json::Value>,
+    truncated: Option<bool>,
+}
+
+impl UserFindResponse {
+    fn users(&self) -> Result<Vec<IPAUser>, Error> {
+        IPAUser::construct(&self.result.clone().unwrap_or_default())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -214,7 +248,7 @@ impl FreeIPA {
             call_post::<UserFindResponse>(&self.auth, "user_find", Some(vec![group.to_string()]))
                 .await?;
 
-        Ok(result.result)
+        result.users()
     }
 
     pub async fn user(&self, user: &str) -> Result<Option<IPAUser>, Error> {
@@ -222,7 +256,7 @@ impl FreeIPA {
             call_post::<UserFindResponse>(&self.auth, "user_show", Some(vec![user.to_string()]))
                 .await?;
 
-        Ok(result.result.first().cloned())
+        Ok(result.users()?.first().cloned())
     }
 }
 

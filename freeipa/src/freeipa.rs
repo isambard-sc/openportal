@@ -4,7 +4,6 @@
 use anyhow::Result;
 use anyhow::{Context, Error as AnyError};
 use reqwest::{cookie::Jar, Client};
-use serde::ser;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -20,7 +19,7 @@ struct IPAUserForDeserialize {
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(default)]
-struct IPAUser {
+pub struct IPAUser {
     uid: String,
     givenname: String,
     userclass: String,
@@ -46,6 +45,7 @@ where
     Ok(users.into_iter().map(|u| u.into()).collect())
 }
 
+#[derive(Debug, Clone, Default)]
 struct FreeAuth {
     server: String,
     jar: Arc<Jar>,
@@ -157,7 +157,17 @@ where
         }
 
         // return the result, encoded to the type T
-        Ok(serde_json::from_value(result.result).context("Could not decode result")?)
+        match serde_json::from_value(result.result.clone()).context("Could not decode result") {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                tracing::error!("Could not decode result: {:?}. Error: {}", result.result, e);
+                tracing::error!("Response: {:?}", result);
+                Err(Error::Call(format!(
+                    "Could not decode result: {:?}. Error: {}",
+                    result.result, e
+                )))
+            }
+        }
     } else {
         tracing::error!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
@@ -180,21 +190,40 @@ struct UserFindResponse {
     count: u32,
     messages: serde_json::Value,
     summary: String,
-    /// have serde deserialize this as a Vec<IPAUserForDeserialize> and then
-    /// convert it to a Vec<IPAUser>
+    /// have serde deserialize either a vector or single IPAUser, and clean
+    /// them up into a single vector
     #[serde(deserialize_with = "deserialize_users")]
     result: Vec<IPAUser>,
     truncated: bool,
 }
 
-pub async fn connect() -> Result<(), Error> {
-    let auth = login("https://ipa.demo1.freeipa.org", "admin", "Secret123").await?;
+#[derive(Debug, Clone, Default)]
+pub struct FreeIPA {
+    auth: FreeAuth,
+}
 
-    let result = call_post::<UserFindResponse>(&auth, "user_find", None).await?;
+impl FreeIPA {
+    pub async fn connect(server: &str, user: &str, password: &str) -> Result<Self, Error> {
+        Ok(FreeIPA {
+            auth: login(server, user, password).await?,
+        })
+    }
 
-    tracing::info!("Result: {:?}", result);
+    pub async fn users_in_group(&self, group: &str) -> Result<Vec<IPAUser>, Error> {
+        let result =
+            call_post::<UserFindResponse>(&self.auth, "user_find", Some(vec![group.to_string()]))
+                .await?;
 
-    Ok(())
+        Ok(result.result)
+    }
+
+    pub async fn user(&self, user: &str) -> Result<Option<IPAUser>, Error> {
+        let result =
+            call_post::<UserFindResponse>(&self.auth, "user_show", Some(vec![user.to_string()]))
+                .await?;
+
+        Ok(result.result.first().cloned())
+    }
 }
 
 /// Errors

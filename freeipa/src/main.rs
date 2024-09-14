@@ -5,6 +5,7 @@ use anyhow::Result;
 
 // import freeipa directory as a module
 mod freeipa;
+use freeipa::FreeIPA;
 
 use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
@@ -26,8 +27,15 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     tracing::info!("FreeIPA account service starting up...");
-    freeipa::connect().await?;
-    tracing::info!("FreeIPA account service started.");
+    let freeipa = FreeIPA::connect("https://ipa.demo1.freeipa.org", "admin", "Secret123").await?;
+
+    // get a list of all users in the "openportal" group
+    let users = freeipa.users_in_group("openportal").await?;
+    tracing::info!("Users in the openportal group: {:?}", users);
+
+    let user = freeipa.user("admin").await?;
+
+    tracing::info!("User: {:?}", user);
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(

@@ -29,13 +29,29 @@ async fn main() -> Result<()> {
     tracing::info!("FreeIPA account service starting up...");
     let freeipa = FreeIPA::connect("https://ipa.demo1.freeipa.org", "admin", "Secret123").await?;
 
+    let user = freeipa.user("admin").await?;
+
+    tracing::info!("User: {:?}", user);
+
+    let users = freeipa.users_in_group("admins").await?;
+
+    tracing::info!("Users in the admins group: {:?}", users);
+
     // get a list of all users in the "openportal" group
     let users = freeipa.users_in_group("openportal").await?;
     tracing::info!("Users in the openportal group: {:?}", users);
 
-    let user = freeipa.user("admin").await?;
+    let user = freeipa.user("chris").await?;
 
     tracing::info!("User: {:?}", user);
+
+    let users = freeipa.users().await?;
+
+    tracing::info!("All users: {:?}", users);
+
+    let groups = freeipa.groups().await?;
+
+    tracing::info!("All groups: {:?}", groups);
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(

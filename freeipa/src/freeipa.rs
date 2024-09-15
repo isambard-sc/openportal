@@ -5,14 +5,17 @@ use anyhow::Result;
 use anyhow::{Context, Error as AnyError};
 use reqwest::{cookie::Jar, Client};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Default)]
 pub struct IPAUser {
-    uid: String,
+    userid: String,
     givenname: String,
+    homedirectory: String,
     userclass: String,
+    memberof: Vec<String>,
 }
 
 impl IPAUser {
@@ -26,10 +29,8 @@ impl IPAUser {
         };
 
         for user in result {
-            tracing::info!("User: {:?}", user);
-
             // uid is a list of strings - just get the first one
-            let uid = user
+            let userid = user
                 .get("uid")
                 .and_then(|v| v.as_array())
                 .and_then(|v| v.first())
@@ -45,6 +46,14 @@ impl IPAUser {
                 .unwrap_or_default()
                 .to_string();
 
+            let homedirectory: String = user
+                .get("homedirectory")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
             let userclass = user
                 .get("userclass")
                 .and_then(|v| v.as_array())
@@ -53,18 +62,31 @@ impl IPAUser {
                 .unwrap_or_default()
                 .to_string();
 
+            let memberof = user
+                .get("memberof_group")
+                .and_then(|v| v.as_array())
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|v| v.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             users.push(IPAUser {
-                uid,
+                userid,
                 givenname,
                 userclass,
+                homedirectory,
+                memberof,
             });
         }
 
         Ok(users)
     }
 
-    pub fn username(&self) -> &str {
-        &self.uid
+    pub fn userid(&self) -> &str {
+        &self.userid
     }
 
     pub fn givenname(&self) -> &str {
@@ -73,6 +95,66 @@ impl IPAUser {
 
     pub fn userclass(&self) -> &str {
         &self.userclass
+    }
+
+    pub fn homedirectory(&self) -> &str {
+        &self.homedirectory
+    }
+
+    pub fn memberof(&self) -> &Vec<String> {
+        &self.memberof
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IPAGroup {
+    groupid: String,
+    description: String,
+}
+
+impl IPAGroup {
+    fn construct(result: &serde_json::Value) -> Result<Vec<IPAGroup>, Error> {
+        let mut groups = Vec::new();
+
+        // convert result into an array if it isn't already
+        let result = match result.as_array() {
+            Some(result) => result.clone(),
+            None => vec![result.clone()],
+        };
+
+        for group in result {
+            // uid is a list of strings - just get the first one
+            let groupid = group
+                .get("cn")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let description = group
+                .get("description")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            groups.push(IPAGroup {
+                groupid,
+                description,
+            });
+        }
+
+        Ok(groups)
+    }
+
+    pub fn groupid(&self) -> &str {
+        &self.groupid
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
     }
 }
 
@@ -132,7 +214,12 @@ struct FreeResponse {
 ///
 /// Call a post URL on the FreeIPA server described in 'auth'.
 ///
-async fn call_post<T>(auth: &FreeAuth, func: &str, params: Option<Vec<String>>) -> Result<T, Error>
+async fn call_post<T>(
+    auth: &FreeAuth,
+    func: &str,
+    args: Option<Vec<String>>,
+    kwargs: Option<HashMap<String, String>>,
+) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
@@ -141,12 +228,15 @@ where
     // make id a random integer between 1 and 1000
     let id = rand::random::<u16>() % 1000;
 
+    let mut kwargs = kwargs.unwrap_or_default();
+    kwargs.insert("version".to_string(), "2.251".to_string());
+
     // the payload is a json object that contains the method, the parameters
     // (as an array, plus a dict of the version) and a random id. The id
     // will be passed back to us in the response.
     let payload = serde_json::json!({
         "method": func,
-        "params": [params.unwrap_or_default(), {"version": "2.251"}],
+        "params": [args.unwrap_or_default(), kwargs],
         "id": id,
     });
 
@@ -231,6 +321,22 @@ impl UserFindResponse {
     }
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct GroupFindResponse {
+    count: Option<u32>,
+    messages: Option<serde_json::Value>,
+    summary: Option<String>,
+    result: Option<serde_json::Value>,
+    truncated: Option<bool>,
+}
+
+impl GroupFindResponse {
+    fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
+        IPAGroup::construct(&self.result.clone().unwrap_or_default())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FreeIPA {
     auth: FreeAuth,
@@ -243,18 +349,40 @@ impl FreeIPA {
         })
     }
 
+    pub async fn users(&self) -> Result<Vec<IPAUser>, Error> {
+        let result = call_post::<UserFindResponse>(&self.auth, "user_find", None, None).await?;
+
+        result.users()
+    }
+
+    pub async fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
+        let result = call_post::<GroupFindResponse>(&self.auth, "group_find", None, None).await?;
+
+        result.groups()
+    }
+
     pub async fn users_in_group(&self, group: &str) -> Result<Vec<IPAUser>, Error> {
+        // call the freeipa api to find users in the passed group
+        let kwargs = {
+            let mut kwargs = HashMap::new();
+            kwargs.insert("in_group".to_string(), group.to_string());
+            kwargs
+        };
+
         let result =
-            call_post::<UserFindResponse>(&self.auth, "user_find", Some(vec![group.to_string()]))
-                .await?;
+            call_post::<UserFindResponse>(&self.auth, "user_find", None, Some(kwargs)).await?;
 
         result.users()
     }
 
     pub async fn user(&self, user: &str) -> Result<Option<IPAUser>, Error> {
-        let result =
-            call_post::<UserFindResponse>(&self.auth, "user_show", Some(vec![user.to_string()]))
-                .await?;
+        let result = call_post::<UserFindResponse>(
+            &self.auth,
+            "user_find",
+            Some(vec![user.to_string()]),
+            None,
+        )
+        .await?;
 
         Ok(result.users()?.first().cloned())
     }

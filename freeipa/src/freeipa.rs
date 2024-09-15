@@ -307,7 +307,7 @@ where
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
-struct UserFindResponse {
+struct IPAResponse {
     count: Option<u32>,
     messages: Option<serde_json::Value>,
     summary: Option<String>,
@@ -315,23 +315,11 @@ struct UserFindResponse {
     truncated: Option<bool>,
 }
 
-impl UserFindResponse {
+impl IPAResponse {
     fn users(&self) -> Result<Vec<IPAUser>, Error> {
         IPAUser::construct(&self.result.clone().unwrap_or_default())
     }
-}
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct GroupFindResponse {
-    count: Option<u32>,
-    messages: Option<serde_json::Value>,
-    summary: Option<String>,
-    result: Option<serde_json::Value>,
-    truncated: Option<bool>,
-}
-
-impl GroupFindResponse {
     fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
         IPAGroup::construct(&self.result.clone().unwrap_or_default())
     }
@@ -340,23 +328,31 @@ impl GroupFindResponse {
 #[derive(Debug, Clone, Default)]
 pub struct FreeIPA {
     auth: FreeAuth,
+    user: String,
+    password: String,
 }
 
 impl FreeIPA {
     pub async fn connect(server: &str, user: &str, password: &str) -> Result<Self, Error> {
         Ok(FreeIPA {
             auth: login(server, user, password).await?,
+            user: user.to_string(),
+            password: password.to_string(),
         })
     }
 
+    pub async fn reconnect(&mut self) -> Result<(), Error> {
+        Ok(self.auth = login(&self.auth.server, &self.user, &self.password).await?)
+    }
+
     pub async fn users(&self) -> Result<Vec<IPAUser>, Error> {
-        let result = call_post::<UserFindResponse>(&self.auth, "user_find", None, None).await?;
+        let result = call_post::<IPAResponse>(&self.auth, "user_find", None, None).await?;
 
         result.users()
     }
 
     pub async fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
-        let result = call_post::<GroupFindResponse>(&self.auth, "group_find", None, None).await?;
+        let result = call_post::<IPAResponse>(&self.auth, "group_find", None, None).await?;
 
         result.groups()
     }
@@ -369,20 +365,15 @@ impl FreeIPA {
             kwargs
         };
 
-        let result =
-            call_post::<UserFindResponse>(&self.auth, "user_find", None, Some(kwargs)).await?;
+        let result = call_post::<IPAResponse>(&self.auth, "user_find", None, Some(kwargs)).await?;
 
         result.users()
     }
 
     pub async fn user(&self, user: &str) -> Result<Option<IPAUser>, Error> {
-        let result = call_post::<UserFindResponse>(
-            &self.auth,
-            "user_find",
-            Some(vec![user.to_string()]),
-            None,
-        )
-        .await?;
+        let result =
+            call_post::<IPAResponse>(&self.auth, "user_find", Some(vec![user.to_string()]), None)
+                .await?;
 
         Ok(result.users()?.first().cloned())
     }

@@ -34,10 +34,16 @@ pub enum Error {
     Delivery(String),
 
     #[error("{0}")]
+    IncompleteCode(String),
+
+    #[error("{0}")]
     InvalidBoard(String),
 
     #[error("{0}")]
     InvalidConfig(String),
+
+    #[error("{0}")]
+    InvalidInstruction(String),
 
     #[error("{0}")]
     InvalidState(String),

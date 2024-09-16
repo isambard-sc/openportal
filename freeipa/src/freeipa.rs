@@ -10,6 +10,7 @@ use secrecy::Secret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use templemeads::grammar::UserIdentifier;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -193,6 +194,7 @@ struct FreeAuth {
     jar: Arc<Jar>,
     user: String,
     password: Secret<String>,
+    system_groups: Vec<IPAGroup>,
     num_reconnects: u32,
 }
 
@@ -203,6 +205,7 @@ impl FreeAuth {
             jar: Arc::new(Jar::default()),
             user: "".to_string(),
             password: Secret::new("".to_string()),
+            system_groups: Vec::new(),
             num_reconnects: 0,
         }
     }
@@ -359,6 +362,15 @@ pub struct IPAGroup {
 }
 
 impl IPAGroup {
+    fn new(groupid: &str, description: &str) -> Result<Self, Error> {
+        // check that the groupid is valid .... PARSING RULES
+
+        Ok(IPAGroup {
+            groupid: groupid.to_string(),
+            description: description.to_string(),
+        })
+    }
+
     fn construct(result: &serde_json::Value) -> Result<Vec<IPAGroup>, Error> {
         let mut groups = Vec::new();
 
@@ -395,6 +407,27 @@ impl IPAGroup {
         Ok(groups)
     }
 
+    pub fn parse(groups: &str) -> Result<Vec<IPAGroup>, Error> {
+        let mut g = Vec::new();
+        let mut errors = Vec::new();
+
+        for group in groups.split(",") {
+            match IPAGroup::new(group, "OpenPortal-managed group") {
+                Ok(group) => g.push(group),
+                Err(_) => errors.push(group),
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(Error::Parse(format!(
+                "Could not parse groups: {:?}",
+                errors.join(",")
+            )));
+        }
+
+        Ok(g)
+    }
+
     pub fn groupid(&self) -> &str {
         &self.groupid
     }
@@ -404,20 +437,26 @@ impl IPAGroup {
     }
 }
 
-pub async fn connect(server: &str, user: &str, password: &str) -> Result<(), Error> {
+pub async fn connect(
+    server: &str,
+    user: &str,
+    password: &str,
+    system_groups: &Vec<IPAGroup>,
+) -> Result<(), Error> {
     // overwrite the global FreeIPA client with a new one
     let mut auth = FREEIPA_AUTH.lock().await;
 
     auth.server = server.to_string();
     auth.user = user.to_string();
     auth.password = Secret::new(password.to_string());
+    auth.system_groups = system_groups.clone();
     auth.num_reconnects = 0;
 
     const MAX_RECONNECTS: u32 = 3;
     const RECONNECT_WAIT: u64 = 100;
 
     loop {
-        match login(&auth.server, &auth.user, &auth.password.expose_secret()).await {
+        match login(&auth.server, &auth.user, auth.password.expose_secret()).await {
             Ok(jar) => {
                 auth.jar = jar;
                 return Ok(());
@@ -470,4 +509,29 @@ pub async fn user(user: &str) -> Result<Option<IPAUser>, Error> {
     let result = call_post::<IPAResponse>("user_find", Some(vec![user.to_string()]), None).await?;
 
     Ok(result.users()?.first().cloned())
+}
+
+pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert(
+            "uid".to_string(),
+            format!("{}.{}", user.username(), user.project()),
+        );
+        kwargs.insert("givenname".to_string(), user.to_string());
+        kwargs.insert("sn".to_string(), "OpenPortal".to_string());
+        kwargs.insert("userclass".to_string(), "OpenPortal".to_string());
+        kwargs.insert("cn".to_string(), format!("{}-OpenPortal", user));
+
+        kwargs
+    };
+
+    let result = call_post::<IPAResponse>("user_add", None, Some(kwargs)).await?;
+    let user = result
+        .users()?
+        .first()
+        .cloned()
+        .ok_or(Error::Call("No user returned".to_string()))?;
+
+    Ok(user)
 }

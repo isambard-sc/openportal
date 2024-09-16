@@ -5,11 +5,15 @@ use anyhow::Result;
 
 // import freeipa directory as a module
 mod freeipa;
+use freeipa::IPAGroup;
 
 use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
+use templemeads::grammar::Instruction::{AddUser, RemoveUser};
+use templemeads::grammar::UserIdentifier;
 use templemeads::job::{Envelope, Job};
+use templemeads::Error;
 
 ///
 /// Main function for the freeipa-account application
@@ -55,6 +59,7 @@ async fn main() -> Result<()> {
     let freeipa_server = config.option("freeipa-server", "");
     let freeipa_user: String = config.option("freeipa-user", "admin");
     let freeipa_password: String = config.option("freeipa-password", "");
+    let default_groups: Vec<IPAGroup> = IPAGroup::parse(&config.option("freeipa-groups", ""))?;
 
     if freeipa_server.is_empty() {
         return Err(anyhow::anyhow!(
@@ -71,7 +76,13 @@ async fn main() -> Result<()> {
     // connect the single shared FreeIPA client - this will be used in the
     // async function (we can't bind variables to async functions, or else
     // we would just pass the client with the environment)
-    freeipa::connect(&freeipa_server, &freeipa_user, &freeipa_password).await?;
+    freeipa::connect(
+        &freeipa_server,
+        &freeipa_user,
+        &freeipa_password,
+        &default_groups,
+    )
+    .await?;
 
     // we need to bind the FreeIPA client into the freeipa_runner
     async_runnable! {
@@ -81,15 +92,31 @@ async fn main() -> Result<()> {
         ///
         pub async fn freeipa_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
         {
-            tracing::info!("Using the freeipa runner for job from {} to {}", envelope.sender(), envelope.recipient());
+            let job = envelope.job();
 
-            let user = freeipa::user("admin").await?;
+            match job.instruction() {
+                AddUser(user) => {
+                    // have we already added this user? - check the list
+                    let user = freeipa::add_user(&user).await?;
 
-            tracing::info!("User: {:?}", user);
+                    tracing::info!("User {:?} added", user);
 
-            let result = envelope.job().execute().await?;
+                    // update the job with the new user
+                    job.completed(format!("User {:?} added", user))?;
 
-            Ok(result)
+                    Ok(job)
+                },
+                RemoveUser(user) => {
+                    Err(Error::IncompleteCode(
+                        format!("RemoveUser instruction not implemented yet - cannot remove {}", user),
+                    ))
+                },
+                _ => {
+                    Err(Error::InvalidInstruction(
+                        format!("Invalid instruction: {}. FreeIPA only supports add_user and remove_user", job.instruction()),
+                    ))
+                }
+            }
         }
     }
 

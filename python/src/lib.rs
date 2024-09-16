@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Error as AnyError;
 use anyhow::{Context, Result};
 use chrono::serde::ts_seconds;
 use chrono::Utc;
@@ -14,7 +13,7 @@ use std::path;
 use std::sync::RwLock;
 use templemeads::job::Status;
 use templemeads::server::sign_api_call;
-use thiserror::Error;
+use templemeads::Error;
 use url::Url;
 use uuid::Uuid;
 
@@ -113,7 +112,7 @@ where
     if result.status().is_success() {
         Ok(result.json::<T>().context("Could not decode from json")?)
     } else {
-        Err(Error::CallError(format!(
+        Err(Error::Call(format!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
             function,
             result.status(),
@@ -156,7 +155,7 @@ where
     if result.status().is_success() {
         Ok(result.json::<T>().context("Could not decode from json")?)
     } else {
-        Err(Error::CallError(format!(
+        Err(Error::Call(format!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
             function,
             result.status(),
@@ -385,30 +384,4 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
     Ok(())
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    AnyError(#[from] AnyError),
-
-    #[error("{0}")]
-    IOError(#[from] std::io::Error),
-
-    #[error("{0}")]
-    CallError(String),
-
-    #[error("File does not exist: {0}")]
-    NotExists(path::PathBuf),
-
-    #[error("{0}")]
-    InvalidConfig(String),
-
-    #[error("{0}")]
-    LockError(String),
-
-    #[error("Unknown error")]
-    Unknown,
 }

@@ -3,9 +3,10 @@
 
 use crate::agent::Type as AgentType;
 use crate::command::Command;
-use anyhow::{Error as AnyError, Result};
+use crate::error::Error;
+
+use anyhow::Result;
 use paddington::command::Command as ControlCommand;
-use thiserror::Error;
 
 pub async fn process_control_message(
     agent_type: &AgentType,
@@ -25,18 +26,4 @@ pub async fn process_control_message(
     }
 
     Ok(())
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Any error: {0}")]
-    Any(#[from] AnyError),
-}
-
-impl From<Error> for paddington::Error {
-    fn from(error: Error) -> paddington::Error {
-        paddington::Error::Any(error.into())
-    }
 }

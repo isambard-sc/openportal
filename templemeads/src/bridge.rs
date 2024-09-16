@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent;
-use crate::board::Error as BoardError;
-use crate::job::{Error as JobError, Job};
+use crate::error::Error;
+use crate::job::Job;
 use crate::state;
-use anyhow::{Error as AnyError, Result};
-use serde_json::Error as SerdeError;
-use thiserror::Error;
+
+use anyhow::Result;
 use uuid::Uuid;
 
 pub async fn status(job: &Uuid) -> Result<Job, Error> {
@@ -20,7 +19,7 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
                 Ok(b) => b.board().await,
                 Err(e) => {
                     tracing::error!("Error getting board for portal: {:?}", e);
-                    return Err(Error::State(e));
+                    return Err(Error::State(e.to_string()));
                 }
             };
 
@@ -52,27 +51,4 @@ pub async fn run(command: &str) -> Result<Job, Error> {
             ))
         }
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Job(#[from] JobError),
-
-    #[error("{0}")]
-    Serde(#[from] SerdeError),
-
-    #[error("{0}")]
-    State(#[from] state::Error),
-
-    #[error("{0}")]
-    Board(#[from] BoardError),
-
-    #[error("{0}")]
-    NoPortal(String),
 }

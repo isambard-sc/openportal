@@ -11,7 +11,6 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::job::{Envelope, Job};
-use templemeads::runnable::Error as RunnableError;
 
 ///
 /// Main function for the freeipa-account application
@@ -90,9 +89,11 @@ async_runnable! {
     /// Runnable function that will be called when a job is received
     /// by the agent
     ///
-    pub async fn freeipa_runner(envelope: Envelope) -> Result<Job, RunnableError>
+    pub async fn freeipa_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
     {
         tracing::info!("Using the freeipa runner for job from {} to {}", envelope.sender(), envelope.recipient());
-        Ok(envelope.job().execute().await?)
+        let result = envelope.job().execute().await?;
+
+        Ok(result)
     }
 }

@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::Error as CryptoError;
 use anyhow::Context;
 use anyhow::Error as AnyError;
-use thiserror::Error;
 
 use futures::{SinkExt, StreamExt};
 use futures_channel::mpsc::{unbounded, UnboundedSender};
@@ -19,8 +17,9 @@ use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
 use std::sync::Arc;
 
 use crate::command::Command;
-use crate::config::{ClientConfig, Error as ConfigError, PeerConfig, ServiceConfig};
+use crate::config::{ClientConfig, PeerConfig, ServiceConfig};
 use crate::crypto::{Key, SecretKey};
+use crate::error::Error;
 use crate::exchange;
 use crate::message::Message;
 
@@ -532,33 +531,4 @@ impl Connection {
 
         Ok(())
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    Crypto(#[from] CryptoError),
-
-    #[error("{0}")]
-    Config(#[from] ConfigError),
-
-    #[error("Invalid peer configuration: {0}")]
-    InvalidPeer(String),
-
-    #[error("Busy line: {0}")]
-    BusyLine(String),
-
-    #[error("Unknown config error")]
-    Unknown,
 }

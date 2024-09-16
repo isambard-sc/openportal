@@ -3,21 +3,22 @@
 
 use crate::agent::Type as AgentType;
 use crate::agent_core::Config;
+use crate::error::Error;
 use crate::handler::{process_message, set_service_details};
 use crate::runnable::AsyncRunnable;
-use anyhow::{Error as AnyError, Result};
-use thiserror::Error;
 
 ///
 /// Run the agent service
 ///
-pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), AnyError> {
+pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     if config.service.name.is_empty() {
-        return Err(Error::Misconfigured("Service name is empty".to_string()).into());
+        return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
 
     if config.agent != AgentType::Account {
-        return Err(Error::Misconfigured("Service agent is not an Account".to_string()).into());
+        return Err(Error::Misconfigured(
+            "Service agent is not an Account".to_string(),
+        ));
     }
 
     // pass the service details onto the handler
@@ -28,15 +29,4 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), AnyError> 
     paddington::run(config.service).await?;
 
     Ok(())
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Misconfigured(String),
 }

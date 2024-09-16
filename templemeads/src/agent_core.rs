@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Type as AgentType;
+use crate::error::Error;
+
 use anyhow::Context;
-use anyhow::{Error as AnyError, Result};
+use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use paddington::config::{
-    load as load_config, save as save_config, Defaults as ServiceDefaults, Error as ConfigError,
-    ServiceConfig,
+    load as load_config, save as save_config, Defaults as ServiceDefaults, ServiceConfig,
 };
-use paddington::invite::{load as load_invite, save as save_invite, Error as InviteError, Invite};
+use paddington::invite::{load as load_invite, save as save_invite, Invite};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use thiserror::Error;
 
 // Configuration
 
@@ -307,33 +307,4 @@ enum Commands {
 
     /// Run the service
     Run {},
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    Config(#[from] ConfigError),
-
-    #[error("{0}")]
-    Invite(#[from] InviteError),
-
-    #[error("{0}")]
-    AddrParse(#[from] std::net::AddrParseError),
-
-    #[error("{0}")]
-    PeerEdit(String),
-
-    #[error("{0}")]
-    ConfigExists(String),
 }

@@ -1,11 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Error as AnyError;
 use anyhow::Result;
-use thiserror::Error;
 
 use crate::config::ServiceConfig;
+use crate::error::Error;
 use crate::{client, server};
 
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
@@ -47,21 +46,4 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     tracing::info!("All handles joined.");
 
     Ok(())
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Join(#[from] tokio::task::JoinError),
-
-    #[error("{0}")]
-    NullConfig(String),
-
-    #[error("Unknown config error")]
-    Unknown,
 }

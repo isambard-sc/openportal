@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::board::{Board, Error as BoardError};
-use anyhow::{Error as AnyError, Result};
+use crate::board::Board;
+use crate::error::Error;
+
+use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::RwLock;
 
 struct States {
@@ -60,14 +61,4 @@ impl State {
     pub async fn board(&self) -> Arc<RwLock<Board>> {
         self.board.clone()
     }
-}
-
-/// Errors
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("Board error: {0}")]
-    Board(#[from] BoardError),
-    #[error("Any error: {0}")]
-    Any(#[from] AnyError),
 }

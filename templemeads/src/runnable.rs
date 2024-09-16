@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::job::{Envelope, Error as JobError, Job};
+use crate::error::Error;
+use crate::job::{Envelope, Job};
 
-use anyhow::Error as AnyError;
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
-use thiserror::Error;
 
 #[macro_export]
 macro_rules! async_runnable {(
@@ -43,26 +42,8 @@ async_runnable! {
     pub async fn default_runner(envelope: Envelope) -> Result<Job, Error>
     {
         tracing::info!("Using the default runner for job from {} to {}", envelope.sender(), envelope.recipient());
-        Ok(envelope.job().execute().await?)
-    }
-}
+        let result = envelope.job().execute().await?;
 
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Job(#[from] JobError),
-}
-
-impl From<Error> for JobError {
-    fn from(error: Error) -> Self {
-        match error {
-            Error::Any(any_error) => JobError::from(any_error),
-            Error::Job(job_error) => job_error,
-        }
+        Ok(result)
     }
 }

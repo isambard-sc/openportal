@@ -1,17 +1,16 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Error as AnyError;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::RwLock;
-use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 
-use crate::connection::{Connection, Error as ConnectionError};
+use crate::connection::Connection;
+use crate::error::Error;
 use crate::message::Message;
 
 // We use the singleton pattern for the exchange data, as there can only
@@ -249,27 +248,4 @@ pub fn received(message: Message) -> Result<(), Error> {
         tracing::error!("Error sending message: {}", e);
         Error::Send(format!("Error sending message: {}", e))
     })
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Connection(#[from] ConnectionError),
-
-    #[error("{0}")]
-    Poison(String),
-
-    #[error("{0}")]
-    Send(String),
-
-    #[error("{0}")]
-    UnnamedConnection(String),
-
-    #[error("Unknown error")]
-    Unknown,
 }

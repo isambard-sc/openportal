@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Error as AnyError;
-use std::io::Error as IOError;
-use thiserror::Error;
-
 use crate::config::{PeerConfig, ServiceConfig};
-use crate::connection::{Connection, Error as ConnectionError};
-use crate::crypto;
+use crate::connection::Connection;
+use crate::error::Error;
 use crate::exchange;
 
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
@@ -62,30 +58,4 @@ pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
         tracing::info!("Sleeping for 5 seconds before retrying the connection...");
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] IOError),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Tungstenite(#[from] tokio_tungstenite::tungstenite::error::Error),
-
-    #[error("{0}")]
-    Crypto(#[from] crypto::Error),
-
-    #[error("{0}")]
-    Connection(#[from] ConnectionError),
-
-    #[error("{0}")]
-    UnknownPeer(String),
-
-    #[error("{0}")]
-    Exchange(#[from] exchange::Error),
 }

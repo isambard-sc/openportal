@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Context;
-use anyhow::Error as AnyError;
 use orion::{aead, auth};
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
 use std::fmt::Display;
 use std::{fmt, str, vec};
-use thiserror::Error;
+
+use crate::error::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signature {
@@ -269,23 +269,4 @@ impl Key {
 
         Ok(())
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    //#[error("{0}")]
-    //UnknownCrypto(#[from] orion::errors::UnknownError),
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
-
-    #[error("Unknown config error")]
-    Unknown,
 }

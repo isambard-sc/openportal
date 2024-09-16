@@ -1,14 +1,13 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::job::{Error as JobError, Job};
+use crate::error::Error;
+use crate::job::Job;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Board {
@@ -179,7 +178,7 @@ impl Waiter {
         match self {
             Waiter::Pending(rx) => match rx.await {
                 Ok(job) => Ok(job),
-                Err(_) => Err(Error::Unknown),
+                Err(_) => Err(Error::Unknown("Failed to receive job".to_string())),
             },
             Waiter::Finished(job) => Ok(*job),
         }
@@ -202,33 +201,5 @@ impl Listener {
 
     pub fn notify(self, job: Job) {
         let _ = self.tx.send(job);
-    }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    NotFound(String),
-
-    #[error("Unknown error")]
-    Unknown,
-}
-
-// automatically convert to JobError
-impl From<Error> for JobError {
-    fn from(e: Error) -> JobError {
-        JobError::Any(e.into())
-    }
-}
-
-// automatically convert JobError to BoardError
-impl From<JobError> for Error {
-    fn from(e: JobError) -> Error {
-        Error::Any(e.into())
     }
 }

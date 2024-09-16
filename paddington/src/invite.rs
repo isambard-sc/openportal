@@ -1,14 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::{Error as CryptoError, SecretKey};
+use crate::crypto::SecretKey;
+use crate::error::Error;
 use anyhow::Context;
-use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::path;
-use thiserror::Error;
-use url::ParseError as UrlParseError;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Invite {
@@ -66,39 +64,4 @@ pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
         .with_context(|| format!("Could not write invite file: {:?}", invite_file))?;
 
     Ok(())
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    Crypto(#[from] CryptoError),
-
-    #[error("{0}")]
-    UrlParse(#[from] UrlParseError),
-
-    #[error("{0}")]
-    Peer(String),
-
-    #[error("Config directory already exists: {0}")]
-    Exists(path::PathBuf),
-
-    #[error("Config directory does not exist: {0}")]
-    NotExists(path::PathBuf),
-
-    #[error("Config file is null: {0}")]
-    Null(String),
-
-    #[error("Unknown config error")]
-    Unknown,
 }

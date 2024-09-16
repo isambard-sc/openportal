@@ -1,17 +1,17 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::{Error as CryptoError, Key, SecretKey};
+use crate::crypto::{Key, SecretKey};
+use crate::error::Error;
 use crate::invite::Invite;
+
 use anyhow::Context;
-use anyhow::Error as AnyError;
 use iptools::iprange::IpRange;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::net::IpAddr;
 use std::path;
-use thiserror::Error;
-use url::{ParseError as UrlParseError, Url};
+use url::Url;
 
 pub fn load<T: serde::de::DeserializeOwned + serde::Serialize>(
     config_file: &path::PathBuf,
@@ -20,7 +20,7 @@ pub fn load<T: serde::de::DeserializeOwned + serde::Serialize>(
     let config_file = path::absolute(config_file)?;
 
     if !config_file.try_exists()? {
-        return Err(Error::NotExists(config_file));
+        return Err(Error::NotExists(config_file.to_string_lossy().to_string()));
     }
 
     // read the config file
@@ -446,7 +446,7 @@ impl ServiceConfig {
         })?;
 
         if config_file.try_exists()? {
-            return Err(Error::Exists(config_file));
+            return Err(Error::NotExists(config_file.to_string_lossy().to_string()));
         }
 
         let config = ServiceConfig::parse(name, url, ip, port)?;
@@ -457,39 +457,4 @@ impl ServiceConfig {
 
         Ok(config)
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    Crypto(#[from] CryptoError),
-
-    #[error("{0}")]
-    UrlParse(#[from] UrlParseError),
-
-    #[error("{0}")]
-    Peer(String),
-
-    #[error("Config directory already exists: {0}")]
-    Exists(path::PathBuf),
-
-    #[error("Config directory does not exist: {0}")]
-    NotExists(path::PathBuf),
-
-    #[error("Config file is null: {0}")]
-    Null(String),
-
-    #[error("Unknown config error")]
-    Unknown,
 }

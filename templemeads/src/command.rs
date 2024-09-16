@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Type as AgentType;
+use crate::error::Error;
 use crate::job::Job;
-use anyhow::Error;
+
 use anyhow::Result;
 use paddington::message::Message;
 use paddington::send as send_to_peer;

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::bridge::{run as bridge_run, status as bridge_status};
+use crate::error::Error;
 use crate::job::Job;
-use anyhow::{Context, Error as AnyError, Result};
+
+use anyhow::{Context, Result};
 use axum::{
     extract::{Json, State},
     http::header::HeaderMap,
@@ -18,9 +20,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::IpAddr;
-use thiserror::Error;
 use tokio::net::TcpListener;
-use url::{ParseError, Url};
+use url::Url;
 use uuid::Uuid;
 
 ///
@@ -374,21 +375,4 @@ where
     fn from(err: E) -> Self {
         Self(err.into(), None)
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    URLParse(#[from] ParseError),
-
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
 }

@@ -3,20 +3,18 @@
 
 use crate::agent;
 use crate::agent::Type as AgentType;
-use crate::board::Error as BoardError;
 use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
-use crate::job::{Envelope, Error as JobError};
-use crate::runnable::{default_runner, AsyncRunnable, Error as RunnableError};
-use crate::state;
-use anyhow::{Error as AnyError, Result};
+use crate::error::Error;
+use crate::job::Envelope;
+use crate::runnable::{default_runner, AsyncRunnable};
+
+use anyhow::Result;
 use once_cell::sync::Lazy;
+use paddington::async_message_handler;
 use paddington::message::Message;
-use paddington::{async_message_handler, Error as PaddingtonError};
-use serde_json::Error as SerdeError;
 use std::boxed::Box;
-use thiserror::Error;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
@@ -186,40 +184,5 @@ async_message_handler! {
                 Ok(process_command(&recipient, &sender, &command, &service_info.runner).await?)
             }
         }
-    }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Job(#[from] JobError),
-
-    #[error("{0}")]
-    Runnable(#[from] RunnableError),
-
-    #[error("{0}")]
-    Paddington(#[from] PaddingtonError),
-
-    #[error("{0}")]
-    Serde(#[from] SerdeError),
-
-    #[error("{0}")]
-    State(#[from] state::Error),
-
-    #[error("{0}")]
-    Board(#[from] BoardError),
-
-    #[error("{0}")]
-    Delivery(String),
-}
-
-impl From<Error> for paddington::Error {
-    fn from(error: Error) -> paddington::Error {
-        paddington::Error::Any(error.into())
     }
 }

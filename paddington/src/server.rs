@@ -1,15 +1,11 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::crypto::Error as CryptoError;
-use anyhow::Error as AnyError;
-use std::io::Error as IOError;
-use thiserror::Error;
-
 use tokio::net::TcpListener;
 
 use crate::config::ServiceConfig;
-use crate::connection::{Connection, Error as ConnectionError};
+use crate::connection::Connection;
+use crate::error::Error;
 use crate::exchange;
 
 ///
@@ -94,27 +90,4 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
             }
         }
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    IO(#[from] IOError),
-
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Tungstenite(#[from] tokio_tungstenite::tungstenite::error::Error),
-
-    #[error("{0}")]
-    Crypto(#[from] CryptoError),
-
-    #[error("{0}")]
-    Connection(#[from] ConnectionError),
-
-    #[error("{0}")]
-    Exchange(#[from] exchange::Error),
 }

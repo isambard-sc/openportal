@@ -4,13 +4,11 @@
 use crate::board::Waiter;
 use crate::command::Command as ControlCommand;
 use crate::destination::Destination;
+use crate::error::Error;
 use crate::grammar::Instruction;
 use crate::state;
 
-use anyhow::Error as AnyError;
 use anyhow::Result;
-use thiserror::Error;
-
 use chrono::serde::ts_seconds;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -331,7 +329,7 @@ impl Job {
             Status::Pending => Ok(None),
             Status::Running => Ok(None),
             Status::Error => match &self.result {
-                Some(result) => Err(Error::RunError(result.clone())),
+                Some(result) => Err(Error::Run(result.clone())),
                 None => Err(Error::InvalidState("Unknown error".to_owned())),
             },
             Status::Complete => match &self.result {
@@ -370,7 +368,7 @@ impl Job {
                     "Error getting board for agent: {:?}. Is this agent known to us?",
                     e
                 );
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -401,7 +399,7 @@ impl Job {
                     "Error getting board for agent: {:?}. Is this agent known to us?",
                     e
                 );
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -441,7 +439,7 @@ impl Job {
                     "Error getting board for agent: {:?}. Is this agent known to us?",
                     e
                 );
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -470,7 +468,7 @@ impl Job {
                     "Error getting board for agent: {:?}. Is this agent known to us?",
                     e
                 );
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -503,7 +501,7 @@ impl Job {
                     "Error getting board for agent: {:?}. Is this agent known to us?",
                     e
                 );
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -533,7 +531,7 @@ impl Job {
                     "Error getting board for agent: {:?}. Is this agent known to us?",
                     e
                 );
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -577,7 +575,7 @@ impl Job {
                     "Error getting board for agent: {:?}. Is this agent known to us?",
                     e
                 );
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -594,39 +592,8 @@ impl Job {
         }
 
         // wait for the job to finish
-        Ok(waiter.result().await?)
-    }
-}
+        let result = waiter.result().await?;
 
-// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    SerdeJson(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    RunError(String),
-
-    #[error("{0}")]
-    InvalidBoard(String),
-
-    #[error("{0}")]
-    InvalidState(String),
-
-    #[error("{0}")]
-    Parse(String),
-
-    #[error("{0}")]
-    Unknown(String),
-}
-
-// auto convert from StateError to JobError
-impl From<state::Error> for Error {
-    fn from(e: state::Error) -> Error {
-        Error::Any(e.into())
+        Ok(result)
     }
 }

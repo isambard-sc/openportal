@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Error as AnyError;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use thiserror::Error;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize)]
@@ -147,12 +145,4 @@ pub async fn portal() -> Option<String> {
 ///
 pub async fn account() -> Option<String> {
     REGISTAR.read().await.account()
-}
-
-/// Errors
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("Any error: {0}")]
-    Any(#[from] AnyError),
 }

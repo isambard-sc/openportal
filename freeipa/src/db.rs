@@ -47,3 +47,32 @@ pub async fn set_system_groups(groups: Vec<IPAGroup>) -> Result<(), Error> {
     db.system_groups = groups;
     Ok(())
 }
+
+///
+/// Set the existing users that we are managing that already
+/// exist in FreeIPA
+///
+pub async fn set_existing_users(users: Vec<IPAUser>) -> Result<(), Error> {
+    let mut db = DB.write().await;
+
+    for user in users {
+        let identifier = user.identifier().clone();
+
+        match identifier.is_valid() {
+            true => {
+                db.users.insert(identifier, user);
+            }
+            false => {
+                tracing::error!(
+                    "Unable to create a valid UserIdentifier for user: {:?}",
+                    user
+                );
+                continue;
+            }
+        }
+    }
+
+    tracing::info!("Existing users: {:?}", db.users.keys());
+
+    Ok(())
+}

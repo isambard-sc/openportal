@@ -46,6 +46,10 @@ impl UserIdentifier {
     pub fn portal(&self) -> String {
         self.portal.clone()
     }
+
+    pub fn is_valid(&self) -> bool {
+        !self.username.is_empty() && !self.project.is_empty() && !self.portal.is_empty()
+    }
 }
 
 impl std::fmt::Display for UserIdentifier {

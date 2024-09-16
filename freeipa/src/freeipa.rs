@@ -353,6 +353,12 @@ impl IPAUser {
     pub fn memberof(&self) -> &Vec<String> {
         &self.memberof
     }
+
+    pub fn identifier(&self) -> UserIdentifier {
+        // we have put the OpenPortal UserIdentifier into the
+        // "givenname" field of the user
+        UserIdentifier::new(&self.userid)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -479,17 +485,24 @@ pub async fn connect(server: &str, user: &str, password: &str) -> Result<(), Err
     }
 }
 
-pub async fn users() -> Result<Vec<IPAUser>, Error> {
+pub async fn get_users() -> Result<Vec<IPAUser>, Error> {
     let result = call_post::<IPAResponse>("user_find", None, None).await?;
     result.users()
 }
 
-pub async fn groups() -> Result<Vec<IPAGroup>, Error> {
+pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
+    let result =
+        call_post::<IPAResponse>("group_find", Some(vec![group.to_string()]), None).await?;
+
+    Ok(result.groups()?.first().cloned())
+}
+
+pub async fn get_groups() -> Result<Vec<IPAGroup>, Error> {
     let result = call_post::<IPAResponse>("group_find", None, None).await?;
     result.groups()
 }
 
-pub async fn users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
+pub async fn get_users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
     // call the freeipa api to find users in the passed group
     let kwargs = {
         let mut kwargs = HashMap::new();
@@ -501,7 +514,7 @@ pub async fn users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
     result.users()
 }
 
-pub async fn user(user: &str) -> Result<Option<IPAUser>, Error> {
+pub async fn get_user(user: &str) -> Result<Option<IPAUser>, Error> {
     let result = call_post::<IPAResponse>("user_find", Some(vec![user.to_string()]), None).await?;
 
     Ok(result.users()?.first().cloned())
@@ -515,30 +528,111 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
 
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
-    let system_groups = db::get_system_groups().await?;
+    let mut groups = db::get_system_groups().await?;
 
-    tracing::info!("Adding user: {:?} to groups {:?}", user, system_groups);
+    // add in the "openportal" group, to which all users managed by
+    // OpenPortal must belong
+    groups.push(IPAGroup::new(
+        "openportal",
+        "Group for all users managed by OpenPortal",
+    )?);
 
+    // also add in the group for the user's project
+    groups.push(IPAGroup::new(
+        &format!("project.{}", user.project()),
+        &format!("Group for all users in the {} project", user.project()),
+    )?);
+
+    tracing::info!("Adding user: {:?} to groups {:?}", user, groups);
+
+    // first step, make sure that all of the groups exist - and get their CNs
+    let mut group_cns = Vec::new();
+
+    for group in &groups {
+        // check if it exists
+        match get_group(group.groupid()).await? {
+            None => {
+                // create the group
+                let kwargs = {
+                    let mut kwargs = HashMap::new();
+                    kwargs.insert("cn".to_string(), group.groupid().to_string());
+                    kwargs.insert("description".to_string(), group.description().to_string());
+                    kwargs
+                };
+
+                match call_post::<IPAResponse>("group_add", None, Some(kwargs)).await {
+                    Ok(_) => {
+                        tracing::info!("Successfully created group: {:?}", group);
+                        group_cns.push(group.groupid().to_string());
+                    }
+                    Err(e) => {
+                        tracing::error!("Could not add group: {:?}. Error: {}", group, e);
+                    }
+                }
+            }
+            Some(group) => {
+                group_cns.push(group.groupid().to_string());
+            }
+        }
+    }
+
+    // now add the user
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert(
             "uid".to_string(),
             format!("{}.{}", user.username(), user.project()),
         );
-        kwargs.insert("givenname".to_string(), user.to_string());
-        kwargs.insert("sn".to_string(), "OpenPortal".to_string());
-        kwargs.insert("userclass".to_string(), "OpenPortal".to_string());
-        kwargs.insert("cn".to_string(), format!("{}-OpenPortal", user));
+        kwargs.insert("givenname".to_string(), user.username().to_string());
+        kwargs.insert("sn".to_string(), user.project().to_string());
+        kwargs.insert("userclass".to_string(), "openportal".to_string());
+        kwargs.insert("cn".to_string(), user.to_string());
 
         kwargs
     };
 
     let result = call_post::<IPAResponse>("user_add", None, Some(kwargs)).await?;
-    let user = result
-        .users()?
-        .first()
-        .cloned()
-        .ok_or(Error::Call("No user returned".to_string()))?;
+    let user = result.users()?.first().cloned().ok_or(Error::Call(format!(
+        "User {:?} could not be found after adding?",
+        user
+    )))?;
+
+    let userid = user.userid().to_string();
+
+    // now add the user to all of the groups
+    for group_cn in &group_cns {
+        let kwargs = {
+            let mut kwargs = HashMap::new();
+            kwargs.insert("cn".to_string(), group_cn.clone());
+            kwargs.insert("user".to_string(), userid.clone());
+            kwargs
+        };
+
+        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
+            Ok(_) => tracing::info!(
+                "Successfully added user {:?} to group {:?}",
+                userid,
+                group_cn
+            ),
+            Err(e) => {
+                tracing::error!(
+                    "Could not add user {:?} to group {:?}. Error: {}",
+                    userid,
+                    group_cn,
+                    e
+                );
+            }
+        }
+    }
+
+    // finally - re-fetch the user from FreeIPA to make sure that we have
+    // the correct information
+    let user = get_user(user.userid()).await?.ok_or(Error::Call(format!(
+        "User {:?} could not be found after adding?",
+        user
+    )))?;
+
+    tracing::info!("User {:?} added", user);
 
     Ok(user)
 }

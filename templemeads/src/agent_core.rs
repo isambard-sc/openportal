@@ -12,6 +12,7 @@ use paddington::config::{
 };
 use paddington::invite::{load as load_invite, save as save_invite, Invite};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -19,14 +20,43 @@ use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
-    pub service: ServiceConfig,
-    pub agent: AgentType,
+    service: ServiceConfig,
+    agent: AgentType,
+
+    #[serde(default)]
+    extras: HashMap<String, String>,
+}
+
+impl Config {
+    pub fn new(service: ServiceConfig, agent: AgentType) -> Self {
+        Self {
+            service,
+            agent,
+            extras: HashMap::new(),
+        }
+    }
+
+    pub fn service(&self) -> ServiceConfig {
+        self.service.clone()
+    }
+
+    pub fn agent(&self) -> AgentType {
+        self.agent.clone()
+    }
+
+    pub fn option(&self, key: &str, default: &str) -> String {
+        match self.extras.get(key) {
+            Some(value) => value.clone(),
+            None => default.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Defaults {
     pub service: ServiceDefaults,
     pub agent: AgentType,
+    pub extras: HashMap<String, String>,
 }
 
 impl Defaults {
@@ -41,7 +71,16 @@ impl Defaults {
         Self {
             service: ServiceDefaults::parse(name, config_file, url, ip, port),
             agent: agent.unwrap_or(AgentType::Portal),
+            extras: HashMap::new(),
         }
+    }
+
+    pub fn add_extra(&mut self, key: &str, value: &str) {
+        self.extras.insert(key.to_string(), value.to_string());
+    }
+
+    pub fn get_extra(&self, key: &str) -> Option<&String> {
+        self.extras.get(key)
     }
 }
 
@@ -91,6 +130,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     )?
                 },
                 agent: defaults.agent.clone(),
+                extras: defaults.extras.clone(),
             };
 
             if config_file.try_exists()? {
@@ -206,6 +246,12 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
             }
         }
+        Some(Commands::Extra { key, value }) => {
+            let mut config = load_config::<Config>(&config_file)?;
+            config.extras.insert(key.clone(), value.clone());
+            save_config(config, &config_file)?;
+            return Ok(None);
+        }
         Some(Commands::Run {}) => {
             let config = load_config::<Config>(&config_file)?;
             tracing::info!("Loaded config from {}", &config_file.display());
@@ -303,6 +349,15 @@ enum Commands {
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,
+    },
+
+    /// Add extra configuration options
+    Extra {
+        #[arg(long, short = 'k', help = "Key for the extra configuration option")]
+        key: String,
+
+        #[arg(long, short = 'v', help = "Value for the extra configuration option")]
+        value: String,
     },
 
     /// Run the service

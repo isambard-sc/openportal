@@ -12,22 +12,22 @@ use anyhow::Result;
 /// Run the agent service
 ///
 pub async fn run(config: Config) -> Result<(), Error> {
-    if config.service.name.is_empty() {
+    if config.service().name.is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
 
-    if config.agent != AgentType::Portal {
+    if config.agent() != AgentType::Portal {
         return Err(Error::Misconfigured(
             "Service agent is not a Portal".to_string(),
         ));
     }
 
     // pass the service details onto the handler
-    set_service_details(&config.service.name, &config.agent, None).await?;
+    set_service_details(&config.service().name, &config.agent(), None).await?;
 
     // run the Provider OpenPortal agent
     paddington::set_handler(process_message).await?;
-    paddington::run(config.service).await?;
+    paddington::run(config.service()).await?;
 
     Ok(())
 }

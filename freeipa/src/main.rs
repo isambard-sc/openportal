@@ -25,35 +25,8 @@ async fn main() -> Result<()> {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    tracing::info!("FreeIPA account service starting up...");
-    let freeipa = FreeIPA::connect("https://ipa.demo1.freeipa.org", "admin", "Secret123").await?;
-
-    let user = freeipa.user("admin").await?;
-
-    tracing::info!("User: {:?}", user);
-
-    let users = freeipa.users_in_group("admins").await?;
-
-    tracing::info!("Users in the admins group: {:?}", users);
-
-    // get a list of all users in the "openportal" group
-    let users = freeipa.users_in_group("openportal").await?;
-    tracing::info!("Users in the openportal group: {:?}", users);
-
-    let user = freeipa.user("chris").await?;
-
-    tracing::info!("User: {:?}", user);
-
-    let users = freeipa.users().await?;
-
-    tracing::info!("All users: {:?}", users);
-
-    let groups = freeipa.groups().await?;
-
-    tracing::info!("All groups: {:?}", groups);
-
     // create the OpenPortal paddington defaults
-    let defaults = Defaults::parse(
+    let mut defaults = Defaults::parse(
         Some("freeipa".to_owned()),
         Some(
             dirs::config_local_dir()
@@ -79,21 +52,51 @@ async fn main() -> Result<()> {
         }
     };
 
+    // get the details about the FreeIPA server - this must be set
+    let freeipa_server = config.option("freeipa-server", "");
+    let freeipa_user: String = config.option("freeipa-user", "admin");
+    let freeipa_password: String = config.option("freeipa-password", "");
+
+    if freeipa_server.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No FreeIPA server specified. Please set this in the freeipa-server option."
+        ));
+    }
+
+    if freeipa_password.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No FreeIPA password specified. Please set this in the freeipa-password option."
+        ));
+    }
+
+    // connect the single shared FreeIPA client - this will be used in the
+    // async function (we can't bind variables to async functions, or else
+    // we would just pass the client with the environment)
+    FreeIPA::connect(&freeipa_server, &freeipa_user, &freeipa_password).await?;
+
+    // we need to bind the FreeIPA client into the freeipa_runner
+    async_runnable! {
+        ///
+        /// Runnable function that will be called when a job is received
+        /// by the agent
+        ///
+        pub async fn freeipa_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
+        {
+            tracing::info!("Using the freeipa runner for job from {} to {}", envelope.sender(), envelope.recipient());
+
+            let client = FreeIPA::client().await?;
+
+            let user = client.user("admin").await?;
+
+            tracing::info!("User: {:?}", user);
+
+            let result = envelope.job().execute().await?;
+
+            Ok(result)
+        }
+    }
+
     run(config, freeipa_runner).await?;
 
     Ok(())
-}
-
-async_runnable! {
-    ///
-    /// Runnable function that will be called when a job is received
-    /// by the agent
-    ///
-    pub async fn freeipa_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
-    {
-        tracing::info!("Using the freeipa runner for job from {} to {}", envelope.sender(), envelope.recipient());
-        let result = envelope.job().execute().await?;
-
-        Ok(result)
-    }
 }

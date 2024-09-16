@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use anyhow::Context;
 use anyhow::Result;
-use anyhow::{Context, Error as AnyError};
+use once_cell::sync::Lazy;
 use reqwest::{cookie::Jar, Client};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use thiserror::Error;
+use templemeads::Error;
+use tokio::sync::{Mutex, MutexGuard};
 
 #[derive(Debug, Clone, Default)]
 pub struct IPAUser {
@@ -332,17 +334,31 @@ pub struct FreeIPA {
     password: String,
 }
 
+static FREEIPA_CLIENT: Lazy<Mutex<Arc<FreeIPA>>> =
+    Lazy::new(|| Mutex::new(Arc::new(FreeIPA::default())));
+
 impl FreeIPA {
-    pub async fn connect(server: &str, user: &str, password: &str) -> Result<Self, Error> {
-        Ok(FreeIPA {
+    pub async fn connect(server: &str, user: &str, password: &str) -> Result<(), Error> {
+        // overwrite the global FreeIPA client with a new one
+        let mut client = FREEIPA_CLIENT.lock().await;
+
+        *client = Arc::new(FreeIPA {
             auth: login(server, user, password).await?,
             user: user.to_string(),
             password: password.to_string(),
-        })
+        });
+
+        Ok(())
+    }
+
+    // function to return the client protected by a MutexGuard
+    pub async fn client<'mg>() -> Result<MutexGuard<'mg, Arc<FreeIPA>>, Error> {
+        Ok(FREEIPA_CLIENT.lock().await)
     }
 
     pub async fn reconnect(&mut self) -> Result<(), Error> {
-        Ok(self.auth = login(&self.auth.server, &self.user, &self.password).await?)
+        self.auth = login(&self.auth.server, &self.user, &self.password).await?;
+        Ok(())
     }
 
     pub async fn users(&self) -> Result<Vec<IPAUser>, Error> {
@@ -377,18 +393,4 @@ impl FreeIPA {
 
         Ok(result.users()?.first().cloned())
     }
-}
-
-/// Errors
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Any(#[from] AnyError),
-
-    #[error("{0}")]
-    Call(String),
-
-    #[error("{0}")]
-    Login(String),
 }

@@ -46,6 +46,9 @@ pub enum Error {
     LockError(String),
 
     #[error("{0}")]
+    Login(String),
+
+    #[error("{0}")]
     Misconfigured(String),
 
     #[error("{0}")]

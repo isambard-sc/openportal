@@ -13,22 +13,22 @@ use anyhow::Result;
 /// Run the agent service
 ///
 pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
-    if config.service.name.is_empty() {
+    if config.service().name.is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
 
-    if config.agent != AgentType::Instance {
+    if config.agent() != AgentType::Instance {
         return Err(Error::Misconfigured(
             "Service agent is not an Instance".to_string(),
         ));
     }
 
     // pass the service details onto the handler
-    set_service_details(&config.service.name, &config.agent, Some(runner)).await?;
+    set_service_details(&config.service().name, &config.agent(), Some(runner)).await?;
 
     // run the Provider OpenPortal agent
     paddington::set_handler(process_message).await?;
-    paddington::run(config.service).await?;
+    paddington::run(config.service()).await?;
 
     Ok(())
 }

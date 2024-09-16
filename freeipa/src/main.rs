@@ -7,11 +7,12 @@ use anyhow::Result;
 mod freeipa;
 use freeipa::IPAGroup;
 
+mod db;
+
 use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{AddUser, RemoveUser};
-use templemeads::grammar::UserIdentifier;
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -59,7 +60,7 @@ async fn main() -> Result<()> {
     let freeipa_server = config.option("freeipa-server", "");
     let freeipa_user: String = config.option("freeipa-user", "admin");
     let freeipa_password: String = config.option("freeipa-password", "");
-    let default_groups: Vec<IPAGroup> = IPAGroup::parse(&config.option("freeipa-groups", ""))?;
+    let system_groups: Vec<IPAGroup> = IPAGroup::parse(&config.option("system-groups", ""))?;
 
     if freeipa_server.is_empty() {
         return Err(anyhow::anyhow!(
@@ -73,16 +74,12 @@ async fn main() -> Result<()> {
         ));
     }
 
+    db::set_system_groups(system_groups).await?;
+
     // connect the single shared FreeIPA client - this will be used in the
     // async function (we can't bind variables to async functions, or else
     // we would just pass the client with the environment)
-    freeipa::connect(
-        &freeipa_server,
-        &freeipa_user,
-        &freeipa_password,
-        &default_groups,
-    )
-    .await?;
+    freeipa::connect(&freeipa_server, &freeipa_user, &freeipa_password).await?;
 
     // we need to bind the FreeIPA client into the freeipa_runner
     async_runnable! {

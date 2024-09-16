@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// A user identifier - this is a triple of username.project.portal
 ///
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserIdentifier {
     username: String,
     project: String,

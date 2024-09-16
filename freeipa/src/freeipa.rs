@@ -14,6 +14,8 @@ use templemeads::grammar::UserIdentifier;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
+use crate::db;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FreeResponse {
     result: serde_json::Value,
@@ -194,7 +196,6 @@ struct FreeAuth {
     jar: Arc<Jar>,
     user: String,
     password: Secret<String>,
-    system_groups: Vec<IPAGroup>,
     num_reconnects: u32,
 }
 
@@ -205,7 +206,6 @@ impl FreeAuth {
             jar: Arc::new(Jar::default()),
             user: "".to_string(),
             password: Secret::new("".to_string()),
-            system_groups: Vec::new(),
             num_reconnects: 0,
         }
     }
@@ -412,9 +412,11 @@ impl IPAGroup {
         let mut errors = Vec::new();
 
         for group in groups.split(",") {
-            match IPAGroup::new(group, "OpenPortal-managed group") {
-                Ok(group) => g.push(group),
-                Err(_) => errors.push(group),
+            if !group.is_empty() {
+                match IPAGroup::new(group, "OpenPortal-managed group") {
+                    Ok(group) => g.push(group),
+                    Err(_) => errors.push(group),
+                }
             }
         }
 
@@ -437,19 +439,13 @@ impl IPAGroup {
     }
 }
 
-pub async fn connect(
-    server: &str,
-    user: &str,
-    password: &str,
-    system_groups: &Vec<IPAGroup>,
-) -> Result<(), Error> {
+pub async fn connect(server: &str, user: &str, password: &str) -> Result<(), Error> {
     // overwrite the global FreeIPA client with a new one
     let mut auth = FREEIPA_AUTH.lock().await;
 
     auth.server = server.to_string();
     auth.user = user.to_string();
     auth.password = Secret::new(password.to_string());
-    auth.system_groups = system_groups.clone();
     auth.num_reconnects = 0;
 
     const MAX_RECONNECTS: u32 = 3;
@@ -512,6 +508,17 @@ pub async fn user(user: &str) -> Result<Option<IPAUser>, Error> {
 }
 
 pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
+    // check to see if the user already exists
+    if let Some(user) = db::get_user(user).await? {
+        return Ok(user);
+    }
+
+    // the user probably doesn't exist, so add them, making sure they
+    // are in the correct groups
+    let system_groups = db::get_system_groups().await?;
+
+    tracing::info!("Adding user: {:?} to groups {:?}", user, system_groups);
+
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert(

@@ -5,11 +5,255 @@ use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use reqwest::{cookie::Jar, Client};
+use secrecy::ExposeSecret;
+use secrecy::Secret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FreeResponse {
+    result: serde_json::Value,
+    principal: serde_json::Value,
+    error: serde_json::Value,
+    id: u16,
+}
+
+///
+/// Call a post URL on the FreeIPA server described in 'auth'.
+///
+async fn call_post<T>(
+    func: &str,
+    args: Option<Vec<String>>,
+    kwargs: Option<HashMap<String, String>>,
+) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
+    // get the auth details from the global FreeIPA client
+    let mut auth = auth().await?;
+    auth.num_reconnects = 0;
+
+    let url = format!("{}/ipa/session/json", &auth.server);
+
+    // make id a random integer between 1 and 1000
+    let id = rand::random::<u16>() % 1000;
+
+    let mut kwargs = kwargs.unwrap_or_default();
+    kwargs.insert("version".to_string(), "2.251".to_string());
+
+    // the payload is a json object that contains the method, the parameters
+    // (as an array, plus a dict of the version) and a random id. The id
+    // will be passed back to us in the response.
+    let payload = serde_json::json!({
+        "method": func,
+        "params": [args.clone().unwrap_or_default(), kwargs.clone()],
+        "id": id,
+    });
+
+    let client = Client::builder()
+        .cookie_provider(Arc::clone(&auth.jar))
+        .build()
+        .context("Could not build client")?;
+
+    let mut result = client
+        .post(&url)
+        .header("Referer", format!("{}/ipa", &auth.server))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .with_context(|| format!("Could not call function: {}", payload))?;
+
+    // if this is an authorisation error, try to reconnect
+    while result.status().as_u16() == 401 {
+        auth.num_reconnects += 1;
+
+        if auth.num_reconnects > 3 {
+            return Err(Error::Call(format!(
+                "Authorisation (401) error: Could not get response for function: {}. Status: {}. Response: {:?}",
+                payload,
+                result.status(),
+                    result
+                )));
+        }
+
+        tracing::error!("Authorisation (401) error. Reconnecting.");
+
+        match login(&auth.server, &auth.user, auth.password.expose_secret()).await {
+            Ok(jar) => {
+                auth.jar = jar;
+
+                // create a new client with the new cookies
+                let client = Client::builder()
+                    .cookie_provider(Arc::clone(&auth.jar))
+                    .build()
+                    .context("Could not build client")?;
+
+                // retry the call
+                result = client
+                    .post(&url)
+                    .header("Referer", format!("{}/ipa", &auth.server))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .json(&payload)
+                    .send()
+                    .await
+                    .with_context(|| format!("Could not call function: {}", payload))?;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Could not login to FreeIPA server: {}. Error: {}",
+                    auth.server,
+                    e
+                );
+            }
+        }
+    }
+
+    // reset the number of reconnects, as we have clearly been successful
+    auth.num_reconnects = 0;
+
+    if result.status().is_success() {
+        let result = result
+            .json::<FreeResponse>()
+            .await
+            .context("Could not decode from json")?;
+
+        // assert that the id numbers match
+        if result.id != id {
+            return Err(Error::Call(format!(
+                "ID mismatch: expected {}, got {}",
+                id, result.id
+            )));
+        }
+
+        // if there is an error, return it
+        if !result.error.is_null() {
+            return Err(Error::Call(format!(
+                "Error in response: {:?}",
+                result.error
+            )));
+        }
+
+        // return the result, encoded to the type T
+        match serde_json::from_value(result.result.clone()).context("Could not decode result") {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                tracing::error!("Could not decode result: {:?}. Error: {}", result.result, e);
+                tracing::error!("Response: {:?}", result);
+                Err(Error::Call(format!(
+                    "Could not decode result: {:?}. Error: {}",
+                    result.result, e
+                )))
+            }
+        }
+    } else {
+        tracing::error!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            url,
+            result.status(),
+            result
+        );
+        Err(Error::Call(format!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            payload,
+            result.status(),
+            result
+        )))
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct IPAResponse {
+    count: Option<u32>,
+    messages: Option<serde_json::Value>,
+    summary: Option<String>,
+    result: Option<serde_json::Value>,
+    truncated: Option<bool>,
+}
+
+impl IPAResponse {
+    fn users(&self) -> Result<Vec<IPAUser>, Error> {
+        IPAUser::construct(&self.result.clone().unwrap_or_default())
+    }
+
+    fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
+        IPAGroup::construct(&self.result.clone().unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FreeAuth {
+    server: String,
+    jar: Arc<Jar>,
+    user: String,
+    password: Secret<String>,
+    num_reconnects: u32,
+}
+
+impl FreeAuth {
+    fn default() -> Self {
+        FreeAuth {
+            server: "".to_string(),
+            jar: Arc::new(Jar::default()),
+            user: "".to_string(),
+            password: Secret::new("".to_string()),
+            num_reconnects: 0,
+        }
+    }
+}
+
+static FREEIPA_AUTH: Lazy<Mutex<FreeAuth>> = Lazy::new(|| Mutex::new(FreeAuth::default()));
+
+///
+/// Login to the FreeIPA server using the passed username and password.
+/// This returns a cookie jar that will contain the resulting authorisation
+/// cookie, and which can be used for subsequent calls to the server.
+///
+async fn login(server: &str, user: &str, password: &str) -> Result<Arc<Jar>, Error> {
+    let jar = Arc::new(Jar::default());
+
+    let client = Client::builder()
+        .cookie_provider(Arc::clone(&jar))
+        .build()
+        .context("Could not build client")?;
+
+    let url = format!("{}/ipa/session/login_password", server);
+
+    let result = client
+        .post(&url)
+        .header("Referer", format!("{}/ipa", server))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "text/plain")
+        .body(format!("user={}&password={}", user, password))
+        .send()
+        .await
+        .with_context(|| format!("Could not login calling URL: {}", url))?;
+
+    match result.status() {
+        status if status.is_success() => Ok(jar),
+        _ => Err(Error::Login(format!(
+            "Could not login to server: {}. Status: {}. Response: {:?}",
+            server,
+            result.status(),
+            result
+        ))),
+    }
+}
+
+// function to return the client protected by a MutexGuard
+async fn auth<'mg>() -> Result<MutexGuard<'mg, FreeAuth>, Error> {
+    Ok(FREEIPA_AUTH.lock().await)
+}
+
+///
+/// Public API
+///
 
 #[derive(Debug, Clone, Default)]
 pub struct IPAUser {
@@ -160,237 +404,70 @@ impl IPAGroup {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct FreeAuth {
-    server: String,
-    jar: Arc<Jar>,
-}
+pub async fn connect(server: &str, user: &str, password: &str) -> Result<(), Error> {
+    // overwrite the global FreeIPA client with a new one
+    let mut auth = FREEIPA_AUTH.lock().await;
 
-///
-/// Login to the FreeIPA server using the passed username and password.
-/// This returns a cookie jar that will contain the resulting authorisation
-/// cookie, and which can be used for subsequent calls to the server.
-///
-async fn login(server: &str, user: &str, password: &str) -> Result<FreeAuth, Error> {
-    let jar = Arc::new(Jar::default());
+    auth.server = server.to_string();
+    auth.user = user.to_string();
+    auth.password = Secret::new(password.to_string());
+    auth.num_reconnects = 0;
 
-    let client = Client::builder()
-        .cookie_provider(Arc::clone(&jar))
-        .build()
-        .context("Could not build client")?;
+    const MAX_RECONNECTS: u32 = 3;
+    const RECONNECT_WAIT: u64 = 100;
 
-    let url = format!("{}/ipa/session/login_password", server);
-
-    let result = client
-        .post(&url)
-        .header("Referer", format!("{}/ipa", server))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Accept", "text/plain")
-        .body(format!("user={}&password={}", user, password))
-        .send()
-        .await
-        .with_context(|| format!("Could not login calling URL: {}", url))?;
-
-    match result.status() {
-        status if status.is_success() => Ok(FreeAuth {
-            server: server.to_string(),
-            jar,
-        }),
-        _ => Err(Error::Login(format!(
-            "Could not login to server: {}. Status: {}. Response: {:?}",
-            server,
-            result.status(),
-            result
-        ))),
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FreeResponse {
-    result: serde_json::Value,
-    principal: serde_json::Value,
-    error: serde_json::Value,
-    id: u16,
-}
-
-///
-/// Call a post URL on the FreeIPA server described in 'auth'.
-///
-async fn call_post<T>(
-    auth: &FreeAuth,
-    func: &str,
-    args: Option<Vec<String>>,
-    kwargs: Option<HashMap<String, String>>,
-) -> Result<T, Error>
-where
-    T: DeserializeOwned,
-{
-    let url = format!("{}/ipa/session/json", &auth.server);
-
-    // make id a random integer between 1 and 1000
-    let id = rand::random::<u16>() % 1000;
-
-    let mut kwargs = kwargs.unwrap_or_default();
-    kwargs.insert("version".to_string(), "2.251".to_string());
-
-    // the payload is a json object that contains the method, the parameters
-    // (as an array, plus a dict of the version) and a random id. The id
-    // will be passed back to us in the response.
-    let payload = serde_json::json!({
-        "method": func,
-        "params": [args.unwrap_or_default(), kwargs],
-        "id": id,
-    });
-
-    let client = Client::builder()
-        .cookie_provider(Arc::clone(&auth.jar))
-        .build()
-        .context("Could not build client")?;
-
-    let result = client
-        .post(&url)
-        .header("Referer", format!("{}/ipa", &auth.server))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .with_context(|| format!("Could not call function: {}", payload))?;
-
-    if result.status().is_success() {
-        let result = result
-            .json::<FreeResponse>()
-            .await
-            .context("Could not decode from json")?;
-
-        // assert that the id numbers match
-        if result.id != id {
-            return Err(Error::Call(format!(
-                "ID mismatch: expected {}, got {}",
-                id, result.id
-            )));
-        }
-
-        // if there is an error, return it
-        if !result.error.is_null() {
-            return Err(Error::Call(format!(
-                "Error in response: {:?}",
-                result.error
-            )));
-        }
-
-        // return the result, encoded to the type T
-        match serde_json::from_value(result.result.clone()).context("Could not decode result") {
-            Ok(result) => Ok(result),
+    loop {
+        match login(&auth.server, &auth.user, &auth.password.expose_secret()).await {
+            Ok(jar) => {
+                auth.jar = jar;
+                return Ok(());
+            }
             Err(e) => {
-                tracing::error!("Could not decode result: {:?}. Error: {}", result.result, e);
-                tracing::error!("Response: {:?}", result);
-                Err(Error::Call(format!(
-                    "Could not decode result: {:?}. Error: {}",
-                    result.result, e
-                )))
+                tracing::error!(
+                    "Could not login to FreeIPA server: {}. Error: {}",
+                    server,
+                    e
+                );
+
+                auth.num_reconnects += 1;
+
+                if auth.num_reconnects > MAX_RECONNECTS {
+                    return Err(Error::Login(format!(
+                        "Could not login to FreeIPA server: {}. Error: {}",
+                        server, e
+                    )));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_WAIT)).await;
             }
         }
-    } else {
-        tracing::error!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
-            result.status(),
-            result
-        );
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            payload,
-            result.status(),
-            result
-        )))
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct IPAResponse {
-    count: Option<u32>,
-    messages: Option<serde_json::Value>,
-    summary: Option<String>,
-    result: Option<serde_json::Value>,
-    truncated: Option<bool>,
+pub async fn users() -> Result<Vec<IPAUser>, Error> {
+    let result = call_post::<IPAResponse>("user_find", None, None).await?;
+    result.users()
 }
 
-impl IPAResponse {
-    fn users(&self) -> Result<Vec<IPAUser>, Error> {
-        IPAUser::construct(&self.result.clone().unwrap_or_default())
-    }
-
-    fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
-        IPAGroup::construct(&self.result.clone().unwrap_or_default())
-    }
+pub async fn groups() -> Result<Vec<IPAGroup>, Error> {
+    let result = call_post::<IPAResponse>("group_find", None, None).await?;
+    result.groups()
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct FreeIPA {
-    auth: FreeAuth,
-    user: String,
-    password: String,
+pub async fn users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
+    // call the freeipa api to find users in the passed group
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("in_group".to_string(), group.to_string());
+        kwargs
+    };
+
+    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
+    result.users()
 }
 
-static FREEIPA_CLIENT: Lazy<Mutex<Arc<FreeIPA>>> =
-    Lazy::new(|| Mutex::new(Arc::new(FreeIPA::default())));
+pub async fn user(user: &str) -> Result<Option<IPAUser>, Error> {
+    let result = call_post::<IPAResponse>("user_find", Some(vec![user.to_string()]), None).await?;
 
-impl FreeIPA {
-    pub async fn connect(server: &str, user: &str, password: &str) -> Result<(), Error> {
-        // overwrite the global FreeIPA client with a new one
-        let mut client = FREEIPA_CLIENT.lock().await;
-
-        *client = Arc::new(FreeIPA {
-            auth: login(server, user, password).await?,
-            user: user.to_string(),
-            password: password.to_string(),
-        });
-
-        Ok(())
-    }
-
-    // function to return the client protected by a MutexGuard
-    pub async fn client<'mg>() -> Result<MutexGuard<'mg, Arc<FreeIPA>>, Error> {
-        Ok(FREEIPA_CLIENT.lock().await)
-    }
-
-    pub async fn reconnect(&mut self) -> Result<(), Error> {
-        self.auth = login(&self.auth.server, &self.user, &self.password).await?;
-        Ok(())
-    }
-
-    pub async fn users(&self) -> Result<Vec<IPAUser>, Error> {
-        let result = call_post::<IPAResponse>(&self.auth, "user_find", None, None).await?;
-
-        result.users()
-    }
-
-    pub async fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
-        let result = call_post::<IPAResponse>(&self.auth, "group_find", None, None).await?;
-
-        result.groups()
-    }
-
-    pub async fn users_in_group(&self, group: &str) -> Result<Vec<IPAUser>, Error> {
-        // call the freeipa api to find users in the passed group
-        let kwargs = {
-            let mut kwargs = HashMap::new();
-            kwargs.insert("in_group".to_string(), group.to_string());
-            kwargs
-        };
-
-        let result = call_post::<IPAResponse>(&self.auth, "user_find", None, Some(kwargs)).await?;
-
-        result.users()
-    }
-
-    pub async fn user(&self, user: &str) -> Result<Option<IPAUser>, Error> {
-        let result =
-            call_post::<IPAResponse>(&self.auth, "user_find", Some(vec![user.to_string()]), None)
-                .await?;
-
-        Ok(result.users()?.first().cloned())
-    }
+    Ok(result.users()?.first().cloned())
 }

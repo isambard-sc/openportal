@@ -86,7 +86,7 @@ where
 
         tracing::error!("Authorisation (401) error. Reconnecting.");
 
-        match login(&auth.server, &auth.user, auth.password.expose_secret()).await {
+        match login(&auth.server, &auth.user, &auth.password).await {
             Ok(jar) => {
                 auth.jar = jar;
 
@@ -218,7 +218,7 @@ static FREEIPA_AUTH: Lazy<Mutex<FreeAuth>> = Lazy::new(|| Mutex::new(FreeAuth::d
 /// This returns a cookie jar that will contain the resulting authorisation
 /// cookie, and which can be used for subsequent calls to the server.
 ///
-async fn login(server: &str, user: &str, password: &str) -> Result<Arc<Jar>, Error> {
+async fn login(server: &str, user: &str, password: &Secret<String>) -> Result<Arc<Jar>, Error> {
     let jar = Arc::new(Jar::default());
 
     let client = Client::builder()
@@ -233,7 +233,11 @@ async fn login(server: &str, user: &str, password: &str) -> Result<Arc<Jar>, Err
         .header("Referer", format!("{}/ipa", server))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "text/plain")
-        .body(format!("user={}&password={}", user, password))
+        .body(format!(
+            "user={}&password={}",
+            user,
+            password.expose_secret()
+        ))
         .send()
         .await
         .with_context(|| format!("Could not login calling URL: {}", url))?;
@@ -445,20 +449,20 @@ impl IPAGroup {
     }
 }
 
-pub async fn connect(server: &str, user: &str, password: &str) -> Result<(), Error> {
+pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Result<(), Error> {
     // overwrite the global FreeIPA client with a new one
     let mut auth = FREEIPA_AUTH.lock().await;
 
     auth.server = server.to_string();
     auth.user = user.to_string();
-    auth.password = Secret::new(password.to_string());
+    auth.password = password.clone();
     auth.num_reconnects = 0;
 
     const MAX_RECONNECTS: u32 = 3;
     const RECONNECT_WAIT: u64 = 100;
 
     loop {
-        match login(&auth.server, &auth.user, auth.password.expose_secret()).await {
+        match login(&auth.server, &auth.user, &auth.password).await {
             Ok(jar) => {
                 auth.jar = jar;
                 return Ok(());

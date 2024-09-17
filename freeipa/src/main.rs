@@ -59,7 +59,6 @@ async fn main() -> Result<()> {
     // get the details about the FreeIPA server - this must be set
     let freeipa_server = config.option("freeipa-server", "");
     let freeipa_user: String = config.option("freeipa-user", "admin");
-    let freeipa_password: String = config.option("freeipa-password", "");
     let system_groups: Vec<IPAGroup> = IPAGroup::parse(&config.option("system-groups", ""))?;
 
     if freeipa_server.is_empty() {
@@ -68,11 +67,14 @@ async fn main() -> Result<()> {
         ));
     }
 
-    if freeipa_password.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No FreeIPA password specified. Please set this in the freeipa-password option."
-        ));
-    }
+    let freeipa_password = match config.secret("freeipa-password") {
+        Some(password) => password,
+        None => {
+            return Err(anyhow::anyhow!(
+                "No FreeIPA password specified. Please set this in the freeipa-password option.",
+            ));
+        }
+    };
 
     db::set_system_groups(system_groups).await?;
 

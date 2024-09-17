@@ -169,7 +169,7 @@ impl Key {
     ///
     /// assert_eq!(decrypted_data, "Hello, World!".to_string());
     /// ```
-    pub fn decrypt<T>(&self, data: &String) -> Result<T, Error>
+    pub fn decrypt<T>(&self, data: &str) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {

@@ -7,6 +7,7 @@ use crate::invite::Invite;
 
 use anyhow::Context;
 use iptools::iprange::IpRange;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::net::IpAddr;
@@ -333,6 +334,9 @@ pub struct ServiceConfig {
     pub ip: IpAddr,
     pub port: u16,
 
+    #[serde(default)]
+    pub key: Option<SecretKey>,
+
     pub servers: Vec<ServerConfig>,
     pub clients: Vec<ClientConfig>,
     pub encryption: Option<String>,
@@ -345,10 +349,28 @@ impl ServiceConfig {
             url: create_websocket_url(&url)?,
             ip,
             port,
+            key: None,
             servers: Vec::new(),
             clients: Vec::new(),
             encryption: None,
         })
+    }
+
+    pub fn encrypt<T>(&self, data: &T) -> Result<String, Error>
+    where
+        T: Serialize,
+    {
+        match self.key {
+            Some(ref key) => key.expose_secret().encrypt(data),
+            None => Err(Error::Null("No key provided.".to_string())),
+        }
+    }
+
+    pub fn decrypt<T>(&self, data: &str) -> Result<T, Error>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.key.expose_secret().decrypt(data)
     }
 
     pub fn add_client(&mut self, name: &String, ip: &String) -> Result<Invite, Error> {

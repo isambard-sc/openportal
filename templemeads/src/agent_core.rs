@@ -11,6 +11,7 @@ use paddington::config::{
     load as load_config, save as save_config, Defaults as ServiceDefaults, ServiceConfig,
 };
 use paddington::invite::{load as load_invite, save as save_invite, Invite};
+use secrecy::Secret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -48,6 +49,19 @@ impl Config {
         match self.extras.get(key) {
             Some(value) => value.clone(),
             None => default.to_string(),
+        }
+    }
+
+    pub fn secret(&self, key: &str) -> Option<Secret<String>> {
+        match self.extras.get(key) {
+            Some(value) => match self.service.decrypt::<String>(value) {
+                Ok(secret) => Some(Secret::<String>::new(secret)),
+                Err(_) => {
+                    tracing::error!("Failed to decrypt secret for key '{}'", key);
+                    None
+                }
+            },
+            None => None,
         }
     }
 }
@@ -246,6 +260,13 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
             }
         }
+        Some(Commands::Secret { key, value }) => {
+            let mut config = load_config::<Config>(&config_file)?;
+            let value = config.service().encrypt(value)?;
+            config.extras.insert(key.clone(), value.clone());
+            save_config(config, &config_file)?;
+            return Ok(None);
+        }
         Some(Commands::Extra { key, value }) => {
             let mut config = load_config::<Config>(&config_file)?;
             config.extras.insert(key.clone(), value.clone());
@@ -357,6 +378,15 @@ enum Commands {
         key: String,
 
         #[arg(long, short = 'v', help = "Value for the extra configuration option")]
+        value: String,
+    },
+
+    /// Add secret configuration options
+    Secret {
+        #[arg(long, short = 'k', help = "Key for the secret configuration option")]
+        key: String,
+
+        #[arg(long, short = 'v', help = "Value for the secret configuration option")]
         value: String,
     },
 

@@ -68,7 +68,7 @@ where
     Ok(inner_key.expose_secret().decrypt::<T>(
         &outer_key
             .expose_secret()
-            .decrypt::<String>(&message.to_text()?.to_string())?,
+            .decrypt::<String>(message.to_text()?)?,
     )?)
 }
 

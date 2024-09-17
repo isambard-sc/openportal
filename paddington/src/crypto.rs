@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Context;
-use orion::{aead, auth};
+use orion::{aead, auth, kdf};
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
@@ -96,6 +96,42 @@ impl Key {
             data: aead::SecretKey::default().unprotected_as_bytes().to_vec(),
         }
         .into()
+    }
+
+    ///
+    /// Generate a new secret key from the supplied password - this will
+    /// reproducibly generate the same key from the same password.
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - The password to generate the key from.
+    ///
+    /// # Returns
+    ///
+    /// The secret key.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use paddington::crypto::Key;
+    ///
+    /// let key = Key::from_password("password".to_string());
+    /// ```
+    pub fn from_password(password: &str) -> Result<SecretKey, Error> {
+        Ok(Key {
+            data: kdf::derive_key(
+                &kdf::Password::from_slice(password.as_bytes())
+                    .context(format!("Failed to generate a password from {}", password))?,
+                &kdf::Salt::default(),
+                3,
+                1 << 16,
+                32,
+            )
+            .context("Failed to derive key from password.")?
+            .unprotected_as_bytes()
+            .to_vec(),
+        }
+        .into())
     }
 
     ///

@@ -328,18 +328,24 @@ impl PeerConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum EncryptionScheme {
+    Environment { key: String },
+    Simple {},
+    /*Vault {
+        url: String,
+    }*/
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServiceConfig {
     pub name: String,
     pub url: String,
     pub ip: IpAddr,
     pub port: u16,
 
-    #[serde(default)]
-    pub key: Option<SecretKey>,
-
     pub servers: Vec<ServerConfig>,
     pub clients: Vec<ClientConfig>,
-    pub encryption: Option<String>,
+    pub encryption: Option<EncryptionScheme>,
 }
 
 impl ServiceConfig {
@@ -349,28 +355,54 @@ impl ServiceConfig {
             url: create_websocket_url(&url)?,
             ip,
             port,
-            key: None,
             servers: Vec::new(),
             clients: Vec::new(),
             encryption: None,
         })
     }
 
+    fn get_key(&self) -> Result<SecretKey, Error> {
+        match self.encryption.clone() {
+            Some(EncryptionScheme::Environment { key }) => {
+                let key = std::env::var(&key)
+                    .with_context(|| format!("Could not get environment variable: {}", key))?;
+
+                Ok(Key::from_password(&key).with_context(|| {
+                    format!("Could not parse key from environment variable: {}", key)
+                })?)
+            }
+            Some(EncryptionScheme::Simple {}) => Ok(Key::from_password(&self.name)?),
+            None => Err(Error::Null(
+                "No encryption in use. Please choose a scheme from the options provided."
+                    .to_string(),
+            )),
+        }
+    }
+
+    pub fn set_environment_encryption(&mut self, key: &str) -> Result<(), Error> {
+        self.encryption = Some(EncryptionScheme::Environment {
+            key: key.to_string(),
+        });
+        Ok(())
+    }
+
+    pub fn set_simple_encryption(&mut self) -> Result<(), Error> {
+        self.encryption = Some(EncryptionScheme::Simple {});
+        Ok(())
+    }
+
     pub fn encrypt<T>(&self, data: &T) -> Result<String, Error>
     where
         T: Serialize,
     {
-        match self.key {
-            Some(ref key) => key.expose_secret().encrypt(data),
-            None => Err(Error::Null("No key provided.".to_string())),
-        }
+        self.get_key()?.expose_secret().encrypt(data)
     }
 
     pub fn decrypt<T>(&self, data: &str) -> Result<T, Error>
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.key.expose_secret().decrypt(data)
+        self.get_key()?.expose_secret().decrypt::<T>(data)
     }
 
     pub fn add_client(&mut self, name: &String, ip: &String) -> Result<Invite, Error> {

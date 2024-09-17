@@ -56,8 +56,8 @@ impl Config {
         match self.extras.get(key) {
             Some(value) => match self.service.decrypt::<String>(value) {
                 Ok(secret) => Some(Secret::<String>::new(secret)),
-                Err(_) => {
-                    tracing::error!("Failed to decrypt secret for key '{}'", key);
+                Err(e) => {
+                    tracing::error!("Failed to decrypt secret for key '{}': {:?}", key, e);
                     None
                 }
             },
@@ -260,6 +260,25 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
             }
         }
+        Some(Commands::Encryption {
+            simple,
+            environment,
+        }) => {
+            let mut config = load_config::<Config>(&config_file)?;
+
+            match environment {
+                Some(env) => {
+                    config.service.set_environment_encryption(env)?;
+                }
+                None => {
+                    if *simple {
+                        config.service.set_simple_encryption()?;
+                    }
+                }
+            }
+            save_config(config, &config_file)?;
+            return Ok(None);
+        }
         Some(Commands::Secret { key, value }) => {
             let mut config = load_config::<Config>(&config_file)?;
             let value = config.service().encrypt(value)?;
@@ -388,6 +407,23 @@ enum Commands {
 
         #[arg(long, short = 'v', help = "Value for the secret configuration option")]
         value: String,
+    },
+
+    /// Add commands to control encryption of the config file and secrets
+    Encryption {
+        #[arg(
+            long,
+            short = 's',
+            help = "Use very simple encryption. This should not be used in production."
+        )]
+        simple: bool,
+
+        #[arg(
+            long,
+            short = 'e',
+            help = "Use the value of the specified environment variable as the encryption password."
+        )]
+        environment: Option<String>,
     },
 
     /// Run the service

@@ -26,6 +26,12 @@ pub struct Config {
 
     #[serde(default)]
     extras: HashMap<String, String>,
+
+    #[serde(default)]
+    encrypted_secrets: HashMap<String, String>,
+
+    #[serde(skip)]
+    secrets: HashMap<String, Secret<String>>,
 }
 
 impl Config {
@@ -34,6 +40,8 @@ impl Config {
             service,
             agent,
             extras: HashMap::new(),
+            encrypted_secrets: HashMap::new(),
+            secrets: HashMap::new(),
         }
     }
 
@@ -54,13 +62,7 @@ impl Config {
 
     pub fn secret(&self, key: &str) -> Option<Secret<String>> {
         match self.extras.get(key) {
-            Some(value) => match self.service.decrypt::<String>(value) {
-                Ok(secret) => Some(Secret::<String>::new(secret)),
-                Err(e) => {
-                    tracing::error!("Failed to decrypt secret for key '{}': {:?}", key, e);
-                    None
-                }
-            },
+            Some(value) => Some(Secret::new(value.clone())),
             None => None,
         }
     }

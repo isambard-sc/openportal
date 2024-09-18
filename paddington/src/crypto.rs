@@ -118,13 +118,25 @@ impl Key {
     /// let key = Key::from_password("password".to_string());
     /// ```
     pub fn from_password(password: &str) -> Result<SecretKey, Error> {
+        // we need to use an application-defined salt to ensure that we always
+        // get the same key from the same password
+
+        // this is a random salt of 16 bytes
+        let salt = vec![
+            0x3a, 0x7f, 0x1b, 0x4c, 0x5d, 0x6e, 0x2f, 0x8a, 0x9b, 0xac, 0xbd, 0xce, 0xdf, 0xef,
+            0xf0, 0x01,
+        ];
+
+        let salt =
+            kdf::Salt::from_slice(&salt).context("Failed to create a salt from the salt data.")?;
+
         Ok(Key {
             data: kdf::derive_key(
                 &kdf::Password::from_slice(password.as_bytes())
                     .context(format!("Failed to generate a password from {}", password))?,
-                &kdf::Salt::default(),
+                &salt,
                 3,
-                1 << 16,
+                8,
                 32,
             )
             .context("Failed to derive key from password.")?

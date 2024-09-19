@@ -83,13 +83,6 @@ async fn main() -> Result<()> {
     // we would just pass the client with the environment)
     freeipa::connect(&freeipa_server, &freeipa_user, &freeipa_password).await?;
 
-    // now get all of the users from FreeIPA that are part of the OpenPortal
-    // group (these are the users that we are managing)
-    let users = freeipa::get_users_in_group("openportal").await?;
-
-    // add all of the users to the database
-    db::set_existing_users(users).await?;
-
     // we need to bind the FreeIPA client into the freeipa_runner
     async_runnable! {
         ///
@@ -104,8 +97,6 @@ async fn main() -> Result<()> {
                 AddUser(user) => {
                     // have we already added this user? - check the list
                     let user = freeipa::add_user(&user).await?;
-
-                    tracing::info!("User {:?} added", user);
 
                     // update the job with the new user
                     job.completed(format!("User {:?} added", user))?;

@@ -49,10 +49,19 @@ pub async fn set_system_groups(groups: Vec<IPAGroup>) -> Result<(), Error> {
 }
 
 ///
-/// Set the existing users that we are managing that already
+/// Add a new user to the database
+///
+pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
+    let mut db = DB.write().await;
+    db.users.insert(user.identifier().clone(), user.clone());
+    Ok(())
+}
+
+///
+/// Add the existing users that we are managing that already
 /// exist in FreeIPA
 ///
-pub async fn set_existing_users(users: Vec<IPAUser>) -> Result<(), Error> {
+pub async fn add_existing_users(users: Vec<IPAUser>) -> Result<(), Error> {
     let mut db = DB.write().await;
 
     for user in users {
@@ -71,8 +80,6 @@ pub async fn set_existing_users(users: Vec<IPAUser>) -> Result<(), Error> {
             }
         }
     }
-
-    tracing::info!("Existing users: {:?}", db.users);
 
     Ok(())
 }

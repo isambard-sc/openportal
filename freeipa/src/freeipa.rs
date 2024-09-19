@@ -265,10 +265,24 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, FreeAuth>, Error> {
 #[derive(Debug, Clone, Default)]
 pub struct IPAUser {
     userid: String,
+    cn: String,
     givenname: String,
     homedirectory: String,
     userclass: String,
     memberof: Vec<String>,
+}
+
+// implement display for IPAUser
+impl std::fmt::Display for IPAUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: cn={}, memberof={}",
+            self.userid,
+            self.cn,
+            self.memberof.join(",")
+        )
+    }
 }
 
 impl IPAUser {
@@ -282,11 +296,17 @@ impl IPAUser {
         };
 
         for user in result {
-            tracing::info!("User: {:?}", user);
-
             // uid is a list of strings - just get the first one
-            let userid = user
+            let cn = user
                 .get("cn")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let userid = user
+                .get("uid")
                 .and_then(|v| v.as_array())
                 .and_then(|v| v.first())
                 .and_then(|v| v.as_str())
@@ -330,6 +350,7 @@ impl IPAUser {
 
             users.push(IPAUser {
                 userid,
+                cn,
                 givenname,
                 userclass,
                 homedirectory,
@@ -342,6 +363,10 @@ impl IPAUser {
 
     pub fn userid(&self) -> &str {
         &self.userid
+    }
+
+    pub fn cn(&self) -> &str {
+        &self.cn
     }
 
     pub fn givenname(&self) -> &str {
@@ -362,8 +387,13 @@ impl IPAUser {
 
     pub fn identifier(&self) -> UserIdentifier {
         // we have put the OpenPortal UserIdentifier into the
-        // "givenname" field of the user
-        UserIdentifier::new(&self.userid)
+        // "cn" field of the user
+        UserIdentifier::new(&self.cn)
+    }
+
+    pub fn infrastructure_identifier(&self) -> &str {
+        // this is the linux user account
+        &self.userid
     }
 }
 
@@ -538,12 +568,13 @@ pub async fn get_user(user: &str) -> Result<Option<IPAUser>, Error> {
     Ok(result.users()?.first().cloned())
 }
 
-pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
-    // check to see if the user already exists
-    if let Some(user) = db::get_user(user).await? {
-        return Ok(user);
-    }
-
+///
+/// Call this function to synchronise the groups for the passed user.
+/// This checks that the user is in the correct groups, and adds them
+/// or removes them as necessary. Groups will match the project group,
+/// the system groups, and the openportal group.
+///
+async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
     let mut groups = db::get_system_groups().await?;
@@ -557,11 +588,12 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
 
     // also add in the group for the user's project
     groups.push(IPAGroup::new(
-        &format!("project.{}", user.project()),
-        &format!("Group for all users in the {} project", user.project()),
+        &format!("project.{}", user.identifier().project()),
+        &format!(
+            "Group for all users in the {} project",
+            user.identifier().project()
+        ),
     )?);
-
-    tracing::info!("Adding user: {:?} to groups {:?}", user, groups);
 
     // first step, make sure that all of the groups exist - and get their CNs
     let mut group_cns = Vec::new();
@@ -594,23 +626,8 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         }
     }
 
-    // now add the user
-    let kwargs = {
-        let mut kwargs = HashMap::new();
-        kwargs.insert(
-            "uid".to_string(),
-            format!("{}.{}", user.username(), user.project()),
-        );
-        kwargs.insert("givenname".to_string(), user.username().to_string());
-        kwargs.insert("sn".to_string(), user.project().to_string());
-        kwargs.insert("userclass".to_string(), "openportal".to_string());
-        kwargs.insert("cn".to_string(), user.to_string());
-
-        kwargs
-    };
-
-    let result = call_post::<IPAResponse>("user_add", None, Some(kwargs)).await?;
-    let user = result.users()?.first().cloned().ok_or(Error::Call(format!(
+    // return the user in the system - check that the groups match
+    let user = get_user(user.userid()).await?.ok_or(Error::Call(format!(
         "User {:?} could not be found after adding?",
         user
     )))?;
@@ -650,7 +667,51 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         user
     )))?;
 
-    tracing::info!("User {:?} added", user);
+    db::add_user(&user).await?;
+
+    Ok(user)
+}
+
+pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
+    // check to see if the user already exists in the database
+    if let Some(user) = db::get_user(user).await? {
+        return Ok(user);
+    }
+
+    // check if the user already exists in FreeIPA
+    if let Some(user) = get_user(user.to_string()).await? {
+        // add the user to the database
+        db::add_user(&user).await?;
+        return Ok(user);
+    }
+
+    tracing::info!("Add user: {}", user);
+
+    // now add the user
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert(
+            "uid".to_string(),
+            format!("{}.{}", user.username(), user.project()),
+        );
+        kwargs.insert("givenname".to_string(), user.username().to_string());
+        kwargs.insert("sn".to_string(), user.project().to_string());
+        kwargs.insert("userclass".to_string(), "openportal".to_string());
+        kwargs.insert("cn".to_string(), user.to_string());
+
+        kwargs
+    };
+
+    let result = call_post::<IPAResponse>("user_add", None, Some(kwargs)).await?;
+    let user = result.users()?.first().cloned().ok_or(Error::Call(format!(
+        "User {:?} could not be found after adding?",
+        user
+    )))?;
+
+    // now synchronise the groups
+    let user = sync_groups(&user).await?;
+
+    tracing::info!("Added user: {}", user);
 
     Ok(user)
 }

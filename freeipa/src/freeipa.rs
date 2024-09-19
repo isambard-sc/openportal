@@ -282,9 +282,11 @@ impl IPAUser {
         };
 
         for user in result {
+            tracing::info!("User: {:?}", user);
+
             // uid is a list of strings - just get the first one
             let userid = user
-                .get("uid")
+                .get("cn")
                 .and_then(|v| v.as_array())
                 .and_then(|v| v.first())
                 .and_then(|v| v.as_str())
@@ -490,7 +492,12 @@ pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Res
 }
 
 pub async fn get_users() -> Result<Vec<IPAUser>, Error> {
-    let result = call_post::<IPAResponse>("user_find", None, None).await?;
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("all".to_string(), "true".to_string());
+        kwargs
+    };
+    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
     result.users()
 }
 
@@ -511,6 +518,7 @@ pub async fn get_users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("in_group".to_string(), group.to_string());
+        kwargs.insert("all".to_string(), "true".to_string());
         kwargs
     };
 
@@ -519,7 +527,13 @@ pub async fn get_users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
 }
 
 pub async fn get_user(user: &str) -> Result<Option<IPAUser>, Error> {
-    let result = call_post::<IPAResponse>("user_find", Some(vec![user.to_string()]), None).await?;
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("all".to_string(), "true".to_string());
+        kwargs
+    };
+    let result =
+        call_post::<IPAResponse>("user_find", Some(vec![user.to_string()]), Some(kwargs)).await?;
 
     Ok(result.users()?.first().cloned())
 }

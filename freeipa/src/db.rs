@@ -72,7 +72,7 @@ pub async fn set_existing_users(users: Vec<IPAUser>) -> Result<(), Error> {
         }
     }
 
-    tracing::info!("Existing users: {:?}", db.users.keys());
+    tracing::info!("Existing users: {:?}", db.users);
 
     Ok(())
 }

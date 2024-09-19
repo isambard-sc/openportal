@@ -14,12 +14,7 @@ use std::net::IpAddr;
 use std::path;
 use url::Url;
 
-pub trait SecretConfig {
-    fn encrypt_secrets(&mut self) -> Result<(), Error>;
-    fn decrypt_secrets(&mut self) -> Result<(), Error>;
-}
-
-pub fn load<T: serde::de::DeserializeOwned + serde::Serialize + SecretConfig>(
+pub fn load<T: serde::de::DeserializeOwned + serde::Serialize>(
     config_file: &path::PathBuf,
 ) -> Result<T, Error> {
     // see if this config_file exists - return an error if it doesn't
@@ -34,24 +29,17 @@ pub fn load<T: serde::de::DeserializeOwned + serde::Serialize + SecretConfig>(
         .with_context(|| format!("Could not read config file: {:?}", config_file))?;
 
     // parse the config file
-    let mut config: T = toml::from_str(&config)
+    let config: T = toml::from_str(&config)
         .with_context(|| format!("Could not parse config file fron toml: {:?}", config_file))?;
-
-    // now decrypt the config in memory
-    config.decrypt_secrets()?;
 
     Ok(config)
 }
 
-pub fn save<T: serde::de::DeserializeOwned + serde::Serialize + SecretConfig>(
+pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
     config: T,
     config_file: &path::PathBuf,
 ) -> Result<(), Error> {
-    // encrypt the config in memory
-    let mut config = config;
-
-    config.encrypt_secrets()?;
-
+    // write the config to a json file
     // write the config to a toml file
     let config_toml =
         toml::to_string(&config).with_context(|| "Could not serialise config to toml")?;

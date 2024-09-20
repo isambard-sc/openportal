@@ -19,15 +19,15 @@ struct Database {
     system_groups: Vec<IPAGroup>,
 }
 
-static DB: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
+static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
 
 ///
 /// Return the IPAUser for the passed UserIdentifier, if this
 /// user exists in the system. Returns None if the user does not
 ///
 pub async fn get_user(identifier: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
-    let db = DB.read().await;
-    Ok(db.users.get(identifier).cloned())
+    let cache = CACHE.read().await;
+    Ok(cache.users.get(identifier).cloned())
 }
 
 ///
@@ -35,17 +35,18 @@ pub async fn get_user(identifier: &UserIdentifier) -> Result<Option<IPAUser>, Er
 /// for all users managed by OpenPortal on this system
 ///
 pub async fn get_system_groups() -> Result<Vec<IPAGroup>, Error> {
-    let db = DB.read().await;
-    Ok(db.system_groups.clone())
+    let cache = CACHE.read().await;
+    Ok(cache.system_groups.clone())
 }
 
 ///
 /// Set the list of all system groups that should be used for all users
 /// managed by OpenPortal on this system
 ///
-pub async fn set_system_groups(groups: &Vec<IPAGroup>) -> Result<(), Error> {
-    let mut db = DB.write().await;
-    db.system_groups = groups.clone();
+pub async fn set_system_groups(groups: &[IPAGroup]) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    cache.system_groups = groups.to_vec();
+    tracing::info!("Setting system groups to {:?}", cache.system_groups);
     Ok(())
 }
 
@@ -55,8 +56,8 @@ pub async fn set_system_groups(groups: &Vec<IPAGroup>) -> Result<(), Error> {
 pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
     match user.identifier().is_valid() {
         true => {
-            let mut db = DB.write().await;
-            db.users.insert(user.identifier().clone(), user.clone());
+            let mut cache = CACHE.write().await;
+            cache.users.insert(user.identifier().clone(), user.clone());
             Ok(())
         }
         false => {
@@ -74,14 +75,14 @@ pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
 /// exist in FreeIPA
 ///
 pub async fn add_existing_users(users: &Vec<IPAUser>) -> Result<(), Error> {
-    let mut db = DB.write().await;
+    let mut cache = CACHE.write().await;
 
     for user in users {
         let identifier = user.identifier().clone();
 
         match identifier.is_valid() {
             true => {
-                db.users.insert(identifier, user.clone());
+                cache.users.insert(identifier, user.clone());
             }
             false => {
                 tracing::error!(
@@ -101,8 +102,8 @@ pub async fn add_existing_users(users: &Vec<IPAUser>) -> Result<(), Error> {
 /// if it doesn't exist
 ///
 pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
-    let db = DB.read().await;
-    Ok(db.groups.get(group).cloned())
+    let cache = CACHE.read().await;
+    Ok(cache.groups.get(group).cloned())
 }
 
 ///
@@ -117,8 +118,9 @@ pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
             );
         }
         false => {
-            let mut db = DB.write().await;
-            db.groups
+            let mut cache = CACHE.write().await;
+            cache
+                .groups
                 .insert(group.identifier().to_owned(), group.clone());
         }
     }
@@ -131,7 +133,7 @@ pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
 /// exist in FreeIPA
 ///
 pub async fn add_existing_groups(groups: &Vec<IPAGroup>) -> Result<(), Error> {
-    let mut db = DB.write().await;
+    let mut cache = CACHE.write().await;
 
     for group in groups {
         let identifier = group.identifier().to_string();
@@ -145,7 +147,7 @@ pub async fn add_existing_groups(groups: &Vec<IPAGroup>) -> Result<(), Error> {
                 continue;
             }
             false => {
-                db.groups.insert(identifier, group.clone());
+                cache.groups.insert(identifier, group.clone());
             }
         }
     }

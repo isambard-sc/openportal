@@ -14,7 +14,7 @@ use templemeads::grammar::UserIdentifier;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
-use crate::db;
+use crate::cache;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FreeResponse {
@@ -468,7 +468,7 @@ impl IPAGroup {
         let mut g = Vec::new();
         let mut errors = Vec::new();
 
-        for group in groups.split(",") {
+        for group in groups.split(',') {
             if !group.is_empty() {
                 match IPAGroup::new(group, "OpenPortal-managed group") {
                     Ok(group) => g.push(group),
@@ -554,7 +554,7 @@ pub async fn get_users() -> Result<Vec<IPAUser>, Error> {
 /// not exist
 ///
 pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
-    match db::get_group(group).await? {
+    match cache::get_group(group).await? {
         Some(group) => Ok(Some(group)),
         None => {
             let result =
@@ -562,7 +562,7 @@ pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
 
             match result.groups()?.first() {
                 Some(group) => {
-                    db::add_existing_group(group).await?;
+                    cache::add_existing_group(group).await?;
                     Ok(Some(group.clone()))
                 }
                 None => Ok(None),
@@ -577,7 +577,7 @@ pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
 pub async fn get_groups() -> Result<Vec<IPAGroup>, Error> {
     let result = call_post::<IPAResponse>("group_find", None, None).await?;
     let groups = result.groups()?;
-    db::add_existing_groups(&groups).await?;
+    cache::add_existing_groups(&groups).await?;
     Ok(groups)
 }
 
@@ -600,7 +600,7 @@ pub async fn get_users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
 
     let users: Vec<IPAUser> = users.into_iter().filter(|user| user.is_managed()).collect();
 
-    db::add_existing_users(&users).await?;
+    cache::add_existing_users(&users).await?;
 
     Ok(users)
 }
@@ -642,7 +642,7 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 
     match users.first() {
         Some(user) => {
-            db::add_existing_user(user).await?;
+            cache::add_existing_user(user).await?;
             Ok(Some(user.clone()))
         }
         None => Ok(None),
@@ -655,7 +655,7 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 /// "openportal" group)
 ///
 pub async fn get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
-    match db::get_user(user).await? {
+    match cache::get_user(user).await? {
         Some(user) => Ok(Some(user.clone())),
         None => Ok(force_get_user(user).await?),
     }
@@ -666,9 +666,9 @@ pub async fn get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
 /// it doesn't already exist
 ///
 async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Error> {
-    // check if it already exist in FreeIPA (this also checks db)
+    // check if it already exist in FreeIPA (this also checks cache)
     if let Some(group) = get_group(group.identifier()).await? {
-        db::add_existing_group(&group).await?;
+        cache::add_existing_group(&group).await?;
         return Ok(group);
     }
 
@@ -705,6 +705,13 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
 }
 
 ///
+/// Return the group that indicates that this user is managed
+///
+fn get_managed_group() -> Result<IPAGroup, Error> {
+    IPAGroup::new("openportal", "Group for all users managed by OpenPortal")
+}
+
+///
 /// Call this function to synchronise the groups for the passed user.
 /// This checks that the user is in the correct groups, and adds them
 /// or removes them as necessary. Groups will match the project group,
@@ -713,14 +720,11 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
 async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
-    let mut groups = db::get_system_groups().await?;
+    let mut groups = cache::get_system_groups().await?;
 
     // add in the "openportal" group, to which all users managed by
     // OpenPortal must belong
-    groups.push(IPAGroup::new(
-        "openportal",
-        "Group for all users managed by OpenPortal",
-    )?);
+    groups.push(get_managed_group()?);
 
     // also add in the group for the user's project
     groups.push(IPAGroup::new(
@@ -735,9 +739,25 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     let mut group_cns = Vec::new();
 
     for group in &groups {
-        let group = get_group_create_if_not_exists(group).await?;
+        let added_group = get_group_create_if_not_exists(group).await?;
+
+        if group.identifier() != added_group.identifier() {
+            tracing::error!(
+                "Disagreement of identifier of added group: {:?} versus {:?}",
+                group,
+                added_group
+            );
+
+            return Err(Error::InvalidState(format!(
+                "Disagreement of identifier of added group: {:?} versus {:?}",
+                group, added_group
+            )));
+        }
+
         group_cns.push(group.identifier().to_string());
     }
+
+    tracing::info!("GROUPS {:?}", group_cns);
 
     // return the user in the system - check that the groups match
     let user = get_user(&user.identifier())
@@ -810,16 +830,16 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     if let Some(user) = get_user(user).await? {
         // make sure that the groups are correct
         let user = sync_groups(&user).await?;
+
+        tracing::info!("Added user [cached] {:?}", user);
+
         return Ok(user);
     }
 
     // They don't exist, so try to add
     let kwargs = {
         let mut kwargs = HashMap::new();
-        kwargs.insert(
-            "uid".to_string(),
-            format!("{}.{}", user.username(), user.project()),
-        );
+        kwargs.insert("uid".to_string(), identifier_to_userid(user).await?);
         kwargs.insert("givenname".to_string(), user.username().to_string());
         kwargs.insert("sn".to_string(), user.project().to_string());
         kwargs.insert("userclass".to_string(), "openportal".to_string());
@@ -833,6 +853,30 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         "User {:?} could not be found after adding?",
         user
     )))?;
+
+    // add this user to the "openportal" group so that it can be managed
+    let userid = user.userid().to_string();
+
+    let group = get_managed_group()?;
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), group.groupid().to_string());
+        kwargs.insert("user".to_string(), userid.clone());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
+        Ok(_) => tracing::info!("Successfully added user {:?} to group {:?}", userid, group),
+        Err(e) => {
+            tracing::error!(
+                "Could not add user {:?} to group {:?}. Error: {}",
+                userid,
+                group,
+                e
+            );
+        }
+    }
 
     // now synchronise the groups - this won't do anything if another
     // thread has already beaten us to creating the user

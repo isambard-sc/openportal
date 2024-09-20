@@ -7,7 +7,7 @@ use anyhow::Result;
 mod freeipa;
 use freeipa::IPAGroup;
 
-mod db;
+mod cache;
 
 use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    db::set_system_groups(&system_groups).await?;
+    cache::set_system_groups(&system_groups).await?;
 
     // connect the single shared FreeIPA client - this will be used in the
     // async function (we can't bind variables to async functions, or else

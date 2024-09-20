@@ -808,6 +808,8 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
 pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(user) = get_user(user).await? {
+        // make sure that the groups are correct
+        let user = sync_groups(&user).await?;
         return Ok(user);
     }
 
@@ -832,7 +834,8 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         user
     )))?;
 
-    // now synchronise the groups
+    // now synchronise the groups - this won't do anything if another
+    // thread has already beaten us to creating the user
     let user = sync_groups(&user).await?;
 
     tracing::info!("Added user: {:?}", user);

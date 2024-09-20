@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    db::set_system_groups(system_groups).await?;
+    db::set_system_groups(&system_groups).await?;
 
     // connect the single shared FreeIPA client - this will be used in the
     // async function (we can't bind variables to async functions, or else

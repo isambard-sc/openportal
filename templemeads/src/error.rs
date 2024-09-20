@@ -80,6 +80,9 @@ pub enum Error {
 
     #[error("{0}")]
     Unknown(String),
+
+    #[error("{0}")]
+    UnmanagedUser(String),
 }
 
 // implement into a paddington::Error

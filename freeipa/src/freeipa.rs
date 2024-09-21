@@ -10,7 +10,7 @@ use secrecy::Secret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use templemeads::grammar::UserIdentifier;
+use templemeads::grammar::{UserIdentifier, UserMapping};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -265,10 +265,11 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, FreeAuth>, Error> {
 #[derive(Debug, Clone, Default)]
 pub struct IPAUser {
     userid: String,
-    cn: String,
+    cn: UserIdentifier,
     givenname: String,
     homedirectory: String,
     userclass: String,
+    primary_group: String,
     memberof: Vec<String>,
 }
 
@@ -297,13 +298,19 @@ impl IPAUser {
 
         for user in result {
             // uid is a list of strings - just get the first one
-            let cn = user
-                .get("cn")
-                .and_then(|v| v.as_array())
-                .and_then(|v| v.first())
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
+            let cn = match UserIdentifier::parse(
+                user.get("cn")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+            ) {
+                Ok(cn) => cn,
+                Err(e) => {
+                    tracing::error!("Could not parse user identifier: {}. Error: {}", user, e);
+                    continue;
+                }
+            };
 
             let userid = user
                 .get("uid")
@@ -337,7 +344,7 @@ impl IPAUser {
                 .unwrap_or_default()
                 .to_string();
 
-            let memberof = user
+            let memberof: Vec<String> = user
                 .get("memberof_group")
                 .and_then(|v| v.as_array())
                 .map(|v| {
@@ -348,12 +355,23 @@ impl IPAUser {
                 })
                 .unwrap_or_default();
 
+            // try to find the primary group for this user
+            let primary_group = get_primary_group(&cn);
+            let primary_group = match memberof.contains(&primary_group) {
+                true => primary_group,
+                false => {
+                    tracing::error!("Could not find primary group for user: {}", cn);
+                    "".to_string()
+                }
+            };
+
             users.push(IPAUser {
                 userid,
                 cn,
                 givenname,
                 userclass,
                 homedirectory,
+                primary_group,
                 memberof,
             });
         }
@@ -365,7 +383,7 @@ impl IPAUser {
         &self.userid
     }
 
-    pub fn cn(&self) -> &str {
+    pub fn cn(&self) -> &UserIdentifier {
         &self.cn
     }
 
@@ -381,14 +399,34 @@ impl IPAUser {
         &self.homedirectory
     }
 
+    pub fn primary_group(&self) -> &str {
+        &self.primary_group
+    }
+
+    pub fn set_primary_group(&mut self, group: &str) {
+        self.primary_group = group.to_string();
+
+        if !self.memberof.contains(&group.to_string()) {
+            self.memberof.push(group.to_string());
+        }
+    }
+
     pub fn memberof(&self) -> &Vec<String> {
         &self.memberof
     }
 
-    pub fn identifier(&self) -> UserIdentifier {
+    pub fn identifier(&self) -> &UserIdentifier {
         // we have put the OpenPortal UserIdentifier into the
         // "cn" field of the user
-        UserIdentifier::new(&self.cn)
+        &self.cn
+    }
+
+    ///
+    /// Return the mapping from the UserIdentifier to the
+    /// FreeIPA user
+    ///
+    pub fn mapping(&self) -> Result<UserMapping, Error> {
+        UserMapping::new(&self.cn, self.userid(), self.primary_group())
     }
 
     pub fn infrastructure_identifier(&self) -> &str {
@@ -717,6 +755,13 @@ fn get_managed_group() -> Result<IPAGroup, Error> {
 }
 
 ///
+/// Return the name of the primary group for the user
+///
+fn get_primary_group(user: &UserIdentifier) -> String {
+    format!("{}.{}", user.portal(), user.project())
+}
+
+///
 /// Call this function to synchronise the groups for the passed user.
 /// This checks that the user is in the correct groups, and adds them
 /// or removes them as necessary. Groups will match the project group,
@@ -731,11 +776,13 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     // OpenPortal must belong
     groups.push(get_managed_group()?);
 
-    // also add in the group for the user's project
+    // also add in the group for the user's project (this is their primary group)
+    let primary_group = get_primary_group(user.identifier());
+
     groups.push(IPAGroup::new(
-        &format!("project.{}", user.identifier().project()),
+        &primary_group,
         &format!(
-            "Group for all users in the {} project",
+            "Primary group for all users in the {} project",
             user.identifier().project()
         ),
     )?);
@@ -765,7 +812,7 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     tracing::info!("GROUPS {:?}", group_cns);
 
     // return the user in the system - check that the groups match
-    let user = get_user(&user.identifier())
+    let user = get_user(user.identifier())
         .await?
         .ok_or(Error::Call(format!(
             "User {:?} could not be found after adding?",
@@ -818,7 +865,7 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
 
     // finally - re-fetch the user from FreeIPA to make sure that we have
     // the correct information
-    match force_get_user(&user.identifier()).await? {
+    match force_get_user(user.identifier()).await? {
         Some(user) => Ok(user),
         None => {
             tracing::error!("Failed to sync groups for user {:?} to FreeIPA", user);

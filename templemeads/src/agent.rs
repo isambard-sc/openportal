@@ -14,6 +14,7 @@ pub enum Type {
     Instance,
     Bridge,
     Account,
+    Filesystem,
 }
 
 pub mod account {
@@ -25,6 +26,13 @@ pub mod account {
 
 pub mod bridge {
     pub use crate::agent_bridge::*;
+}
+
+pub mod filesystem {
+    pub use crate::account::run;
+    pub use crate::agent_core::process_args;
+    pub use crate::agent_core::Config;
+    pub use crate::agent_core::Defaults;
 }
 
 pub mod instance {

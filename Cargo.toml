@@ -4,7 +4,7 @@
 [workspace]
 
 members = [
-    "bridge", "cluster", "freeipa", "paddington", "portal",
+    "bridge", "cluster", "filesystem", "freeipa", "paddington", "portal",
     "provider", "python", "slurm", "templemeads"
 ]
 

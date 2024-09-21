@@ -13,7 +13,6 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{AddUser, RemoveUser};
-use templemeads::grammar::UserMapping;
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -100,7 +99,7 @@ async fn main() -> Result<()> {
                     let user = freeipa::add_user(&user).await?;
 
                     // update the job with the new user
-                    let job = job.completed(UserMapping::new(&user.identifier(), user.userid()))?;
+                    let job = job.completed(user.mapping()?)?;
 
                     Ok(job)
                 },

@@ -3,12 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::Error;
+
 /// Grammar for all of the commands that can be sent to agents
 
 ///
 /// A user identifier - this is a triple of username.project.portal
 ///
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct UserIdentifier {
     username: String,
     project: String,
@@ -16,23 +18,46 @@ pub struct UserIdentifier {
 }
 
 impl UserIdentifier {
-    pub fn new(identifier: &str) -> Self {
+    pub fn parse(identifier: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = identifier.split('.').collect();
 
         if parts.len() != 3 {
-            tracing::error!("Invalid UserIdentifier: {}", identifier);
-            return Self {
-                username: "".to_string(),
-                project: "".to_string(),
-                portal: "".to_string(),
-            };
+            return Err(Error::Parse(format!(
+                "Invalid UserIdentifier: {}",
+                identifier
+            )));
         }
 
-        Self {
-            username: parts[0].to_string(),
-            project: parts[1].to_string(),
-            portal: parts[2].to_string(),
-        }
+        let username = parts[0].trim();
+        let project = parts[1].trim();
+        let portal = parts[2].trim();
+
+        if username.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid UserIdentifier - username cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        if project.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid UserIdentifier - project cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        if portal.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid UserIdentifier - portal cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        Ok(Self {
+            username: username.to_string(),
+            project: project.to_string(),
+            portal: portal.to_string(),
+        })
     }
 
     pub fn username(&self) -> String {
@@ -75,7 +100,7 @@ impl<'de> Deserialize<'de> for UserIdentifier {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(Self::new(&s))
+        Self::parse(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -86,29 +111,92 @@ impl<'de> Deserialize<'de> for UserIdentifier {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserMapping {
     user: UserIdentifier,
-    local_username: String,
+    local_user: String,
+    local_project: String,
 }
 
 impl UserMapping {
-    pub fn new(user: &UserIdentifier, local_username: &str) -> Self {
-        Self {
+    pub fn new(
+        user: &UserIdentifier,
+        local_user: &str,
+        local_project: &str,
+    ) -> Result<Self, Error> {
+        let local_user = local_user.trim();
+        let local_project = local_project.trim();
+
+        if local_user.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid UserMapping - local_user cannot be empty '{}'",
+                local_user
+            )));
+        };
+
+        if local_project.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid UserMapping - local_project cannot be empty '{}'",
+                local_project
+            )));
+        };
+
+        Ok(Self {
             user: user.clone(),
-            local_username: local_username.to_string(),
+            local_user: local_user.to_string(),
+            local_project: local_project.to_string(),
+        })
+    }
+
+    pub fn parse(identifier: &str) -> Result<Self, Error> {
+        let parts: Vec<&str> = identifier.split(':').collect();
+
+        if parts.len() != 3 {
+            return Err(Error::Parse(format!("Invalid UserMapping: {}", identifier)));
         }
+
+        let user = UserIdentifier::parse(parts[0])?;
+        let local_user = parts[1].trim();
+        let local_project = parts[2].trim();
+
+        if local_user.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid UserMapping - local_user cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        if local_project.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid UserMapping - local_project cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        Ok(Self {
+            user,
+            local_user: local_user.to_string(),
+            local_project: local_project.to_string(),
+        })
     }
 
     pub fn user(&self) -> &UserIdentifier {
         &self.user
     }
 
-    pub fn local_username(&self) -> &str {
-        &self.local_username
+    pub fn local_user(&self) -> &str {
+        &self.local_user
+    }
+
+    pub fn local_project(&self) -> &str {
+        &self.local_project
     }
 }
 
 impl std::fmt::Display for UserMapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.user, self.local_username)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.user, self.local_user, self.local_project
+        )
     }
 }
 
@@ -129,13 +217,7 @@ impl<'de> Deserialize<'de> for UserMapping {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-
-        let parts: Vec<&str> = s.split(':').collect();
-
-        if parts.len() != 2 {
-            return Err(serde::de::Error::custom("Invalid UserMapping"));
-        }
-        Ok(Self::new(&UserIdentifier::new(parts[0]), parts[1]))
+        Self::parse(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -150,6 +232,12 @@ pub enum Instruction {
     /// An instruction to remove a user
     RemoveUser(UserIdentifier),
 
+    /// An instruction to add a local user
+    AddLocalUser(UserMapping),
+
+    /// An instruction to remove a local user
+    RemoveLocalUser(UserMapping),
+
     /// Placeholder for an invalid instruction
     Invalid(String),
 }
@@ -158,14 +246,22 @@ impl Instruction {
     pub fn new(s: &str) -> Self {
         let parts: Vec<&str> = s.split(' ').collect();
         match parts[0] {
-            "add_user" => {
-                let user = UserIdentifier::new(&parts[1..].join(" "));
-                Instruction::AddUser(user)
-            }
-            "remove_user" => {
-                let user = UserIdentifier::new(&parts[1..].join(" "));
-                Instruction::RemoveUser(user)
-            }
+            "add_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Instruction::AddUser(user),
+                Err(_) => Instruction::Invalid(s.to_string()),
+            },
+            "remove_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Instruction::RemoveUser(user),
+                Err(_) => Instruction::Invalid(s.to_string()),
+            },
+            "add_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Instruction::AddLocalUser(mapping),
+                Err(_) => Instruction::Invalid(s.to_string()),
+            },
+            "remove_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Instruction::RemoveLocalUser(mapping),
+                Err(_) => Instruction::Invalid(s.to_string()),
+            },
             _ => Instruction::Invalid(s.to_string()),
         }
     }
@@ -174,6 +270,8 @@ impl Instruction {
         match self {
             Instruction::AddUser(user) => !user.username().is_empty(),
             Instruction::RemoveUser(user) => !user.username().is_empty(),
+            Instruction::AddLocalUser(mapping) => !mapping.local_user().is_empty(),
+            Instruction::RemoveLocalUser(mapping) => !mapping.local_user().is_empty(),
             Instruction::Invalid(_) => false,
         }
     }
@@ -184,6 +282,8 @@ impl std::fmt::Display for Instruction {
         match self {
             Instruction::AddUser(user) => write!(f, "add_user {}", user),
             Instruction::RemoveUser(user) => write!(f, "remove_user {}", user),
+            Instruction::AddLocalUser(mapping) => write!(f, "add_local_user {}", mapping),
+            Instruction::RemoveLocalUser(mapping) => write!(f, "remove_local_user {}", mapping),
             Instruction::Invalid(s) => write!(f, "invalid {}", s),
         }
     }

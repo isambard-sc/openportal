@@ -105,9 +105,6 @@ async fn main() -> Result<()> {
                                 );
                             }
 
-                            // communicate the change
-                            job = job.updated().await?;
-
                             tracing::info!("User added to slurm cluster: {}", user);
                         }
                         None => {

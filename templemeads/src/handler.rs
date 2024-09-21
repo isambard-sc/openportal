@@ -117,7 +117,13 @@ async fn process_command(
                 }
                 Position::Destination => {
                     // we are the destination, so we need to take action
-                    let job = runner(Envelope::new(recipient, sender, &job)).await?;
+                    let job = match runner(Envelope::new(recipient, sender, &job)).await {
+                        Ok(job) => job,
+                        Err(e) => {
+                            tracing::error!("Error running job: {:?}", e);
+                            job.errored(&e.to_string())?
+                        }
+                    };
 
                     tracing::info!("Job has finished: {:?}", job);
 

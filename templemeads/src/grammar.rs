@@ -80,6 +80,66 @@ impl<'de> Deserialize<'de> for UserIdentifier {
 }
 
 ///
+/// Struct that holds the mapping of a UserIdentifier to a local
+/// username on a system
+///
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserMapping {
+    user: UserIdentifier,
+    local_username: String,
+}
+
+impl UserMapping {
+    pub fn new(user: &UserIdentifier, local_username: &str) -> Self {
+        Self {
+            user: user.clone(),
+            local_username: local_username.to_string(),
+        }
+    }
+
+    pub fn user(&self) -> &UserIdentifier {
+        &self.user
+    }
+
+    pub fn local_username(&self) -> &str {
+        &self.local_username
+    }
+}
+
+impl std::fmt::Display for UserMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.user, self.local_username)
+    }
+}
+
+/// Serialize and Deserialize via the string representation
+/// of the UserMapping
+impl Serialize for UserMapping {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for UserMapping {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        let parts: Vec<&str> = s.split(':').collect();
+
+        if parts.len() != 2 {
+            return Err(serde::de::Error::custom("Invalid UserMapping"));
+        }
+        Ok(Self::new(&UserIdentifier::new(parts[0]), parts[1]))
+    }
+}
+
+///
 /// Enum of all of the instructions that can be sent to agents
 ///
 #[derive(Debug, Clone, PartialEq)]

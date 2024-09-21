@@ -546,7 +546,7 @@ pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Res
 ///
 pub async fn get_users() -> Result<Vec<IPAUser>, Error> {
     // we can only interact with users who are in the "openportal" group
-    get_users_in_group("openportal").await
+    get_users_in_group(get_managed_group()?.groupid()).await
 }
 
 ///
@@ -557,8 +557,13 @@ pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
     match cache::get_group(group).await? {
         Some(group) => Ok(Some(group)),
         None => {
-            let result =
-                call_post::<IPAResponse>("group_find", Some(vec![group.to_string()]), None).await?;
+            let kwargs = {
+                let mut kwargs = HashMap::new();
+                kwargs.insert("cn".to_string(), group.to_string());
+                kwargs
+            };
+
+            let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
 
             match result.groups()?.first() {
                 Some(group) => {
@@ -625,12 +630,12 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("all".to_string(), "true".to_string());
+        kwargs.insert("cn".to_string(), user.to_string());
+        kwargs.insert("uid".to_string(), identifier_to_userid(user).await?);
         kwargs
     };
 
-    let userid = identifier_to_userid(user).await?;
-
-    let result = call_post::<IPAResponse>("user_find", Some(vec![userid]), Some(kwargs)).await?;
+    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
 
     // this isn't one line because we need to specify the
     // type of 'users'
@@ -854,10 +859,13 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         user
     )))?;
 
-    // add this user to the "openportal" group so that it can be managed
+    // add this user to the managed group so that it can be managed
     let userid = user.userid().to_string();
 
     let group = get_managed_group()?;
+
+    // make sure that this group exists
+    let group = get_group_create_if_not_exists(&group).await?;
 
     let kwargs = {
         let mut kwargs = HashMap::new();
@@ -875,6 +883,36 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
                 group,
                 e
             );
+
+            // this failed, so we need to remove the user so that we can try again
+            // (there is a race condition here, but that would be fixed the next
+            //  time the user is added)
+            let kwargs = {
+                let mut kwargs = HashMap::new();
+                kwargs.insert("uid".to_string(), userid.clone());
+                kwargs
+            };
+
+            match call_post::<IPAResponse>("user_del", None, Some(kwargs)).await {
+                Ok(_) => {
+                    tracing::info!(
+                        "Successfully removed user {:?} after failed group add",
+                        userid
+                    )
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Could not remove user {:?} after failed group add. Error: {}",
+                        userid,
+                        e
+                    );
+                }
+            }
+
+            return Err(Error::Call(format!(
+                "Could not add user {:?} to group {:?}. Error: {}",
+                user, group, e
+            )));
         }
     }
 

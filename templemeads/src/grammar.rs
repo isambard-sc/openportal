@@ -188,6 +188,10 @@ impl UserMapping {
     pub fn local_project(&self) -> &str {
         &self.local_project
     }
+
+    pub fn is_valid(&self) -> bool {
+        self.user.is_valid() && !self.local_user.is_empty() && !self.local_project.is_empty()
+    }
 }
 
 impl std::fmt::Display for UserMapping {
@@ -238,6 +242,9 @@ pub enum Instruction {
     /// An instruction to remove a local user
     RemoveLocalUser(UserMapping),
 
+    /// An instruction to update the home directory of a user
+    UpdateHomeDir(UserIdentifier, String),
+
     /// Placeholder for an invalid instruction
     Invalid(String),
 }
@@ -262,16 +269,33 @@ impl Instruction {
                 Ok(mapping) => Instruction::RemoveLocalUser(mapping),
                 Err(_) => Instruction::Invalid(s.to_string()),
             },
+            "update_homedir" => {
+                if parts.len() < 3 {
+                    return Instruction::Invalid(s.to_string());
+                }
+
+                let homedir = parts[2].trim().to_string();
+
+                if homedir.is_empty() {
+                    return Instruction::Invalid(s.to_string());
+                }
+
+                match UserIdentifier::parse(parts[1]) {
+                    Ok(user) => Instruction::UpdateHomeDir(user, homedir),
+                    Err(_) => Instruction::Invalid(s.to_string()),
+                }
+            }
             _ => Instruction::Invalid(s.to_string()),
         }
     }
 
     pub fn is_valid(&self) -> bool {
         match self {
-            Instruction::AddUser(user) => !user.username().is_empty(),
-            Instruction::RemoveUser(user) => !user.username().is_empty(),
-            Instruction::AddLocalUser(mapping) => !mapping.local_user().is_empty(),
-            Instruction::RemoveLocalUser(mapping) => !mapping.local_user().is_empty(),
+            Instruction::AddUser(user) => user.is_valid(),
+            Instruction::RemoveUser(user) => user.is_valid(),
+            Instruction::AddLocalUser(mapping) => mapping.is_valid(),
+            Instruction::RemoveLocalUser(mapping) => mapping.is_valid(),
+            Instruction::UpdateHomeDir(user, homedir) => user.is_valid() && !homedir.is_empty(),
             Instruction::Invalid(_) => false,
         }
     }
@@ -284,6 +308,9 @@ impl std::fmt::Display for Instruction {
             Instruction::RemoveUser(user) => write!(f, "remove_user {}", user),
             Instruction::AddLocalUser(mapping) => write!(f, "add_local_user {}", mapping),
             Instruction::RemoveLocalUser(mapping) => write!(f, "remove_local_user {}", mapping),
+            Instruction::UpdateHomeDir(user, homedir) => {
+                write!(f, "update_homedir {} {}", user, homedir)
+            }
             Instruction::Invalid(s) => write!(f, "invalid {}", s),
         }
     }

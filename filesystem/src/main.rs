@@ -66,8 +66,8 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 AddLocalUser(mapping) => {
-                    let home_dir = format!("/home/{}", mapping.local_user());
-                    let project_dir = format!("/projects/{}", mapping.local_project());
+                    let home_dir = format!("/shared/home/{}", mapping.local_user());
+                    let project_dir = format!("/projects/{}", mapping.user().project());
 
                     tracing::info!("Creating directories for {} - home = {}, project = {}",
                                    mapping.user(), home_dir, project_dir);

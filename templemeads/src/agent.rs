@@ -29,10 +29,10 @@ pub mod bridge {
 }
 
 pub mod filesystem {
-    pub use crate::account::run;
     pub use crate::agent_core::process_args;
     pub use crate::agent_core::Config;
     pub use crate::agent_core::Defaults;
+    pub use crate::filesystem::run;
 }
 
 pub mod instance {
@@ -116,6 +116,15 @@ impl Registrar {
             .get(&Type::Account)
             .and_then(|v| v.first().cloned())
     }
+
+    ///
+    /// Return the name of the first filesystem agent in the system
+    ///
+    fn filesystem(&self) -> Option<String> {
+        self.by_type
+            .get(&Type::Filesystem)
+            .and_then(|v| v.first().cloned())
+    }
 }
 
 static REGISTAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::new()));
@@ -153,4 +162,11 @@ pub async fn portal() -> Option<String> {
 ///
 pub async fn account() -> Option<String> {
     REGISTAR.read().await.account()
+}
+
+///
+/// Return the name of the first filesystem agent in the system
+///
+pub async fn filesystem() -> Option<String> {
+    REGISTAR.read().await.filesystem()
 }

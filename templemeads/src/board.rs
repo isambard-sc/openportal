@@ -95,6 +95,17 @@ impl Board {
                     *j = job.clone();
                     updated = true;
                 }
+                // else if the job is newer, then automatically create a new version
+                else if job.changed() > j.changed() {
+                    let newer_version = j.version();
+                    *j = job.clone();
+
+                    while j.version() <= newer_version {
+                        *j = j.increment_version();
+                    }
+
+                    updated = true;
+                }
             }
             None => {
                 self.jobs.insert(job.id(), job.clone());

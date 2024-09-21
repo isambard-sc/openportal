@@ -82,6 +82,9 @@ pub enum Error {
     Unknown(String),
 
     #[error("{0}")]
+    UnknownInstruction(String),
+
+    #[error("{0}")]
     UnmanagedUser(String),
 }
 

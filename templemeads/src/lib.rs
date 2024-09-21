@@ -8,6 +8,7 @@ mod agent_core;
 mod bridge_server;
 mod control_message;
 mod error;
+mod filesystem;
 mod handler;
 mod instance;
 mod platform;

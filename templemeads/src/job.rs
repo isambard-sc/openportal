@@ -157,7 +157,7 @@ impl Job {
         let job = Self::new(command);
 
         if !job.command.is_valid() {
-            return Err(Error::Parse("Invalid command".to_owned()));
+            return Err(Error::Parse(format!("Invalid command {:?}", command)));
         }
 
         Ok(job)
@@ -193,6 +193,19 @@ impl Job {
 
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    pub fn increment_version(&self) -> Self {
+        Self {
+            id: self.id,
+            created: self.created,
+            changed: Utc::now(),
+            version: self.version + 1,
+            command: self.command.clone(),
+            state: self.state.clone(),
+            result: self.result.clone(),
+            board: self.board.clone(),
+        }
     }
 
     pub fn assert_is_for_board(&self, agent: &str) -> Result<(), Error> {
@@ -263,7 +276,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
-                version: self.version + 1,
+                version: self.version + 1000, // make sure this is the newest version
                 command: self.command.clone(),
                 state: Status::Complete,
                 result: Some(serde_json::to_string(&result)?),
@@ -281,7 +294,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
-                version: self.version + 1,
+                version: self.version + 1000, // make sure this is the newest version
                 command: self.command.clone(),
                 state: Status::Error,
                 result: Some(message.to_owned()),

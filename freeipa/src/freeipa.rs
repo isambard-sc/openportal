@@ -360,7 +360,7 @@ impl IPAUser {
             let primary_group = match memberof.contains(&primary_group) {
                 true => primary_group,
                 false => {
-                    tracing::error!("Could not find primary group for user: {}", cn);
+                    tracing::warn!("Could not find primary group for user: {}", cn);
                     "".to_string()
                 }
             };
@@ -970,4 +970,72 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     tracing::info!("Added user: {:?}", user);
 
     Ok(user)
+}
+
+pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<String, Error> {
+    let homedir = homedir.trim();
+
+    if homedir.is_empty() {
+        return Err(Error::InvalidState("Empty homedir".to_string()));
+    }
+
+    // get the user from FreeIPA
+    let user = get_user(user).await?.ok_or(Error::Call(format!(
+        "User {} does not exist in FreeIPA?",
+        user
+    )))?;
+
+    if user.homedirectory() == homedir {
+        // nothing to do
+        tracing::info!(
+            "Homedir for user {} is already {}. No changes needed.",
+            user.identifier(),
+            homedir
+        );
+        return Ok(user.homedirectory().to_string());
+    }
+
+    // now update the homedir to the passed string
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("uid".to_string(), user.userid().to_string());
+        kwargs.insert("homedirectory".to_string(), homedir.to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("user_mod", None, Some(kwargs)).await {
+        Ok(_) => {
+            tracing::info!(
+                "Successfully updated homedir for user: {:?}",
+                user.identifier()
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not update homedir for user {} to {}. Error: {}",
+                user.identifier(),
+                homedir,
+                e
+            );
+        }
+    }
+
+    // now update the user in the cache
+    let user = force_get_user(user.identifier())
+        .await?
+        .ok_or(Error::Call(format!(
+            "User {} does not exist in FreeIPA?",
+            user.identifier()
+        )))?;
+
+    if user.homedirectory() != homedir {
+        return Err(Error::InvalidState(format!(
+            "Homedir for user {} was not updated to {}",
+            user, homedir
+        )));
+    }
+
+    tracing::info!("User homedir updated: {:?}", user);
+
+    Ok(user.homedirectory().to_string())
 }

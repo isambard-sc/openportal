@@ -12,7 +12,7 @@ mod cache;
 use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{AddUser, RemoveUser};
+use templemeads::grammar::Instruction::{AddUser, RemoveUser, UpdateHomeDir};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -95,18 +95,19 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 AddUser(user) => {
-                    // have we already added this user? - check the list
                     let user = freeipa::add_user(&user).await?;
-
-                    // update the job with the new user
                     let job = job.completed(user.mapping()?)?;
-
                     Ok(job)
                 },
                 RemoveUser(user) => {
                     Err(Error::IncompleteCode(
                         format!("RemoveUser instruction not implemented yet - cannot remove {}", user),
                     ))
+                },
+                UpdateHomeDir(user, homedir) => {
+                    let _ = freeipa::update_homedir(&user, &homedir).await?;
+                    let job = job.completed(homedir)?;
+                    Ok(job)
                 },
                 _ => {
                     Err(Error::InvalidInstruction(

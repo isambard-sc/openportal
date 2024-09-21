@@ -809,8 +809,6 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
         group_cns.push(group.identifier().to_string());
     }
 
-    tracing::info!("GROUPS {:?}", group_cns);
-
     // return the user in the system - check that the groups match
     let user = get_user(user.identifier())
         .await?

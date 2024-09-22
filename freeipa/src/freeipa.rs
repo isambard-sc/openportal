@@ -767,7 +767,7 @@ fn get_primary_group(user: &UserIdentifier) -> String {
 /// or removes them as necessary. Groups will match the project group,
 /// the system groups, and the openportal group.
 ///
-async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
+async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
     let mut groups = cache::get_system_groups().await?;
@@ -864,13 +864,13 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     // finally - re-fetch the user from FreeIPA to make sure that we have
     // the correct information
     match force_get_user(user.identifier()).await? {
-        Some(user) => Ok(user),
+        Some(user) => Ok(Some(user)),
         None => {
-            tracing::error!("Failed to sync groups for user {:?} to FreeIPA", user);
-            Err(Error::Call(format!(
-                "Failed to sync groups for user {:?} to FreeIPA",
-                user
-            )))
+            tracing::warn!(
+                "Failed to sync groups for user {} as this user no longer exists in FreeIPA",
+                user.identifier()
+            );
+            Ok(None)
         }
     }
 }
@@ -879,11 +879,13 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(user) = get_user(user).await? {
         // make sure that the groups are correct
-        let user = sync_groups(&user).await?;
+        if let Some(user) = sync_groups(&user).await? {
+            tracing::info!("Added user [cached] {:?}", user);
+            return Ok(user);
+        }
 
-        tracing::info!("Added user [cached] {:?}", user);
-
-        return Ok(user);
+        // we get here if the user has been removed from FreeIPA behind
+        // our back!
     }
 
     // They don't exist, so try to add
@@ -963,11 +965,22 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
 
     // now synchronise the groups - this won't do anything if another
     // thread has already beaten us to creating the user
-    let user = sync_groups(&user).await?;
-
-    tracing::info!("Added user: {:?}", user);
-
-    Ok(user)
+    match sync_groups(&user).await? {
+        Some(user) => {
+            tracing::info!("Added user: {:?}", user);
+            Ok(user)
+        }
+        None => {
+            tracing::warn!(
+                "Failed to add user {} - they have been removed from FreeIPA?",
+                user.identifier()
+            );
+            Err(Error::Call(format!(
+                "Failed to add user {} - they have been removed from FreeIPA?",
+                user.identifier()
+            )))
+        }
+    }
 }
 
 pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<String, Error> {

@@ -19,6 +19,18 @@ pub enum Command {
     Register { agent: AgentType },
 }
 
+impl std::fmt::Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Command::Error { error } => write!(f, "Error: {}", error),
+            Command::Put { job } => write!(f, "Put: {}", job),
+            Command::Update { job } => write!(f, "Update: {}", job),
+            Command::Delete { job } => write!(f, "Delete: {}", job),
+            Command::Register { agent } => write!(f, "Register: {}", agent),
+        }
+    }
+}
+
 impl Command {
     pub fn put(job: &Job) -> Self {
         Self::Put { job: job.clone() }

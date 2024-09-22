@@ -143,13 +143,8 @@ impl std::fmt::Display for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: version={}, created={}, changed={}, state={:?}, board={}",
-            self.command,
-            self.version,
-            self.created,
-            self.changed,
-            self.state,
-            self.board.clone().unwrap_or("None".to_owned())
+            "{{{}}}: version={}, created={}, changed={}, state={:?}",
+            self.command, self.version, self.created, self.changed, self.state,
         )
     }
 }

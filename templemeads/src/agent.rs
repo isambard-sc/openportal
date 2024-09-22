@@ -17,6 +17,20 @@ pub enum Type {
     Filesystem,
 }
 
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Type::Portal => write!(f, "portal"),
+            Type::Provider => write!(f, "provider"),
+            Type::Platform => write!(f, "platform"),
+            Type::Instance => write!(f, "instance"),
+            Type::Bridge => write!(f, "bridge"),
+            Type::Account => write!(f, "account"),
+            Type::Filesystem => write!(f, "filesystem"),
+        }
+    }
+}
+
 pub mod account {
     pub use crate::account::run;
     pub use crate::agent_core::process_args;

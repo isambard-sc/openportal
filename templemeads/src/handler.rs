@@ -68,11 +68,11 @@ async fn process_command(
 ) -> Result<(), Error> {
     match command {
         Command::Register { agent } => {
-            tracing::info!("Registering agent: {:?}", agent);
+            tracing::info!("Registering agent: {}", agent);
             agent::register(sender, agent).await;
         }
         Command::Update { job } => {
-            tracing::info!("Update job: {:?} to {} from {}", job, recipient, sender);
+            tracing::info!("Update job: {} to {} from {}", job, recipient, sender);
 
             // update the sender's board with the received job
             let job = job.received(sender).await?;
@@ -94,15 +94,15 @@ async fn process_command(
                     }
                 }
                 Position::Destination => {
-                    tracing::info!("Job has arrived at its destination: {:?}", job);
+                    tracing::info!("Job has arrived at its destination: {}", job);
                 }
                 _ => {
-                    tracing::warn!("Job {:?} is being updated, but is not moving?", job);
+                    tracing::warn!("Job {} is being updated, but is not moving?", job);
                 }
             }
         }
         Command::Put { job } => {
-            tracing::info!("Put job: {:?} to {} from {}", job, recipient, sender);
+            tracing::info!("Put job: {} to {} from {}", job, recipient, sender);
 
             // update the sender's board with the received job
             let job = job.received(sender).await?;
@@ -120,23 +120,23 @@ async fn process_command(
                     let job = match runner(Envelope::new(recipient, sender, &job)).await {
                         Ok(job) => job,
                         Err(e) => {
-                            tracing::error!("Error running job: {:?}", e);
+                            tracing::error!("Error running job: {}", e);
                             job.errored(&e.to_string())?
                         }
                     };
 
-                    tracing::info!("Job has finished: {:?}", job);
+                    tracing::info!("Job has finished: {}", job);
 
                     // now the job has finished, update the sender's board
                     let _ = job.update(sender).await?;
                 }
                 _ => {
-                    tracing::warn!("Job {:?} is being put, but is not moving?", job);
+                    tracing::warn!("Job {} is being put, but is not moving?", job);
                 }
             }
         }
         Command::Delete { job } => {
-            tracing::info!("Delete job: {:?} to {} from {}", job, recipient, sender);
+            tracing::info!("Delete job: {} to {} from {}", job, recipient, sender);
 
             // record that the sender has deleted the job
             let job = job.deleted(sender).await?;
@@ -157,12 +157,12 @@ async fn process_command(
                     }
                 }
                 _ => {
-                    tracing::warn!("Job {:?} is being deleted, but is not moving?", job);
+                    tracing::warn!("Job {} is being deleted, but is not moving?", job);
                 }
             }
         }
         _ => {
-            tracing::warn!("Command {:?} not recognised", command);
+            tracing::warn!("Command {} not recognised", command);
         }
     }
 

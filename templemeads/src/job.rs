@@ -138,6 +138,22 @@ pub struct Job {
     board: Option<String>,
 }
 
+// implement display for Job
+impl std::fmt::Display for Job {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: version={}, created={}, changed={}, state={:?}, board={}",
+            self.command,
+            self.version,
+            self.created,
+            self.changed,
+            self.state,
+            self.board.clone().unwrap_or("None".to_owned())
+        )
+    }
+}
+
 impl Job {
     pub fn new(command: &str) -> Self {
         let now = Utc::now();

@@ -278,10 +278,13 @@ impl std::fmt::Display for IPAUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: cn={}, memberof={}",
-            self.userid,
-            self.cn,
-            self.memberof.join(",")
+            "{}: local_name={}, givenname={}, primary_group={}, memberof={}, home={}",
+            self.identifier(),
+            self.userid(),
+            self.givenname(),
+            self.primary_group(),
+            self.memberof().join(","),
+            self.home(),
         )
     }
 }
@@ -379,42 +382,53 @@ impl IPAUser {
         Ok(users)
     }
 
+    ///
+    /// Return the local user identifier (local unix account)
+    /// for this user
+    ///
     pub fn userid(&self) -> &str {
-        &self.userid
+        self.local_username()
     }
 
-    pub fn cn(&self) -> &UserIdentifier {
-        &self.cn
-    }
-
+    ///
+    /// Return the givenname for this user (this is the full user.project.portal)
+    ///
     pub fn givenname(&self) -> &str {
         &self.givenname
     }
 
+    ///
+    /// Return the userclass for this user - it should be "openportal"
+    ///
     pub fn userclass(&self) -> &str {
         &self.userclass
     }
 
-    pub fn homedirectory(&self) -> &str {
+    ///
+    /// Return the home directory for this user
+    ///
+    pub fn home(&self) -> &str {
         &self.homedirectory
     }
 
+    ///
+    /// Return the primary group for this user - this should be
+    /// the project group
+    ///
     pub fn primary_group(&self) -> &str {
         &self.primary_group
     }
 
-    pub fn set_primary_group(&mut self, group: &str) {
-        self.primary_group = group.to_string();
-
-        if !self.memberof.contains(&group.to_string()) {
-            self.memberof.push(group.to_string());
-        }
-    }
-
+    ///
+    /// Return the groups that this user is a member of
+    ///
     pub fn memberof(&self) -> &Vec<String> {
         &self.memberof
     }
 
+    ///
+    /// Return the UserIdentifier for this user (user.project.portal)
+    ///
     pub fn identifier(&self) -> &UserIdentifier {
         // we have put the OpenPortal UserIdentifier into the
         // "cn" field of the user
@@ -423,13 +437,16 @@ impl IPAUser {
 
     ///
     /// Return the mapping from the UserIdentifier to the
-    /// FreeIPA user
+    /// FreeIPA (local user account plus primary project) user
     ///
     pub fn mapping(&self) -> Result<UserMapping, Error> {
         UserMapping::new(&self.cn, self.userid(), self.primary_group())
     }
 
-    pub fn infrastructure_identifier(&self) -> &str {
+    ///
+    /// Return the local username for this user (Unix account)
+    ///
+    pub fn local_username(&self) -> &str {
         // this is the linux user account
         &self.userid
     }
@@ -438,7 +455,7 @@ impl IPAUser {
     /// Return whether this user is in the passed group
     ///
     pub fn in_group(&self, group: &str) -> bool {
-        self.memberof.contains(&group.to_string())
+        self.memberof().contains(&group.to_string())
     }
 
     ///
@@ -446,7 +463,12 @@ impl IPAUser {
     /// in the "openportal" group can be managed
     ///
     pub fn is_managed(&self) -> bool {
-        self.in_group("openportal")
+        let managed_group = match get_managed_group() {
+            Ok(group) => group.identifier().to_string(),
+            Err(_) => return false,
+        };
+
+        self.in_group(&managed_group) && self.userclass() == managed_group
     }
 }
 
@@ -454,6 +476,13 @@ impl IPAUser {
 pub struct IPAGroup {
     groupid: String,
     description: String,
+}
+
+// implement display for IPAGroup
+impl std::fmt::Display for IPAGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: description={}", self.groupid(), self.description())
+    }
 }
 
 impl IPAGroup {
@@ -579,15 +608,6 @@ pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Res
 }
 
 ///
-/// Return all of the users that we can manage in FreeIPA. These
-/// are all of the users in the "openportal" group
-///
-pub async fn get_users() -> Result<Vec<IPAUser>, Error> {
-    // we can only interact with users who are in the "openportal" group
-    get_users_in_group(get_managed_group()?.groupid()).await
-}
-
-///
 /// Return the specified group from FreeIPA, or None if it does
 /// not exist
 ///
@@ -612,40 +632,6 @@ pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
             }
         }
     }
-}
-
-///
-/// Return all of the currently existing groups in FreeIPA
-///
-pub async fn get_groups() -> Result<Vec<IPAGroup>, Error> {
-    let result = call_post::<IPAResponse>("group_find", None, None).await?;
-    let groups = result.groups()?;
-    cache::add_existing_groups(&groups).await?;
-    Ok(groups)
-}
-
-///
-/// Return all of the users in the specified group. Note that
-/// this will exclude any users who are not in the 'openportal'
-/// group
-///
-pub async fn get_users_in_group(group: &str) -> Result<Vec<IPAUser>, Error> {
-    // call the freeipa api to find users in the passed group
-    let kwargs = {
-        let mut kwargs = HashMap::new();
-        kwargs.insert("in_group".to_string(), group.to_string());
-        kwargs.insert("all".to_string(), "true".to_string());
-        kwargs
-    };
-
-    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
-    let users = result.users()?;
-
-    let users: Vec<IPAUser> = users.into_iter().filter(|user| user.is_managed()).collect();
-
-    cache::add_existing_users(&users).await?;
-
-    Ok(users)
 }
 
 ///
@@ -725,10 +711,10 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
 
     match call_post::<IPAResponse>("group_add", None, Some(kwargs)).await {
         Ok(_) => {
-            tracing::info!("Successfully created group: {:?}", group);
+            tracing::info!("Successfully created group: {}", group);
         }
         Err(e) => {
-            tracing::error!("Could not add group: {:?}. Error: {}", group, e);
+            tracing::error!("Could not add group: {}. Error: {}", group, e);
         }
     }
 
@@ -738,9 +724,9 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
     match get_group(group.identifier()).await? {
         Some(group) => Ok(group),
         None => {
-            tracing::error!("Failed to add group {:?} to FreeIPA", group);
+            tracing::error!("Failed to add group {} to FreeIPA", group);
             Err(Error::Call(format!(
-                "Failed to add group {:?} to FreeIPA",
+                "Failed to add group {} to FreeIPA",
                 group
             )))
         }
@@ -795,13 +781,13 @@ async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
 
         if group.identifier() != added_group.identifier() {
             tracing::error!(
-                "Disagreement of identifier of added group: {:?} versus {:?}",
+                "Disagreement of identifier of added group: {} versus {}",
                 group,
                 added_group
             );
 
             return Err(Error::InvalidState(format!(
-                "Disagreement of identifier of added group: {:?} versus {:?}",
+                "Disagreement of identifier of added group: {} versus {}",
                 group, added_group
             )));
         }
@@ -813,7 +799,7 @@ async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
     let user = get_user(user.identifier())
         .await?
         .ok_or(Error::Call(format!(
-            "User {:?} could not be found after adding?",
+            "User {} could not be found after adding?",
             user
         )))?;
 
@@ -845,14 +831,10 @@ async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
         };
 
         match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
-            Ok(_) => tracing::info!(
-                "Successfully added user {:?} to group {:?}",
-                userid,
-                group_cn
-            ),
+            Ok(_) => tracing::info!("Successfully added user {} to group {}", userid, group_cn),
             Err(e) => {
                 tracing::error!(
-                    "Could not add user {:?} to group {:?}. Error: {}",
+                    "Could not add user {} to group {}. Error: {}",
                     userid,
                     group_cn,
                     e
@@ -867,9 +849,11 @@ async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
         Some(user) => Ok(Some(user)),
         None => {
             tracing::warn!(
-                "Failed to sync groups for user {} as this user no longer exists in FreeIPA",
+                "Failed to sync groups for user {} as this user no longer exists in FreeIPA.",
                 user.identifier()
             );
+            tracing::info!("Clearing the cache as FreeIPA has changed behind our back.");
+            cache::clear().await?;
             Ok(None)
         }
     }
@@ -880,13 +864,15 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     if let Some(user) = get_user(user).await? {
         // make sure that the groups are correct
         if let Some(user) = sync_groups(&user).await? {
-            tracing::info!("Added user [cached] {:?}", user);
+            tracing::info!("Added user [cached] {}", user);
             return Ok(user);
         }
 
         // we get here if the user has been removed from FreeIPA behind
-        // our back!
+        // our back - if this was the case, then the cache has been cleared
     }
+
+    let managed_group = get_managed_group()?;
 
     // They don't exist, so try to add
     let kwargs = {
@@ -894,7 +880,10 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         kwargs.insert("uid".to_string(), identifier_to_userid(user).await?);
         kwargs.insert("givenname".to_string(), user.username().to_string());
         kwargs.insert("sn".to_string(), user.project().to_string());
-        kwargs.insert("userclass".to_string(), "openportal".to_string());
+        kwargs.insert(
+            "userclass".to_string(),
+            managed_group.identifier().to_string(),
+        );
         kwargs.insert("cn".to_string(), user.to_string());
 
         kwargs
@@ -902,32 +891,34 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
 
     let result = call_post::<IPAResponse>("user_add", None, Some(kwargs)).await?;
     let user = result.users()?.first().cloned().ok_or(Error::Call(format!(
-        "User {:?} could not be found after adding?",
+        "User {} could not be found after adding?",
         user
     )))?;
 
     // add this user to the managed group so that it can be managed
     let userid = user.userid().to_string();
 
-    let group = get_managed_group()?;
-
     // make sure that this group exists
-    let group = get_group_create_if_not_exists(&group).await?;
+    let managed_group = get_group_create_if_not_exists(&managed_group).await?;
 
     let kwargs = {
         let mut kwargs = HashMap::new();
-        kwargs.insert("cn".to_string(), group.groupid().to_string());
+        kwargs.insert("cn".to_string(), managed_group.groupid().to_string());
         kwargs.insert("user".to_string(), userid.clone());
         kwargs
     };
 
     match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
-        Ok(_) => tracing::info!("Successfully added user {:?} to group {:?}", userid, group),
+        Ok(_) => tracing::info!(
+            "Successfully added user {} to group {}",
+            userid,
+            managed_group
+        ),
         Err(e) => {
             tracing::error!(
-                "Could not add user {:?} to group {:?}. Error: {}",
+                "Could not add user {} to group {}. Error: {}",
                 userid,
-                group,
+                managed_group,
                 e
             );
 
@@ -943,13 +934,13 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
             match call_post::<IPAResponse>("user_del", None, Some(kwargs)).await {
                 Ok(_) => {
                     tracing::info!(
-                        "Successfully removed user {:?} after failed group add",
+                        "Successfully removed user {} after failed group add",
                         userid
                     )
                 }
                 Err(e) => {
                     tracing::error!(
-                        "Could not remove user {:?} after failed group add. Error: {}",
+                        "Could not remove user {} after failed group add. Error: {}",
                         userid,
                         e
                     );
@@ -957,8 +948,8 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
             }
 
             return Err(Error::Call(format!(
-                "Could not add user {:?} to group {:?}. Error: {}",
-                user, group, e
+                "Could not add user {} to group {}. Error: {}",
+                user, managed_group, e
             )));
         }
     }
@@ -967,7 +958,7 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     // thread has already beaten us to creating the user
     match sync_groups(&user).await? {
         Some(user) => {
-            tracing::info!("Added user: {:?}", user);
+            tracing::info!("Added user: {}", user);
             Ok(user)
         }
         None => {
@@ -996,14 +987,14 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
         user
     )))?;
 
-    if user.homedirectory() == homedir {
+    if user.home() == homedir {
         // nothing to do
         tracing::info!(
             "Homedir for user {} is already {}. No changes needed.",
             user.identifier(),
             homedir
         );
-        return Ok(user.homedirectory().to_string());
+        return Ok(user.home().to_string());
     }
 
     // now update the homedir to the passed string
@@ -1017,7 +1008,7 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
     match call_post::<IPAResponse>("user_mod", None, Some(kwargs)).await {
         Ok(_) => {
             tracing::info!(
-                "Successfully updated homedir for user: {:?}",
+                "Successfully updated homedir for user: {}",
                 user.identifier()
             );
         }
@@ -1039,14 +1030,14 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
             user.identifier()
         )))?;
 
-    if user.homedirectory() != homedir {
+    if user.home() != homedir {
         return Err(Error::InvalidState(format!(
             "Homedir for user {} was not updated to {}",
             user, homedir
         )));
     }
 
-    tracing::info!("User homedir updated: {:?}", user);
+    tracing::info!("User homedir updated: {}", user);
 
-    Ok(user.homedirectory().to_string())
+    Ok(user.home().to_string())
 }

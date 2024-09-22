@@ -71,33 +71,6 @@ pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
 }
 
 ///
-/// Add the existing users that we are managing that already
-/// exist in FreeIPA
-///
-pub async fn add_existing_users(users: &Vec<IPAUser>) -> Result<(), Error> {
-    let mut cache = CACHE.write().await;
-
-    for user in users {
-        let identifier = user.identifier().clone();
-
-        match identifier.is_valid() {
-            true => {
-                cache.users.insert(identifier, user.clone());
-            }
-            false => {
-                tracing::error!(
-                    "Unable to register {:?} as their UserIdentifier is not valid",
-                    user
-                );
-                continue;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-///
 /// Return the IPAGroup for the named group (or None)
 /// if it doesn't exist
 ///
@@ -129,28 +102,12 @@ pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
 }
 
 ///
-/// Add the existing groups that we are managing that already
-/// exist in FreeIPA
+/// Clear the cache - we need to do this is FreeIPA is changed behine
+/// our back
 ///
-pub async fn add_existing_groups(groups: &Vec<IPAGroup>) -> Result<(), Error> {
+pub async fn clear() -> Result<(), Error> {
     let mut cache = CACHE.write().await;
-
-    for group in groups {
-        let identifier = group.identifier().to_string();
-
-        match identifier.is_empty() {
-            true => {
-                tracing::error!(
-                    "Unable to register {:?} as the group identifier is not valid",
-                    group
-                );
-                continue;
-            }
-            false => {
-                cache.groups.insert(identifier, group.clone());
-            }
-        }
-    }
-
+    cache.users.clear();
+    cache.groups.clear();
     Ok(())
 }

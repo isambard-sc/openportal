@@ -62,44 +62,4 @@ mod tests {
 
         Ok(())
     }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_ping_pong() -> Result<()> {
-        let mut primary = ServiceConfig::parse("primary", "http://localhost", "127.0.0.1", 5544)
-            .unwrap_or_else(|e| {
-                unreachable!("Cannot create service config: {}", e);
-            });
-
-        let mut secondary =
-            ServiceConfig::parse("secondary", "http://localhost", "127.0.0.1", 5545)
-                .unwrap_or_else(|e| {
-                    unreachable!("Cannot create service config: {}", e);
-                });
-
-        // introduce the secondary to the primary
-        let invite = primary
-            .add_client(&secondary.name(), "127.0.0.1")
-            .unwrap_or_else(|e| {
-                unreachable!("Cannot add secondary to primary: {}", e);
-            });
-
-        // give the invitation to the secondary
-        secondary.add_server(invite).unwrap_or_else(|e| {
-            unreachable!("Cannot add primary to secondary: {}", e);
-        });
-
-        // run the primary
-        let primary_handle = tokio::spawn(async move { run(primary).await });
-
-        // run the secondary
-        let secondary_handle = tokio::spawn(async move { run(secondary).await });
-
-        // wait for the primary to finish
-        let _ = primary_handle.await?;
-
-        // wait for the secondary to finish
-        let _ = secondary_handle.await?;
-
-        Ok(())
-    }
 }

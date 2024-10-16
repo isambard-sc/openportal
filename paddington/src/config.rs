@@ -642,4 +642,36 @@ mod tests {
         assert!(!peer.is_server());
         assert!(!peer.is_null());
     }
+
+    #[test]
+    fn test_invitations() {
+        let mut primary = ServiceConfig::parse("primary", "http://localhost", "127.0.0.1", 5544)
+            .unwrap_or_else(|e| {
+                unreachable!("Cannot create service config: {}", e);
+            });
+
+        let mut secondary =
+            ServiceConfig::parse("secondary", "http://localhost", "127.0.0.1", 5545)
+                .unwrap_or_else(|e| {
+                    unreachable!("Cannot create service config: {}", e);
+                });
+
+        // introduce the secondary to the primary
+        let invite = primary
+            .add_client(&secondary.name(), "127.0.0.1")
+            .unwrap_or_else(|e| {
+                unreachable!("Cannot add secondary to primary: {}", e);
+            });
+
+        // give the invitation to the secondary
+        secondary.add_server(invite).unwrap_or_else(|e| {
+            unreachable!("Cannot add primary to secondary: {}", e);
+        });
+
+        assert_eq!(primary.clients().len(), 1);
+        assert_eq!(secondary.servers().len(), 1);
+
+        assert_eq!(primary.clients()[0].name(), Some("secondary".to_string()));
+        assert_eq!(secondary.servers()[0].name(), "primary".to_string());
+    }
 }

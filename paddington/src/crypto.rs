@@ -318,3 +318,70 @@ impl Key {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use secrecy::ExposeSecret;
+
+    use super::*;
+
+    #[test]
+    fn test_key_generate() {
+        let key = Key::generate();
+        assert_eq!(key.expose_secret().data.len(), 32);
+    }
+
+    #[test]
+    fn test_key_from_password() {
+        let key: Secret<Key> = Key::from_password("password").unwrap_or_else(|err| {
+            unreachable!("Failed to create key from password: {}", err);
+        });
+
+        assert_eq!(key.expose_secret().data.len(), 32);
+
+        let key2: SecretKey = Key::from_password("password").unwrap_or_else(|err| {
+            unreachable!("Failed to create key from password: {}", err);
+        });
+
+        assert_eq!(key.expose_secret().data, key2.expose_secret().data);
+    }
+
+    #[test]
+    fn test_key_encrypt_decrypt() {
+        let key: Secret<Key> = Key::generate();
+
+        let encrypted_data: String = key
+            .expose_secret()
+            .encrypt("Hello, World!".to_string())
+            .unwrap_or_else(|err| {
+                unreachable!("Failed to encrypt data: {}", err);
+            });
+
+        let decrypted_data: String =
+            key.expose_secret()
+                .decrypt(&encrypted_data)
+                .unwrap_or_else(|err| {
+                    unreachable!("Failed to decrypt data: {}", err);
+                });
+
+        assert_eq!(decrypted_data, "Hello, World!".to_string());
+    }
+
+    #[test]
+    fn test_key_sign_verify() {
+        let key: Secret<Key> = Key::generate();
+
+        let signature: Signature = key
+            .expose_secret()
+            .sign("Hello, World!".to_string())
+            .unwrap_or_else(|err| {
+                unreachable!("Failed to sign data: {}", err);
+            });
+
+        key.expose_secret()
+            .verify("Hello, World!".to_string(), &signature)
+            .unwrap_or_else(|err| {
+                unreachable!("Failed to verify data: {}", err);
+            });
+    }
+}

@@ -181,7 +181,7 @@ impl ServerConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum IpOrRange {
     IP(IpAddr),
     Range(String),
@@ -200,7 +200,13 @@ impl IpOrRange {
     pub fn new(ip: &str) -> Result<Self, Error> {
         match ip.parse() {
             Ok(ip) => Ok(IpOrRange::IP(ip)),
-            Err(_) => Ok(IpOrRange::Range(ip.to_string())),
+            Err(_) => match IpRange::new(ip, "") {
+                Ok(_) => Ok(IpOrRange::Range(ip.to_string())),
+                Err(err) => Err(Error::Parse(format!(
+                    "Could not parse IP address or range: {}, error {}",
+                    ip, err
+                ))),
+            },
         }
     }
 
@@ -209,7 +215,10 @@ impl IpOrRange {
             IpOrRange::IP(ip) => ip == addr,
             IpOrRange::Range(range) => match IpRange::new(range, "") {
                 Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
-                Err(_) => false,
+                Err(_) => {
+                    tracing::warn!("Could not parse IP range: {}", range);
+                    false
+                }
             },
         }
     }
@@ -510,5 +519,53 @@ impl ServiceConfig {
         let config = load::<ServiceConfig>(&config_file)?;
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ip_or_range() {
+        let mut ip = IpOrRange::new("127.0.0.1").unwrap_or_else(|e| {
+            unreachable!("Could not create IP address: {:?}", e);
+        });
+
+        assert_eq!(format!("{}", ip), "127.0.0.1");
+
+        assert!(ip.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(!ip.matches(&IpAddr::from([127, 0, 0, 2])));
+        assert!(!ip.matches(&IpAddr::from([129, 0, 0, 1])));
+
+        assert!(IpOrRange::new("127.*.*.*").is_err());
+
+        ip = IpOrRange::new("127.0.0.0/24").unwrap_or_else(|e| {
+            unreachable!("Could not create IP range: {:?}", e);
+        });
+
+        assert_eq!(format!("{}", ip), "127.0.0.0/24");
+
+        assert!(ip.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(ip.matches(&IpAddr::from([127, 0, 0, 2])));
+        assert!(!ip.matches(&IpAddr::from([129, 0, 0, 1])));
+    }
+
+    #[test]
+    fn test_client_config() {
+        let ip = IpOrRange::new("127.0.0.1").unwrap_or_else(|e| {
+            unreachable!("Could not create IP address: {:?}", e);
+        });
+
+        let client = ClientConfig::new("test", &ip);
+
+        assert_eq!(client.name, Some("test".to_string()));
+        assert_eq!(client.ip, Some(ip));
+
+        let peer = PeerConfig::from_client(&client);
+
+        assert!(peer.is_client());
+        assert!(!peer.is_server());
+        assert!(!peer.is_null());
     }
 }

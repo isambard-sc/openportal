@@ -532,3 +532,27 @@ impl Connection {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enveloping() {
+        let inner_key = Key::generate();
+        let outer_key = Key::generate();
+
+        let message = "Hello, world!";
+
+        let envelope = envelope_message(message, &inner_key, &outer_key).unwrap_or_else(|e| {
+            unreachable!("Error enveloping message: {:?}", e);
+        });
+
+        let deenvelope = deenvelope_message::<String>(envelope, &inner_key, &outer_key)
+            .unwrap_or_else(|e| {
+                unreachable!("Error de-enveloping message: {:?}", e);
+            });
+
+        assert_eq!(message, deenvelope);
+    }
+}

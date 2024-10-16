@@ -35,6 +35,9 @@ pub enum Error {
     Null(String),
 
     #[error("{0}")]
+    Parse(String),
+
+    #[error("{0}")]
     Peer(String),
 
     #[error("{0}")]

@@ -11,7 +11,7 @@ use crate::runnable::AsyncRunnable;
 /// Run the filesystem service
 ///
 pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
-    if config.service().name.is_empty() {
+    if config.service().name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
 
@@ -22,7 +22,7 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     }
 
     // pass the service details onto the handler
-    set_service_details(&config.service().name, &config.agent(), Some(runner)).await?;
+    set_service_details(&config.service().name(), &config.agent(), Some(runner)).await?;
 
     // run the Provider OpenPortal agent
     paddington::set_handler(process_message).await?;

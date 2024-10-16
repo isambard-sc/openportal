@@ -45,7 +45,7 @@ async fn handle_connection(
 pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
     // Create the event loop and TCP listener we'll accept connections on.
 
-    let addr = format!("{}:{}", config.ip, config.port);
+    let addr = format!("{}:{}", config.ip(), config.port());
 
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Listening on: {}", listener.local_addr()?);
@@ -72,7 +72,7 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
 
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     // set the name of the service in the exchange
-    exchange::set_name(&config.name).await?;
+    exchange::set_name(&config.name()).await?;
 
     loop {
         let result = run_once(config.clone()).await;

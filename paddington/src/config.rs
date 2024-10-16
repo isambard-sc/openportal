@@ -68,11 +68,11 @@ pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Defaults {
-    pub name: String,
-    pub config_file: std::path::PathBuf,
-    pub url: String,
-    pub ip: String,
-    pub port: u16,
+    name: String,
+    config_file: std::path::PathBuf,
+    url: String,
+    ip: String,
+    port: u16,
 }
 
 impl Defaults {
@@ -101,14 +101,34 @@ impl Defaults {
             port: port.unwrap_or(8042),
         }
     }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn config_file(&self) -> std::path::PathBuf {
+        self.config_file.clone()
+    }
+
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    pub fn ip(&self) -> String {
+        self.ip.clone()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServerConfig {
-    pub name: String,
-    pub url: String,
-    pub inner_key: SecretKey,
-    pub outer_key: SecretKey,
+    name: String,
+    url: String,
+    inner_key: SecretKey,
+    outer_key: SecretKey,
 }
 
 impl Display for ServerConfig {
@@ -179,6 +199,22 @@ impl ServerConfig {
 
         Ok(self.url.clone())
     }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    pub fn inner_key(&self) -> SecretKey {
+        self.inner_key.clone()
+    }
+
+    pub fn outer_key(&self) -> SecretKey {
+        self.outer_key.clone()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -226,10 +262,10 @@ impl IpOrRange {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
-    pub name: Option<String>,
-    pub ip: Option<IpOrRange>,
-    pub inner_key: SecretKey,
-    pub outer_key: SecretKey,
+    name: Option<String>,
+    ip: Option<IpOrRange>,
+    inner_key: SecretKey,
+    outer_key: SecretKey,
 }
 
 impl Display for ClientConfig {
@@ -278,6 +314,22 @@ impl ClientConfig {
 
     pub fn to_peer(&self) -> PeerConfig {
         PeerConfig::from_client(self)
+    }
+
+    pub fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    pub fn ip(&self) -> Option<IpOrRange> {
+        self.ip.clone()
+    }
+
+    pub fn inner_key(&self) -> SecretKey {
+        self.inner_key.clone()
+    }
+
+    pub fn outer_key(&self) -> SecretKey {
+        self.outer_key.clone()
     }
 }
 
@@ -347,22 +399,24 @@ pub enum EncryptionScheme {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServiceConfig {
-    pub name: String,
-    pub url: String,
-    pub ip: IpAddr,
-    pub port: u16,
+    name: String,
+    url: String,
+    ip: IpAddr,
+    port: u16,
 
-    pub servers: Vec<ServerConfig>,
-    pub clients: Vec<ClientConfig>,
-    pub encryption: Option<EncryptionScheme>,
+    servers: Vec<ServerConfig>,
+    clients: Vec<ClientConfig>,
+    encryption: Option<EncryptionScheme>,
 }
 
 impl ServiceConfig {
-    pub fn parse(name: String, url: String, ip: IpAddr, port: u16) -> Result<Self, Error> {
+    pub fn parse(name: &str, url: &str, ip: &str, port: u16) -> Result<Self, Error> {
         Ok(ServiceConfig {
             name: name.to_string(),
-            url: create_websocket_url(&url)?,
-            ip,
+            url: create_websocket_url(url)?,
+            ip: ip
+                .parse()
+                .with_context(|| format!("Could not parse IP address: {}", ip))?,
             port,
             servers: Vec::new(),
             clients: Vec::new(),
@@ -414,7 +468,23 @@ impl ServiceConfig {
         self.get_key()?.expose_secret().decrypt::<T>(data)
     }
 
-    pub fn add_client(&mut self, name: &String, ip: &String) -> Result<Invite, Error> {
+    pub fn clients(&self) -> Vec<ClientConfig> {
+        self.clients.clone()
+    }
+
+    pub fn servers(&self) -> Vec<ServerConfig> {
+        self.servers.clone()
+    }
+
+    pub fn ip(&self) -> IpAddr {
+        self.ip
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn add_client(&mut self, name: &str, ip: &str) -> Result<Invite, Error> {
         let ip = IpOrRange::new(ip)
             .with_context(|| format!("Could not parse into an IP address or IP range: {}", ip))?;
 
@@ -424,7 +494,7 @@ impl ServiceConfig {
 
         // check if we already have a client with this name
         for c in self.clients.iter() {
-            if c.name == Some(name.clone()) {
+            if c.name == Some(name.to_string()) {
                 return Err(Error::Peer(format!(
                     "Client with name '{}' already exists.",
                     name
@@ -512,13 +582,17 @@ impl ServiceConfig {
             return Err(Error::NotExists(config_file.to_string_lossy().to_string()));
         }
 
-        let config = ServiceConfig::parse(name, url, ip, port)?;
+        let config = ServiceConfig::parse(&name, &url, &ip.to_string(), port)?;
         save::<ServiceConfig>(config.clone(), &config_file)?;
 
         // check we can read the config and return it
         let config = load::<ServiceConfig>(&config_file)?;
 
         Ok(config)
+    }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
     }
 }
 

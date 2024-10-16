@@ -97,9 +97,9 @@ impl Config {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Defaults {
-    pub url: String,
-    pub ip: String,
-    pub port: u16,
+    url: String,
+    ip: String,
+    port: u16,
 }
 
 impl Defaults {
@@ -109,6 +109,18 @@ impl Defaults {
             ip: ip.unwrap_or("127.0.0.1".to_owned()),
             port: port.unwrap_or(8042),
         }
+    }
+
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    pub fn ip(&self) -> String {
+        self.ip.clone()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 }
 

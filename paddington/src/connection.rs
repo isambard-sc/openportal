@@ -205,7 +205,7 @@ impl Connection {
         let outer_key = Key::generate();
 
         let message =
-            match envelope_message(outer_key.clone(), &server.inner_key, &server.outer_key) {
+            match envelope_message(outer_key.clone(), &server.inner_key(), &server.outer_key()) {
                 Ok(message) => message,
                 Err(e) => {
                     tracing::warn!("Error enveloping message: {:?}", e);
@@ -242,15 +242,15 @@ impl Connection {
 
         // the server has generated a new session inner key, and has sent that
         // wrapped using the client/server inner key and the new session outer key
-        let inner_key: SecretKey = match deenvelope_message(response, &server.inner_key, &outer_key)
-        {
-            Ok(inner_key) => inner_key,
-            Err(e) => {
-                tracing::warn!("Error de-enveloping message: {:?}", e);
-                self.set_error().await;
-                return Err(e.into());
-            }
-        };
+        let inner_key: SecretKey =
+            match deenvelope_message(response, &server.inner_key(), &outer_key) {
+                Ok(inner_key) => inner_key,
+                Err(e) => {
+                    tracing::warn!("Error de-enveloping message: {:?}", e);
+                    self.set_error().await;
+                    return Err(e.into());
+                }
+            };
 
         tracing::info!("Handshake complete!");
 
@@ -320,7 +320,7 @@ impl Connection {
     /// loop to handle the sending and receiving of messages.
     ///
     pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
-        let service_name = self.config.name.clone();
+        let service_name = self.config.name();
 
         if service_name.is_empty() {
             tracing::warn!("Service must have a name to handle a connection.");
@@ -353,7 +353,7 @@ impl Connection {
 
         let clients: Vec<ClientConfig> = self
             .config
-            .clients
+            .clients()
             .iter()
             .filter(|client| client.matches(addr.ip()))
             .cloned()
@@ -408,13 +408,13 @@ impl Connection {
 
                 match deenvelope_message::<SecretKey>(
                     message.clone(),
-                    &client.inner_key,
-                    &client.outer_key,
+                    &client.inner_key(),
+                    &client.outer_key(),
                 ) {
                     Ok(_) => {
                         tracing::info!(
                             "Client {:?} authenticated for address: {}",
-                            client.name.clone().unwrap_or_default(),
+                            client.name().unwrap_or_default(),
                             addr
                         );
                         true
@@ -443,7 +443,7 @@ impl Connection {
 
         let peer = clients[0].clone();
 
-        let peer_name = peer.name.clone().unwrap_or_default();
+        let peer_name = peer.name().unwrap_or_default();
 
         if peer_name.is_empty() {
             tracing::warn!("Peer must have a name to handle a connection.");
@@ -460,14 +460,15 @@ impl Connection {
 
         // the peer has sent us the new session outer key that should be used,
         // wrapped in the client/server inner and outer keys
-        let outer_key = deenvelope_message::<SecretKey>(message, &peer.inner_key, &peer.outer_key)
-            .with_context(|| "Error de-enveloping message - closing connection.")?;
+        let outer_key =
+            deenvelope_message::<SecretKey>(message, &peer.inner_key(), &peer.outer_key())
+                .with_context(|| "Error de-enveloping message - closing connection.")?;
 
         // we will create a new session inner key and send it back to the
         // client, wrapped in the client/server inner key and session outer key
         let inner_key = Key::generate();
 
-        let response = envelope_message(inner_key.clone(), &peer.inner_key, &outer_key)
+        let response = envelope_message(inner_key.clone(), &peer.inner_key(), &outer_key)
             .with_context(|| "Error enveloping message - closing connection.")?;
 
         outgoing

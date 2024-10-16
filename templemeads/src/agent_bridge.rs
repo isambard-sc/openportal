@@ -26,7 +26,7 @@ use std::path::PathBuf;
 /// bridges those to the other Agents in the OpenPortal system.
 ///
 pub async fn run(config: Config) -> Result<(), Error> {
-    if config.service.name.is_empty() {
+    if config.service.name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
 
@@ -37,7 +37,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
     }
 
     // pass the service details onto the handler
-    set_service_details(&config.service.name, &config.agent, None).await?;
+    set_service_details(&config.service.name(), &config.agent, None).await?;
 
     // spawn the bridge server
     spawn(config.bridge).await?;
@@ -105,7 +105,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
     let config_file = match args.config_file {
         Some(path) => path,
-        None => defaults.service.config_file,
+        None => defaults.service.config_file(),
     };
 
     // see if we need to initialise the config directory
@@ -122,21 +122,22 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             let config = Config {
                 service: {
                     ServiceConfig::parse(
-                        service.clone().unwrap_or(defaults.service.name),
-                        url.clone().unwrap_or(defaults.service.url),
-                        ip.clone()
-                            .unwrap_or(defaults.service.ip)
-                            .parse::<IpAddr>()?,
-                        port.unwrap_or_else(|| defaults.service.port),
+                        &service.clone().unwrap_or(defaults.service.name()),
+                        &url.clone().unwrap_or(defaults.service.url()),
+                        &ip.clone()
+                            .unwrap_or(defaults.service.ip())
+                            .parse::<IpAddr>()?
+                            .to_string(),
+                        port.unwrap_or_else(|| defaults.service.port()),
                     )?
                 },
                 bridge: BridgeConfig::parse(
-                    &bridge_ip.clone().unwrap_or(defaults.bridge.url),
+                    &bridge_ip.clone().unwrap_or(defaults.bridge.url()),
                     bridge_ip
                         .clone()
-                        .unwrap_or(defaults.bridge.ip)
+                        .unwrap_or(defaults.bridge.ip())
                         .parse::<IpAddr>()?,
-                    bridge_port.unwrap_or_else(|| defaults.bridge.port),
+                    bridge_port.unwrap_or_else(|| defaults.bridge.port()),
                 ),
                 agent: AgentType::Bridge,
             };
@@ -172,7 +173,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             match list {
                 true => {
                     let config = load_config::<Config>(&config_file)?;
-                    for client in config.service.clients.clone() {
+                    for client in config.service.clients() {
                         println!("{}", client);
                     }
                     return Ok(None);
@@ -219,7 +220,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             match list {
                 true => {
                     let config = load_config::<Config>(&config_file)?;
-                    for server in config.service.servers.clone() {
+                    for server in config.service.servers() {
                         println!("{}", server);
                     }
                     return Ok(None);

@@ -7,7 +7,7 @@ use crate::error::Error;
 use crate::exchange;
 
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
-    let service_name = config.name.clone();
+    let service_name = config.name();
 
     if service_name.is_empty() {
         return Err(Error::UnknownPeer(
@@ -42,7 +42,7 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Err
 
 pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
     // set the name of the service in the exchange
-    exchange::set_name(&config.name).await?;
+    exchange::set_name(&config.name()).await?;
 
     loop {
         match run_once(config.clone(), peer.clone()).await {

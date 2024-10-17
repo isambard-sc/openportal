@@ -103,8 +103,6 @@ impl Connection {
 
         let mut tx = tx.lock().await;
 
-        tracing::info!("Sending message to peer: {}", message);
-
         let inner_key = self.inner_key.as_ref().ok_or_else(|| {
             tracing::warn!("No inner key to send message with!");
             Error::InvalidPeer("No inner key to send message with!".to_string())
@@ -303,8 +301,6 @@ impl Connection {
                     return future::ok(());
                 }
             };
-
-            tracing::info!("Received de-enveloped message from peer: {}", msg);
 
             exchange::received(Message::new(&peer_name, &msg)).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
@@ -525,8 +521,6 @@ impl Connection {
                     return future::ok(());
                 }
             };
-
-            tracing::info!("Received de-enveloped message from peer: {}", msg);
 
             exchange::received(Message::new(&peer_name, &msg)).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);

@@ -103,7 +103,19 @@ impl Connection {
 
         let mut tx = tx.lock().await;
 
-        tx.send(TokioMessage::text(message.to_string()))
+        tracing::info!("Sending message to peer: {}", message);
+
+        let inner_key = self.inner_key.as_ref().ok_or_else(|| {
+            tracing::warn!("No inner key to send message with!");
+            Error::InvalidPeer("No inner key to send message with!".to_string())
+        })?;
+
+        let outer_key = self.outer_key.as_ref().ok_or_else(|| {
+            tracing::warn!("No outer key to send message with!");
+            Error::InvalidPeer("No outer key to send message with!".to_string())
+        })?;
+
+        tx.send(envelope_message(message.to_string(), inner_key, outer_key)?)
             .await
             .with_context(|| "Error sending message to peer")?;
 
@@ -283,13 +295,18 @@ impl Connection {
         // and now we can start the message handling loop - make sure to
         // handle the sending of messages to others
         let received_from_peer = incoming.try_for_each(|msg| {
-            // If we can't parse the message, we'll just ignore it.
-            let msg = msg.to_text().unwrap_or_else(|_| {
-                tracing::warn!("Error parsing message: {:?}", msg);
-                ""
-            });
+            // we need to deenvelope the message
+            let msg: String = match deenvelope_message(msg, &inner_key, &outer_key) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::warn!("Error de-enveloping message: {:?}", e);
+                    return future::ok(());
+                }
+            };
 
-            exchange::received(Message::new(&peer_name, msg)).unwrap_or_else(|e| {
+            tracing::info!("Received de-enveloped message from peer: {}", msg);
+
+            exchange::received(Message::new(&peer_name, &msg)).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 
@@ -500,13 +517,18 @@ impl Connection {
 
         // handle the sending of messages to others
         let received_from_peer = incoming.try_for_each(|msg| {
-            // If we can't parse the message, we'll just ignore it.
-            let msg = msg.to_text().unwrap_or_else(|_| {
-                tracing::warn!("Error parsing message: {:?}", msg);
-                ""
-            });
+            // we need to deenvelope the message
+            let msg: String = match deenvelope_message(msg, &inner_key, &outer_key) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::warn!("Error de-enveloping message: {:?}", e);
+                    return future::ok(());
+                }
+            };
 
-            exchange::received(Message::new(&peer_name, msg)).unwrap_or_else(|e| {
+            tracing::info!("Received de-enveloped message from peer: {}", msg);
+
+            exchange::received(Message::new(&peer_name, &msg)).unwrap_or_else(|e| {
                 tracing::warn!("Error handling message: {:?}", e);
             });
 

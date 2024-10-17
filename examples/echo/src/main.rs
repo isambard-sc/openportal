@@ -158,7 +158,7 @@ async_message_handler! {
         }
 
         // just echo the message back to the sender
-        send(Message::new("echo-server", message.payload())).await?;
+        send(Message::new(message.sender(), message.payload())).await?;
 
         // exit if the message is "0"
         if message.payload() == "0" {
@@ -223,7 +223,7 @@ async_message_handler! {
                 })?;
 
                 // echo the decremented number
-                send(Message::new("echo-client", &(number - 1).to_string())).await?;
+                send(Message::new(message.sender(), &(number - 1).to_string())).await?;
 
                 if number <= 1 {
                     // blast off!

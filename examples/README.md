@@ -26,7 +26,7 @@ The two main components of OpenPortal are:
    set of Jobs in a robust manner, such that the system can recover from
    the failure of individual Agents.
 
-## Agents
+## Agents
 
 There are many types of Agent in OpenPortal. Each Agent operates as a single
 executable process. These processes can be distributed, with `paddington`

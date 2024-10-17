@@ -75,12 +75,11 @@ echo-server received: Control message: {"Connected":{"agent":"echo-client"}}
 written to the log for the `echo-server` service (with a similar message
 written to the log for the `echo-client` service).
 
-.. note::
-
-   paddington is a peer-to-peer network, so there is no concept of a
-   "server" or "client" once the connection is established. The only
-   distinction is that the "client" is the process that initiates the
-   new connection to the "server"
+> [!NOTE]
+> paddington is a peer-to-peer network, so there is no concept of a
+> "server" or "client" once the connection is established. The only
+> distinction is that the "client" is the process that initiates the
+> new connection to the "server"
 
 The `echo-client` service ignores control messages, so doesn't do anything.
 
@@ -177,10 +176,9 @@ async_message_handler! {
 }
 ```
 
-.. note::
-
-   Note that the handler function is defined using the `async_message_handler!`
-   as rust needs help to use async function pointers.
+> [!NOTE]
+> Note that the handler function is defined using the `async_message_handler!`
+> as rust needs help to use async function pointers.
 
 In this case, we check to see if the message is a control message.
 If it is, we ignore it. Otherwise, we send the message back to the
@@ -243,13 +241,12 @@ event loop the is responsible for listening for new connections from
 client services, connecting to new server services, and handling the sending
 and receiving of messages between services.
 
-.. note::
-
-   An individual service can be connected to an arbitrary number of peer
-   services. It can connect to them both as a client that initiates the
-   connection, and a server than listens for new connections. In this way,
-   a distributed network of peer-to-peer communicating services can be
-   orchestrated.
+> [!NOTE]
+> An individual service can be connected to an arbitrary number of peer
+> services. It can connect to them both as a client that initiates the
+> connection, and a server than listens for new connections. In this way,
+> a distributed network of peer-to-peer communicating services can be
+> orchestrated.
 
 Services can only connect to each other if they have been properly introduced.
 To introduce a service to another, you first need to ask the "server" service
@@ -279,7 +276,7 @@ When the "client" service connects to the "server" service, the two engage
 in a handshake to securely upgrade the connection to a peer-to-peer
 websocket connection.
 
-### Handshake
+### Handshake
 
 The handshake starts from the "client" service. It generates a new
 symmetric cryptographic key and encrypts this with the two keys contained
@@ -332,12 +329,11 @@ even if the underlying communication protocol is insecure (e.g. standard
 websockets over HTTP, rather than secure websockets over HTTPS), then
 communication is authenticated and protected from tampering or eavesdropping.
 
-.. note::
-
-   The pair of invitation symmetric keys are only used in the handshake
-   to set up the initial connection between the two services. Once the
-   handshake is complete, all encryption is done using the pair of session
-   keys.
+> [!NOTE]
+> The pair of invitation symmetric keys are only used in the handshake
+> to set up the initial connection between the two services. Once the
+> handshake is complete, all encryption is done using the pair of session
+> keys.
 
 ### Encryption standard
 

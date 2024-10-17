@@ -7,6 +7,7 @@ mod agent_bridge;
 mod agent_core;
 mod bridge_server;
 mod control_message;
+mod custom;
 mod error;
 mod filesystem;
 mod handler;

@@ -42,6 +42,11 @@ pub mod bridge {
     pub use crate::agent_bridge::*;
 }
 
+pub mod custom {
+    pub use crate::agent_core::Config;
+    pub use crate::custom::run;
+}
+
 pub mod filesystem {
     pub use crate::agent_core::process_args;
     pub use crate::agent_core::Config;

@@ -32,7 +32,7 @@ or
 cargo build --release
 ```
 
-## Installing OpenPortal
+## Installing OpenPortal
 
 The result of compilation will be a number of executable binaries in the
 `target/debug` or `target/release` directories. These are static executables

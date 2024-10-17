@@ -4,7 +4,7 @@ This is an implementation of the OpenPortal protocol for communication
 between a user portal (e.g. Waldur) and digital research infrastructure
 (e.g. the Isambard supercomputers provided by BriSC).
 
-## Compiling OpenPortal
+## Compiling OpenPortal
 
 OpenPortal is written in Rust, so you will need to have Rust installed.
 

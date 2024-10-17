@@ -76,7 +76,7 @@ written to the log for the `echo-server` service (with a similar message
 written to the log for the `echo-client` service).
 
 > [!NOTE]
-> paddington is a peer-to-peer network, so there is no concept of a
+> paddington implements a peer-to-peer network, so there is no concept of a
 > "server" or "client" once the connection is established. The only
 > distinction is that the "client" is the process that initiates the
 > new connection to the "server"

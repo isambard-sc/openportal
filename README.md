@@ -40,5 +40,5 @@ that can be safely copied to their target destinations and run there.
 
 To understand where to install the executables, you will first need to
 understand what OpenPortal is, and how it is used. Please see the
-[examples](examples) directory for detailed documentation on the
+[docs](docs) directory for detailed documentation on the
 design and implementation of OpenPortal, together with some examples.

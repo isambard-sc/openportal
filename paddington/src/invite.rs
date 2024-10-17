@@ -10,10 +10,73 @@ use std::path;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Invite {
-    pub name: String,
-    pub url: String,
-    pub inner_key: SecretKey,
-    pub outer_key: SecretKey,
+    name: String,
+    url: String,
+    inner_key: SecretKey,
+    outer_key: SecretKey,
+}
+
+impl Invite {
+    pub fn new(name: &str, url: &str, inner_key: &SecretKey, outer_key: &SecretKey) -> Self {
+        Invite {
+            name: name.to_string(),
+            url: url.to_string(),
+            inner_key: inner_key.clone(),
+            outer_key: outer_key.clone(),
+        }
+    }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    pub fn inner_key(&self) -> SecretKey {
+        self.inner_key.clone()
+    }
+
+    pub fn outer_key(&self) -> SecretKey {
+        self.outer_key.clone()
+    }
+
+    pub fn load(filename: &path::Path) -> Result<Self, Error> {
+        let invite = std::fs::read_to_string(filename)
+            .with_context(|| format!("Could not read invite file: {:?}", filename))?;
+
+        let invite: Invite = toml::from_str(&invite)
+            .with_context(|| format!("Could not parse invite file from toml: {:?}", filename))?;
+
+        Ok(invite)
+    }
+
+    pub fn save(&self, filename: &path::Path) -> Result<(), Error> {
+        let invite_toml =
+            toml::to_string(&self).with_context(|| "Could not serialise invite to toml")?;
+
+        let invite_file_string = filename.to_string_lossy();
+
+        let prefix = filename.parent().with_context(|| {
+            format!(
+                "Could not get parent directory for invite file: {:?}",
+                invite_file_string
+            )
+        })?;
+
+        std::fs::create_dir_all(prefix).with_context(|| {
+            format!(
+                "Could not create parent directory for invite file: {:?}",
+                invite_file_string
+            )
+        })?;
+
+        std::fs::write(filename, invite_toml)
+            .with_context(|| format!("Could not write invite file: {:?}", filename))?;
+
+        Ok(())
+    }
 }
 
 impl Display for Invite {

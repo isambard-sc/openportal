@@ -2,12 +2,26 @@
 // SPDX-License-Identifier: MIT
 
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     sender: String,
     recipient: String,
     payload: String,
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.is_control() {
+            true => write!(f, "Control message: {}", self.payload),
+            false => write!(
+                f,
+                "Message from {} to {}: {}",
+                self.sender, self.recipient, self.payload
+            ),
+        }
+    }
 }
 
 impl Message {

@@ -4,8 +4,10 @@
 [workspace]
 
 members = [
-    "bridge", "cluster", "filesystem", "freeipa", "paddington", "portal",
-    "provider", "python", "slurm", "templemeads"
+    "bridge", "cluster",
+    "filesystem", "freeipa", "paddington", "portal",
+    "provider", "python", "slurm", "templemeads",
+    "examples/echo"
 ]
 
 resolver = "2"

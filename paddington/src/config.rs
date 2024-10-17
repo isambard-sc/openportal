@@ -174,6 +174,15 @@ impl ServerConfig {
         }
     }
 
+    pub fn from_invite(invite: &Invite) -> Result<Self, Error> {
+        Ok(ServerConfig {
+            name: invite.name(),
+            url: create_websocket_url(&invite.url())?,
+            inner_key: invite.inner_key(),
+            outer_key: invite.outer_key(),
+        })
+    }
+
     pub fn create_null() -> Self {
         ServerConfig {
             name: "".to_string(),
@@ -410,14 +419,14 @@ pub struct ServiceConfig {
 }
 
 impl ServiceConfig {
-    pub fn parse(name: &str, url: &str, ip: &str, port: u16) -> Result<Self, Error> {
+    pub fn new(name: &str, url: &str, ip: &str, port: &u16) -> Result<Self, Error> {
         Ok(ServiceConfig {
             name: name.to_string(),
             url: create_websocket_url(url)?,
             ip: ip
                 .parse()
                 .with_context(|| format!("Could not parse IP address: {}", ip))?,
-            port,
+            port: *port,
             servers: Vec::new(),
             clients: Vec::new(),
             encryption: None,
@@ -506,12 +515,12 @@ impl ServiceConfig {
 
         self.clients.push(client.clone());
 
-        Ok(Invite {
-            name: self.name.clone(),
-            url: self.url.clone(),
-            inner_key: client.inner_key.clone(),
-            outer_key: client.outer_key.clone(),
-        })
+        Ok(Invite::new(
+            &self.name,
+            &self.url,
+            &client.inner_key,
+            &client.outer_key,
+        ))
     }
 
     pub fn remove_client(&mut self, name: &str) -> Result<(), Error> {
@@ -527,23 +536,18 @@ impl ServiceConfig {
 
     pub fn add_server(&mut self, invite: Invite) -> Result<(), Error> {
         for server in self.servers.iter() {
-            if server.name == invite.name {
+            if server.name == invite.name() {
                 return Err(Error::Peer(format!(
                     "Server with name '{}' already exists.",
-                    invite.name
+                    invite.name()
                 )));
             }
         }
 
-        let server = ServerConfig {
-            name: invite.name.clone(),
-            url: create_websocket_url(&invite.url)?,
-            inner_key: invite.inner_key,
-            outer_key: invite.outer_key,
-        };
+        let server = ServerConfig::from_invite(&invite)?;
 
         if server.url.is_empty() {
-            tracing::warn!("No valid URL provided for server {}.", server.name);
+            tracing::warn!("No valid URL provided for server {}.", server.name());
             return Err(Error::Null("No URL provided.".to_string()));
         }
 
@@ -582,7 +586,7 @@ impl ServiceConfig {
             return Err(Error::NotExists(config_file.to_string_lossy().to_string()));
         }
 
-        let config = ServiceConfig::parse(&name, &url, &ip.to_string(), port)?;
+        let config = ServiceConfig::new(&name, &url, &ip.to_string(), &port)?;
         save::<ServiceConfig>(config.clone(), &config_file)?;
 
         // check we can read the config and return it
@@ -645,16 +649,15 @@ mod tests {
 
     #[test]
     fn test_invitations() {
-        let mut primary = ServiceConfig::parse("primary", "http://localhost", "127.0.0.1", 5544)
+        let mut primary = ServiceConfig::new("primary", "http://localhost", "127.0.0.1", &5544)
             .unwrap_or_else(|e| {
                 unreachable!("Cannot create service config: {}", e);
             });
 
-        let mut secondary =
-            ServiceConfig::parse("secondary", "http://localhost", "127.0.0.1", 5545)
-                .unwrap_or_else(|e| {
-                    unreachable!("Cannot create service config: {}", e);
-                });
+        let mut secondary = ServiceConfig::new("secondary", "http://localhost", "127.0.0.1", &5545)
+            .unwrap_or_else(|e| {
+                unreachable!("Cannot create service config: {}", e);
+            });
 
         // introduce the secondary to the primary
         let invite = primary

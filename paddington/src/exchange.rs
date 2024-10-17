@@ -52,7 +52,7 @@ async_message_handler! {
     async fn default_message_handler(message: Message) -> Result<(), Error>
     {
         tracing::info!(
-            "Default handler received {:?}", message);
+            "Default handler received: {}", message);
 
         Ok(())
     }

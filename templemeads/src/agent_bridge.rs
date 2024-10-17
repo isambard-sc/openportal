@@ -121,17 +121,17 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
         }) => {
             let config = Config {
                 service: {
-                    ServiceConfig::parse(
+                    ServiceConfig::new(
                         &service.clone().unwrap_or(defaults.service.name()),
                         &url.clone().unwrap_or(defaults.service.url()),
                         &ip.clone()
                             .unwrap_or(defaults.service.ip())
                             .parse::<IpAddr>()?
                             .to_string(),
-                        port.unwrap_or_else(|| defaults.service.port()),
+                        &port.unwrap_or_else(|| defaults.service.port()),
                     )?
                 },
-                bridge: BridgeConfig::parse(
+                bridge: BridgeConfig::new(
                     &bridge_ip.clone().unwrap_or(defaults.bridge.url()),
                     bridge_ip
                         .clone()

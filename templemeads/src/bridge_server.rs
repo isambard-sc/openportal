@@ -77,7 +77,7 @@ fn create_webserver_url(url: &str) -> Result<Url, Error> {
 }
 
 impl Config {
-    pub fn parse(url: &str, ip: IpAddr, port: u16) -> Self {
+    pub fn new(url: &str, ip: IpAddr, port: u16) -> Self {
         Self {
             url: create_webserver_url(url).unwrap_or_else(|e| {
                 tracing::error!(

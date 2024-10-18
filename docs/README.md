@@ -163,3 +163,11 @@ which echo messages between each other. This example introduces the key
 concepts in `paddington`, such as how to create services, how to introduce
 them to each other, how to send messages, and how to implement your own
 message handler to process messages.
+
+### Example 2: job
+
+The [job](job) example demonstrates a pair of simple `templemeads` Agents
+which send `Jobs` between each other. This example introduces the key
+concepts in `templemeads`, such as how to create Agents, how to introduce
+them to each other, how to send `Jobs`, and how to implement your own
+job handler to implement the business logic.

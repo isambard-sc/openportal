@@ -591,7 +591,7 @@ Jobs can be `put`, `update`, and `delete` in parallel. This is because
 the underlying peer-to-peer `paddington` network is fully duplex,
 and websockets communicate in real time.
 
-There are on consistency guarantees on the order of jobs. You can though
+There are no consistency guarantees on the order of jobs. You can though
 rely on the fact that the state of each job will update atomically, and
 its state will be communicated as soon as possible to all agents that
 hold a copy. You can also rely on the fact that only a single agent
@@ -602,12 +602,12 @@ update the job.
 
 Jobs are idempotent. This means that if a job is `put` onto the system
 multiple times, then only the first `put` will change the state of the
-service. Subsequent `put`s will not change the state. This is a key
+service. Subsequent `puts` will not change the state. This is a key
 design feature, enabling the system to robustly implement error recovery
 by simply re-sending jobs. For example, it is safe to re-send the
 job to `add_user` `fred.proj.org` to the `cluster` agent. The first
 time this is processed it will do all of the business logic to add
-`fred` to the `proj` project on `cluster`. Subsequent `put`s of
+`fred` to the `proj` project on `cluster`. Subsequent `puts` of
 this job will be ignored, as `fred` is already a member of the `proj`
 project on `cluster`.
 
@@ -624,10 +624,10 @@ times (once on each side of the three `Connections`).
 This means that the system is robust to failures. If, for example, the
 `notebook` agent goes down, then the `Job` still exists on `Boards` on the
 `waldur`, `brics` and `shared` agents. When the `notebook` agent comes back,
-its first task is to restore the `Board`s for each of its `Connection`s,
+its first task is to restore the `Boards` for each of its `Connections`,
 by asking that the agent on the other side sends across all of its jobs.
 This is because the system ensures that the `Boards` are kept in sync
 on both sides of a `Connection`. If, for example, `shared` went down while
 processing a `Job`, then on coming back, it would receive the `Job` again
-from `notebook`, and would then process it again. As `Job`s are idempotent,
+from `notebook`, and would then process it again. As `Jobs` are idempotent,
 this is a safe operation.

@@ -1,11 +1,12 @@
-# Echo Service Example
+# Agents Sending Jobs Example
 
-This is a simple echo demo between two paddington Services. It demonstrates:
+This is a demo of two templemeads Agents that send jobs to each other. The
+aims of this example are to show you;
 
-1. How to create paddington Services
-2. How to introduce one Service to another via an Invite
-3. How to set the message handler for each service
-4. How to send and receive messages between the services
+1. How to create templemeads Agents
+2. How to introduce Agents to each other
+3. How to create an send jobs between Agents, including returning results
+4. How to supply a custom job handler to process jobs
 
 ## Compiling the Example
 
@@ -13,460 +14,620 @@ You have two choices for compiling the example:
 
 1. Compile everything, by going into the top-level directory and
    running `make` (or `cargo build`). This will produce an executable
-   called `example-echo` in the `target/debug` directory.
+   called `example-job` in the `target/debug` directory.
 
 2. Compile only this example by navigating to this directory and
    running `cargo build`. To run, you will need to use `cargo run`
 
 ## Running the Example
 
-This example implements two services:
+This example implements two Agents;
 
-1. The `echo-server` service, which listens for a connection from
-   the `echo-client` service,
+1. The `portal` agent, which sends jobs to the `cluster` agent. These
+   jobs tell the `cluster` to add and remove users from projects,
 
-2. and the `echo-client` service, which initiates a connection to
-   the `echo-server` service.
+2. and the `cluster` agent, which receives jobs from the `portal`,
+   and which would implement the business logic of adding and removing
+   users from projects.
 
-You fist need to start the `echo-server` service. You can do this using
-the `server` argument. Either;
+Both agents are implemented in the same executable. You choose which agent
+to run by passing either `portal` or `cluster` as an argument.
+
+You first need to start the `portal` agent. You can do this using
+the `portal` argument. Either;
 
 ```bash
-./target/debug/example-echo server
+./target/debug/example-job portal
 ```
 
 or
 
 ```bash
-cargo run -- server
+cargo run -- portal
 ```
 
-This will start the `echo-server` service and will write an invitation
-file to invite the client. By default this invitation will be in the
+This will start the `portal` agent and will write an invitation
+file to invite the `cluster`. By default this invitation will be in the
 current directory and called `invitation.toml`.
 
-Next, you need to start the `echo-client` service. You can do this using
-the `client` argument, specifyig the path to the invitation file
+Next, you need to start the `cluster` agent. You can do this using
+the `cluster` argument, specifyig the path to the invitation file
 via the `--invitation` argument. Either;
 
 ```bash
-./target/debug/example-echo client --invitation invitation.toml
+./target/debug/example-job cluster --invitation invitation.toml
 ```
 
 or
 
 ```bash
-cargo run -- client --invitation invitation.toml
+cargo run -- cluster --invitation invitation.toml
 ```
 
 ## Expected Behaviour
 
-What should happen is that the `echo-client` service will connect to the
-`echo-server` service. Both service will then become peers, able to send
-and receive messages to each other.
+What should happen is that you will see that the `cluster` agent connects
+to the `portal` agent via a paddington peer-to-peer connection. Once
+connected, both agents will register the other agent as a peer to whom
+they can communicate.
 
-First, each service will receive a "control message", that tells them
-that a peer service has connected. For example, you should see
+Next, the `portal` will send a job to add the user `fred` to the
+project `proj`, with this project managed by the organisation portal
+called `org`. This job is represented by the string;
 
 ```
-echo-server received: Control message: {"Connected":{"agent":"echo-client"}}
+add_user fred.proj.org
 ```
 
-written to the log for the `echo-server` service (with a similar message
-written to the log for the `echo-client` service).
+This job is sent from the `portal` to the `cluster`, so the command is
+prefixed with the addressing details, i.e. `portal.cluster` (meaning
+sent from the `portal` to the `cluster`). The full job commmand is thus;
 
-> [!NOTE]
-> paddington implements a peer-to-peer network, so there is no concept of a
-> "server" or "client" once the connection is established. The only
-> distinction is that the "client" is the process that initiates the
-> new connection to the "server"
+```
+portal.cluster add_user fred.proj.org
+```
 
-The `echo-client` service ignores control messages, so doesn't do anything.
+In the `cluster` agent, you should see that this job is "put" onto the
+`cluster`. The `cluster` agent then processes this job, and when it has
+finished, it updates the job with the result.
 
-However, the `echo-server` service, on receiving the control message,
-sends a message to `echo-client` with the content `1000`.
+```
+Put job: {portal.cluster add_user fred.proj.org}: version=2, created=2024-10-18 11:46:09 UTC, changed=2024-10-18 11:46:09 UTC, state=Pending to cluster from portal
+Adding fred.proj.org to cluster
+Here we would implement the business logic to add the user to the cluster
+Job has finished: {portal.cluster add_user fred.proj.org}: version=1002, created=2024-10-18 11:46:09 UTC, changed=2024-10-18 11:46:09.470340 UTC, state=Complete
+```
 
-The `echo-client` service is configured to just echo back any messages it
-receives from peer services. So, on receiving the message `1000` from
-`echo-server`, it just echos back `1000` to `echo-server`.
+You should see that the job state has been updated from `Pending` to `Complete`,
+and the version number of the job increased.
 
-The `echo-server` service is configured to interpret any message received
-from a peer as an integer. On receiving the message, it decrements one from
-that number and sends it back to the `echo-client` service.
+On the `portal` agent you will next see that the job has been updated with
+this new version.
 
-This process continues until the number reaches `0`. At this point,
-both services exit - but not before the `echo-server` prints
-"Blast off!".
+```
+ Update job: {portal.cluster add_user fred.proj.org}: version=1002, created=2024-10-18 11:46:09 UTC, changed=2024-10-18 11:46:09 UTC, state=Complete to portal from cluster
+ ```
 
-So you should see a countdown from 1000 to 0 in the logs of both services,
-with "Blast off!" written into the log of `echo-server` at the end.
+ This update enables the `portal` agent to get the result of the job.
+
+ ```
+ Result: Some("account created")
+ ```
+
+ This process is repeated, except now the user `fred` is removed from the
+ `proj` project that is managed by the `org` organisation portal.
+
+ The job is
+
+```
+portal.cluster remove_user fred.proj.org
+```
+
+This is "put" onto the system, meaning that it is communicated from
+`portal` to `cluster`, and `cluster` is the agent responsible for
+processing the job. Once complete, `cluster` updates the job with the
+result, and then enacts an "update" on the job, which communicates the
+new version back from `cluster` to `portal`. From here, `portal` can get
+the result.
+
+Finally, `portal` tries to remove a user from the `admin` project, by
+"putting" this job into the system;
+
+```
+portal.cluster remove_user jane.admin.org
+```
+
+However, in this example, `cluster` is hard-coded to prevent the removal
+of admin users. So, instead an error is generated, and this is used to
+"update" the job. This is "updated" on the system, which communicates it
+back to `portal`. On trying to get the result, `portal` receives the
+error instead. As this is a Rust error that `portal` isn't programmed
+to handle, it exits with the error
+
+```
+Error: You are not allowed to remove the account for "jane"
+```
+
+with `cluster` exiting shortly afterwards.
 
 ## How was this implemented?
 
-Both the `echo-client` and `echo-server` services are implemented in the
+Both the `portal` and `cluster` agents are implemented in the
 `src/main.rs` file. This file is mostly parsing command line arguments,
-followed by a call to either `run_server` or `run_client` depending on
-the service.
+followed by a call to either `run_portal` or `run_cluster` depending on
+the agent. Note that this is very similar to the previous `echo-client`
+example, as `templemeads` agents build on the `paddington` peer-to-peer
+services.
 
-Each of these functions defines the service, sets the message handler,
-and then enters the service event loop. For example, here is
-`run_client`:
+Each of these functions defines the agent, sets the job handler,
+enters the agent's event loop in a background task, and then in the
+foreground task, the `portal` sends jobs, while the `cluster` runs
+a timer to automatically shut down after a couple of seconds.
+
+For example, here is the `run_cluster` function.
 
 ```rust
-async fn run_client(invitation: &Path) -> Result<(), Error> {
+async fn run_cluster(invitation: &Path) -> Result<(), Error> {
     // load the invitation from the file
     let invite: Invite = Invite::load(invitation)?;
 
-    // create the echo-client service - note that the url, ip and
-    // port aren't used, as this service won't be listening for any
-    // connecting clients
+    // create the paddington service for the cluster agent
+    // - note that the url, ip and port aren't used, as this
+    // agent won't be listening for any connecting clients
     let mut service: ServiceConfig =
-        ServiceConfig::new("echo-client", "http://localhost:6502", "127.0.0.1", &6502)?;
+        ServiceConfig::new("cluster", "http://localhost:6502", "127.0.0.1", &6502)?;
 
     // now give the invitation to connect to the server to the client
     service.add_server(invite)?;
 
-    // set the handler for the echo-client service
-    set_handler(echo_client_handler).await?;
+    // now create the config for this agent - this combines
+    // the paddington service configuration with the Agent::Type
+    // for the agent
+    let config = agent::custom::Config::new(service, agent::Type::Instance);
 
-    // run the echo-client service
-    run(service).await?;
+    // now start the agent, passing in the message handler for the agent
+    // We will start this in a background task, so that we can close the
+    // program after a few seconds
+    tokio::spawn(async move {
+        agent::custom::run(config, cluster_runner)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Error running cluster: {}", e);
+            });
+    });
+
+    // wait for a few seconds before exiting
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    std::process::exit(0);
+}
+```
+
+It starts in a very similar way to the `echo-client` example. It loads
+the invitation, and then defines a `paddington` service configuration
+(`ServiceConfig`) based on it's own details and the contents of the
+invitation.
+
+Next, it passes the `ServiceConfig`, together with the agent type of
+`Instance` to the `agent::custom::Config::new` function. This creates
+a new custom agent configuration. We are using a custom configuration here
+as we want to supply a custom job handler to the agent. There are already
+hard-coded agents that could be used, e.g. `agent::portal::Config`,
+`agent::cluster::Config`, etc.
+
+Now that the agent has been configured, we run its event loop via the
+`agent::custom::run` function, passing in the agent configuration,
+and the `cluster_runner` async function that will be used to process jobs.
+This is spawned into a background task in this example, so that we can
+start a timer in the foreground task to automatically shut down the
+program after a couple of seconds. Normally, you would run the agent
+event loop in the foreground task, and would not manually exit the process.
+
+### Job Handlers
+
+The `cluster_runner` function is the job handler for the `cluster` agent.
+
+The handler function is called whenever a `Job` is `put` onto the system
+for this agent. The possible actions for a `Job` are;
+
+1. `put` - this adds a new `Job` to the distributed system of agents. The
+   `Job` will be communicated to the destination agent, and it will be
+   responsible for doing the work.
+
+2. `update` - this will update the contents of a `Job` that already exists
+   in the distributed system of agents. All agents that hold a copy of this
+   job will receive the update.
+
+3. `delete` - this will remove a `Job` from the distributed system of agents.
+   All agents that hold a copy of this job will remove it. If the destination
+   agent is processing the job, then the job will be cancelled.
+
+Here is the `cluster_runner` function. Note that, as with the `echo-client`
+the function has to be made `async_runnable`, to help Rust hold pointers
+to async functions.
+
+```rust
+async_runnable! {
+    ///
+    /// Runnable function that will be called when a job is received
+    /// by the cluster agent
+    ///
+    pub async fn cluster_runner(envelope: Envelope) -> Result<Job, Error>
+    {
+        let mut job = envelope.job();
+
+        match job.instruction() {
+            AddUser(user) => {
+                // add the user to the cluster
+                tracing::info!("Adding {} to cluster", user);
+
+                tracing::info!("Here we would implement the business logic to add the user to the cluster");
+
+                job = job.completed("account created")?;
+            }
+            RemoveUser(user) => {
+                // remove the user from the cluster
+                tracing::info!("Removing {} from the cluster", user);
+
+                tracing::info!("Here we would implement the business logic to remove the user from the cluster");
+
+                if user.project() == "admin" {
+                    job = job.errored(&format!("You are not allowed to remove the account for {:?}",
+                                      user.username()))?;
+                } else {
+                    job = job.completed("account removed")?;
+                }
+            }
+            _ => {
+                tracing::error!("Unknown instruction: {:?}", job.instruction());
+                return Err(Error::UnknownInstruction(
+                    format!("Unknown instruction: {:?}", job.instruction()).to_string(),
+                ));
+            }
+        }
+
+        Ok(job)
+    }
+}
+```
+
+The `Job` is passed to the handler function in an `Envelope`. The `Envelope`
+contains the `Job`, as well as metadata about the communication of that
+job (e.g. the sender, intended recipient etc).
+
+The aim of the `cluster_runner` function is to process the job, and then
+return the new, updated version of the job.
+
+First, it extracts the `Job` from the `Envelope` into a mutable variable.
+This is mutable as we will be updating the job through the function.
+
+We then match on the instruction of the job. The instruction is the
+command that the job is supposed to carry out. There is a whole grammar,
+described later, that maps string commands (e.g. `add_user`) to Rust
+instruction Enums (e.g. `AddUser`). This ensures that command parsing
+is robust and that the risk of command injection attacks is minimised.
+
+There are three arms to this match statement. The first is for the
+`AddUser` instruction. This implements the business logic to add a user
+to the cluster. In this example, it just logs that it is adding the user,
+and then marks the job as completed with the result "account created".
+
+The second arm is for the `RemoveUser` instruction. This implements the
+business logic to remove a user from the cluster. In this example, it
+logs that it is removing the user, and then checks if the user is an
+admin user. If it is, then it marks the job as errored with the message
+"You are not allowed to remove the account for `username`". If it is not
+an admin user, then it marks the job as completed with the result
+"account removed".
+
+The final arm is for any other instruction. This logs an error message
+saying that the `cluster` agent cannot process any other instruction. This
+is also a security design feature - we ensure that each agent contains
+only the business logic of the instructions that it is supposed to process.
+It doesn't contain any other code, and so cannot be manipulated to do
+things that it is not permitted to do.
+
+Finally, the function returns the updated job.
+
+In constrast, the job handler for the `portal` agent is much simpler. It
+is not responsible for processing any jobs, and so its handler simply
+triggers an error if it is ever called.
+
+```rust
+async_runnable! {
+    ///
+    /// Runnable function that will be called when a job is received
+    /// by the portal agent
+    ///
+    pub async fn portal_runner(envelope: Envelope) -> Result<Job, Error>
+    {
+        let job = envelope.job();
+
+        tracing::error!("Unknown instruction: {:?}", job.instruction());
+
+        return Err(Error::UnknownInstruction(
+            format!("Unknown instruction: {:?}", job.instruction()).to_string(),
+        ));
+    }
+}
+```
+
+### Submitting Jobs
+
+The `portal` agent is responsible for submitting jobs to the `cluster` agent.
+This is done in the `run_portal` function, after the `portal` agent has
+been configured and its event loop started in a background task.
+
+```rust
+async fn run_portal(
+    url: &str,
+    ip: &str,
+    port: &u16,
+    range: &str,
+    invitation: &Path,
+) -> Result<(), Error> {
+    // create a paddington service configuration for the portal agent
+    let mut service = ServiceConfig::new("portal", url, ip, port)?;
+
+    // add the cluster to the portal, returning an invitation
+    let invite = service.add_client("cluster", range)?;
+
+    // save the invitation to the requested file
+    invite.save(invitation)?;
+
+    // now create the config for this agent - this combines
+    // the paddington service configuration with the Agent::Type
+    // for the agent
+    let config = agent::custom::Config::new(service, agent::Type::Portal);
+
+    // now start the agent, passing in the message handler for the agent
+    // Do this in a background task, so that we can send jobs to the cluster
+    // here - normally jobs will come from the bridge
+    tokio::spawn(async move {
+        agent::custom::run(config, portal_runner)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Error running portal: {}", e);
+            });
+    });
+
+    // wait until the cluster has connected...
+    let mut clusters = agent::get_all(&agent::Type::Instance).await;
+
+    while clusters.is_empty() {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        clusters = agent::get_all(&agent::Type::Instance).await;
+    }
+
+    let cluster = clusters.pop().unwrap_or_else(|| {
+        tracing::error!("No cluster connected to the portal");
+        std::process::exit(1);
+    });
+
+    // create a job to add a user to the cluster
+    let mut job = Job::parse("portal.cluster add_user fred.proj.org")?;
+
+    // put this job to the cluster
+    job = job.put(&cluster).await?;
+
+    // get the result - note that calling 'result' on its own would
+    // just look to see if the result exists now. To actually wait
+    // for the result to arrive we need to use the 'wait' function,
+    // await on that, and then call 'result'
+    let result: Option<String> = job.wait().await?.result()?;
+
+    tracing::info!("Result: {:?}", result);
+
+    // create a job to remove a user from the cluster
+    let mut job = Job::parse("portal.cluster remove_user fred.proj.org")?;
+
+    // put this job to the cluster
+    job = job.put(&cluster).await?;
+
+    // get the result
+    let result: Option<String> = job.wait().await?.result()?;
+
+    tracing::info!("Result: {:?}", result);
+
+    // try to remove a user who should not be removed
+    let mut job = Job::parse("portal.cluster remove_user jane.admin.org")?;
+
+    // put this job to the cluster
+    job = job.put(&cluster).await?;
+
+    // get the result - this should exit with an error
+    let result: Option<String> = job.wait().await?.result()?;
+
+    tracing::info!("Result: {:?}", result);
 
     Ok(())
 }
 ```
 
-We see that first we read the invitation from the passed file. We then create
-a new service configuration (`ServiceConfig`). This configures the name of the
-service (`echo-client`) and connection details if this service is expecting
-to be connected to by other client services.
-
-Next, we add a new server to the service configuration by passing in the
-invitation. Then, we set the handler function for the service, before calling
-the `run` function to enter the service's event loop.
-
-The handler function is called whenever the service receives any message.
-It is set via the `set_handler` function. Here is the handler function for
-the `echo-client` service:
+Once its event loop starts, the `run_portal` function waits until an
+agent of type `Instance` has connected.
 
 ```rust
-async_message_handler! {
-    ///
-    /// This is the function that will be called on the echo-client
-    /// service whenever it receives a message
-    ///
-    async fn echo_client_handler(message: Message) -> Result<(), Error> {
-        tracing::info!("echo-client received: {}", message);
+    // wait until the cluster has connected...
+    let mut clusters = agent::get_all(&agent::Type::Instance).await;
 
-        // we will ignore control messages
-        if message.is_control() {
-            return Ok(())
-        }
+    while clusters.is_empty() {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        // just echo the message back to the sender
-        send(Message::new(message.sender(), message.payload())).await?;
-
-        // exit if the message is "0"
-        if message.payload() == "0" {
-            std::process::exit(0);
-        }
-
-        Ok(())
+        clusters = agent::get_all(&agent::Type::Instance).await;
     }
-}
+
+    let cluster = clusters.pop().unwrap_or_else(|| {
+        tracing::error!("No cluster connected to the portal");
+        std::process::exit(1);
+    });
 ```
 
-> [!NOTE]
-> Note that the handler function is defined using the `async_message_handler!`
-> as rust needs help to use async function pointers.
+It does this by calling the `agent::get_all` function, to find all agents
+connected with a specified agent type. Once connected, it stores the name
+of the connected agent in the `cluster` variable.
 
-In this case, we check to see if the message is a control message.
-If it is, we ignore it. Otherwise, we send the message back to the
-sender. If the message is "0", we exit the service.
-
-The `echo-server` service is similar, but it sends a message to the
-`echo-client` service when it receives a control message, and decrements
-the number of the message it receives from the `echo-client` service.
-
-Here is it's message handler;
+Next, the `portal` agent creates a job to add a user to the cluster.
 
 ```rust
-    async fn echo_server_handler(message: Message) -> Result<(), Error> {
-        tracing::info!("echo-server received: {}", message);
-
-        // there are two types of message - control messages that
-        // tell us that, e.g. services have connected, and normal
-        // messages that come from those services. Here, as the
-        // echo-server, we will start the echo exchange whenever
-        // we receive a control message telling us the echo-client
-        // service has connected
-        match message.is_control() {
-            true => {
-                // start the echo exchange
-                send(Message::new("echo-client", "1000")).await?;
-            }
-            false => {
-                // the message should be a number - we will decrement
-                // it and echo it back
-                let number = message.payload().parse::<i32>().with_context(|| {
-                    format!("Could not parse message payload as i32: {}", message.payload())
-                })?;
-
-                // echo the decremented number
-                send(Message::new(message.sender(), &(number - 1).to_string())).await?;
-
-                if number <= 1 {
-                    // blast off!
-                    tracing::info!("Blast off!");
-
-                    // exit the program gracefully
-                    // (this will eventually flush all caches / queues,
-                    //  and exit once all messages sent, blocking sending
-                    //  of any new messages - for now, we will just sleep
-                    // for a short time before calling exit...)
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    std::process::exit(0);
-                }
-            }
-        }
-
-        Ok(())
-    }
+    // create a job to add a user to the cluster
+    let mut job = Job::parse("portal.cluster add_user fred.proj.org")?;
 ```
 
-## Under the hood
+This job is created by parsing the string `portal.cluster add_user fred.proj.org`.
 
-The `run` function is the main entry point for the service. It creates an
-event loop the is responsible for listening for new connections from
-client services, connecting to new server services, and handling the sending
-and receiving of messages between services.
+Parsing uses the job grammar mentioned earlier to securely parse the
+command string into a `Job` object. A simple grammar is used, comprising
+three parts:
 
-> [!NOTE]
-> An individual service can be connected to an arbitrary number of peer
-> services. It can connect to them both as a client that initiates the
-> connection, and a server than listens for new connections. In this way,
-> a distributed network of peer-to-peer communicating services can be
-> orchestrated.
+1. The full path between the sending agent, in this case `portal`, and the
+   destination agent, in this case `cluster`. The names are separated by
+   dots, e.g. `portal.cluster`. In this case, we only have a couple of agents,
+   so it is a simple path. But, for more complex networks, the path
+   can be longer, e.g. `waldur.brics.notebook.shared` would be the path
+   from the `portal` agent called `waldur`, to the `provider` agent called
+   `brics`, to the `platform` agent called `notebook`, to the individual
+   `instance` agent of a notebook platform called `shared`.
 
-Services can only connect to each other if they have been properly introduced.
-To introduce a service to another, you first need to ask the "server" service
-to create an invitation file that will be passed to the "client" service.
+2. The instruction, e.g. `add_user`. This is the command that the job is
+   supposed to carry out. Instructions include `add_user`, `remove_user`,
+   etc.
 
-This request tells the "server" service to create a pair of secure
-symmetric cryptographic keys that will be used for the connection. It also lets
-the "server" know the name of the "client" service, plus the expected
-IP address or IP range from which the "client" will connect. The "server"
-then encodes information about how to connect to itself (e.g. the protocol,
-URL, port, etc) and the cryptographic keys into an invitation file, which
-is written in the toml format.
+3. The argument(s) to the instruction. In this case, the argument is a
+   user identifier. In OpenPortal, users are identified by a unique
+   triple - the username, the project that they are a member of, and the
+   name of the portal that manages that project. For example,
+   `dave.demo.brics` would refer to the user called `dave` who is a member
+   of the project called `demo` that is managed by the portal called `brics`.
+   The user identifier triple should uniquely identify the user across
+   the full distributed OpenPortal network of agents. In the case of this
+   example, the user identifier is `fred.proj.org`.
 
-You then manually (out of band) give this invitation file to the
-"client" service. This tells the "client" that it should initiate the
-connection to the "server" service.
-
-### Initiating the connection
-
-If a service knows that it has clients, then it will start a HTTP server
-listening for new connections as specified in its configuration.
-
-If a service knows that it has servers, then it will start a HTTP client
-to try to connect to that server.
-
-When the "client" service connects to the "server" service, the two engage
-in a handshake to securely upgrade the connection to a peer-to-peer
-websocket connection.
-
-### Handshake
-
-The handshake starts from the "client" service. It generates a new
-symmetric cryptographic key and encrypts this with the two keys contained
-in the invititation file from the "server" service. It sends this encrypted
-message to the "server".
-
-On receiving the message, the "server" checks to see if it is expecting a
-connection from any client with the IP address in one of the IP ranges
-expected for the clients. If not, it drops the connection.
-
-Next, the "server" checks to see if the name of the connecting "client"
-service matches the name expected for a service from the connecting IP address.
-If not, it drops the connection.
-
-Next, the "server" checks to see if it has an existing connection from the
-named "client" service. If it does, it drops the connection. This ensures
-that there is only a single peer-to-peer connection between any two services
-at any one time.
-
-Next, it tries to decrypt the message from the "client" service using the
-pair of symmetric keys that it generated when it created the invitation file
-for the "client". If it can't decrypt the message, it drops the connection.
-
-However, if all of the above succeeded, then the "server" can be confident
-that the "client" is authenticated (it connected with the right name from
-the right location and knew both the secret symmetric keys). Given this,
-the "server" saves the (now decrypted) new symmetric key from the client,
-and then generates its own, new symmetric key. These two new symmetric keys
-will become the session keys for the connection.
-
-The "server" encrypts its new symmetric key with both one of the invitation
-symmetric keys, and the new symmetric key from the "client". It sends the
-result back as a message to the "client".
-
-The "client" receives the message, and checks that it can decrypt it using
-one of the invitation symmetric keys, and the new symmetric key that it
-generated and sent to the "server". If it can, then it can be confident
-that it is truly communicating with the "server" service, as only the
-"server" is able to respond to the request with the correct IP parameters,
-service name and demonstration of the ability to both decrypt and encrypt
-messages using the invitiation symmetric keys. If anything here fails,
-then the client will drop the connection.
-
-Now that the "server" and "client" have both authenticated each other,
-they both now share a pair of newly generated "session" symmetric keys.
-The connection is fully upgraded to a peer-to-peer websocket connection,
-and all messages sent during this session between the two services are
-double-encrypted using the two session symmetric keys. This ensures that
-even if the underlying communication protocol is insecure (e.g. standard
-websockets over HTTP, rather than secure websockets over HTTPS), then
-communication is authenticated and protected from tampering or eavesdropping.
-
-> [!NOTE]
-> The pair of invitation symmetric keys are only used in the handshake
-> to set up the initial connection between the two services. Once the
-> handshake is complete, all encryption is done using the pair of session
-> keys.
-
-### Encryption standard
-
-The paddington protocol currently uses the `XChaCha20Poly1305` algorithm
-implemented in the [orion crate](https://github.com/orion-rs/orion). Orion
-is a performant, pure rust encryption crate.
-
-All symmetric keys are 256bits, and are randomly generated using the secure
-functions provided by orion.
-
-### Sending a Message
-
-The message protocol is simple. A `Message` object contains three fields;
+Next, the `Job` is `put` onto the distributed system of agents.
 
 ```rust
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Message {
-    sender: String,
-    recipient: String,
-    payload: String,
-}
+    // put this job to the cluster
+    job = job.put(&cluster).await?;
 ```
 
-The `sender` is the name of the service that sent the message. The
-`recipent` is the name of the service that should receive the message.
-And the `payload` is a string containing the message itself.
+This sends the `Job` to the backend distributed peer-to-peer communications
+network implemented by the `paddington` crate. Each `paddington::Connection`
+between pairs of agents is given a job `Board`. The `Board` is responsible
+for recording the state of jobs on either side of the `paddington::Connection`.
+When a job is `put` onto the system, the agent that `put` the job identifies
+the next agent in the route. For example, if the `waldur` portal `put` a job
+to `waldur.brics.notebook.shared`, then the `waldur` portal would `put`
+the job onto its job `Board` that is associated with its connection to the
+`brics` agent. Because the `Board` is made the same on both sides of the
+connection, this would copy the `Job` onto the `Board` of the `brics` agent.
+The `brics` agent would see the job, and would detect that it isn't the
+final destination (that is `shared`). So, it `puts` the job onto the next
+connection in the route, which is the connection to the `notebook` agent.
+This `puts` the `Job` onto the `Board` of the `notebook` agent,
+which copies it across the `Connection` between `brics` and `notebook`,
+meaning that `notebook` now has a copy. Noticing that it isn't the final
+destination of the job, it `puts` the job onto the `Connection` between
+itself and the `shared` agent. This `puts` the job onto the `Board` of the
+`shared` agent, which is the final destination of the job. The `shared`
+agent, recognising that it is the final destination, processes the job
+via its job handling function.
 
-Typically, the `payload` will be a string. However, you can send anything
-that can be serialised to a string, e.g. an object serialised to JSON via
-[serde_json](https://docs.rs/serde_json/latest/serde_json/index.html).
+In our example case, we just have two agents, `portal` and `cluster`, and
+so the route is just `portal.cluster`. The `portal` agent `puts` the job
+onto the `Board` for the `Connection` between `portal` and `cluster`, which
+copies the `Job` across to `cluster`. The `cluster` agent, recognising that
+it is the final destination, processes the job via the job handling function
+we discussed above.
 
-The `sender` and `recipient` need to be specified because each service can
-be connected to multiple peer services. Every connection between a pair
-of services is managed via a `Connection` object. All of the connections
-for a service are managed via the `Exchange`.
+Once finished, it returns an updated version of the `Job`. This goes back onto
+the `Board` for the `Connection` between `portal` and `cluster`. As the
+system recognises that the version of the `Job` has changed, it will call
+`update` to `update` to the `Job` across the `Connection`. This copies the
+new job back to the `Board` on the side of the `Connection` belonging to
+`portal`, meaning that `portal` now has the result.
 
-To send a message, you call the `send` function, which is defined as part
-of the `Exchange`. This implements a set of functions that handle the
-exchange of messages between services. The `Exchange` looks at the `sender` and
-`recipient` and works out if it knows how to send the message to one of its
-connected peer services. If it does, it passes the payload of the message
-to the `Connection` object that manages the peer-to-peer connection between
-the services.
+The `portal` agent has been waiting for the result by calling
+`wait().await` on the job that it originally `put`.
 
-### Transmitting the Payload
+```rust
+    // get the result - note that calling 'result' on its own would
+    // just look to see if the result exists now. To actually wait
+    // for the result to arrive we need to use the 'wait' function,
+    // await on that, and then call 'result'
+    let result: Option<String> = job.wait().await?.result()?;
 
-The `Connection` object is responsible for sending the actual message over the
-websocket stream. First, it envelopes the payload using the `envelope_message`
-function. This encrypts the payload string using the two session symmetric keys.
-The result is passed into [tokio::tungstenite](https://docs.rs/tokio-tungstenite/latest/tokio_tungstenite/) as a `tokio_tungstenite::tungstenite::protocol::Message as TokioMessage`
-(as a "text" message). The `tokio::tungstenite` crate handes the websocket
-connection and is responsible for the underlying wire protocol, chunking
-of the message into packets etc.
+    tracing::info!("Result: {:?}", result);
+```
 
-The actual string message that is sent is the result of enveloping
-(double-encrypting) the payload. Encrypting the data is handled by
-the `paddington::crypto` module, using a `paddington::crypto::Key`.
-This first uses [serde_json](https://docs.rs/serde_json/latest/serde_json/index.html)
-to convert the data to be encrypted into a UTF-8 encoded JSON string. This string
-is then byte encrypted using [orion](https://docs.rs/orion/latest/orion/index.html)
-into a binary array. This binary array is converted back into a string
-using hexadecimal encoding. This process is performed twice, once for
-each of the two session keys. The result is that the payload is converted
-into a long(ish) secure hex-encoded string, which is passed to
-[tokio::tungstenite](https://docs.rs/tokio-tungstenite/latest/tokio_tungstenite/)
-to transmit over websockets using the text protocol implemented in that crate.
+Once updated, the `portal` agent can get the result of the job by calling
+`result()` on the job. This returns an `Option<String>`, which is the
+result of the job. In this case, the result is "account created".
 
-### Receiving the Message
+> [!NOTE]
+> A `Job` can return any type - it is up to the definition of the
+> grammar of the individual `Instruction` to define what information
+> should be returned as the result.
 
-On receiving, the whole process is repeated in reverse. The
-[tokio::tungstenite](https://docs.rs/tokio-tungstenite/latest/tokio_tungstenite/)
-crate is responsible for decoding and reassembling the websocket packets
-back into a single string. This is a hex-encoded UTF-8 string, which is
-de-enveloped by `Connection` via double-decrypting using the two
-session keys via `crypto::Key::descrypt`. The result is a UTF-8 encoded
-string which is the original payload. This is combined by the `Exchange`
-with the sender and recipient data to create a `paddington::message::Message`
-object that is passed to the async message handling function that is set
-for the service (via the `paddington::set_handler` function).
+Note that calling `result()?` will return a `templemeads::Error` if anything
+went wrong with processing the job. This is why the `run_portal` function
+exited when the `remove_user jane.admin.org` job failed to process.
 
-### Parallelism
+```rust
+    // try to remove a user who should not be removed
+    let mut job = Job::parse("portal.cluster remove_user jane.admin.org")?;
 
-The event loop handling all communication is implemented using
-[tokio](https://docs.rs/tokio/latest/tokio/index.html). This allows
-for parallel, asynchronous handling of messages. The peer-to-peer
-connecton is fully duplex, meaning that messages can be sent and
-received at the same time. To keep the code responsive, and to manage
-memory and resource usage, both sending and receiving of messages uses
-rust channels to queue messages. In code, sending a message merely pushes
-the message onto a channel, returning immediately. In the background,
-the event loop's large number of parallel tokio tasks are pulling
-messages off of this channel and doing the work of sending them
-over the "send" websocket connection. Similarly, incoming
-messages are read from the websocket connection and pushed onto a
-receive channel. The event loop's parallel tokio tasks are pulling
-received messages from this channel, processing them, and then
-calling the message handler function. In this way, sending and
-receiving of messages is not blocked by message processing,
-and the service should scale as the number of messages sent
-and received increases.
+    // put this job to the cluster
+    job = job.put(&cluster).await?;
 
-### Error handling
+    // get the result - this should exit with an error
+    let result: Option<String> = job.wait().await?.result()?;
 
-The event loop and tokio tasks handling the sending and receiving of
-messages also handle all errors encountered during the process. If
-any errors are encountered, then these are logged via the
-[tracing](https://docs.rs/tracing/latest/tracing/) crate, and
-subsequent processing of that message is cancelled. The event loop
-and its worker tasks then move on to processing the next message.
+    tracing::info!("Result: {:?}", result);
+```
 
-In this way, errors should not cause the service to crash or for
-message processing to be blocked.
+## Parallelism
 
-In addition, the event loop catches errors that occur for the
-actual websocket connection. If the connection is lost, then
-the event loop will automatically try to reconnect to the peer
-service (i.e. the "server" will automatically try to restart the
-HTTP servre, and the "client" will automatically try to reconnect via
-a HTTP client, re-trying to connect every 5 seconds). In this way,
-any disruptions or outages in the connection should be automatically
-recovered from. Messages that were in the process of being sent
-may be lost, so it is up to a higher level protocol (e.g. that
-implemented in templemeads) to handle recovery.
+Jobs can be `put`, `update`, and `delete` in parallel. This is because
+the underlying peer-to-peer `paddington` network is fully duplex,
+and websockets communicate in real time.
 
-Finally, if the service does exit, e.g. by crashing or being killed,
-then on restarting, it will automatically try to reconnect to all
-of its peer services. This means that a keepalive process, e.g.
-using kubernetes pods or systemd daeamons, could be used to ensure
-that the service automatically restarts and recovers from most
-outages.
+There are on consistency guarantees on the order of jobs. You can though
+rely on the fact that the state of each job will update atomically, and
+its state will be communicated as soon as possible to all agents that
+hold a copy. You can also rely on the fact that only a single agent
+will process each job, and only that agent (the job's destination) can
+update the job.
 
-## What next?
+## Idempotency
 
-Now that you've seen how paddington peer-to-peer services can be created,
-and how they communicate with one another, the next step is to see how
-templemeads builds on this to create a distributed network of Agents.
+Jobs are idempotent. This means that if a job is `put` onto the system
+multiple times, then only the first `put` will change the state of the
+service. Subsequent `put`s will not change the state. This is a key
+design feature, enabling the system to robustly implement error recovery
+by simply re-sending jobs. For example, it is safe to re-send the
+job to `add_user` `fred.proj.org` to the `cluster` agent. The first
+time this is processed it will do all of the business logic to add
+`fred` to the `proj` project on `cluster`. Subsequent `put`s of
+this job will be ignored, as `fred` is already a member of the `proj`
+project on `cluster`.
+
+## Robustness
+
+Multiple copies of a `Job` are held across the distributed peer-to-peer
+network of Agents. The `Job` is held on a `Board` on each side of a
+`Connection` between pairs of Agents along the communication path from
+the sender to the receiver. For example, the `Job` sent via `portal.cluster`
+would be stored twice (once of each side of the single `Connection`),
+while the `Job` sent via `waldur.brics.notebook.shared` would be stored six
+times (once on each side of the three `Connections`).
+
+This means that the system is robust to failures. If, for example, the
+`notebook` agent goes down, then the `Job` still exists on `Boards` on the
+`waldur`, `brics` and `shared` agents. When the `notebook` agent comes back,
+its first task is to restore the `Board`s for each of its `Connection`s,
+by asking that the agent on the other side sends across all of its jobs.
+This is because the system ensures that the `Boards` are kept in sync
+on both sides of a `Connection`. If, for example, `shared` went down while
+processing a `Job`, then on coming back, it would receive the `Job` again
+from `notebook`, and would then process it again. As `Job`s are idempotent,
+this is a safe operation.

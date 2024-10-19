@@ -189,3 +189,64 @@ pub async fn account() -> Option<String> {
 pub async fn filesystem() -> Option<String> {
     REGISTAR.read().await.filesystem()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    ///
+    /// Only used by testing to clear out the registry
+    ///
+    async fn clear() {
+        let mut registrar = REGISTAR.write().await;
+
+        registrar.agents.clear();
+        registrar.by_type.clear();
+    }
+
+    #[tokio::test]
+    async fn test_register() {
+        // run all tests in one function, as they need to be serial
+        // or they overwrite each other
+        clear().await;
+        register("test", &Type::Portal).await;
+        let agents = get_all(&Type::Portal).await;
+        assert_eq!(agents, vec!["test"]);
+
+        clear().await;
+        register("test", &Type::Portal).await;
+        remove("test").await;
+        let agents = get_all(&Type::Portal).await;
+        assert!(agents.is_empty());
+
+        clear().await;
+        register("test", &Type::Portal).await;
+        let agent = portal().await;
+        assert_eq!(agent, Some("test".to_string()));
+
+        clear().await;
+        register("test", &Type::Account).await;
+        let agent = account().await;
+        assert_eq!(agent, Some("test".to_string()));
+
+        clear().await;
+        register("test", &Type::Filesystem).await;
+        let agent = filesystem().await;
+        assert_eq!(agent, Some("test".to_string()));
+
+        clear().await;
+        register("test1", &Type::Portal).await;
+        register("test2", &Type::Portal).await;
+        register("test3", &Type::Provider).await;
+        remove("test1").await;
+
+        let agents = get_all(&Type::Portal).await;
+        assert_eq!(agents, vec!["test2"]);
+        let agents = get_all(&Type::Provider).await;
+        assert_eq!(agents, vec!["test3"]);
+
+        assert_eq!(portal().await, Some("test2".to_string()));
+        assert_eq!(account().await, None);
+        assert_eq!(filesystem().await, None);
+    }
+}

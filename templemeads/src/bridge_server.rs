@@ -388,3 +388,33 @@ where
         Self(err.into(), None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sign_api_call() {
+        let key = Key::generate();
+        let date = Utc::now();
+        let protocol = "get";
+        let function = "health";
+        let arguments = None;
+
+        let signed = sign_api_call(&key, &date, protocol, function, &arguments).unwrap_or_default();
+
+        let expected = format!(
+            "OpenPortal {}",
+            key.expose_secret()
+                .sign(format!(
+                    "{}\napplication/json\n{}\n{}",
+                    protocol,
+                    date.format("%a, %d %b %Y %H:%M:%S GMT"),
+                    function
+                ))
+                .unwrap()
+        );
+
+        assert_eq!(signed, expected);
+    }
+}

@@ -20,7 +20,13 @@ pub enum Position {
 impl Destination {
     pub fn new(destination: &str) -> Self {
         Self {
-            agents: destination.split('.').map(|s| s.to_string()).collect(),
+            agents: destination
+                .split('.')
+                .filter_map(|s| match s.is_empty() {
+                    false => Some(s.to_string()),
+                    true => None,
+                })
+                .collect(),
         }
     }
 
@@ -28,7 +34,7 @@ impl Destination {
         self.agents.clone()
     }
 
-    pub fn position(&self, agent: &str, previous: &str) -> Position {
+    fn position_internal(&self, agent: &str, previous: &str) -> Position {
         match self.agents.last() {
             Some(last) => {
                 if last == agent {
@@ -50,6 +56,13 @@ impl Destination {
                 }
             }
             None => Position::Error,
+        }
+    }
+
+    pub fn position(&self, agent: &str, previous: &str) -> Position {
+        match self.agents.contains(&previous.to_string()) {
+            false => Position::Error,
+            true => self.position_internal(agent, previous),
         }
     }
 
@@ -119,5 +132,77 @@ impl<'de> Deserialize<'de> for Destination {
     {
         let s = String::deserialize(deserializer)?;
         Ok(Self::new(&s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_destination_new() {
+        let destination = Destination::new("a.b.c");
+        assert_eq!(destination.agents(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_destination_position() {
+        let destination = Destination::new("a.b.c");
+        assert_eq!(destination.position("a", ""), Position::Error);
+        assert_eq!(destination.position("b", "a"), Position::Downstream);
+        assert_eq!(destination.position("c", "b"), Position::Destination);
+        assert_eq!(destination.position("a", "b"), Position::Upstream);
+        assert_eq!(destination.position("b", "c"), Position::Upstream);
+        assert_eq!(destination.position("c", "a"), Position::Destination);
+        assert_eq!(destination.position("c", "d"), Position::Error);
+        assert_eq!(destination.position("d", "c"), Position::Error);
+    }
+
+    #[test]
+    fn test_destination_next() {
+        let destination = Destination::new("a.b.c");
+        assert_eq!(destination.next("a"), Some("b".to_string()));
+        assert_eq!(destination.next("b"), Some("c".to_string()));
+        assert_eq!(destination.next("c"), None);
+    }
+
+    #[test]
+    fn test_destination_previous() {
+        let destination = Destination::new("a.b.c");
+        assert_eq!(destination.previous("a"), None);
+        assert_eq!(destination.previous("b"), Some("a".to_string()));
+        assert_eq!(destination.previous("c"), Some("b".to_string()));
+    }
+
+    #[test]
+    fn test_destination_is_empty() {
+        let destination = Destination::new("");
+        assert!(destination.is_empty());
+    }
+
+    #[test]
+    fn test_destination_is_valid() {
+        let destination = Destination::new("a.b.c");
+        assert!(destination.is_valid());
+    }
+
+    #[test]
+    fn test_destination_display() {
+        let destination = Destination::new("a.b.c");
+        assert_eq!(destination.to_string(), "a.b.c");
+    }
+
+    #[test]
+    fn test_destination_serialise() {
+        let destination = Destination::new("a.b.c");
+        let serialised = serde_json::to_string(&destination).unwrap_or_else(|_| "".to_string());
+        assert_eq!(serialised, "\"a.b.c\"");
+    }
+
+    #[test]
+    fn test_destination_deserialise() {
+        let deserialised: Destination =
+            serde_json::from_str("\"a.b.c\"").unwrap_or_else(|_| Destination::new(""));
+        assert_eq!(deserialised, Destination::new("a.b.c"));
     }
 }

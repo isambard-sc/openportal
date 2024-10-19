@@ -108,7 +108,7 @@ impl<'de> Deserialize<'de> for UserIdentifier {
 /// Struct that holds the mapping of a UserIdentifier to a local
 /// username on a system
 ///
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct UserMapping {
     user: UserIdentifier,
     local_user: String,
@@ -246,7 +246,13 @@ pub enum Instruction {
     UpdateHomeDir(UserIdentifier, String),
 
     /// Placeholder for an invalid instruction
-    Invalid(String),
+    Invalid(),
+}
+
+impl Default for Instruction {
+    fn default() -> Self {
+        Instruction::Invalid()
+    }
 }
 
 impl Instruction {
@@ -255,37 +261,63 @@ impl Instruction {
         match parts[0] {
             "add_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
                 Ok(user) => Instruction::AddUser(user),
-                Err(_) => Instruction::Invalid(s.to_string()),
+                Err(_) => {
+                    tracing::error!("add_user failed to parse: {}", &parts[1..].join(" "));
+                    Instruction::Invalid()
+                }
             },
             "remove_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
                 Ok(user) => Instruction::RemoveUser(user),
-                Err(_) => Instruction::Invalid(s.to_string()),
+                Err(_) => {
+                    tracing::error!("remove_user failed to parse: {}", &parts[1..].join(" "));
+                    Instruction::Invalid()
+                }
             },
             "add_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
                 Ok(mapping) => Instruction::AddLocalUser(mapping),
-                Err(_) => Instruction::Invalid(s.to_string()),
+                Err(_) => {
+                    tracing::error!("add_local_user failed to parse: {}", &parts[1..].join(" "));
+                    Instruction::Invalid()
+                }
             },
             "remove_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
                 Ok(mapping) => Instruction::RemoveLocalUser(mapping),
-                Err(_) => Instruction::Invalid(s.to_string()),
+                Err(_) => {
+                    tracing::error!(
+                        "remove_local_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Instruction::Invalid()
+                }
             },
             "update_homedir" => {
                 if parts.len() < 3 {
-                    return Instruction::Invalid(s.to_string());
+                    tracing::error!("update_homedir failed to parse: {}", &parts[1..].join(" "));
+                    return Instruction::Invalid();
                 }
 
                 let homedir = parts[2].trim().to_string();
 
                 if homedir.is_empty() {
-                    return Instruction::Invalid(s.to_string());
+                    tracing::error!("update_homedir failed to parse: {}", &parts[1..].join(" "));
+                    return Instruction::Invalid();
                 }
 
                 match UserIdentifier::parse(parts[1]) {
                     Ok(user) => Instruction::UpdateHomeDir(user, homedir),
-                    Err(_) => Instruction::Invalid(s.to_string()),
+                    Err(_) => {
+                        tracing::error!(
+                            "update_homedir failed to parse: {}",
+                            &parts[1..].join(" ")
+                        );
+                        Instruction::Invalid()
+                    }
                 }
             }
-            _ => Instruction::Invalid(s.to_string()),
+            _ => {
+                tracing::error!("Invalid instruction: {}", s);
+                Instruction::Invalid()
+            }
         }
     }
 
@@ -296,7 +328,7 @@ impl Instruction {
             Instruction::AddLocalUser(mapping) => mapping.is_valid(),
             Instruction::RemoveLocalUser(mapping) => mapping.is_valid(),
             Instruction::UpdateHomeDir(user, homedir) => user.is_valid() && !homedir.is_empty(),
-            Instruction::Invalid(_) => false,
+            Instruction::Invalid() => false,
         }
     }
 }
@@ -311,7 +343,7 @@ impl std::fmt::Display for Instruction {
             Instruction::UpdateHomeDir(user, homedir) => {
                 write!(f, "update_homedir {} {}", user, homedir)
             }
-            Instruction::Invalid(s) => write!(f, "invalid {}", s),
+            Instruction::Invalid() => write!(f, "invalid"),
         }
     }
 }
@@ -334,5 +366,172 @@ impl<'de> Deserialize<'de> for Instruction {
     {
         let s = String::deserialize(deserializer)?;
         Ok(Instruction::new(&s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_user_identifier() {
+        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        assert_eq!(user.username(), "user");
+        assert_eq!(user.project(), "project");
+        assert_eq!(user.portal(), "portal");
+        assert_eq!(user.to_string(), "user.project.portal");
+    }
+
+    #[test]
+    fn test_user_mapping() {
+        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+        assert_eq!(mapping.user(), &user);
+        assert_eq!(mapping.local_user(), "local_user");
+        assert_eq!(mapping.local_project(), "local_project");
+        assert_eq!(
+            mapping.to_string(),
+            "user.project.portal:local_user:local_project"
+        );
+    }
+
+    #[test]
+    fn test_instruction() {
+        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+
+        let instruction = Instruction::new("add_user user.project.portal");
+        assert_eq!(instruction, Instruction::AddUser(user.clone()));
+
+        let instruction = Instruction::new("remove_user user.project.portal");
+        assert_eq!(instruction, Instruction::RemoveUser(user.clone()));
+
+        let instruction =
+            Instruction::new("add_local_user user.project.portal:local_user:local_project");
+        assert_eq!(instruction, Instruction::AddLocalUser(mapping.clone()));
+
+        let instruction =
+            Instruction::new("remove_local_user user.project.portal:local_user:local_project");
+        assert_eq!(instruction, Instruction::RemoveLocalUser(mapping.clone()));
+
+        let instruction = Instruction::new("update_homedir user.project.portal /home/user");
+        assert_eq!(
+            instruction,
+            Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string())
+        );
+
+        let instruction = Instruction::new("invalid");
+        assert_eq!(instruction, Instruction::Invalid());
+    }
+
+    #[test]
+    fn assert_serialize_user() {
+        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        let serialized = serde_json::to_string(&user).unwrap_or_default();
+        assert_eq!(serialized, "\"user.project.portal\"");
+    }
+
+    #[test]
+    fn assert_deserialize_user() {
+        let user: UserIdentifier =
+            serde_json::from_str("\"user.project.portal\"").unwrap_or_default();
+        assert_eq!(user.to_string(), "user.project.portal");
+    }
+
+    #[test]
+    fn assert_serialize_mapping() {
+        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+        let serialized = serde_json::to_string(&mapping).unwrap_or_default();
+        assert_eq!(
+            serialized,
+            "\"user.project.portal:local_user:local_project\""
+        );
+    }
+
+    #[test]
+    fn assert_deserialize_mapping() {
+        let mapping: UserMapping =
+            serde_json::from_str("\"user.project.portal:local_user:local_project\"")
+                .unwrap_or_default();
+        assert_eq!(
+            mapping.to_string(),
+            "user.project.portal:local_user:local_project"
+        );
+    }
+
+    #[test]
+    fn assert_serialize_instruction() {
+        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+
+        let instruction = Instruction::AddUser(user.clone());
+        let serialized = serde_json::to_string(&instruction).unwrap_or_default();
+        assert_eq!(serialized, "\"add_user user.project.portal\"");
+
+        let instruction = Instruction::RemoveUser(user.clone());
+        let serialized = serde_json::to_string(&instruction).unwrap_or_default();
+        assert_eq!(serialized, "\"remove_user user.project.portal\"");
+
+        let instruction = Instruction::AddLocalUser(mapping.clone());
+        let serialized = serde_json::to_string(&instruction).unwrap_or_default();
+        assert_eq!(
+            serialized,
+            "\"add_local_user user.project.portal:local_user:local_project\""
+        );
+
+        let instruction = Instruction::RemoveLocalUser(mapping.clone());
+        let serialized = serde_json::to_string(&instruction).unwrap_or_default();
+        assert_eq!(
+            serialized,
+            "\"remove_local_user user.project.portal:local_user:local_project\""
+        );
+
+        let instruction = Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string());
+        let serialized = serde_json::to_string(&instruction).unwrap_or_default();
+        assert_eq!(
+            serialized,
+            "\"update_homedir user.project.portal /home/user\""
+        );
+
+        let instruction = Instruction::Invalid();
+        let serialized = serde_json::to_string(&instruction).unwrap_or_default();
+        assert_eq!(serialized, "\"invalid\"");
+    }
+
+    #[test]
+    fn assert_deserialize_instruction() {
+        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+
+        let instruction: Instruction =
+            serde_json::from_str("\"add_user user.project.portal\"").unwrap_or_default();
+        assert_eq!(instruction, Instruction::AddUser(user.clone()));
+
+        let instruction: Instruction =
+            serde_json::from_str("\"remove_user user.project.portal\"").unwrap_or_default();
+        assert_eq!(instruction, Instruction::RemoveUser(user.clone()));
+
+        let instruction: Instruction =
+            serde_json::from_str("\"add_local_user user.project.portal:local_user:local_project\"")
+                .unwrap_or_default();
+        assert_eq!(instruction, Instruction::AddLocalUser(mapping.clone()));
+
+        let instruction: Instruction = serde_json::from_str(
+            "\"remove_local_user user.project.portal:local_user:local_project\"",
+        )
+        .unwrap_or_default();
+        assert_eq!(instruction, Instruction::RemoveLocalUser(mapping.clone()));
+
+        let instruction: Instruction =
+            serde_json::from_str("\"update_homedir user.project.portal /home/user\"")
+                .unwrap_or_default();
+        assert_eq!(
+            instruction,
+            Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string())
+        );
+
+        let instruction: Instruction = serde_json::from_str("\"invalid\"").unwrap_or_default();
+        assert_eq!(instruction, Instruction::Invalid());
     }
 }

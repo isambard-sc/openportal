@@ -621,3 +621,112 @@ impl Job {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_command_new() {
+        let command = Command::new("portal.cluster add_user demo.proj.portal");
+        assert_eq!(command.destination().to_string(), "portal.cluster");
+        assert_eq!(
+            command.instruction().to_string(),
+            "add_user demo.proj.portal"
+        );
+    }
+
+    #[test]
+    fn test_command_display() {
+        let command = Command::new("portal.cluster add_user demo.proj.portal");
+        assert_eq!(
+            command.to_string(),
+            "portal.cluster add_user demo.proj.portal"
+        );
+    }
+
+    #[test]
+    fn test_job_new() {
+        let job = Job::new("portal.cluster add_user demo.proj.portal");
+        assert_eq!(
+            job.command.to_string(),
+            "portal.cluster add_user demo.proj.portal"
+        );
+        assert_eq!(job.state, Status::Created);
+        assert_eq!(job.result, None);
+    }
+
+    #[test]
+    fn test_job_state() {
+        let mut job = Job::new("portal.cluster add_user demo.proj.portal");
+
+        assert!(!job.is_finished());
+        assert_eq!(job.state(), Status::Created);
+        assert_eq!(job.created(), job.changed());
+        assert_eq!(job.version(), 1);
+
+        job = job.pending().unwrap_or(job);
+
+        assert!(!job.is_finished());
+        assert_eq!(job.state(), Status::Pending);
+        assert!(job.changed() > job.created());
+        assert_eq!(job.version(), 2);
+
+        job = job.running(None).unwrap_or(job);
+
+        assert!(!job.is_finished());
+        assert_eq!(job.state(), Status::Running);
+        assert!(job.changed() > job.created());
+        assert_eq!(job.version(), 3);
+
+        job = job.completed("done").unwrap_or(job);
+
+        assert!(job.is_finished());
+        assert_eq!(job.state(), Status::Complete);
+        assert!(job.changed() > job.created());
+        assert_eq!(job.version(), 1003);
+
+        assert_eq!(
+            job.result::<String>().unwrap_or_default(),
+            Some("done".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_job_error() {
+        let mut job = Job::new("portal.cluster add_user demo.proj.portal");
+
+        assert!(!job.is_finished());
+        assert_eq!(job.state(), Status::Created);
+        assert_eq!(job.created(), job.changed());
+        assert_eq!(job.version(), 1);
+
+        job = job.pending().unwrap_or(job);
+
+        assert!(!job.is_finished());
+        assert_eq!(job.state(), Status::Pending);
+        assert!(job.changed() > job.created());
+        assert_eq!(job.version(), 2);
+
+        job = job.running(None).unwrap_or(job);
+
+        assert!(!job.is_finished());
+        assert_eq!(job.state(), Status::Running);
+        assert!(job.changed() > job.created());
+        assert_eq!(job.version(), 3);
+
+        job = job.errored("failed").unwrap_or(job);
+
+        assert!(job.is_finished());
+        assert_eq!(job.state(), Status::Error);
+        assert!(job.changed() > job.created());
+        assert_eq!(job.version(), 1003);
+
+        assert_eq!(job.error_message(), Some("failed".to_owned()));
+
+        match job.result::<String>() {
+            Ok(_) => unreachable!("Should not have a result"),
+            Err(e) => assert_eq!(e.to_string(), "failed"),
+        }
+    }
+}

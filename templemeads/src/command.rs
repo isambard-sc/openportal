@@ -67,3 +67,55 @@ impl From<Message> for Command {
             .unwrap_or(Command::error(&format!("Could not parse command: {:?}", m)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_command_display() {
+        let job = Job::new("test");
+        let command = Command::put(&job);
+        assert_eq!(format!("{}", command), format!("Put: {}", job));
+    }
+
+    #[test]
+    fn test_command_put() {
+        let job = Job::new("test");
+        let command = Command::put(&job);
+        assert_eq!(command, Command::Put { job });
+    }
+
+    #[test]
+    fn test_command_update() {
+        let job = Job::new("test");
+        let command = Command::update(&job);
+        assert_eq!(command, Command::Update { job });
+    }
+
+    #[test]
+    fn test_command_delete() {
+        let job = Job::new("test");
+        let command = Command::delete(&job);
+        assert_eq!(command, Command::Delete { job });
+    }
+
+    #[test]
+    fn test_command_error() {
+        let error = "test error";
+        let command = Command::error(error);
+        assert_eq!(
+            command,
+            Command::Error {
+                error: error.to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn test_command_register() {
+        let agent = AgentType::Portal;
+        let command = Command::register(&agent);
+        assert_eq!(command, Command::Register { agent });
+    }
+}

@@ -403,18 +403,21 @@ mod tests {
 
         let signed = sign_api_call(&key, &date, protocol, function, &arguments).unwrap_or_default();
 
-        let expected = format!(
-            "OpenPortal {}",
-            key.expose_secret()
-                .sign(format!(
-                    "{}\napplication/json\n{}\n{}",
-                    protocol,
-                    date.format("%a, %d %b %Y %H:%M:%S GMT"),
-                    function
-                ))
-                .unwrap()
-        );
+        #[allow(clippy::unwrap_used)] // safe to do this in a test
+        {
+            let expected = format!(
+                "OpenPortal {}",
+                key.expose_secret()
+                    .sign(format!(
+                        "{}\napplication/json\n{}\n{}",
+                        protocol,
+                        date.format("%a, %d %b %Y %H:%M:%S GMT"),
+                        function
+                    ))
+                    .unwrap()
+            );
 
-        assert_eq!(signed, expected);
+            assert_eq!(signed, expected);
+        }
     }
 }

@@ -87,7 +87,7 @@ impl Key {
     /// # Example
     ///
     /// ```
-    /// use paddington::crypto::Key;
+    /// use paddington::{Key, SecretKey};
     ///
     /// let key = Key::generate();
     /// ```
@@ -113,9 +113,10 @@ impl Key {
     /// # Example
     ///
     /// ```
-    /// use paddington::crypto::Key;
+    /// use paddington::{Key, SecretKey};
+    /// use secrecy::ExposeSecret;
     ///
-    /// let key = Key::from_password("password".to_string());
+    /// let key = Key::from_password("password");
     /// ```
     pub fn from_password(password: &str) -> Result<SecretKey, Error> {
         // we need to use an application-defined salt to ensure that we always
@@ -171,7 +172,8 @@ impl Key {
     /// # Example
     ///
     /// ```
-    /// use paddington::crypto::Key;
+    /// use paddington::{Key, SecretKey};
+    /// use secrecy::ExposeSecret;
     ///
     /// let key = Key::generate();
     ///
@@ -208,12 +210,13 @@ impl Key {
     /// Example
     ///
     /// ```
-    /// use paddington::crypto::Key;
+    /// use paddington::{Key, SecretKey};
+    /// use secrecy::ExposeSecret;
     ///
     /// let key = Key::generate();
     ///
-    /// let encrypted_data = key.expose_secret().encrypt("Hello, World!".to_string());
-    /// let decrypted_data = key.expose_secret().decrypt(&encrypted_data).unwrap();
+    /// let encrypted_data = key.expose_secret().encrypt("Hello, World!").unwrap();
+    /// let decrypted_data: String = key.expose_secret().decrypt(&encrypted_data).unwrap();
     ///
     /// assert_eq!(decrypted_data, "Hello, World!".to_string());
     /// ```
@@ -253,7 +256,8 @@ impl Key {
     /// Example
     ///
     /// ```
-    /// use paddington::crypto::Key;
+    /// use paddington::{Key, SecretKey};
+    /// use secrecy::ExposeSecret;
     ///
     /// let key = Key::generate();
     ///
@@ -292,13 +296,14 @@ impl Key {
     /// Example
     ///
     /// ```
-    /// use paddington::crypto::Key;
+    /// use paddington::{Key, SecretKey};
+    /// use secrecy::ExposeSecret;
     ///
     /// let key = Key::generate();
     ///
-    /// let signature = key.expose_secret().sign("Hello, World!".to_string());
+    /// let signature = key.expose_secret().sign("Hello, World!".to_string()).unwrap();
     ///
-    /// key.expose_secret().verify("Hello, World!".to_string(), &signature)?;
+    /// key.expose_secret().verify("Hello, World!".to_string(), &signature).unwrap();
     /// ```
     ///
     pub fn verify<T>(&self, data: T, signature: &Signature) -> Result<(), Error>

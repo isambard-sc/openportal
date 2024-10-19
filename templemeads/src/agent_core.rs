@@ -176,90 +176,77 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             list,
             remove,
         }) => {
-            match list {
-                true => {
-                    let config = load_config::<Config>(&config_file)?;
-                    for client in config.service.clients() {
-                        println!("{}", client);
-                    }
-                    return Ok(None);
+            if *list {
+                let config = load_config::<Config>(&config_file)?;
+                for client in config.service.clients() {
+                    println!("{}", client);
                 }
-                false => {}
+                return Ok(None);
             }
 
-            match add {
-                Some(client) => {
-                    if ip.is_none() {
-                        return Err(Error::PeerEdit(format!(
-                            "No IP address or IP range provided for client {}.",
-                            client
-                        )));
-                    }
-
-                    let mut config = load_config::<Config>(&config_file)?;
-
-                    let invite = config
-                        .service
-                        .add_client(client, &ip.clone().unwrap_or_else(|| "".to_string()))?;
-
-                    save_config(config, &config_file)?;
-                    save_invite(invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;
-
-                    tracing::info!("Client '{}' added.", client);
-                    return Ok(None);
+            if let Some(client) = add {
+                if ip.is_none() {
+                    return Err(Error::PeerEdit(format!(
+                        "No IP address or IP range provided for client {}.",
+                        client
+                    )));
                 }
-                None => {}
+
+                let mut config = load_config::<Config>(&config_file)?;
+
+                let invite = config
+                    .service
+                    .add_client(client, &ip.clone().unwrap_or_else(|| "".to_string()))?;
+
+                save_config(config, &config_file)?;
+                save_invite(invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;
+
+                tracing::info!("Client '{}' added.", client);
+                return Ok(None);
             }
 
-            match remove {
-                Some(client) => {
-                    let mut config = load_config::<Config>(&config_file)?;
-                    config.service.remove_client(client)?;
-                    save_config(config, &config_file)?;
-                    tracing::info!("Client '{}' removed.", client);
-                    return Ok(None);
-                }
-                None => {}
+            if let Some(client) = remove {
+                let mut config = load_config::<Config>(&config_file)?;
+                config.service.remove_client(client)?;
+                save_config(config, &config_file)?;
+                tracing::info!("Client '{}' removed.", client);
+                return Ok(None);
             }
+
+            let _ = Args::command().print_help();
+
+            return Ok(None);
         }
         Some(Commands::Server { add, list, remove }) => {
-            match list {
-                true => {
-                    let config = load_config::<Config>(&config_file)?;
-                    for server in config.service.servers() {
-                        println!("{}", server);
-                    }
-                    return Ok(None);
+            if *list {
+                let config = load_config::<Config>(&config_file)?;
+                for server in config.service.servers() {
+                    println!("{}", server);
                 }
-                false => {}
+                return Ok(None);
             }
 
-            match add {
-                Some(server) => {
-                    // read the invitation from the passed toml file
-                    let invite = load_invite::<Invite>(server)?;
-                    let mut config = load_config::<Config>(&config_file)?;
-                    config.service.add_server(invite)?;
-                    save_config(config, &config_file)?;
-                    tracing::info!("Server '{}' added.", server.display());
-                    return Ok(None);
-                }
-                None => {}
+            if let Some(server) = add {
+                // read the invitation from the passed toml file
+                let invite = load_invite::<Invite>(server)?;
+                let mut config = load_config::<Config>(&config_file)?;
+                config.service.add_server(invite)?;
+                save_config(config, &config_file)?;
+                tracing::info!("Server '{}' added.", server.display());
+                return Ok(None);
             }
 
-            match remove {
-                Some(server) => {
-                    let mut config = load_config::<Config>(&config_file)?;
-                    config.service.remove_server(server)?;
-                    save_config(config, &config_file)?;
-                    tracing::info!("Server '{}' removed.", server);
-                    return Ok(None);
-                }
-                None => {
-                    let _ = Args::command().print_help();
-                    return Ok(None);
-                }
+            if let Some(server) = remove {
+                let mut config = load_config::<Config>(&config_file)?;
+                config.service.remove_server(server)?;
+                save_config(config, &config_file)?;
+                tracing::info!("Server '{}' removed.", server);
+                return Ok(None);
             }
+
+            let _ = Args::command().print_help();
+
+            return Ok(None);
         }
         Some(Commands::Encryption {
             simple,

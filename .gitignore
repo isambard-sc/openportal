@@ -1,4 +1,6 @@
 target
 .env
 Cargo.lock
-*.toml
+invitation.toml
+invite*.toml
+*_config.toml

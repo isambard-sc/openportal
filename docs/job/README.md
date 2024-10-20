@@ -631,3 +631,12 @@ on both sides of a `Connection`. If, for example, `shared` went down while
 processing a `Job`, then on coming back, it would receive the `Job` again
 from `notebook`, and would then process it again. As `Jobs` are idempotent,
 this is a safe operation.
+
+## What next?
+
+Now that you've seen how to write custom `templemeads` agents, we will next
+look at how to write more standardised agents, which have standard
+command line arguments and use standard configuration files to
+store their configuration.
+
+We will do this in the [command line example](../cmdline/README.md).

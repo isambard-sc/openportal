@@ -470,3 +470,5 @@ outages.
 Now that you've seen how paddington peer-to-peer services can be created,
 and how they communicate with one another, the next step is to see how
 templemeads builds on this to create a distributed network of Agents.
+We will do this in the [job example](../job/README.md).
+

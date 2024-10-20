@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
         Some("example-cluster".to_owned()),
-        Some(PathBuf::from("example-cluster.json")),
+        Some(PathBuf::from("example-cluster.toml")),
         Some("ws://localhost:8091".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8091),

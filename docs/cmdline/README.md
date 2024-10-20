@@ -1,27 +1,37 @@
-# Agents Sending Jobs Example
+# Command Line and Config Files Example
 
-This is a demo of two templemeads Agents that send jobs to each other. The
-aims of this example are to show you;
+This is a demo of two templemeads Agents that have been set up to use
+the standard command line argument parser and configuration file
+handling built into the `templemeads` crate. This example extends
+the previous example, in that we now the `portal` and `cluster`
+agents using a more standardised route. The aims of this example
+are to show you how to;
 
-1. How to create templemeads Agents
-2. How to introduce Agents to each other
-3. How to create an send jobs between Agents, including returning results
-4. How to supply a custom job handler to process jobs
+1. Use default options to create standard command line arguments
+2. How to create, update and use agent configuration files
+3. How to introduce agents using command line options
+4. How to run an agent in a standardised way
 
 ## Compiling the Example
+
+There are two subdirectories in this example, each containing a
+Rust executable. The `portal` agent is in the `portal/src` directory,
+while the `cluster` agent is in the `cluster/src` directory.
 
 You have two choices for compiling the example:
 
 1. Compile everything, by going into the top-level directory and
-   running `make` (or `cargo build`). This will produce an executable
-   called `example-job` in the `target/debug` directory.
+   running `make` (or `cargo build`). This will produce executables
+   called `example-portal` and `example-cluster` in the `target/debug`
+   directory.
 
-2. Compile only this example by navigating to this directory and
-   running `cargo build`. To run, you will need to use `cargo run`
+2. Compile only this example by navigating to each of the `portal`
+   and `cluster` subdirectories and running `cargo build`. To run,
+   you will need to use `cargo run` in each.
 
 ## Running the Example
 
-This example implements two Agents;
+This example implements two "standardised" Agents;
 
 1. The `portal` agent, which sends jobs to the `cluster` agent. These
    jobs tell the `cluster` to add and remove users from projects,
@@ -30,604 +40,464 @@ This example implements two Agents;
    and which would implement the business logic of adding and removing
    users from projects.
 
-Both agents are implemented in the same executable. You choose which agent
-to run by passing either `portal` or `cluster` as an argument.
+## Running the portal
 
-You first need to start the `portal` agent. You can do this using
-the `portal` argument. Either;
+Because this is now standardised, the `portal` agent has a number of
+command line options. You can see these by running the `example-portal`
+executable with the `--help` option:
 
-```bash
-./target/debug/example-job portal
+```shell
+$ ./target/debug/example-portal --help
+
+A library for interfacing OpenPortal with specific portals
+
+Usage: example-portal [OPTIONS] [COMMAND]
+
+Commands:
+  client      Adding and removing clients
+  server      Adding and removing servers
+  init        Initialise the Service
+  extra       Add extra configuration options
+  secret      Add secret configuration options
+  encryption  Add commands to control encryption of the config file and secrets
+  run         Run the service
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config-file <CONFIG_FILE>  Path to the configuration file
+  -h, --help                       Print help
+  -V, --version                    Print version
 ```
 
-or
+To start, we have to initiailise the `portal`. We do this with the
+`init` command. There are optional arguments to this that can be used
+to configure how the agent will behave. These can be seen by running
+the `init` command with the `--help` option:
 
-```bash
-cargo run -- portal
+```shell
+$ ./target/debug/example-portal init --help
+
+Initialise the Service
+
+Usage: example-portal init [OPTIONS]
+
+Options:
+  -n, --service <SERVICE>  Name of the service to initialise
+  -u, --url <URL>          URL of the service including port and route (e.g. http://localhost:8080)
+  -i, --ip <IP>            IP address on which to listen for connections (e.g. 127.0.0.1)
+  -p, --port <PORT>        Port on which to listen for connections (e.g. 8042)
+  -f, --force              Force reinitialisation
+  -h, --help               Print help
 ```
 
-This will start the `portal` agent and will write an invitation
-file to invite the `cluster`. By default this invitation will be in the
-current directory and called `invitation.toml`.
+For now, we will accept all of the default, so just run;
 
-Next, you need to start the `cluster` agent. You can do this using
-the `cluster` argument, specifyig the path to the invitation file
-via the `--invitation` argument. Either;
-
-```bash
-./target/debug/example-job cluster --invitation invitation.toml
+```shell
+$ ./target/debug/example-portal init
 ```
 
-or
-
-```bash
-cargo run -- cluster --invitation invitation.toml
-```
-
-## Expected Behaviour
-
-What should happen is that you will see that the `cluster` agent connects
-to the `portal` agent via a paddington peer-to-peer connection. Once
-connected, both agents will register the other agent as a peer to whom
-they can communicate.
-
-Next, the `portal` will send a job to add the user `fred` to the
-project `proj`, with this project managed by the organisation portal
-called `org`. This job is represented by the string;
+You should see something like this printed out;
 
 ```
-add_user fred.proj.org
+Service initialised. Config file written to example-portal.toml
 ```
 
-This job is sent from the `portal` to the `cluster`, so the command is
-prefixed with the addressing details, i.e. `portal.cluster` (meaning
-sent from the `portal` to the `cluster`). The full job commmand is thus;
+This shows that the `portal` agent has been initialised, and its
+configuration has been written to the file `example-portal.toml`.
 
-```
-portal.cluster add_user fred.proj.org
-```
+Take a look at the file - it should look something like this;
 
-In the `cluster` agent, you should see that this job is "put" onto the
-`cluster`. The `cluster` agent then processes this job, and when it has
-finished, it updates the job with the result.
+```toml
+agent = "Portal"
 
-```
-Put job: {portal.cluster add_user fred.proj.org}: version=2, created=2024-10-18 11:46:09 UTC, changed=2024-10-18 11:46:09 UTC, state=Pending to cluster from portal
-Adding fred.proj.org to cluster
-Here we would implement the business logic to add the user to the cluster
-Job has finished: {portal.cluster add_user fred.proj.org}: version=1002, created=2024-10-18 11:46:09 UTC, changed=2024-10-18 11:46:09.470340 UTC, state=Complete
-```
+[service]
+name = "portal"
+url = "ws://localhost:8090/"
+ip = "127.0.0.1"
+port = 8090
+servers = []
+clients = []
 
-You should see that the job state has been updated from `Pending` to `Complete`,
-and the version number of the job increased.
-
-On the `portal` agent you will next see that the job has been updated with
-this new version.
-
-```
- Update job: {portal.cluster add_user fred.proj.org}: version=1002, created=2024-10-18 11:46:09 UTC, changed=2024-10-18 11:46:09 UTC, state=Complete to portal from cluster
- ```
-
- This update enables the `portal` agent to get the result of the job.
-
- ```
- Result: Some("account created")
- ```
-
- This process is repeated, except now the user `fred` is removed from the
- `proj` project that is managed by the `org` organisation portal.
-
- The job is
-
-```
-portal.cluster remove_user fred.proj.org
+[extras]
 ```
 
-This is "put" onto the system, meaning that it is communicated from
-`portal` to `cluster`, and `cluster` is the agent responsible for
-processing the job. Once complete, `cluster` updates the job with the
-result, and then enacts an "update" on the job, which communicates the
-new version back from `cluster` to `portal`. From here, `portal` can get
-the result.
+This shows that the type of this agent is `Portal`, and its name is
+`portal`. It also gives the URL on which the agent can be contacted,
+and the IP address and port on which it will listen for connections.
 
-Finally, `portal` tries to remove a user from the `admin` project, by
-"putting" this job into the system;
+At the end it gives the list of server and client agents that it will
+try to connect to. As there are none at the moment, these lists are
+empty.
 
-```
-portal.cluster remove_user jane.admin.org
-```
+### Under the hood
 
-However, in this example, `cluster` is hard-coded to prevent the removal
-of admin users. So, instead an error is generated, and this is used to
-"update" the job. This is "updated" on the system, which communicates it
-back to `portal`. On trying to get the result, `portal` receives the
-error instead. As this is a Rust error that `portal` isn't programmed
-to handle, it exits with the error
-
-```
-Error: You are not allowed to remove the account for "jane"
-```
-
-with `cluster` exiting shortly afterwards.
-
-## How was this implemented?
-
-Both the `portal` and `cluster` agents are implemented in the
-`src/main.rs` file. This file is mostly parsing command line arguments,
-followed by a call to either `run_portal` or `run_cluster` depending on
-the agent. Note that this is very similar to the previous `echo-client`
-example, as `templemeads` agents build on the `paddington` peer-to-peer
-services.
-
-Each of these functions defines the agent, sets the job handler,
-enters the agent's event loop in a background task, and then in the
-foreground task, the `portal` sends jobs, while the `cluster` runs
-a timer to automatically shut down after a couple of seconds.
-
-For example, here is the `run_cluster` function.
+These defaults were set in the code in the `portal/src/main.rs` file.
 
 ```rust
-async fn run_cluster(invitation: &Path) -> Result<(), Error> {
-    // load the invitation from the file
-    let invite: Invite = Invite::load(invitation)?;
+use anyhow::Result;
 
-    // create the paddington service for the cluster agent
-    // - note that the url, ip and port aren't used, as this
-    // agent won't be listening for any connecting clients
-    let mut service: ServiceConfig =
-        ServiceConfig::new("cluster", "http://localhost:6502", "127.0.0.1", &6502)?;
+use templemeads::agent::portal::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
 
-    // now give the invitation to connect to the server to the client
-    service.add_server(invite)?;
+use std::path::PathBuf;
 
-    // now create the config for this agent - this combines
-    // the paddington service configuration with the Agent::Type
-    // for the agent
-    let config = agent::custom::Config::new(service, agent::Type::Instance);
+#[tokio::main]
+async fn main() -> Result<()> {
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    tracing::subscriber::set_global_default(subscriber)?;
 
-    // now start the agent, passing in the message handler for the agent
-    // We will start this in a background task, so that we can close the
-    // program after a few seconds
-    tokio::spawn(async move {
-        agent::custom::run(config, cluster_runner)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Error running cluster: {}", e);
-            });
-    });
+    // create the default options for a portal
+    let defaults = Defaults::parse(
+        Some("portal".to_owned()),
+        Some(PathBuf::from("example-portal.toml")),
+        Some("ws://localhost:8090".to_owned()),
+        Some("127.0.0.1".to_owned()),
+        Some(8090),
+        Some(AgentType::Portal),
+    );
 
-    // wait for a few seconds before exiting
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    std::process::exit(0);
-}
-```
-
-It starts in a very similar way to the `echo-client` example. It loads
-the invitation, and then defines a `paddington` service configuration
-(`ServiceConfig`) based on it's own details and the contents of the
-invitation.
-
-Next, it passes the `ServiceConfig`, together with the agent type of
-`Instance` to the `agent::custom::Config::new` function. This creates
-a new custom agent configuration. We are using a custom configuration here
-as we want to supply a custom job handler to the agent. There are already
-hard-coded agents that could be used, e.g. `agent::portal::Config`,
-`agent::cluster::Config`, etc.
-
-Now that the agent has been configured, we run its event loop via the
-`agent::custom::run` function, passing in the agent configuration,
-and the `cluster_runner` async function that will be used to process jobs.
-This is spawned into a background task in this example, so that we can
-start a timer in the foreground task to automatically shut down the
-program after a couple of seconds. Normally, you would run the agent
-event loop in the foreground task, and would not manually exit the process.
-
-### Job Handlers
-
-The `cluster_runner` function is the job handler for the `cluster` agent.
-
-The handler function is called whenever a `Job` is `put` onto the system
-for this agent. The possible actions for a `Job` are;
-
-1. `put` - this adds a new `Job` to the distributed system of agents. The
-   `Job` will be communicated to the destination agent, and it will be
-   responsible for doing the work.
-
-2. `update` - this will update the contents of a `Job` that already exists
-   in the distributed system of agents. All agents that hold a copy of this
-   job will receive the update.
-
-3. `delete` - this will remove a `Job` from the distributed system of agents.
-   All agents that hold a copy of this job will remove it. If the destination
-   agent is processing the job, then the job will be cancelled.
-
-Here is the `cluster_runner` function. Note that, as with the `echo-client`
-the function has to be made `async_runnable`, to help Rust hold pointers
-to async functions.
-
-```rust
-async_runnable! {
-    ///
-    /// Runnable function that will be called when a job is received
-    /// by the cluster agent
-    ///
-    pub async fn cluster_runner(envelope: Envelope) -> Result<Job, Error>
-    {
-        let mut job = envelope.job();
-
-        match job.instruction() {
-            AddUser(user) => {
-                // add the user to the cluster
-                tracing::info!("Adding {} to cluster", user);
-
-                tracing::info!("Here we would implement the business logic to add the user to the cluster");
-
-                job = job.completed("account created")?;
-            }
-            RemoveUser(user) => {
-                // remove the user from the cluster
-                tracing::info!("Removing {} from the cluster", user);
-
-                tracing::info!("Here we would implement the business logic to remove the user from the cluster");
-
-                if user.project() == "admin" {
-                    job = job.errored(&format!("You are not allowed to remove the account for {:?}",
-                                      user.username()))?;
-                } else {
-                    job = job.completed("account removed")?;
-                }
-            }
-            _ => {
-                tracing::error!("Unknown instruction: {:?}", job.instruction());
-                return Err(Error::UnknownInstruction(
-                    format!("Unknown instruction: {:?}", job.instruction()).to_string(),
-                ));
-            }
+    // now parse the command line arguments to get the service configuration
+    let config = match process_args(&defaults).await? {
+        Some(config) => config,
+        None => {
+            // Not running the service, so can safely exit
+            return Ok(());
         }
+    };
 
-        Ok(job)
-    }
-}
-```
-
-The `Job` is passed to the handler function in an `Envelope`. The `Envelope`
-contains the `Job`, as well as metadata about the communication of that
-job (e.g. the sender, intended recipient etc).
-
-The aim of the `cluster_runner` function is to process the job, and then
-return the new, updated version of the job.
-
-First, it extracts the `Job` from the `Envelope` into a mutable variable.
-This is mutable as we will be updating the job through the function.
-
-We then match on the instruction of the job. The instruction is the
-command that the job is supposed to carry out. There is a whole grammar,
-described later, that maps string commands (e.g. `add_user`) to Rust
-instruction Enums (e.g. `AddUser`). This ensures that command parsing
-is robust and that the risk of command injection attacks is minimised.
-
-There are three arms to this match statement. The first is for the
-`AddUser` instruction. This implements the business logic to add a user
-to the cluster. In this example, it just logs that it is adding the user,
-and then marks the job as completed with the result "account created".
-
-The second arm is for the `RemoveUser` instruction. This implements the
-business logic to remove a user from the cluster. In this example, it
-logs that it is removing the user, and then checks if the user is an
-admin user. If it is, then it marks the job as errored with the message
-"You are not allowed to remove the account for `username`". If it is not
-an admin user, then it marks the job as completed with the result
-"account removed".
-
-The final arm is for any other instruction. This logs an error message
-saying that the `cluster` agent cannot process any other instruction. This
-is also a security design feature - we ensure that each agent contains
-only the business logic of the instructions that it is supposed to process.
-It doesn't contain any other code, and so cannot be manipulated to do
-things that it is not permitted to do.
-
-Finally, the function returns the updated job.
-
-In constrast, the job handler for the `portal` agent is much simpler. It
-is not responsible for processing any jobs, and so its handler simply
-triggers an error if it is ever called.
-
-```rust
-async_runnable! {
-    ///
-    /// Runnable function that will be called when a job is received
-    /// by the portal agent
-    ///
-    pub async fn portal_runner(envelope: Envelope) -> Result<Job, Error>
-    {
-        let job = envelope.job();
-
-        tracing::error!("Unknown instruction: {:?}", job.instruction());
-
-        return Err(Error::UnknownInstruction(
-            format!("Unknown instruction: {:?}", job.instruction()).to_string(),
-        ));
-    }
-}
-```
-
-### Submitting Jobs
-
-The `portal` agent is responsible for submitting jobs to the `cluster` agent.
-This is done in the `run_portal` function, after the `portal` agent has
-been configured and its event loop started in a background task.
-
-```rust
-async fn run_portal(
-    url: &str,
-    ip: &str,
-    port: &u16,
-    range: &str,
-    invitation: &Path,
-) -> Result<(), Error> {
-    // create a paddington service configuration for the portal agent
-    let mut service = ServiceConfig::new("portal", url, ip, port)?;
-
-    // add the cluster to the portal, returning an invitation
-    let invite = service.add_client("cluster", range)?;
-
-    // save the invitation to the requested file
-    invite.save(invitation)?;
-
-    // now create the config for this agent - this combines
-    // the paddington service configuration with the Agent::Type
-    // for the agent
-    let config = agent::custom::Config::new(service, agent::Type::Portal);
-
-    // now start the agent, passing in the message handler for the agent
-    // Do this in a background task, so that we can send jobs to the cluster
-    // here - normally jobs will come from the bridge
-    tokio::spawn(async move {
-        agent::custom::run(config, portal_runner)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Error running portal: {}", e);
-            });
-    });
-
-    // wait until the cluster has connected...
-    let mut clusters = agent::get_all(&agent::Type::Instance).await;
-
-    while clusters.is_empty() {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        clusters = agent::get_all(&agent::Type::Instance).await;
-    }
-
-    let cluster = clusters.pop().unwrap_or_else(|| {
-        tracing::error!("No cluster connected to the portal");
-        std::process::exit(1);
-    });
-
-    // create a job to add a user to the cluster
-    let mut job = Job::parse("portal.cluster add_user fred.proj.org")?;
-
-    // put this job to the cluster
-    job = job.put(&cluster).await?;
-
-    // get the result - note that calling 'result' on its own would
-    // just look to see if the result exists now. To actually wait
-    // for the result to arrive we need to use the 'wait' function,
-    // await on that, and then call 'result'
-    let result: Option<String> = job.wait().await?.result()?;
-
-    tracing::info!("Result: {:?}", result);
-
-    // create a job to remove a user from the cluster
-    let mut job = Job::parse("portal.cluster remove_user fred.proj.org")?;
-
-    // put this job to the cluster
-    job = job.put(&cluster).await?;
-
-    // get the result
-    let result: Option<String> = job.wait().await?.result()?;
-
-    tracing::info!("Result: {:?}", result);
-
-    // try to remove a user who should not be removed
-    let mut job = Job::parse("portal.cluster remove_user jane.admin.org")?;
-
-    // put this job to the cluster
-    job = job.put(&cluster).await?;
-
-    // get the result - this should exit with an error
-    let result: Option<String> = job.wait().await?.result()?;
-
-    tracing::info!("Result: {:?}", result);
+    // run the portal agent
+    run(config).await?;
 
     Ok(())
 }
 ```
 
-Once its event loop starts, the `run_portal` function waits until an
-agent of type `Instance` has connected.
+This line;
 
 ```rust
-    // wait until the cluster has connected...
-    let mut clusters = agent::get_all(&agent::Type::Instance).await;
-
-    while clusters.is_empty() {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        clusters = agent::get_all(&agent::Type::Instance).await;
-    }
-
-    let cluster = clusters.pop().unwrap_or_else(|| {
-        tracing::error!("No cluster connected to the portal");
-        std::process::exit(1);
-    });
+use templemeads::agent::portal::{process_args, run, Defaults};
 ```
 
-It does this by calling the `agent::get_all` function, to find all agents
-connected with a specified agent type. Once connected, it stores the name
-of the connected agent in the `cluster` variable.
+imports the `process_args` and `run` function for `portal` agents, as
+well as the default configuration options for portals, in `Defaults`.
 
-Next, the `portal` agent creates a job to add a user to the cluster.
+This is used in these lines to let us specify the defaults for our
+example portal;
 
 ```rust
-    // create a job to add a user to the cluster
-    let mut job = Job::parse("portal.cluster add_user fred.proj.org")?;
+    // create the default options for a portal
+    let defaults = Defaults::parse(
+        Some("portal".to_owned()),
+        Some(PathBuf::from("example-portal.toml")),
+        Some("ws://localhost:8090".to_owned()),
+        Some("127.0.0.1".to_owned()),
+        Some(8090),
+        Some(AgentType::Portal),
+    );
 ```
 
-This job is created by parsing the string `portal.cluster add_user fred.proj.org`.
+Here, we set the default name of the agent to `portal`, the default
+configuration file path to `example-portal.toml`, the default URL to
+`ws://localhost:8090`, the default IP address to `127.0.0.1` and
+the default port to `8090`. We also set the type of the agent to
+`Portal`.
 
-Parsing uses the job grammar mentioned earlier to securely parse the
-command string into a `Job` object. A simple grammar is used, comprising
-three parts:
+> **Note**: With the exception of the agent type, all of these options
+> can be overridden by command line arguments or values set in the
+> configuration file.
 
-1. The full path between the sending agent, in this case `portal`, and the
-   destination agent, in this case `cluster`. The names are separated by
-   dots, e.g. `portal.cluster`. In this case, we only have a couple of agents,
-   so it is a simple path. But, for more complex networks, the path
-   can be longer, e.g. `waldur.brics.notebook.shared` would be the path
-   from the `portal` agent called `waldur`, to the `provider` agent called
-   `brics`, to the `platform` agent called `notebook`, to the individual
-   `instance` agent of a notebook platform called `shared`.
-
-2. The instruction, e.g. `add_user`. This is the command that the job is
-   supposed to carry out. Instructions include `add_user`, `remove_user`,
-   etc.
-
-3. The argument(s) to the instruction. In this case, the argument is a
-   user identifier. In OpenPortal, users are identified by a unique
-   triple - the username, the project that they are a member of, and the
-   name of the portal that manages that project. For example,
-   `dave.demo.brics` would refer to the user called `dave` who is a member
-   of the project called `demo` that is managed by the portal called `brics`.
-   The user identifier triple should uniquely identify the user across
-   the full distributed OpenPortal network of agents. In the case of this
-   example, the user identifier is `fred.proj.org`.
-
-Next, the `Job` is `put` onto the distributed system of agents.
+Now that that defaults have been set, these lines set up and parse
+the command line arguments;
 
 ```rust
-    // put this job to the cluster
-    job = job.put(&cluster).await?;
+    // now parse the command line arguments to get the service configuration
+    let config = match process_args(&defaults).await? {
+        Some(config) => config,
+        None => {
+            // Not running the service, so can safely exit
+            return Ok(());
+        }
+    };
 ```
 
-This sends the `Job` to the backend distributed peer-to-peer communications
-network implemented by the `paddington` crate. Each `paddington::Connection`
-between pairs of agents is given a job `Board`. The `Board` is responsible
-for recording the state of jobs on either side of the `paddington::Connection`.
-When a job is `put` onto the system, the agent that `put` the job identifies
-the next agent in the route. For example, if the `waldur` portal `put` a job
-to `waldur.brics.notebook.shared`, then the `waldur` portal would `put`
-the job onto its job `Board` that is associated with its connection to the
-`brics` agent. Because the `Board` is made the same on both sides of the
-connection, this would copy the `Job` onto the `Board` of the `brics` agent.
-The `brics` agent would see the job, and would detect that it isn't the
-final destination (that is `shared`). So, it `puts` the job onto the next
-connection in the route, which is the connection to the `notebook` agent.
-This `puts` the `Job` onto the `Board` of the `notebook` agent,
-which copies it across the `Connection` between `brics` and `notebook`,
-meaning that `notebook` now has a copy. Noticing that it isn't the final
-destination of the job, it `puts` the job onto the `Connection` between
-itself and the `shared` agent. This `puts` the job onto the `Board` of the
-`shared` agent, which is the final destination of the job. The `shared`
-agent, recognising that it is the final destination, processes the job
-via its job handling function.
-
-In our example case, we just have two agents, `portal` and `cluster`, and
-so the route is just `portal.cluster`. The `portal` agent `puts` the job
-onto the `Board` for the `Connection` between `portal` and `cluster`, which
-copies the `Job` across to `cluster`. The `cluster` agent, recognising that
-it is the final destination, processes the job via the job handling function
-we discussed above.
-
-Once finished, it returns an updated version of the `Job`. This goes back onto
-the `Board` for the `Connection` between `portal` and `cluster`. As the
-system recognises that the version of the `Job` has changed, it will call
-`update` to `update` to the `Job` across the `Connection`. This copies the
-new job back to the `Board` on the side of the `Connection` belonging to
-`portal`, meaning that `portal` now has the result.
-
-The `portal` agent has been waiting for the result by calling
-`wait().await` on the job that it originally `put`.
+Finally, we enter the event loop for our example portal agent
+via;
 
 ```rust
-    // get the result - note that calling 'result' on its own would
-    // just look to see if the result exists now. To actually wait
-    // for the result to arrive we need to use the 'wait' function,
-    // await on that, and then call 'result'
-    let result: Option<String> = job.wait().await?.result()?;
-
-    tracing::info!("Result: {:?}", result);
+    // run the portal agent
+    run(config).await?;
 ```
 
-Once updated, the `portal` agent can get the result of the job by calling
-`result()` on the job. This returns an `Option<String>`, which is the
-result of the job. In this case, the result is "account created".
+## Running the cluster
 
-> [!NOTE]
-> A `Job` can return any type - it is up to the definition of the
-> grammar of the individual `Instruction` to define what information
-> should be returned as the result.
+The `cluster` agent is set up in a similar way to the `portal` agent.
+You can see the command line options by running the `example-cluster`
+executable with the `--help` option:
 
-Note that calling `result()?` will return a `templemeads::Error` if anything
-went wrong with processing the job. This is why the `run_portal` function
-exited when the `remove_user jane.admin.org` job failed to process.
+```shell
+A library for interfacing OpenPortal with specific portals
+
+Usage: example-cluster [OPTIONS] [COMMAND]
+
+Commands:
+  client      Adding and removing clients
+  server      Adding and removing servers
+  init        Initialise the Service
+  extra       Add extra configuration options
+  secret      Add secret configuration options
+  encryption  Add commands to control encryption of the config file and secrets
+  run         Run the service
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config-file <CONFIG_FILE>  Path to the configuration file
+  -h, --help                       Print help
+  -V, --version                    Print version
+```
+
+These are identical to those of the portal. Using the standardised functions
+helps maintain consistency between all of the executables that implement
+the agents.
+
+We will now initialise the `cluster` agent. As before, we will accept
+all of the defaults, so just run;
+
+```shell
+$ ./target/debug/example-cluster init
+```
+
+You should see that this has initialised the `cluster` agent, and
+written its configuration to the file `example-cluster.toml`. This file
+should look very similar to the `example-portal.toml` file, e.g.
+
+```toml
+agent = "Instance"
+
+[service]
+name = "example-cluster"
+url = "ws://localhost:8091/"
+ip = "127.0.0.1"
+port = 8091
+servers = []
+clients = []
+
+[extras]
+```
+
+### Under the hood
+
+Looking in the `cluster/src/main.rs` file, we see that the code is very
+similar to that of the `portal` agent.
 
 ```rust
-    // try to remove a user who should not be removed
-    let mut job = Job::parse("portal.cluster remove_user jane.admin.org")?;
+// SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+// SPDX-License-Identifier: MIT
 
-    // put this job to the cluster
-    job = job.put(&cluster).await?;
+use anyhow::Result;
 
-    // get the result - this should exit with an error
-    let result: Option<String> = job.wait().await?.result()?;
+use std::path::PathBuf;
+use templemeads::agent::instance::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
+use templemeads::grammar::Instruction::{AddUser, RemoveUser};
+use templemeads::job::{Envelope, Job};
+use templemeads::Error;
 
-    tracing::info!("Result: {:?}", result);
+#[tokio::main]
+async fn main() -> Result<()> {
+    // start tracing
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    // create the OpenPortal paddington defaults
+    let defaults = Defaults::parse(
+        Some("example-cluster".to_owned()),
+        Some(PathBuf::from("example-cluster.toml")),
+        Some("ws://localhost:8091".to_owned()),
+        Some("127.0.0.1".to_owned()),
+        Some(8091),
+        Some(AgentType::Instance),
+    );
+
+    // now parse the command line arguments to get the service configuration
+    let config = match process_args(&defaults).await? {
+        Some(config) => config,
+        None => {
+            // Not running the service, so can safely exit
+            return Ok(());
+        }
+    };
+
+    // run the portal agent
+    run(config, cluster_runner).await?;
+
+    Ok(())
+}
 ```
 
-## Parallelism
+The main differences are that we are importing `process_args`,
+`run` and `Defaults` from `templemeads::agent::instance`, and that
+we pass in the `cluster_runner` function to the `run` function,
+so that it can be used to handle the jobs that are sent to the
+`cluster` agent.
 
-Jobs can be `put`, `update`, and `delete` in parallel. This is because
-the underlying peer-to-peer `paddington` network is fully duplex,
-and websockets communicate in real time.
+>> **Note**: The `cluster_runner` function is not shown here as it
+>> is identical to the `cluster_runner` function from the previous
+>> example.
 
-There are no consistency guarantees on the order of jobs. You can though
-rely on the fact that the state of each job will update atomically, and
-its state will be communicated as soon as possible to all agents that
-hold a copy. You can also rely on the fact that only a single agent
-will process each job, and only that agent (the job's destination) can
-update the job.
+## Introducing the agents
 
-## Idempotency
+We can now introduce the `portal` and `cluster` agents by asking
+the `portal` to create an invitation for the `cluster`.
 
-Jobs are idempotent. This means that if a job is `put` onto the system
-multiple times, then only the first `put` will change the state of the
-service. Subsequent `puts` will not change the state. This is a key
-design feature, enabling the system to robustly implement error recovery
-by simply re-sending jobs. For example, it is safe to re-send the
-job to `add_user` `fred.proj.org` to the `cluster` agent. The first
-time this is processed it will do all of the business logic to add
-`fred` to the `proj` project on `cluster`. Subsequent `puts` of
-this job will be ignored, as `fred` is already a member of the `proj`
-project on `cluster`.
+We do this use the `client` command line option of the `portal` agent.
 
-## Robustness
+```shell
+$ ./target/debug/example-portal client --help
 
-Multiple copies of a `Job` are held across the distributed peer-to-peer
-network of Agents. The `Job` is held on a `Board` on each side of a
-`Connection` between pairs of Agents along the communication path from
-the sender to the receiver. For example, the `Job` sent via `portal.cluster`
-would be stored twice (once of each side of the single `Connection`),
-while the `Job` sent via `waldur.brics.notebook.shared` would be stored six
-times (once on each side of the three `Connections`).
+Adding and removing clients
 
-This means that the system is robust to failures. If, for example, the
-`notebook` agent goes down, then the `Job` still exists on `Boards` on the
-`waldur`, `brics` and `shared` agents. When the `notebook` agent comes back,
-its first task is to restore the `Boards` for each of its `Connections`,
-by asking that the agent on the other side sends across all of its jobs.
-This is because the system ensures that the `Boards` are kept in sync
-on both sides of a `Connection`. If, for example, `shared` went down while
-processing a `Job`, then on coming back, it would receive the `Job` again
-from `notebook`, and would then process it again. As `Jobs` are idempotent,
-this is a safe operation.
+Usage: example-portal client [OPTIONS]
+
+Options:
+  -a, --add <ADD>        Name of a client to add to the service
+  -r, --remove <REMOVE>  Name of a client to remove from the service
+  -i, --ip <IP>          IP address or IP range that the client can connect from
+  -l, --list             List all clients added to the service
+  -h, --help             Print help
+```
+
+In this case we want to add the `cluster` agent as a new client, and will
+say that it will connect to the `portal` only from the localhost IP address
+(as we are running everything locally).
+
+```shell
+$ ./target/debug/example-portal client -a cluster -i 127.0.0.1
+```
+
+This will produce an invitation file called `invite_cluster.toml` in the
+current directory.
+
+>> **Note**: The invitation file is called `invite_{name}.toml', where
+>> `{name}` is the name of the agent being invited.
+
+Now that we have this invitation, we can pass it to the `cluster` agent.
+To do this, we use the `server` command line option of the `cluster` agent.
+
+```shell
+$ ./target/debug/example-cluster server --help
+
+Adding and removing servers
+
+Usage: example-cluster server [OPTIONS]
+
+Options:
+  -a, --add <ADD>        File containing an invite from a server to add to the service
+  -r, --remove <REMOVE>  Name of a server to remove from the service
+  -l, --list             List all servers added to the service
+  -h, --help             Print help
+```
+
+In this case, we just need to add the invitation file.
+
+```shell
+$ ./target/debug/example-cluster server -a invite_cluster.toml
+```
+
+Running this, you should see that the portal has been added.
+
+### Under the hood
+
+Calling the above functions has modified the configuration files for
+the `portal` and `cluster` agents. Information about the agents are
+added to these files, including the secret pair of synmmetric keys
+used for the handshake between the two agents. For example, here is
+the `example-portal.toml` file after the `cluster` agent has been
+added;
+
+```toml
+agent = "Instance"
+
+[service]
+name = "example-cluster"
+url = "ws://localhost:8091/"
+ip = "127.0.0.1"
+port = 8091
+clients = []
+
+[[service.servers]]
+name = "portal"
+url = "ws://localhost:8090/"
+
+[service.servers.inner_key]
+data = "2c79e38168ef4b4b323415f88a5f9872cf2d40bc324ed9f30ed3b38fb22542de"
+
+[service.servers.outer_key]
+data = "c27997a3e2c4e745d16a7b57e4ad19b242afb1ce02e129e267b9e6645b9725cd"
+
+[extras]
+```
+
+and here is the `example-cluster.toml` file.
+
+```toml
+agent = "Instance"
+
+[service]
+name = "example-cluster"
+url = "ws://localhost:8091/"
+ip = "127.0.0.1"
+port = 8091
+clients = []
+
+[[service.servers]]
+name = "portal"
+url = "ws://localhost:8090/"
+
+[service.servers.inner_key]
+data = "2c79e38168ef4b4b323415f88a5f9872cf2d40bc324ed9f30ed3b38fb22542de"
+
+[service.servers.outer_key]
+data = "c27997a3e2c4e745d16a7b57e4ad19b242afb1ce02e129e267b9e6645b9725cd"
+
+[extras]
+```
+
+You can see that the key pairs match up.
+
+>> **Note**: The data in this configuration file is currently *not* encrypted.
+>> The keys are very sensitive data, so please make sure to keep the
+>> configuration files of the agent secure. We are working on a way to
+>> encrypt the configuration file using a secret, and will update this
+>> example when the code is available. Note also that the above keys are
+>> examples, and are not in production use anywhere.
+
+## Running the agents
+
+You can now run the two agents using the `run` command line argument.
+
+```shell
+$ ./target/debug/example-portal run
+```
+
+and
+
+```shell
+$ ./target/debug/example-cluster run
+```
+
+You should see that they both start and connect to each other. Then, nothing
+happens, because no-one is sending any jobs. You can stop the agents by
+pressing `Ctrl-C`. If you stop the `portal` first, you will see that the
+`cluster` agent will keep retrying to connect, and will automatically
+reconnect if the `portal` restarts.
+
+## What next?
+
+Now that you've seen how to write standardised `templemeads` agents,
+we will next look at how to connect these agents, via a bridge,
+to a Python script.
+
+We will do this in the [bridge example](../bridge/README.md).
+
+

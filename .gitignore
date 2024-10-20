@@ -4,3 +4,5 @@ Cargo.lock
 invitation.toml
 invite*.toml
 *_config.toml
+example*.json
+example*.toml

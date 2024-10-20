@@ -7,7 +7,8 @@ members = [
     "bridge", "cluster",
     "filesystem", "freeipa", "paddington", "portal",
     "provider", "python", "slurm", "templemeads",
-    "docs/echo", "docs/job"
+    "docs/echo", "docs/job", "docs/cmdline/portal",
+    "docs/cmdline/cluster"
 ]
 
 resolver = "2"

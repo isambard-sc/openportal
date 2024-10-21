@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
+[package]
+name = "example-portal"
+version = "0.1.0"
+description = "templemeads command line example - portal agent"
+edition = "2021"
+license = "MIT"
+homepage = "https://github.com/chryswoods/openportal/"
+repository = "https://github.com/chryswoods/openportal/"
+
+[build-dependencies]
+built = { version = "0.7", default-features = false, features = ["git2"] }
+
+[dependencies]
+anyhow = { version="1.0.86", features = ["backtrace"] }
+templemeads = { path = "../../../templemeads" }
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_crate_dependencies = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+
+[package.metadata.clippy]
+allow-dbg-in-tests = true

@@ -174,7 +174,7 @@ job handler to implement the business logic.
 
 ### Example 3: command line and config files
 
-The [command line](command_line) example demonstrates how to create agents
+The [command line](cmdline) example demonstrates how to create agents
 in a more standardised way, e.g. with a standardised command line interface
 and configuration file. This example shows how to easily create new agents
 that will look and feel like other agents in the OpenPortal system.

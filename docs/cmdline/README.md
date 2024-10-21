@@ -347,9 +347,9 @@ so that it can be used to handle the jobs that are sent to the
 `cluster` agent.
 
 > [!NOTE]
->> The `cluster_runner` function is not shown here as it
->> is identical to the `cluster_runner` function from the previous
->> example.
+> The `cluster_runner` function is not shown here as it
+> is identical to the `cluster_runner` function from the previous
+> example.
 
 ## Introducing the agents
 
@@ -385,8 +385,8 @@ This will produce an invitation file called `invite_cluster.toml` in the
 current directory.
 
 > [!NOTE]
->> The invitation file is called `invite_{name}.toml', where
->> `{name}` is the name of the agent being invited.
+> The invitation file is called `invite_{name}.toml', where
+> `{name}` is the name of the agent being invited.
 
 Now that we have this invitation, we can pass it to the `cluster` agent.
 To do this, we use the `server` command line option of the `cluster` agent.
@@ -473,12 +473,12 @@ data = "c27997a3e2c4e745d16a7b57e4ad19b242afb1ce02e129e267b9e6645b9725cd"
 You can see that the key pairs match up.
 
 > [!NOTE]
->> The data in this configuration file is currently *not* encrypted.
->> The keys are very sensitive data, so please make sure to keep the
->> configuration files of the agent secure. We are working on a way to
->> encrypt the configuration file using a secret, and will update this
->> example when the code is available. Note also that the above keys are
->> examples, and are not in production use anywhere.
+> The data in this configuration file is currently *not* encrypted.
+> The keys are very sensitive data, so please make sure to keep the
+> configuration files of the agent secure. We are working on a way to
+> encrypt the configuration file using a secret, and will update this
+> example when the code is available. Note also that the above keys are
+> examples, and are not in production use anywhere.
 
 ## Running the agents
 

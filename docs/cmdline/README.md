@@ -3,9 +3,9 @@
 This is a demo of two templemeads Agents that have been set up to use
 the standard command line argument parser and configuration file
 handling built into the `templemeads` crate. This example extends
-the previous example, in that we now the `portal` and `cluster`
-agents using a more standardised route. The aims of this example
-are to show you how to;
+the previous example, in that we the `portal` and `cluster`
+agents are now created using a more standardised route. The aims of this
+example are to show you how to;
 
 1. Use default options to create standard command line arguments
 2. How to create, update and use agent configuration files
@@ -28,6 +28,10 @@ You have two choices for compiling the example:
 2. Compile only this example by navigating to each of the `portal`
    and `cluster` subdirectories and running `cargo build`. To run,
    you will need to use `cargo run` in each.
+
+However, it is much easier now to use `make` and work with the executables
+in the `target/debug` directory. The commands below assume you are using
+these executables.
 
 ## Running the Example
 
@@ -202,7 +206,8 @@ configuration file path to `example-portal.toml`, the default URL to
 the default port to `8090`. We also set the type of the agent to
 `Portal`.
 
-> **Note**: With the exception of the agent type, all of these options
+> [!NOTE]
+> With the exception of the agent type, all of these options
 > can be overridden by command line arguments or values set in the
 > configuration file.
 
@@ -341,7 +346,8 @@ we pass in the `cluster_runner` function to the `run` function,
 so that it can be used to handle the jobs that are sent to the
 `cluster` agent.
 
->> **Note**: The `cluster_runner` function is not shown here as it
+> [!NOTE]
+>> The `cluster_runner` function is not shown here as it
 >> is identical to the `cluster_runner` function from the previous
 >> example.
 
@@ -378,7 +384,8 @@ $ ./target/debug/example-portal client -a cluster -i 127.0.0.1
 This will produce an invitation file called `invite_cluster.toml` in the
 current directory.
 
->> **Note**: The invitation file is called `invite_{name}.toml', where
+> [!NOTE]
+>> The invitation file is called `invite_{name}.toml', where
 >> `{name}` is the name of the agent being invited.
 
 Now that we have this invitation, we can pass it to the `cluster` agent.
@@ -406,7 +413,7 @@ $ ./target/debug/example-cluster server -a invite_cluster.toml
 
 Running this, you should see that the portal has been added.
 
-### Under the hood
+### Under the hood
 
 Calling the above functions has modified the configuration files for
 the `portal` and `cluster` agents. Information about the agents are
@@ -465,7 +472,8 @@ data = "c27997a3e2c4e745d16a7b57e4ad19b242afb1ce02e129e267b9e6645b9725cd"
 
 You can see that the key pairs match up.
 
->> **Note**: The data in this configuration file is currently *not* encrypted.
+> [!NOTE]
+>> The data in this configuration file is currently *not* encrypted.
 >> The keys are very sensitive data, so please make sure to keep the
 >> configuration files of the agent secure. We are working on a way to
 >> encrypt the configuration file using a secret, and will update this

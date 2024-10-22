@@ -11,9 +11,9 @@ function artifact_path {
 }
 
 out=$(cargo build --package op-bridge --target=x86_64-unknown-linux-musl --message-format=json ${@-})
-cp "$(artifact_path "${out}" "op-bridge")" oci
+cp "$(artifact_path "${out}" "op-bridge")" oci/bridge
 
-cd oci
+cd oci/bridge
 
 version=$(./op-portal --version | tail -n1 | cut -d' ' -f 2)
 image_id=$(

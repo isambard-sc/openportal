@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-FileCopyrightText: © 2024 Matt Williams <matt.williams@bristol.ac.uk>
+SPDX-License-Identifier: CC-BY-SA-4.0
+-->
+
 # Changelog
 
 All notable changes to this project will be documented in this file.

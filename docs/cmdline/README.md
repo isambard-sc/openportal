@@ -1,6 +1,6 @@
 <!--
-# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
-# SPDX-License-Identifier: CC0-1.0
+SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-License-Identifier: CC0-1.0
 -->
 
 # Command Line and Config Files Example

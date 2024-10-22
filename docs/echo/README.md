@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-License-Identifier: CC0-1.0
+-->
+
 # Echo Service Example
 
 This is a simple echo demo between two paddington Services. It demonstrates:

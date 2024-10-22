@@ -15,9 +15,9 @@ cp "$(artifact_path "${out}" "op-bridge")" oci/bridge
 
 cd oci/bridge
 
-version=$(./op-portal --version | tail -n1 | cut -d' ' -f 2)
+version=$(./op-bridge --version | tail -n1 | cut -d' ' -f 2)
 image_id=$(
-  podman build . --tag=op-portal:latest --tag=op-portal:"${version}" \
+  podman build . --tag=op-bridge:latest --tag=op-bridge:"${version}" \
     --annotation="org.opencontainers.image.source=https://github.com/isambard-sc/openportal" \
     --annotation="org.opencontainers.image.description=OpenPortal" \
     --annotation="org.opencontainers.image.licenses=MIT" \

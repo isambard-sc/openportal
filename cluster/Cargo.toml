@@ -3,7 +3,7 @@
 
 [package]
 name = "op-cluster"
-version = "0.1.0"
+version = "0.0.1"
 description = "An example of an OpenPortal HPC cluster platform agent"
 edition = "2021"
 license = "MIT"

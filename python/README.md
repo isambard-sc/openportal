@@ -1,3 +1,8 @@
+<!--
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+-->
+
 # Developing the Python wrappers
 
 You should create a Python virtual environment into which to develop / install the wrappers.

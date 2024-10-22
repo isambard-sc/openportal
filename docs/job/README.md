@@ -1,3 +1,8 @@
+<!--
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+-->
+
 # Agents Sending Jobs Example
 
 This is a demo of two templemeads Agents that send jobs to each other. The

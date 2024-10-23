@@ -186,7 +186,7 @@ jobs:
 
   make-release:
     name: Make release ${{ needs.tag-release.outputs.ref }}
-    needs: [build-release, tag-release, attest]
+    needs: [build-release, tag-release, attest-bridge, attest-portal]
     runs-on: ubuntu-latest
     permissions:
       contents: write

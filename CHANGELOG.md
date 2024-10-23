@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Fixing the attestations so that SBOMs are correctly generated for container images.
+
 ## [0.0.2] - 2024-10-23
 ### Added
 - Fixing the helm charts so that they version numbers are correctly set.

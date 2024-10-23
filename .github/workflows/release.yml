@@ -116,8 +116,8 @@ jobs:
       attestations: write
       id-token: write
 
-  attest:
-    name: Attest
+  attest-portal:
+    name: Attest Portal
     needs: build-release
     runs-on: ubuntu-latest
     permissions:
@@ -133,22 +133,56 @@ jobs:
         with:
           tool: cargo-sbom
       - name: Generate SBOM
-        run: cargo sbom --output-format=spdx_json_2_3 > sbom.spdx.json
+        run: cargo sbom --package op-portal --output-format=spdx_json_2_3 > sbom-portal.spdx.json
       - name: Fetch release artefacts
         uses: actions/download-artifact@v4
         with:
-          pattern: op-*
+          pattern: op-portal
           merge-multiple: true
       - name: Attest SBOM
         uses: actions/attest-sbom@v1
         with:
-          subject-path: openportal
-          sbom-path: sbom.spdx.json
+          subject-path: op-portal
+          sbom-path: sbom-portal.spdx.json
       - name: Store SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: sbom.spdx.json
-          path: sbom.spdx.json
+          name: sbom-portal.spdx.json
+          path: sbom-portal.spdx.json
+
+  attest-bridge:
+    name: Attest Bridge
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --package op-bridge --output-format=spdx_json_2_3 > sbom-bridge.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-bridge
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-bridge
+          sbom-path: sbom-bridge.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-bridge.spdx.json
+          path: sbom-bridge.spdx.json
 
   make-release:
     name: Make release ${{ needs.tag-release.outputs.ref }}

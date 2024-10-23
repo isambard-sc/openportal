@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Fixing release issues, and beginning work on the workflow for the Python module
+
 ## [0.0.3] - 2024-10-23
 ### Added
 - Fixing the attestations so that SBOMs are correctly generated for container images.

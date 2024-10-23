@@ -87,14 +87,14 @@ jobs:
         uses: actions/attest-build-provenance@v1
         id: attest-portal
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-portal
           subject-digest: ${{ steps.push-portal-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Attest op-bridge image
         uses: actions/attest-build-provenance@v1
         id: attest-bridge
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-bridge
           subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Push op-portal Helm chart

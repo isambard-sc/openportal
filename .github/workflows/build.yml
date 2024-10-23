@@ -101,16 +101,25 @@ jobs:
         run: helm push "./op-portal-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
       - name: Push op-bridge Helm chart
         run: helm push "./op-bridge-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
-      - name: Store build artefacts
+      - name: Store portal artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-portal
+          path: |
+            target/release/op-portal
+      - name: Store bridge artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-bridge
+          path: |
+            target/release/op-bridge
+      - name: Store other agent artefacts
         uses: actions/upload-artifact@v4
         with:
           name: openportal-agents
           path: |
-            target/release/op-portal
-            target/release/op-bridge
             target/release/op-provider
             target/release/op-cluster
             target/release/op-slurm
             target/release/op-filesystem
             target/release/op-freeipa
-

@@ -30,7 +30,7 @@ spec:
           readinessProbe:
             httpGet:
               path: /health
-              port: {{ .Values.port }}
+              port: {{ .Values.health_port }}
           volumeMounts:
             - mountPath: "/config"
               name: "config-file-volume"

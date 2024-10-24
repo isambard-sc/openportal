@@ -9,4 +9,5 @@ image:
   tag:  # defaults to appVersion if not set
 log_level: info
 secret_name: portal-config
-port: 8080
+port: 80
+health_port: 8080

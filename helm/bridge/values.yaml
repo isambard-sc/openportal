@@ -9,4 +9,6 @@ image:
   tag:  # defaults to appVersion if not set
 log_level: info
 secret_name: bridge-config
-port: 8080
+port: 80
+bridge_port: 8800
+health_port: 8080

@@ -11,5 +11,8 @@ spec:
     - protocol: TCP
       port: {{ .Values.port }}
       targetPort: {{ .Values.port }}
+    - protocol: TCP
+      port: {{ .Values.health_port }}
+      targetPort: {{ .Values.health_port }}
   selector:
     app.kubernetes.io/name: op-portal

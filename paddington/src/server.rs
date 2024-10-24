@@ -7,6 +7,7 @@ use crate::config::ServiceConfig;
 use crate::connection::Connection;
 use crate::error::Error;
 use crate::exchange;
+use crate::healthcheck;
 
 ///
 /// Internal function used to handle a single connection to the server.
@@ -73,6 +74,11 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     // set the name of the service in the exchange
     exchange::set_name(&config.name()).await?;
+
+    // spawn the healthcheck server if enabled
+    if let Some(healthcheck_port) = config.healthcheck_port() {
+        healthcheck::spawn(config.ip(), healthcheck_port).await?;
+    }
 
     loop {
         let result = run_once(config.clone()).await;

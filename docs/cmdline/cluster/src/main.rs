@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
         Some("ws://localhost:8091".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8091),
+        None,
         Some(AgentType::Instance),
     );
 

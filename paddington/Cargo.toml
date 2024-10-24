@@ -17,6 +17,7 @@ built = { version = "0.7", default-features = false, features = ["git2"] }
 
 [dependencies]
 anyhow = { version="1.0.86", features = ["backtrace"] }
+axum = { version = "0.7", features = ["tracing", "query"] }
 dirs = "5.0.1"
 futures = "0.3.30"
 futures-channel = "0.3.30"

@@ -365,6 +365,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
 
     Ok(())
 }
+
 // Errors
 
 #[derive(Debug)]

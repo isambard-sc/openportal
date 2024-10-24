@@ -72,12 +72,13 @@ impl Defaults {
         url: Option<String>,
         ip: Option<String>,
         port: Option<u16>,
+        healthcheck_port: Option<u16>,
         bridge_url: Option<String>,
         bridge_ip: Option<String>,
         bridge_port: Option<u16>,
     ) -> Self {
         Self {
-            service: ServiceDefaults::parse(name, config_file, url, ip, port),
+            service: ServiceDefaults::parse(name, config_file, url, ip, port, healthcheck_port),
             bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port),
         }
     }
@@ -117,8 +118,17 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             port,
             bridge_ip,
             bridge_port,
+            healthcheck_port,
             force,
         }) => {
+            let local_healthcheck_port;
+
+            if let Some(healthcheck_port) = healthcheck_port {
+                local_healthcheck_port = Some(*healthcheck_port);
+            } else {
+                local_healthcheck_port = defaults.service.healthcheck_port();
+            }
+
             let config = Config {
                 service: {
                     ServiceConfig::new(
@@ -129,6 +139,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                             .parse::<IpAddr>()?
                             .to_string(),
                         &port.unwrap_or_else(|| defaults.service.port()),
+                        &local_healthcheck_port,
                     )?
                 },
                 bridge: BridgeConfig::new(
@@ -373,6 +384,13 @@ enum Commands {
             help = "Port on which to listen for bridge connections (e.g. 3000)"
         )]
         bridge_port: Option<u16>,
+
+        #[arg(
+            long,
+            short = 'k',
+            help = "Optional port on which to listen for health checks (e.g. 3001)"
+        )]
+        healthcheck_port: Option<u16>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

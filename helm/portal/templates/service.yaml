@@ -10,9 +10,11 @@ spec:
   ports:
     - protocol: TCP
       port: {{ .Values.port }}
+      name: agent
       targetPort: {{ .Values.port }}
     - protocol: TCP
       port: {{ .Values.health_port }}
+      name: health
       targetPort: {{ .Values.health_port }}
   selector:
     app.kubernetes.io/name: op-portal

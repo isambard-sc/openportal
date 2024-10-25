@@ -53,8 +53,6 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
 
     // Let's spawn the handling of each connection in a separate task.
     loop {
-        tracing::info!("Awaiting the next connection...");
-
         match listener.accept().await {
             Ok((stream, addr)) => {
                 tracing::info!("New connection from: {}", addr);

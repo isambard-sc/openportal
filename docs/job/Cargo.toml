@@ -3,7 +3,7 @@
 
 [package]
 name = "example-job"
-version = "0.0.9"
+version = "0.0.10"
 description = "templemeads job example"
 edition = "2021"
 license = "MIT"

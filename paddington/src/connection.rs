@@ -9,6 +9,7 @@ use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
 use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
@@ -395,12 +396,8 @@ impl Connection {
 
         if let Some(proxy_client) = proxy_client {
             tracing::info!("Proxy client: {:?}", proxy_client);
-            addr = proxy_client.parse().with_context(|| {
-                format!(
-                    "Error parsing proxy client address: {}. Closing connection.",
-                    proxy_client
-                )
-            })?;
+            addr = std::net::SocketAddr::from_str(&proxy_client)
+                .with_context(|| "Error parsing proxy client address")?;
         }
 
         tracing::info!("Accepted connection from peer: {}", addr);

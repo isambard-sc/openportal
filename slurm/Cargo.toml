@@ -3,7 +3,7 @@
 
 [package]
 name = "op-slurm"
-version = "0.0.9"
+version = "0.0.10"
 description = "An example of an OpenPortal Slurm cluster instance agent"
 edition = "2021"
 license = "MIT"

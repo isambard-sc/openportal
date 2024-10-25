@@ -162,8 +162,27 @@ fn create_websocket_url(url: &str) -> Result<String, Error> {
     };
 
     let host = url.host_str().unwrap_or("localhost");
-    let port = url.port().unwrap_or(8080);
+    let port = url.port().unwrap_or(match scheme {
+        "ws" => 80,
+        "wss" => 443,
+        _ => 443,
+    });
     let path = url.path();
+
+    // don't specify the port if it's the default for the protocol
+    match scheme {
+        "ws" => {
+            if port == 80 {
+                return Ok(format!("{}://{}", scheme, host));
+            }
+        }
+        "wss" => {
+            if port == 443 {
+                return Ok(format!("{}://{}", scheme, host));
+            }
+        }
+        _ => {}
+    }
 
     Ok(format!("{}://{}:{}{}", scheme, host, port, path))
 }

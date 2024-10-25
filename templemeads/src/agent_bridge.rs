@@ -116,6 +116,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             url,
             ip,
             port,
+            bridge_url,
             bridge_ip,
             bridge_port,
             healthcheck_port,
@@ -143,7 +144,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     )?
                 },
                 bridge: BridgeConfig::new(
-                    &bridge_ip.clone().unwrap_or(defaults.bridge.url()),
+                    &bridge_url.clone().unwrap_or(defaults.bridge.url()),
                     bridge_ip
                         .clone()
                         .unwrap_or(defaults.bridge.ip())
@@ -373,8 +374,15 @@ enum Commands {
 
         #[arg(
             long,
+            short = 'r',
+            help = "URL of the bridge API server including port and route (e.g. http://localhost:3000)"
+        )]
+        bridge_url: Option<String>,
+
+        #[arg(
+            long,
             short = 'b',
-            help = "IP address on which to listen for bridge connections (e.g. '::')"
+            help = "IP address on which to listen for bridge connections (e.g. '0.0.0.0')"
         )]
         bridge_ip: Option<String>,
 

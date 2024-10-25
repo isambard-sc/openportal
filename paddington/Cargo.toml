@@ -3,7 +3,7 @@
 
 [package]
 name = "paddington"
-version = "0.0.1"
+version = "0.0.9"
 description = "A library for implementing the OpenPortal communication protocol"
 edition = "2021"
 license = "MIT"
@@ -32,9 +32,10 @@ serde_json = "1.0.120"
 serde_with = { version="3.9.0", features = ["hex"] }
 thiserror = "1.0.63"
 tokio = { version = "1.0", features = ["full", "tracing"] }
-tokio-tungstenite = { version = "0.23.1", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.24.0", features = ["rustls-tls-native-roots"] }
 toml = "0.8.16"
 tracing = "0.1.40"
+tungstenite = "0.24.0"
 url = {version="2.5.2", features=["serde"]}
 
 [lints.rust]

@@ -9,12 +9,15 @@ use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
 use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
-
-use std::sync::Arc;
+use tungstenite::handshake::server::{
+    ErrorResponse as HandshakeErrorResponse, Request as HandshakeRequest,
+    Response as HandshakeResponse,
+};
 
 use crate::command::Command;
 use crate::config::{ClientConfig, PeerConfig, ServiceConfig};
@@ -358,9 +361,47 @@ impl Connection {
         // we now know we are the only ones handling the connection,
         // and are safe to update the keys etc.
 
-        let addr: std::net::SocketAddr = stream
+        let mut addr: std::net::SocketAddr = stream
             .peer_addr()
             .with_context(|| "Error getting the peer address. Ensure the connection is open.")?;
+
+        let proxy_header = self.config.proxy_header();
+        let mut proxy_client = None;
+
+        let process_headers = |request: &HandshakeRequest,
+                               response: HandshakeResponse|
+         -> Result<HandshakeResponse, HandshakeErrorResponse> {
+            if let Some(proxy_header) = proxy_header {
+                if let Some(value) = request
+                    .headers()
+                    .get(proxy_header)
+                    .and_then(|value| value.to_str().ok())
+                {
+                    proxy_client = Some(value.to_string());
+                }
+            }
+
+            Ok(response)
+        };
+
+        let ws_stream = tokio_tungstenite::accept_hdr_async(stream, process_headers)
+            .await
+            .with_context(|| {
+                format!(
+                    "Error accepting WebSocket connection from: {}. Closing connection.",
+                    addr
+                )
+            })?;
+
+        if let Some(proxy_client) = proxy_client {
+            tracing::info!("Proxy client: {:?}", proxy_client);
+            addr = proxy_client.parse().with_context(|| {
+                format!(
+                    "Error parsing proxy client address: {}. Closing connection.",
+                    proxy_client
+                )
+            })?;
+        }
 
         tracing::info!("Accepted connection from peer: {}", addr);
 
@@ -378,15 +419,6 @@ impl Connection {
                 "No matching peer found for address.".to_string(),
             ));
         }
-
-        let ws_stream = tokio_tungstenite::accept_async(stream)
-            .await
-            .with_context(|| {
-                format!(
-                    "Error accepting WebSocket connection from: {}. Closing connection.",
-                    addr
-                )
-            })?;
 
         // Split the WebSocket stream into incoming and outgoing parts
         let (mut outgoing, mut incoming) = ws_stream.split();

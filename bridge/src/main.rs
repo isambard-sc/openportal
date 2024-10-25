@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
         Some("127.0.0.1".to_owned()),
         Some(8044),
         None,
+        None,
         Some("http://localhost:3000".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(3000),

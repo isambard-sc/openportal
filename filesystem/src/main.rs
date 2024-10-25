@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
         Some("127.0.0.1".to_owned()),
         Some(8047),
         None,
+        None,
         Some(AgentType::Filesystem),
     );
 

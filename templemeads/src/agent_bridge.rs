@@ -73,12 +73,21 @@ impl Defaults {
         ip: Option<String>,
         port: Option<u16>,
         healthcheck_port: Option<u16>,
+        proxy_header: Option<String>,
         bridge_url: Option<String>,
         bridge_ip: Option<String>,
         bridge_port: Option<u16>,
     ) -> Self {
         Self {
-            service: ServiceDefaults::parse(name, config_file, url, ip, port, healthcheck_port),
+            service: ServiceDefaults::parse(
+                name,
+                config_file,
+                url,
+                ip,
+                port,
+                healthcheck_port,
+                proxy_header,
+            ),
             bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port),
         }
     }
@@ -120,6 +129,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             bridge_ip,
             bridge_port,
             healthcheck_port,
+            proxy_header,
             force,
         }) => {
             let local_healthcheck_port;
@@ -141,6 +151,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                             .to_string(),
                         &port.unwrap_or_else(|| defaults.service.port()),
                         &local_healthcheck_port,
+                        proxy_header,
                     )?
                 },
                 bridge: BridgeConfig::new(
@@ -399,6 +410,13 @@ enum Commands {
             help = "Optional port on which to listen for health checks (e.g. 3001)"
         )]
         healthcheck_port: Option<u16>,
+
+        #[arg(
+            long,
+            short = 'x',
+            help = "Optional header to use for proxying requests - look in this for the client IP address"
+        )]
+        proxy_header: Option<String>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

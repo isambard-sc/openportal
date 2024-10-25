@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
         Some("127.0.0.1".to_owned()),
         Some(8045),
         None,
+        None,
         Some(AgentType::Platform),
     );
 

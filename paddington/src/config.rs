@@ -74,6 +74,7 @@ pub struct Defaults {
     ip: String,
     port: u16,
     healthcheck_port: Option<u16>,
+    proxy_header: Option<String>,
 }
 
 impl Defaults {
@@ -84,6 +85,7 @@ impl Defaults {
         ip: Option<String>,
         port: Option<u16>,
         healthcheck_port: Option<u16>,
+        proxy_header: Option<String>,
     ) -> Self {
         let config_file = config_file.unwrap_or(
             dirs::config_local_dir()
@@ -102,6 +104,7 @@ impl Defaults {
             ip: ip.unwrap_or("127.0.0.1".to_owned()),
             port: port.unwrap_or(8042),
             healthcheck_port,
+            proxy_header,
         }
     }
 
@@ -439,6 +442,7 @@ pub struct ServiceConfig {
     ip: IpAddr,
     port: u16,
     heathcheck_port: Option<u16>,
+    proxy_header: Option<String>,
 
     servers: Vec<ServerConfig>,
     clients: Vec<ClientConfig>,
@@ -452,6 +456,7 @@ impl ServiceConfig {
         ip: &str,
         port: &u16,
         healthcheck_port: &Option<u16>,
+        proxy_header: &Option<String>,
     ) -> Result<Self, Error> {
         Ok(ServiceConfig {
             name: name.to_string(),
@@ -461,6 +466,7 @@ impl ServiceConfig {
                 .with_context(|| format!("Could not parse IP address: {}", ip))?,
             port: *port,
             heathcheck_port: *healthcheck_port,
+            proxy_header: proxy_header.clone(),
             servers: Vec::new(),
             clients: Vec::new(),
             encryption: None,
@@ -529,6 +535,10 @@ impl ServiceConfig {
 
     pub fn healthcheck_port(&self) -> Option<u16> {
         self.heathcheck_port
+    }
+
+    pub fn proxy_header(&self) -> Option<String> {
+        self.proxy_header.clone()
     }
 
     pub fn add_client(&mut self, name: &str, ip: &str) -> Result<Invite, Error> {
@@ -612,6 +622,7 @@ impl ServiceConfig {
         ip: IpAddr,
         port: u16,
         healthcheck_port: &Option<u16>,
+        proxy_header: &Option<String>,
     ) -> Result<ServiceConfig, Error> {
         // see if this config_dir exists - return an error if it does
         let config_file = path::absolute(config_file).with_context(|| {
@@ -625,7 +636,14 @@ impl ServiceConfig {
             return Err(Error::NotExists(config_file.to_string_lossy().to_string()));
         }
 
-        let config = ServiceConfig::new(&name, &url, &ip.to_string(), &port, healthcheck_port)?;
+        let config = ServiceConfig::new(
+            &name,
+            &url,
+            &ip.to_string(),
+            &port,
+            healthcheck_port,
+            proxy_header,
+        )?;
         save::<ServiceConfig>(config.clone(), &config_file)?;
 
         // check we can read the config and return it
@@ -688,17 +706,29 @@ mod tests {
 
     #[test]
     fn test_invitations() {
-        let mut primary =
-            ServiceConfig::new("primary", "http://localhost", "127.0.0.1", &5544, &None)
-                .unwrap_or_else(|e| {
-                    unreachable!("Cannot create service config: {}", e);
-                });
+        let mut primary = ServiceConfig::new(
+            "primary",
+            "http://localhost",
+            "127.0.0.1",
+            &5544,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| {
+            unreachable!("Cannot create service config: {}", e);
+        });
 
-        let mut secondary =
-            ServiceConfig::new("secondary", "http://localhost", "127.0.0.1", &5545, &None)
-                .unwrap_or_else(|e| {
-                    unreachable!("Cannot create service config: {}", e);
-                });
+        let mut secondary = ServiceConfig::new(
+            "secondary",
+            "http://localhost",
+            "127.0.0.1",
+            &5545,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| {
+            unreachable!("Cannot create service config: {}", e);
+        });
 
         // introduce the secondary to the primary
         let invite = primary

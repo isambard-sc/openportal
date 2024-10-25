@@ -57,8 +57,14 @@ mod tests {
     async fn test_run() -> Result<()> {
         // this tests that the service can be configured and will run
         // (it will exit immediately as there are no clients or servers)
-        let config =
-            ServiceConfig::new("test_server", "http://localhost", "127.0.0.1", &5544, &None)?;
+        let config = ServiceConfig::new(
+            "test_server",
+            "http://localhost",
+            "127.0.0.1",
+            &5544,
+            &None,
+            &None,
+        )?;
         run(config).await?;
 
         Ok(())

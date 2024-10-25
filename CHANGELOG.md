@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Fixed bug in parsing command line options for bridge
+- Added support for getting the client IP address from a proxy header (e.g. `X-Forwarded-For`)
+- Cleaned up port handling, so URLs with default ports don't have the ports specified
 
 ## [0.0.8] - 2024-10-24
 ### Added

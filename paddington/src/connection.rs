@@ -9,7 +9,6 @@ use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
 use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Serialize};
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
@@ -362,9 +361,10 @@ impl Connection {
         // we now know we are the only ones handling the connection,
         // and are safe to update the keys etc.
 
-        let mut addr: std::net::SocketAddr = stream
+        let mut client_ip: std::net::IpAddr = stream
             .peer_addr()
-            .with_context(|| "Error getting the peer address. Ensure the connection is open.")?;
+            .with_context(|| "Error getting the peer address. Ensure the connection is open.")?
+            .ip();
 
         let proxy_header = self.config.proxy_header();
         let mut proxy_client = None;
@@ -390,28 +390,32 @@ impl Connection {
             .with_context(|| {
                 format!(
                     "Error accepting WebSocket connection from: {}. Closing connection.",
-                    addr
+                    client_ip
                 )
             })?;
 
         if let Some(proxy_client) = proxy_client {
             tracing::info!("Proxy client: {:?}", proxy_client);
-            addr = std::net::SocketAddr::from_str(&proxy_client)
+            client_ip = proxy_client
+                .parse()
                 .with_context(|| "Error parsing proxy client address")?;
         }
 
-        tracing::info!("Accepted connection from peer: {}", addr);
+        // this doesn't need to be mutable any more
+        let client_ip = client_ip;
+
+        tracing::info!("Accepted connection from peer: {}", client_ip);
 
         let clients: Vec<ClientConfig> = self
             .config
             .clients()
             .iter()
-            .filter(|client| client.matches(addr.ip()))
+            .filter(|client| client.matches(client_ip))
             .cloned()
             .collect();
 
         if clients.is_empty() {
-            tracing::warn!("No matching peer found for address: {}", addr);
+            tracing::warn!("No matching peer found for address: {}", client_ip);
             return Err(Error::InvalidPeer(
                 "No matching peer found for address.".to_string(),
             ));
@@ -457,7 +461,7 @@ impl Connection {
                         tracing::info!(
                             "Client {:?} authenticated for address: {}",
                             client.name().unwrap_or_default(),
-                            addr
+                            client_ip
                         );
                         true
                     }
@@ -468,7 +472,10 @@ impl Connection {
             .collect();
 
         if clients.is_empty() {
-            tracing::warn!("No matching peer could authenticate for address: {}", addr);
+            tracing::warn!(
+                "No matching peer could authenticate for address: {}",
+                client_ip
+            );
             return Err(Error::InvalidPeer(
                 "No matching peer could authenticate for address.".to_string(),
             ));
@@ -478,7 +485,7 @@ impl Connection {
             tracing::warn!(
                 "Multiple matching peers found for address: {} - \
                     {:?}. Ignoring all but the first...",
-                addr,
+                client_ip,
                 clients
             );
         }
@@ -570,7 +577,7 @@ impl Connection {
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;
 
-        tracing::info!("{} disconnected", &addr);
+        tracing::info!("{} disconnected", &client_ip);
 
         // we've exited, meaning that this connection is now closed
         self.closed_connection().await;

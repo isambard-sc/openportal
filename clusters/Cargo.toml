@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: CC0-1.0
 
 [package]
-name = "op-slurm"
+name = "op-clusters"
 version = "0.0.12"
-description = "An example of an OpenPortal Slurm cluster instance agent"
+description = "An example of an OpenPortal cluster platform agent"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/chryswoods/openportal/"

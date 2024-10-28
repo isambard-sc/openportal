@@ -190,11 +190,15 @@ async_message_handler! {
                     return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
                 }
 
-                tracing::info!("Keep alive message received from {}", sender);
-
                 // wait 20 seconds and send a keep alive message back
                 tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
-                paddington::send(Message::keepalive(&sender)).await?;
+
+                match paddington::send(Message::keepalive(&sender)).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Error sending keepalive message to {} : {}", sender, e);
+                    }
+                }
 
                 Ok(())
             }

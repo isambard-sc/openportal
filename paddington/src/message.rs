@@ -24,6 +24,12 @@ impl Display for Message {
     }
 }
 
+pub enum MessageType {
+    Control,
+    KeepAlive,
+    Message,
+}
+
 impl Message {
     pub fn new(sender: &str, payload: &str) -> Self {
         Self {
@@ -43,6 +49,32 @@ impl Message {
 
     pub fn is_control(&self) -> bool {
         self.sender.is_empty()
+    }
+
+    pub fn keepalive(sender: &str) -> Self {
+        Self {
+            sender: sender.to_owned(),
+            recipient: "".to_owned(),
+            payload: "KEEPALIVE".to_owned(),
+        }
+    }
+
+    pub fn is_keepalive(&self) -> bool {
+        self.payload == "KEEPALIVE"
+    }
+
+    pub fn is_message(&self) -> bool {
+        !self.is_control() && !self.is_keepalive()
+    }
+
+    pub fn typ(&self) -> MessageType {
+        if self.is_control() {
+            MessageType::Control
+        } else if self.is_keepalive() {
+            MessageType::KeepAlive
+        } else {
+            MessageType::Message
+        }
     }
 
     pub fn set_recipient(&mut self, recipient: &str) {

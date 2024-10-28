@@ -321,6 +321,13 @@ impl Connection {
         exchange::received(Command::connected(peer_name.clone()).into())
             .with_context(|| "Error triggering /connected control message")?;
 
+        // finally, send a keepalive message to the peer - this will start
+        // a ping-pong with the peer that should keep it open
+        // (client sends, as the server should already be set up now)
+        exchange::send(Message::keepalive(&peer_name))
+            .await
+            .with_context(|| "Error sending keepalive message to peer")?;
+
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;
 

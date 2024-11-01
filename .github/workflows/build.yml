@@ -155,42 +155,42 @@ jobs:
         id: attest-cluster
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-cluster
-          subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
+          subject-digest: ${{ steps.push-cluster-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Attest op-clusters image
         uses: actions/attest-build-provenance@v1
         id: attest-clusters
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-clusters
-          subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
+          subject-digest: ${{ steps.push-clusters-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Attest op-filesystem image
         uses: actions/attest-build-provenance@v1
         id: attest-filesystem
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-filesystem
-          subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
+          subject-digest: ${{ steps.push-filesystem-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Attest op-freeipa image
         uses: actions/attest-build-provenance@v1
         id: attest-freeipa
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-freeipa
-          subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
+          subject-digest: ${{ steps.push-freeipa-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Attest op-portal image
         uses: actions/attest-build-provenance@v1
         id: attest-portal
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-portal
-          subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
+          subject-digest: ${{ steps.push-portal-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Attest op-provider image
         uses: actions/attest-build-provenance@v1
         id: attest-provider
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-provider
-          subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
+          subject-digest: ${{ steps.push-provider-to-ghcr.outputs.digest }}
           push-to-registry: true
       - name: Push op-bridge Helm chart
         run: helm push "./op-bridge-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"

@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
-### Fixed
+
+## [0.0.17] - 2024-11-01
+### Fixed
 - Fixed issues with attestations that depended on releases. Need to release
   each agent separately, which this release now does.
 
@@ -77,6 +79,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.0.17]: https://github.com/isambard-sc/openportal/releases/tag/0.0.17
 [0.0.16]: https://github.com/isambard-sc/openportal/releases/tag/0.0.16
 [0.0.15]: https://github.com/isambard-sc/openportal/releases/tag/0.0.15
 [0.0.14]: https://github.com/isambard-sc/openportal/releases/tag/0.0.14

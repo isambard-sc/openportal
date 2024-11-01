@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-License-Identifier: CC0-1.0
+-->
+
 # FreeIPA agent
 
 This requires extra configuration to set the details used to connect

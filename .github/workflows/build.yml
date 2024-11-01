@@ -37,6 +37,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
+
       - name: Build op-bridge OCI image
         run: oci/bridge/build.sh --release
       - name: Build op-cluster OCI image
@@ -51,6 +52,7 @@ jobs:
         run: oci/portal/build.sh --release
       - name: Build op-provider OCI image
         run: oci/provider/build.sh --release
+
       - name: Get version
         id: get_version
         run: |
@@ -63,6 +65,7 @@ jobs:
           else
             echo version="${{ steps.get_version.outputs.version }}.${{ github.ref_name }}" >> "${GITHUB_OUTPUT}"
           fi
+
       - name: package op-bridge helm chart
         run: |
           helm package helm/bridge --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
@@ -84,6 +87,7 @@ jobs:
       - name: package op-provider helm chart
         run: |
           helm package helm/provider --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+
       - name: Log in to GHCR
         uses: redhat-actions/podman-login@v1
         with:
@@ -94,6 +98,7 @@ jobs:
         run: echo $GITHUB_TOKEN | helm registry login "ghcr.io/${{ github.repository_owner }}" --username "${{ github.actor }}" --password-stdin
         env:
           GITHUB_TOKEN: "${{ github.token }}"
+
       - name: Publish op-bridge OCI image
         id: push-bridge-to-ghcr
         uses: redhat-actions/push-to-registry@v2
@@ -143,6 +148,7 @@ jobs:
           image: op-provider
           tags: ${{ steps.get_version.outputs.version }}
           registry: ghcr.io/${{ github.repository_owner }}
+
       - name: Attest op-bridge image
         uses: actions/attest-build-provenance@v1
         id: attest-bridge
@@ -206,15 +212,46 @@ jobs:
         run: helm push "./op-portal-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
       - name: Push op-provider Helm chart
         run: helm push "./op-provider-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
-      - name: Store agent artefacts
+
+      - name: Store bridge artefact
         uses: actions/upload-artifact@v4
         with:
-          name: openportal-agents
+          name: op-bridge
           path: |
             target/release/op-bridge
+      - name: Store cluster artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-cluster
+          path: |
             target/release/op-cluster
+      - name: Store clusters artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-clusters
+          path: |
             target/release/op-clusters
+      - name: Store filesystem artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-filesystem
+          path: |
             target/release/op-filesystem
+      - name: Store freeipa artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-freeipa
+          path: |
             target/release/op-freeipa
+      - name: Store portal artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-portal
+          path: |
             target/release/op-portal
+      - name: Store provider artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-provider
+          path: |
             target/release/op-provider

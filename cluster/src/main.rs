@@ -13,10 +13,10 @@ use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
 ///
-/// Main function for the slurm cluster instance agent
+/// Main function for the cluster instance agent
 ///
 /// This purpose of this agent is to manage an individual instance
-/// of a slurm batch cluster. It will manage the lifecycle of
+/// of a batch cluster. It will manage the lifecycle of
 /// users and projects on the cluster.
 ///
 #[tokio::main]
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
-        Some("slurm".to_owned()),
+        Some("cluster".to_owned()),
         Some(
             dirs::config_local_dir()
                 .unwrap_or(
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
                         .expect("Could not parse fallback config directory."),
                 )
                 .join("openportal")
-                .join("slurm-config.toml"),
+                .join("cluster-config.toml"),
         ),
         Some("ws://localhost:8046".to_owned()),
         Some("127.0.0.1".to_owned()),
@@ -59,9 +59,9 @@ async fn main() -> Result<()> {
         /// Runnable function that will be called when a job is received
         /// by the agent
         ///
-        pub async fn slurm_runner(envelope: Envelope) -> Result<Job, Error>
+        pub async fn cluster_runner(envelope: Envelope) -> Result<Job, Error>
         {
-            tracing::info!("Using the slurm runner");
+            tracing::info!("Using the cluster runner");
 
             let me = envelope.recipient();
             let sender = envelope.sender();
@@ -69,8 +69,8 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 AddUser(user) => {
-                    // add the user to the slurm cluster
-                    tracing::info!("Adding user to slurm cluster: {}", user);
+                    // add the user to the cluster
+                    tracing::info!("Adding user to cluster: {}", user);
                     let mapping = create_account(&me, &user).await?;
 
                     job = job.running(Some("Step 1/3: Account created".to_string()))?;
@@ -86,8 +86,8 @@ async fn main() -> Result<()> {
                     job = job.completed(mapping)?;
                 }
                 RemoveUser(user) => {
-                    // remove the user from the slurm cluster
-                    tracing::info!("Removing user from slurm cluster: {}", user);
+                    // remove the user from the cluster
+                    tracing::info!("Removing user from cluster: {}", user);
                     job = job.completed("User removed")?;
                 }
                 _ => {
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
     }
 
     // run the agent
-    run(config, slurm_runner).await?;
+    run(config, cluster_runner).await?;
 
     Ok(())
 }

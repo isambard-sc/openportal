@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Changed the names of the cluster instance and platform agents to `cluster` and `clusters`,
+  as they don't need to be named after slurm (and would cause confusion with the slurm agent).
+- Added OCI images and helm charts for all agents
+- Added instructions on how to configure the freeipa agent
 
 ## [0.0.12] - 2024-10-28
 ### Added

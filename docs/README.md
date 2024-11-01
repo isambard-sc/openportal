@@ -98,8 +98,8 @@ The key types of Agent are:
    adding the colleague to the project may require adding them to a slurm
    cluster. So the `provider` Agent will send a Job to the `platform`
    Agent to tell it to add the colleague to the slurm cluster.
-   The `op-cluster` executable implements the `platform` Agent
-   for clusters, with source code in the [cluster](../cluster) directory.
+   The `op-clusters` executable implements the `platform` Agent
+   for clusters, with source code in the [clusters](../clusters) directory.
 
 4. `instance` - these are agents that represent individual instances of
    a platform. For example, each indvidual slurm cluster or Jupyter notebook
@@ -109,8 +109,8 @@ The key types of Agent are:
    slurm clusters would pass on the request to add the colleague to the
    individual `instance` Agent that is responsible for managing the
    specific slurm cluster to which the colleague is being added.
-   The `op-slurm` executable implements the `instance` Agent for slurm
-   clusters, with source code in the [slurm](../slurm) directory.
+   The `op-cluster` executable implements the `instance` Agent for
+   clusters, with source code in the [cluster](../cluster) directory.
 
 5. `account` - these are Agents that interface with user account management
    services, e.g. LDAP, FreeIPA etc. There is one `account` Agent per

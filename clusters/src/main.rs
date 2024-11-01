@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
-        Some("cluster".to_owned()),
+        Some("clusters".to_owned()),
         Some(
             dirs::config_local_dir()
                 .unwrap_or(
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
                         .expect("Could not parse fallback config directory."),
                 )
                 .join("openportal")
-                .join("cluster-config.toml"),
+                .join("clusters-config.toml"),
         ),
         Some("ws://localhost:8045".to_owned()),
         Some("127.0.0.1".to_owned()),

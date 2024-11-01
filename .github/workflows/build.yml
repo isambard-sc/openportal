@@ -47,8 +47,6 @@ jobs:
         run: oci/filesystem/build.sh --release
       - name: Build op-freeipa OCI image
         run: oci/freeipa/build.sh --release
-      - name: Build op-platform OCI image
-        run: oci/platform/build.sh --release
       - name: Build op-portal OCI image
         run: oci/portal/build.sh --release
       - name: Build op-provider OCI image
@@ -80,9 +78,6 @@ jobs:
       - name: package op-freeipa helm chart
         run: |
           helm package helm/freeipa --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
-      - name: package op-platform helm chart
-        run: |
-          helm package helm/platform --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
       - name: package op-portal helm chart
         run: |
           helm package helm/portal --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
@@ -134,13 +129,6 @@ jobs:
           image: op-freeipa
           tags: ${{ steps.get_version.outputs.version }}
           registry: ghcr.io/${{ github.repository_owner }}
-      - name: Publish op-platform OCI image
-        id: push-platform-to-ghcr
-        uses: redhat-actions/push-to-registry@v2
-        with:
-          image: op-platform
-          tags: ${{ steps.get_version.outputs.version }}
-          registry: ghcr.io/${{ github.repository_owner }}
       - name: Publish op-portal OCI image
         id: push-portal-to-ghcr
         uses: redhat-actions/push-to-registry@v2
@@ -190,13 +178,6 @@ jobs:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-freeipa
           subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
           push-to-registry: true
-      - name: Attest op-platform image
-        uses: actions/attest-build-provenance@v1
-        id: attest-platform
-        with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/op-platform
-          subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
-          push-to-registry: true
       - name: Attest op-portal image
         uses: actions/attest-build-provenance@v1
         id: attest-portal
@@ -221,8 +202,6 @@ jobs:
         run: helm push "./op-filesystem-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
       - name: Push op-freeipa Helm chart
         run: helm push "./op-freeipa-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
-      - name: Push op-platform Helm chart
-        run: helm push "./op-platform-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
       - name: Push op-portal Helm chart
         run: helm push "./op-portal-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
       - name: Push op-provider Helm chart
@@ -237,6 +216,5 @@ jobs:
             target/release/op-clusters
             target/release/op-filesystem
             target/release/op-freeipa
-            target/release/op-platform
             target/release/op-portal
             target/release/op-provider

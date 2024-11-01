@@ -286,40 +286,6 @@ jobs:
           name: sbom-freeipa.spdx.json
           path: sbom-freeipa.spdx.json
 
-  attest-platform:
-    name: Attest Platform
-    needs: build-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-sbom
-      - name: Generate SBOM
-        run: cargo sbom --cargo-package op-platform --output-format=spdx_json_2_3 > sbom-platform.spdx.json
-      - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: op-platform
-          merge-multiple: true
-      - name: Attest SBOM
-        uses: actions/attest-sbom@v1
-        with:
-          subject-path: op-platform
-          sbom-path: sbom-platform.spdx.json
-      - name: Store SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-platform.spdx.json
-          path: sbom-platform.spdx.json
-
   attest-portal:
     name: Attest Portal
     needs: build-release
@@ -391,7 +357,7 @@ jobs:
   make-release:
     name: Make release ${{ needs.tag-release.outputs.ref }}
     needs: [build-release, tag-release, attest-bridge, attest-cluster,
-            attest-clusters, attest-filesystem, attest-freeipa, attest-platform,
+            attest-clusters, attest-filesystem, attest-freeipa,
             attest-portal, attest-provider]
     runs-on: ubuntu-latest
     permissions:

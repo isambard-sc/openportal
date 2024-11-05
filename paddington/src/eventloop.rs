@@ -8,6 +8,16 @@ use crate::error::Error;
 use crate::{client, server};
 
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Could not install default ring provider: {:?}", e);
+            return Err(Error::NotExists(
+                "Could not install default ring provider".to_owned(),
+            ));
+        }
+    }
+
     let mut server_handles = vec![];
     let mut client_handles = vec![];
 

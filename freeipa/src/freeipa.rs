@@ -753,7 +753,7 @@ fn get_primary_group(user: &UserIdentifier) -> String {
 /// or removes them as necessary. Groups will match the project group,
 /// the system groups, and the openportal group.
 ///
-async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
+async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
     let mut groups = cache::get_system_groups().await?;
@@ -833,12 +833,21 @@ async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
         match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
             Ok(_) => tracing::info!("Successfully added user {} to group {}", userid, group_cn),
             Err(e) => {
+                // this should not happen - it indicates that the group has disappeared
+                // since we last updated. Our cache is now likely out of date.
                 tracing::error!(
                     "Could not add user {} to group {}. Error: {}",
                     userid,
                     group_cn,
                     e
                 );
+                tracing::info!("Clearing the cache as FreeIPA has changed behind our back.");
+                cache::clear().await?;
+                // Return None so that the caller handles this failure case
+                return Err(Error::InvalidState(format!(
+                    "Could not add user {} to group {}. Error: {}. Likely freeipa was changed behind our back!",
+                    userid, group_cn, e
+                )));
             }
         }
     }
@@ -846,7 +855,7 @@ async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
     // finally - re-fetch the user from FreeIPA to make sure that we have
     // the correct information
     match force_get_user(user.identifier()).await? {
-        Some(user) => Ok(Some(user)),
+        Some(user) => Ok(user),
         None => {
             tracing::warn!(
                 "Failed to sync groups for user {} as this user no longer exists in FreeIPA.",
@@ -854,7 +863,11 @@ async fn sync_groups(user: &IPAUser) -> Result<Option<IPAUser>, Error> {
             );
             tracing::info!("Clearing the cache as FreeIPA has changed behind our back.");
             cache::clear().await?;
-            Ok(None)
+            // Return None so that the caller handles this failure case
+            Err(Error::InvalidState(format!(
+                "Failed to sync groups for user {} as this user no longer exists in FreeIPA. Likely freeipa was changed behind our back!",
+                user.identifier()
+            )))
         }
     }
 }
@@ -863,9 +876,22 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(user) = get_user(user).await? {
         // make sure that the groups are correct
-        if let Some(user) = sync_groups(&user).await? {
-            tracing::info!("Added user [cached] {}", user);
-            return Ok(user);
+        match sync_groups(&user).await {
+            Ok(user) => {
+                tracing::info!("Added user [cached] {}", user);
+                return Ok(user);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to sync groups for user {} after adding. Error: {}",
+                    user.identifier(),
+                    e
+                );
+                tracing::info!(
+                    "Will try to add user {} again, as the groups are not correct.",
+                    user.identifier()
+                );
+            }
         }
 
         // we get here if the user has been removed from FreeIPA behind
@@ -956,19 +982,21 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
 
     // now synchronise the groups - this won't do anything if another
     // thread has already beaten us to creating the user
-    match sync_groups(&user).await? {
-        Some(user) => {
+    match sync_groups(&user).await {
+        Ok(user) => {
             tracing::info!("Added user: {}", user);
             Ok(user)
         }
-        None => {
+        Err(e) => {
             tracing::warn!(
-                "Failed to add user {} - they have been removed from FreeIPA?",
-                user.identifier()
+                "Failed to add user {} - they have been removed from FreeIPA? {}",
+                user.identifier(),
+                e
             );
             Err(Error::Call(format!(
-                "Failed to add user {} - they have been removed from FreeIPA?",
-                user.identifier()
+                "Failed to add user {} - they have been removed from FreeIPA? {}",
+                user.identifier(),
+                e
             )))
         }
     }

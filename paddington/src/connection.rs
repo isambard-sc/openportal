@@ -265,6 +265,83 @@ impl Connection {
                 }
             };
 
+        // the final step is to exchange names and aliases with the server.
+        // We send the server our name and alias, and the server will send
+        // us its name and alias. We will both validate that the names match
+        // the expected names, and then we can trust the connection.
+        let message = match envelope_message(
+            format!("{}:{}", self.config.name(), self.config.name()),
+            &inner_key,
+            &outer_key,
+        ) {
+            Ok(message) => message,
+            Err(e) => {
+                tracing::warn!("Error enveloping message: {:?}", e);
+                self.set_error().await;
+                return Err(e.into());
+            }
+        };
+
+        if let Err(r) = outgoing.send(message).await {
+            self.set_error().await;
+            return Err(Error::Any(r.into()));
+        }
+
+        // receive the response
+        let response = match incoming.next().await {
+            Some(response) => response,
+            None => {
+                tracing::warn!("Error receiving response from peer. Ensure the peer is valid and the connection is open.");
+                self.set_error().await;
+                return Err(Error::InvalidPeer(
+                    "Error receiving response from peer. Ensure the peer is valid and the connection is open.".to_string(),
+                ));
+            }
+        };
+
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!("Error receiving response from peer: {:?}", e);
+                self.set_error().await;
+                return Err(Error::Any(e.into()));
+            }
+        };
+
+        // the response should be the server's name and alias, separated by a colon
+        let response: String = match deenvelope_message(response, &inner_key, &outer_key) {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!("Error de-enveloping message: {:?}", e);
+                self.set_error().await;
+                return Err(e.into());
+            }
+        };
+
+        let parts: Vec<&str> = response.split(':').collect();
+
+        if parts.len() != 2 {
+            tracing::warn!("Error parsing response from peer: {:?}", response);
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Error parsing response from peer.".to_string(),
+            ));
+        }
+
+        tracing::info!("Connected to peer {}, alias {}", parts[0], parts[1]);
+
+        if parts[0] != peer_name {
+            tracing::warn!(
+                "Peer name does not match expected name: {} != {}",
+                parts[0],
+                peer_name
+            );
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Peer name does not match expected name.".to_string(),
+            ));
+        }
+
         tracing::info!("Handshake complete!");
 
         // we can now save these keys as the new session keys for the connection
@@ -531,6 +608,49 @@ impl Connection {
             .send(response)
             .await
             .with_context(|| "Error sending response to peer")?;
+
+        // the peer will now send us its name and alias, separated by a colon
+        let message = incoming.next().await.ok_or_else(|| {
+            tracing::warn!("No peer information received - closing connection.");
+            Error::InvalidPeer("No peer information received - closing connection.".to_string())
+        })??;
+
+        let message = deenvelope_message::<String>(message, &inner_key, &outer_key)
+            .with_context(|| "Error de-enveloping message - closing connection.")?;
+
+        let parts: Vec<&str> = message.split(':').collect();
+
+        if parts.len() != 2 {
+            tracing::warn!("Error parsing response from peer: {:?}", message);
+            return Err(Error::InvalidPeer(
+                "Error parsing response from peer - closing connection.".to_string(),
+            ));
+        }
+
+        tracing::info!("Connected to peer {}, alias {}", parts[0], parts[1]);
+
+        if parts[0] != peer_name {
+            tracing::warn!(
+                "Peer name does not match expected name: {} != {}",
+                parts[0],
+                peer_name
+            );
+            return Err(Error::InvalidPeer(
+                "Peer name does not match expected name - closing connection.".to_string(),
+            ));
+        }
+
+        // now send back our name and alias
+        let message = envelope_message(
+            format!("{}:{}", service_name, service_name),
+            &inner_key,
+            &outer_key,
+        )?;
+
+        outgoing
+            .send(message)
+            .await
+            .with_context(|| "Error sending response to peer - closing connection")?;
 
         tracing::info!("Handshake complete!");
 

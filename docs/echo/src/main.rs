@@ -265,7 +265,7 @@ async fn run_server(
     // create the echo-server service
     let mut service = ServiceConfig::new("echo-server", url, ip, port, &None, &None)?;
 
-    let invite = service.add_client("echo-client", range)?;
+    let invite = service.add_client("echo-client", range, "default")?;
 
     // save the invitation to the requested file
     invite.save(invitation)?;

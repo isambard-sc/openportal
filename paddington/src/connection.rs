@@ -91,8 +91,16 @@ impl Connection {
     /// Return the name of the connection - this is the name of the peer
     /// that the connection is connected to.
     ///
-    pub fn name(&self) -> Option<String> {
+    pub fn name(&self) -> String {
         self.peer.as_ref().unwrap_or(&PeerConfig::None).name()
+    }
+
+    ///
+    /// Return the zone of the connection - both sides of the connection
+    /// must agree on the same zone
+    ///
+    pub fn zone(&self) -> String {
+        self.peer.as_ref().unwrap_or(&PeerConfig::None).zone()
     }
 
     ///
@@ -195,7 +203,7 @@ impl Connection {
 
         // save the peer we are connecting to
         self.peer = Some(peer.clone());
-        let peer_name = peer.name().unwrap_or_default();
+        let peer_name = peer.name();
 
         let url = server.get_websocket_url()?.to_string();
 
@@ -544,7 +552,7 @@ impl Connection {
                     Ok(_) => {
                         tracing::info!(
                             "Client {:?} authenticated for address: {}",
-                            client.name().unwrap_or_default(),
+                            client.name(),
                             client_ip
                         );
                         true
@@ -576,7 +584,7 @@ impl Connection {
 
         let peer = clients[0].clone();
 
-        let peer_name = peer.name().unwrap_or_default();
+        let peer_name = peer.name();
 
         if peer_name.is_empty() {
             tracing::warn!("Peer must have a name to handle a connection.");

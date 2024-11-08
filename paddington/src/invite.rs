@@ -12,15 +12,23 @@ use std::path;
 pub struct Invite {
     name: String,
     url: String,
+    zone: String,
     inner_key: SecretKey,
     outer_key: SecretKey,
 }
 
 impl Invite {
-    pub fn new(name: &str, url: &str, inner_key: &SecretKey, outer_key: &SecretKey) -> Self {
+    pub fn new(
+        name: &str,
+        url: &str,
+        zone: &str,
+        inner_key: &SecretKey,
+        outer_key: &SecretKey,
+    ) -> Self {
         Invite {
             name: name.to_string(),
             url: url.to_string(),
+            zone: zone.to_string(),
             inner_key: inner_key.clone(),
             outer_key: outer_key.clone(),
         }
@@ -32,6 +40,10 @@ impl Invite {
 
     pub fn url(&self) -> String {
         self.url.clone()
+    }
+
+    pub fn zone(&self) -> String {
+        self.zone.clone()
     }
 
     pub fn inner_key(&self) -> SecretKey {
@@ -81,7 +93,11 @@ impl Invite {
 
 impl Display for Invite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Invite {{ name: {}, url: {} }}", self.name, self.url)
+        write!(
+            f,
+            "Invite {{ name: {}, url: {}, zone: {} }}",
+            self.name, self.url, self.zone
+        )
     }
 }
 

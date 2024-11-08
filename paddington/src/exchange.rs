@@ -157,7 +157,7 @@ pub async fn set_handler(handler: AsyncMessageHandler) -> Result<(), Error> {
 }
 
 pub async fn unregister(connection: &Connection) -> Result<(), Error> {
-    let name = connection.name().unwrap_or_default();
+    let name = connection.name();
 
     if name.is_empty() {
         return Err(Error::UnnamedConnection(
@@ -186,7 +186,7 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
 }
 
 pub async fn register(connection: Connection) -> Result<(), Error> {
-    let name = connection.name().unwrap_or_default();
+    let name = connection.name();
 
     if name.is_empty() {
         return Err(Error::UnnamedConnection(

@@ -217,9 +217,11 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
                 let mut config = load_config::<Config>(&config_file)?;
 
-                let invite = config
-                    .service
-                    .add_client(client, &ip.clone().unwrap_or_else(|| "".to_string()))?;
+                let invite = config.service.add_client(
+                    client,
+                    &ip.clone().unwrap_or_else(|| "".to_string()),
+                    "default",
+                )?;
 
                 save_config(config, &config_file)?;
                 save_invite(invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;

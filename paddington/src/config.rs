@@ -137,6 +137,7 @@ impl Defaults {
 pub struct ServerConfig {
     name: String,
     url: String,
+    zone: String,
     inner_key: SecretKey,
     outer_key: SecretKey,
 }
@@ -145,8 +146,8 @@ impl Display for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ServerConfig {{ name: {}, url: {} }}",
-            self.name, self.url
+            "ServerConfig {{ name: {}, url: {}, zone: {} }}",
+            self.name, self.url, self.zone
         )
     }
 }
@@ -191,13 +192,14 @@ fn create_websocket_url(url: &str) -> Result<String, Error> {
 }
 
 impl ServerConfig {
-    pub fn new(name: String, url: String) -> Self {
+    pub fn new(name: &str, url: &str, zone: &str) -> Self {
         ServerConfig {
             name: name.to_string(),
-            url: create_websocket_url(&url).unwrap_or_else(|e| {
+            url: create_websocket_url(url).unwrap_or_else(|e| {
                 tracing::warn!("Could not create websocket URL {}: {:?}", url, e);
                 "".to_string()
             }),
+            zone: zone.to_string(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -207,6 +209,7 @@ impl ServerConfig {
         Ok(ServerConfig {
             name: invite.name(),
             url: create_websocket_url(&invite.url())?,
+            zone: invite.zone(),
             inner_key: invite.inner_key(),
             outer_key: invite.outer_key(),
         })
@@ -216,6 +219,7 @@ impl ServerConfig {
         ServerConfig {
             name: "".to_string(),
             url: "".to_string(),
+            zone: "".to_string(),
             inner_key: Key::null(),
             outer_key: Key::null(),
         }
@@ -223,6 +227,10 @@ impl ServerConfig {
 
     pub fn is_null(&self) -> bool {
         self.name.is_empty()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.is_null()
     }
 
     pub fn to_peer(&self) -> PeerConfig {
@@ -244,6 +252,10 @@ impl ServerConfig {
 
     pub fn url(&self) -> String {
         self.url.clone()
+    }
+
+    pub fn zone(&self) -> String {
+        self.zone.clone()
     }
 
     pub fn inner_key(&self) -> SecretKey {
@@ -300,31 +312,29 @@ impl IpOrRange {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
-    name: Option<String>,
-    ip: Option<IpOrRange>,
+    name: String,
+    ip: IpOrRange,
+    zone: String,
     inner_key: SecretKey,
     outer_key: SecretKey,
 }
 
 impl Display for ClientConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ip = match &self.ip {
-            Some(ip) => format!("{}", ip),
-            None => "None".to_string(),
-        };
-
-        match &self.name {
-            Some(name) => write!(f, "ClientConfig {{ name: {}, ip: {} }}", name, ip),
-            None => write!(f, "ClientConfig {{ name: null, ip: {} }}", ip),
-        }
+        write!(
+            f,
+            "ClientConfig {{ name: {}, ip: {}, zone: {} }}",
+            self.name, self.ip, self.zone
+        )
     }
 }
 
 impl ClientConfig {
-    pub fn new(name: &str, ip: &IpOrRange) -> Self {
+    pub fn new(name: &str, ip: &IpOrRange, zone: &str) -> Self {
         ClientConfig {
-            name: Some(name.to_string()),
-            ip: Some(ip.clone()),
+            name: name.to_string(),
+            ip: ip.clone(),
+            zone: zone.to_string(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -332,34 +342,41 @@ impl ClientConfig {
 
     pub fn create_null() -> Self {
         ClientConfig {
-            name: None,
-            ip: None,
+            name: "".to_string(),
+            #[allow(clippy::unwrap_used)]
+            ip: IpOrRange::IP("127.0.0.1".parse().unwrap()),
+            zone: "".to_string(),
             inner_key: Key::null(),
             outer_key: Key::null(),
         }
     }
 
     pub fn is_null(&self) -> bool {
-        self.ip.is_none()
+        self.name.is_empty()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.is_null()
     }
 
     pub fn matches(&self, addr: IpAddr) -> bool {
-        match &self.ip {
-            Some(ip) => ip.matches(&addr),
-            None => false,
-        }
+        self.ip.matches(&addr)
     }
 
     pub fn to_peer(&self) -> PeerConfig {
         PeerConfig::from_client(self)
     }
 
-    pub fn name(&self) -> Option<String> {
+    pub fn name(&self) -> String {
         self.name.clone()
     }
 
-    pub fn ip(&self) -> Option<IpOrRange> {
+    pub fn ip(&self) -> IpOrRange {
         self.ip.clone()
+    }
+
+    pub fn zone(&self) -> String {
+        self.zone.clone()
     }
 
     pub fn inner_key(&self) -> SecretKey {
@@ -409,6 +426,10 @@ impl PeerConfig {
         }
     }
 
+    pub fn is_valid(&self) -> bool {
+        !self.is_null()
+    }
+
     pub fn is_client(&self) -> bool {
         matches!(self, PeerConfig::Client(_))
     }
@@ -417,11 +438,23 @@ impl PeerConfig {
         matches!(self, PeerConfig::Server(_))
     }
 
-    pub fn name(&self) -> Option<String> {
+    pub fn is_none(&self) -> bool {
+        matches!(self, PeerConfig::None)
+    }
+
+    pub fn name(&self) -> String {
         match self {
-            PeerConfig::Server(server) => Some(server.name.clone()),
+            PeerConfig::Server(server) => server.name.clone(),
             PeerConfig::Client(client) => client.name.clone(),
-            PeerConfig::None => None,
+            PeerConfig::None => "".to_string(),
+        }
+    }
+
+    pub fn zone(&self) -> String {
+        match self {
+            PeerConfig::Server(server) => server.zone.clone(),
+            PeerConfig::Client(client) => client.zone.clone(),
+            PeerConfig::None => "".to_string(),
         }
     }
 }
@@ -541,7 +574,7 @@ impl ServiceConfig {
         self.proxy_header.clone()
     }
 
-    pub fn add_client(&mut self, name: &str, ip: &str) -> Result<Invite, Error> {
+    pub fn add_client(&mut self, name: &str, ip: &str, zone: &str) -> Result<Invite, Error> {
         let ip = IpOrRange::new(ip)
             .with_context(|| format!("Could not parse into an IP address or IP range: {}", ip))?;
 
@@ -551,7 +584,7 @@ impl ServiceConfig {
 
         // check if we already have a client with this name
         for c in self.clients.iter() {
-            if c.name == Some(name.to_string()) {
+            if c.name == name {
                 return Err(Error::Peer(format!(
                     "Client with name '{}' already exists.",
                     name
@@ -559,13 +592,14 @@ impl ServiceConfig {
             }
         }
 
-        let client = ClientConfig::new(name, &ip);
+        let client = ClientConfig::new(name, &ip, zone);
 
         self.clients.push(client.clone());
 
         Ok(Invite::new(
             &self.name,
             &self.url,
+            zone,
             &client.inner_key,
             &client.outer_key,
         ))
@@ -575,7 +609,7 @@ impl ServiceConfig {
         self.clients = self
             .clients
             .iter()
-            .filter(|client| client.name != Some(name.to_string()))
+            .filter(|client| client.name != name)
             .cloned()
             .collect();
 
@@ -692,10 +726,10 @@ mod tests {
             unreachable!("Could not create IP address: {:?}", e);
         });
 
-        let client = ClientConfig::new("test", &ip);
+        let client = ClientConfig::new("test", &ip, "default");
 
-        assert_eq!(client.name, Some("test".to_string()));
-        assert_eq!(client.ip, Some(ip));
+        assert_eq!(client.name, "test".to_string());
+        assert_eq!(client.ip, ip);
 
         let peer = PeerConfig::from_client(&client);
 
@@ -732,7 +766,7 @@ mod tests {
 
         // introduce the secondary to the primary
         let invite = primary
-            .add_client(&secondary.name(), "127.0.0.1")
+            .add_client(&secondary.name(), "127.0.0.1", "default")
             .unwrap_or_else(|e| {
                 unreachable!("Cannot add secondary to primary: {}", e);
             });
@@ -745,7 +779,7 @@ mod tests {
         assert_eq!(primary.clients().len(), 1);
         assert_eq!(secondary.servers().len(), 1);
 
-        assert_eq!(primary.clients()[0].name(), Some("secondary".to_string()));
+        assert_eq!(primary.clients()[0].name(), "secondary".to_string());
         assert_eq!(secondary.servers()[0].name(), "primary".to_string());
     }
 }

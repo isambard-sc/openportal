@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added the concept of zones. Agents can now only send messages along chains
+  within the same zone. This increases security, and makes it easier to
+  segment the agent peer network into different zones (with some agents
+  acting as bridges between multiple zones).
 
 ## [0.0.19] - 2024-11-07
 ### Fixed

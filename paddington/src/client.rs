@@ -16,7 +16,7 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Err
         ));
     }
 
-    let peer_name = peer.name().clone().unwrap_or_default();
+    let peer_name = peer.name();
 
     if peer_name.is_empty() {
         return Err(Error::UnknownPeer(

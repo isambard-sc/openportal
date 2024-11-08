@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent::Peer;
 use crate::board::Waiter;
 use crate::command::Command as ControlCommand;
 use crate::destination::Destination;
@@ -18,24 +19,26 @@ use uuid::Uuid;
 pub struct Envelope {
     recipient: String,
     sender: String,
+    zone: String,
     job: Job,
 }
 
 impl Envelope {
-    pub fn new(recipient: &str, sender: &str, job: &Job) -> Self {
+    pub fn new(recipient: &str, sender: &str, zone: &str, job: &Job) -> Self {
         Self {
             recipient: recipient.to_owned(),
             sender: sender.to_owned(),
+            zone: zone.to_owned(),
             job: job.clone(),
         }
     }
 
-    pub fn recipient(&self) -> String {
-        self.recipient.clone()
+    pub fn recipient(&self) -> Peer {
+        Peer::new(&self.recipient, &self.zone)
     }
 
-    pub fn sender(&self) -> String {
-        self.sender.clone()
+    pub fn sender(&self) -> Peer {
+        Peer::new(&self.sender, &self.zone)
     }
 
     pub fn job(&self) -> Job {
@@ -135,7 +138,7 @@ pub struct Job {
     state: Status,
     result: Option<String>,
     #[serde(skip)]
-    board: Option<String>,
+    board: Option<Peer>,
 }
 
 // implement display for Job
@@ -219,7 +222,7 @@ impl Job {
         }
     }
 
-    pub fn assert_is_for_board(&self, agent: &str) -> Result<(), Error> {
+    pub fn assert_is_for_board(&self, agent: &Peer) -> Result<(), Error> {
         match &self.board {
             Some(b) => {
                 if b == agent {
@@ -375,7 +378,7 @@ impl Job {
         }
     }
 
-    pub async fn received(&self, agent: &str) -> Result<Job, Error> {
+    pub async fn received(&self, peer: &Peer) -> Result<Job, Error> {
         if self.state == Status::Created {
             return Err(Error::InvalidState(
                 format!("A created job should not have been received? {:?}", self).to_owned(),
@@ -385,7 +388,7 @@ impl Job {
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -404,19 +407,19 @@ impl Job {
 
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
-            job.board = Some(agent.to_owned());
+            job.board = Some(peer.clone());
             board.add(&job)?;
         }
 
         Ok(job)
     }
 
-    pub async fn put(&self, agent: &str) -> Result<Job, Error> {
+    pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
         // transition the job to pending, recording where it was sent
         let mut job = self.pending()?;
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -435,12 +438,12 @@ impl Job {
 
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
-            job.board = Some(agent.to_owned());
+            job.board = Some(peer.clone());
             board.add(&job)?;
         }
 
         // now send it to the agent for processing
-        ControlCommand::put(&job).send_to(agent).await?;
+        ControlCommand::put(&job).send_to(peer).await?;
 
         Ok(job)
     }
@@ -481,11 +484,11 @@ impl Job {
         Ok(self.clone())
     }
 
-    pub async fn update(&self, agent: &str) -> Result<Job, Error> {
+    pub async fn update(&self, peer: &Peer) -> Result<Job, Error> {
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -504,21 +507,21 @@ impl Job {
 
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
-            job.board = Some(agent.to_owned());
+            job.board = Some(peer.clone());
             board.add(&job)?;
         }
 
         // now send it to the agent for processing
-        ControlCommand::update(&job).send_to(agent).await?;
+        ControlCommand::update(&job).send_to(peer).await?;
 
         Ok(job)
     }
 
-    pub async fn deleted(&self, agent: &str) -> Result<Job, Error> {
+    pub async fn deleted(&self, peer: &Peer) -> Result<Job, Error> {
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -536,7 +539,7 @@ impl Job {
             let mut board = board.write().await;
 
             // remove the job to the board
-            job.board = Some(agent.to_owned());
+            job.board = Some(peer.clone());
             board.remove(&job)?;
             job.board = None;
         }
@@ -544,11 +547,11 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn delete(&self, agent: &str) -> Result<Job, Error> {
+    pub async fn delete(&self, peer: &Peer) -> Result<Job, Error> {
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -566,13 +569,13 @@ impl Job {
             let mut board = board.write().await;
 
             // remove the job from the board
-            job.board = Some(agent.to_owned());
+            job.board = Some(peer.clone());
             board.remove(&job)?;
             job.board = None;
         }
 
         // now send it to the agent for processing
-        ControlCommand::delete(&job).send_to(agent).await?;
+        ControlCommand::delete(&job).send_to(peer).await?;
 
         Ok(job)
     }

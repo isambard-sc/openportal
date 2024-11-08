@@ -10,7 +10,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use paddington::config::{
     load as load_config, save as save_config, Defaults as ServiceDefaults, ServiceConfig,
 };
-use paddington::invite::{load as load_invite, save as save_invite, Invite};
+use paddington::invite::{load as load_invite, save as save_invite};
 use secrecy::Secret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -185,7 +185,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             }
 
             // save the config to the requested file
-            save_config(config, &config_file)?;
+            save_config(&config, &config_file)?;
 
             tracing::info!(
                 "Service initialised. Config file written to {}",
@@ -198,6 +198,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             ip,
             list,
             remove,
+            zone,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -217,12 +218,14 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
                 let mut config = load_config::<Config>(&config_file)?;
 
-                let invite = config
-                    .service
-                    .add_client(client, &ip.clone().unwrap_or_else(|| "".to_string()))?;
+                let invite = config.service.add_client(
+                    client,
+                    &ip.clone().unwrap_or_else(|| "".to_string()),
+                    zone,
+                )?;
 
-                save_config(config, &config_file)?;
-                save_invite(invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;
+                save_config(&config, &config_file)?;
+                save_invite(&invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;
 
                 tracing::info!("Client '{}' added.", client);
                 return Ok(None);
@@ -230,8 +233,8 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
             if let Some(client) = remove {
                 let mut config = load_config::<Config>(&config_file)?;
-                config.service.remove_client(client)?;
-                save_config(config, &config_file)?;
+                config.service.remove_client(client, zone)?;
+                save_config(&config, &config_file)?;
                 tracing::info!("Client '{}' removed.", client);
                 return Ok(None);
             }
@@ -240,7 +243,12 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
             return Ok(None);
         }
-        Some(Commands::Server { add, list, remove }) => {
+        Some(Commands::Server {
+            add,
+            list,
+            remove,
+            zone,
+        }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
                 for server in config.service.servers() {
@@ -251,18 +259,29 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
             if let Some(server) = add {
                 // read the invitation from the passed toml file
-                let invite = load_invite::<Invite>(server)?;
+                let invite = load_invite(server)?;
+
+                let zone = zone.clone().unwrap_or_else(|| invite.zone());
+
+                if zone != invite.zone() {
+                    return Err(Error::InvalidConfig(format!(
+                        "Zone mismatch: invite is for zone '{}', but zone '{}' was specified.",
+                        invite.zone(),
+                        zone
+                    )));
+                }
+
                 let mut config = load_config::<Config>(&config_file)?;
                 config.service.add_server(invite)?;
-                save_config(config, &config_file)?;
+                save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' added.", server.display());
                 return Ok(None);
             }
 
             if let Some(server) = remove {
                 let mut config = load_config::<Config>(&config_file)?;
-                config.service.remove_server(server)?;
-                save_config(config, &config_file)?;
+                config.service.remove_server(server, zone)?;
+                save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' removed.", server);
                 return Ok(None);
             }
@@ -287,20 +306,20 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     }
                 }
             }
-            save_config(config, &config_file)?;
+            save_config(&config, &config_file)?;
             return Ok(None);
         }
         Some(Commands::Secret { key, value }) => {
             let mut config = load_config::<Config>(&config_file)?;
             let value = config.service().encrypt(value)?;
             config.extras.insert(key.clone(), value.clone());
-            save_config(config, &config_file)?;
+            save_config(&config, &config_file)?;
             return Ok(None);
         }
         Some(Commands::Extra { key, value }) => {
             let mut config = load_config::<Config>(&config_file)?;
             config.extras.insert(key.clone(), value.clone());
-            save_config(config, &config_file)?;
+            save_config(&config, &config_file)?;
             return Ok(None);
         }
         Some(Commands::Run {}) => {
@@ -349,6 +368,13 @@ enum Commands {
 
         #[arg(long, short = 'l', help = "List all clients added to the service")]
         list: bool,
+
+        #[arg(
+            long,
+            short = 'z',
+            help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
+        )]
+        zone: Option<String>,
     },
 
     /// Adding and removing servers
@@ -369,6 +395,13 @@ enum Commands {
 
         #[arg(long, short = 'l', help = "List all servers added to the service")]
         list: bool,
+
+        #[arg(
+            long,
+            short = 'z',
+            help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
+        )]
+        zone: Option<String>,
     },
 
     /// Initialise the Service

@@ -4,6 +4,7 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Display;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize)]
@@ -82,37 +83,91 @@ pub mod provider {
     pub use crate::provider::run;
 }
 
-struct Registrar {
-    agents: HashMap<String, Type>,
-    by_type: HashMap<Type, Vec<String>>,
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub struct Peer {
+    name: String,
+    zone: String,
 }
 
-impl Registrar {
-    fn new() -> Self {
+impl Peer {
+    pub fn new(name: &str, zone: &str) -> Self {
         Self {
-            agents: HashMap::new(),
-            by_type: HashMap::new(),
+            name: name.to_string(),
+            zone: zone.to_string(),
         }
     }
 
-    fn register(&mut self, name: &str, agent_type: &Type) {
-        self.agents.insert(name.to_string(), agent_type.clone());
-        self.by_type
-            .entry(agent_type.clone())
-            .or_default()
-            .push(name.to_string());
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    fn remove(&mut self, name: &str) {
-        if let Some(agent_type) = self.agents.remove(name) {
-            if let Some(v) = self.by_type.get_mut(&agent_type) {
-                v.retain(|n| n != name);
+    pub fn zone(&self) -> &str {
+        &self.zone
+    }
+}
+
+impl Display for Peer {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}@{}", self.name, self.zone)
+    }
+}
+
+struct Registrar {
+    peers: HashMap<Peer, Type>,
+    peers_by_type: HashMap<Type, Vec<Peer>>,
+    name: String,
+    typ: Type,
+    zones: Vec<String>,
+}
+
+impl Registrar {
+    fn create_null() -> Self {
+        Self {
+            peers: HashMap::new(),
+            peers_by_type: HashMap::new(),
+            name: String::new(),
+            typ: Type::Portal,
+            zones: Vec::new(),
+        }
+    }
+
+    fn register_self(&mut self, name: &str, agent_type: &Type) {
+        self.name = name.to_string();
+        self.typ = agent_type.clone();
+    }
+
+    fn register_peer(&mut self, peer: &Peer, agent_type: &Type) {
+        self.peers.insert(peer.clone(), agent_type.clone());
+        self.peers_by_type
+            .entry(agent_type.clone())
+            .or_default()
+            .push(peer.clone());
+
+        if !self.zones.contains(&peer.zone) {
+            self.zones.push(peer.zone().to_owned());
+        }
+    }
+
+    fn remove(&mut self, peer: &Peer) {
+        if let Some(agent_type) = self.peers.remove(peer) {
+            if let Some(v) = self.peers_by_type.get_mut(&agent_type) {
+                v.retain(|p| *p != *peer);
+            }
+
+            // make sure to update the zones list - this is a bit nasty,
+            // there are better ways to do it ;-)
+            self.zones.clear();
+
+            for (peer, _) in self.peers.iter() {
+                if !self.zones.contains(&peer.zone) {
+                    self.zones.push(peer.zone.clone());
+                }
             }
         }
     }
 
-    fn agents(&self, agent_type: &Type) -> Vec<String> {
-        self.by_type
+    fn agents(&self, agent_type: &Type) -> Vec<Peer> {
+        self.peers_by_type
             .get(agent_type)
             .map(|v| v.to_vec())
             .unwrap_or_default()
@@ -121,8 +176,8 @@ impl Registrar {
     ///
     /// Return the name of the first portal agent in the system
     ///
-    fn portal(&self) -> Option<String> {
-        self.by_type
+    fn portal(&self) -> Option<Peer> {
+        self.peers_by_type
             .get(&Type::Portal)
             .and_then(|v| v.first().cloned())
     }
@@ -130,8 +185,8 @@ impl Registrar {
     ///
     /// Return the name of the first account agent in the system
     ///
-    fn account(&self) -> Option<String> {
-        self.by_type
+    fn account(&self) -> Option<Peer> {
+        self.peers_by_type
             .get(&Type::Account)
             .and_then(|v| v.first().cloned())
     }
@@ -139,54 +194,63 @@ impl Registrar {
     ///
     /// Return the name of the first filesystem agent in the system
     ///
-    fn filesystem(&self) -> Option<String> {
-        self.by_type
+    fn filesystem(&self) -> Option<Peer> {
+        self.peers_by_type
             .get(&Type::Filesystem)
             .and_then(|v| v.first().cloned())
     }
 }
 
-static REGISTAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::new()));
+static REGISTAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
 
 ///
-/// Register that the agent called 'name' is of type 'agent_type'
+/// Register that the peer agent called 'name' is of type 'agent_type'
+/// and is connecting from zone `zone`
 ///
-pub async fn register(name: &str, agent_type: &Type) {
-    REGISTAR.write().await.register(name, agent_type)
+pub async fn register_peer(peer: &Peer, agent_type: &Type) {
+    REGISTAR.write().await.register_peer(peer, agent_type)
 }
 
 ///
-/// Remove the agent called 'name' from the registry
+/// Register that this agent in this process is called `name` and
+/// is of type `agent_type`
 ///
-pub async fn remove(name: &str) {
-    REGISTAR.write().await.remove(name)
+pub async fn register_self(name: &str, agent_type: &Type) {
+    REGISTAR.write().await.register_self(name, agent_type)
+}
+
+///
+/// Remove the agent called 'name' in the zone `zone` from the registry
+///
+pub async fn remove(peer: &Peer) {
+    REGISTAR.write().await.remove(peer)
 }
 
 ///
 /// Return the names of all agents of a specified type
 ///
-pub async fn get_all(agent_type: &Type) -> Vec<String> {
+pub async fn get_all(agent_type: &Type) -> Vec<Peer> {
     REGISTAR.read().await.agents(agent_type)
 }
 
 ///
 /// Return the name of the first portal agent in the system
 ///
-pub async fn portal() -> Option<String> {
+pub async fn portal() -> Option<Peer> {
     REGISTAR.read().await.portal()
 }
 
 ///
 /// Return the name of the first account agent in the system
 ///
-pub async fn account() -> Option<String> {
+pub async fn account() -> Option<Peer> {
     REGISTAR.read().await.account()
 }
 
 ///
 /// Return the name of the first filesystem agent in the system
 ///
-pub async fn filesystem() -> Option<String> {
+pub async fn filesystem() -> Option<Peer> {
     REGISTAR.read().await.filesystem()
 }
 
@@ -200,8 +264,8 @@ mod tests {
     async fn clear() {
         let mut registrar = REGISTAR.write().await;
 
-        registrar.agents.clear();
-        registrar.by_type.clear();
+        registrar.peers.clear();
+        registrar.peers_by_type.clear();
     }
 
     #[tokio::test]
@@ -209,43 +273,43 @@ mod tests {
         // run all tests in one function, as they need to be serial
         // or they overwrite each other
         clear().await;
-        register("test", &Type::Portal).await;
+        register_peer(&Peer::new("test", "default"), &Type::Portal).await;
         let agents = get_all(&Type::Portal).await;
-        assert_eq!(agents, vec!["test"]);
+        assert_eq!(agents, vec![Peer::new("test", "default")]);
 
         clear().await;
-        register("test", &Type::Portal).await;
-        remove("test").await;
+        register_peer(&Peer::new("test", "internal"), &Type::Portal).await;
+        remove(&Peer::new("test", "internal")).await;
         let agents = get_all(&Type::Portal).await;
         assert!(agents.is_empty());
 
         clear().await;
-        register("test", &Type::Portal).await;
+        register_peer(&Peer::new("test", "internal"), &Type::Portal).await;
         let agent = portal().await;
-        assert_eq!(agent, Some("test".to_string()));
+        assert_eq!(agent, Some(Peer::new("test", "internal")));
 
         clear().await;
-        register("test", &Type::Account).await;
+        register_peer(&Peer::new("test", "local"), &Type::Account).await;
         let agent = account().await;
-        assert_eq!(agent, Some("test".to_string()));
+        assert_eq!(agent, Some(Peer::new("test", "local")));
 
         clear().await;
-        register("test", &Type::Filesystem).await;
+        register_peer(&Peer::new("test", "something"), &Type::Filesystem).await;
         let agent = filesystem().await;
-        assert_eq!(agent, Some("test".to_string()));
+        assert_eq!(agent, Some(Peer::new("test", "something")));
 
         clear().await;
-        register("test1", &Type::Portal).await;
-        register("test2", &Type::Portal).await;
-        register("test3", &Type::Provider).await;
-        remove("test1").await;
+        register_peer(&Peer::new("test1", "internal"), &Type::Portal).await;
+        register_peer(&Peer::new("test2", "default"), &Type::Portal).await;
+        register_peer(&Peer::new("test3", "internal"), &Type::Provider).await;
+        remove(&Peer::new("test1", "internal")).await;
 
         let agents = get_all(&Type::Portal).await;
-        assert_eq!(agents, vec!["test2"]);
+        assert_eq!(agents, vec![Peer::new("test2", "default")]);
         let agents = get_all(&Type::Provider).await;
-        assert_eq!(agents, vec!["test3"]);
+        assert_eq!(agents, vec![Peer::new("test3", "internal")]);
 
-        assert_eq!(portal().await, Some("test2".to_string()));
+        assert_eq!(portal().await, Some(Peer::new("test2", "default")));
         assert_eq!(account().await, None);
         assert_eq!(filesystem().await, None);
     }

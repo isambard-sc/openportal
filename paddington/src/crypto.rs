@@ -59,7 +59,7 @@ impl Signature {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Key {
     #[serde_as(as = "serde_with::hex::Hex")]
-    pub data: vec::Vec<u8>,
+    data: vec::Vec<u8>,
 }
 
 impl Zeroize for Key {
@@ -152,6 +152,13 @@ impl Key {
     ///
     pub fn null() -> SecretKey {
         Key { data: vec![0; 32] }.into()
+    }
+
+    ///
+    /// Return whether or not this key is null
+    ///
+    pub fn is_null(&self) -> bool {
+        self.data.is_empty() || self.data.iter().all(|&x| x == 0)
     }
 
     ///

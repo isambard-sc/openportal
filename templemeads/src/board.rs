@@ -6,12 +6,13 @@ use std::collections::HashMap;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::agent::Peer;
 use crate::error::Error;
 use crate::job::Job;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Board {
-    peer: String,
+    peer: Peer,
     jobs: HashMap<Uuid, Job>,
 
     // do not serialise or clone the waiters
@@ -31,9 +32,9 @@ impl Clone for Board {
 }
 
 impl Board {
-    pub fn new(peer: &str) -> Self {
+    pub fn new(peer: &Peer) -> Self {
         Self {
-            peer: peer.to_string(),
+            peer: peer.clone(),
             jobs: HashMap::new(),
             waiters: HashMap::new(),
         }

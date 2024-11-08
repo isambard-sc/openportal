@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent::Peer;
 use crate::board::Board;
 use crate::error::Error;
 
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 struct States {
-    states: HashMap<String, Arc<State>>,
+    states: HashMap<Peer, Arc<State>>,
 }
 
 static STATES: Lazy<RwLock<States>> = Lazy::new(|| RwLock::new(States::new()));
@@ -24,25 +25,25 @@ impl States {
     }
 }
 
-async fn _force_get(key: &str) -> Result<Arc<State>, Error> {
+async fn _force_get(peer: Peer) -> Result<Arc<State>, Error> {
     Ok(STATES
         .write()
         .await
         .states
-        .entry(key.to_string())
-        .or_insert(Arc::new(State::new(key)))
+        .entry(peer.clone())
+        .or_insert(Arc::new(State::new(peer.clone())))
         .clone())
 }
 
-async fn _get(key: &str) -> Result<Option<Arc<State>>, Error> {
-    Ok(STATES.read().await.states.get(key).cloned())
+async fn _get(peer: &Peer) -> Result<Option<Arc<State>>, Error> {
+    Ok(STATES.read().await.states.get(peer).cloned())
 }
 
-pub async fn get(key: &str) -> Result<Arc<State>, Error> {
-    if let Some(state) = _get(key).await? {
+pub async fn get(peer: &Peer) -> Result<Arc<State>, Error> {
+    if let Some(state) = _get(peer).await? {
         Ok(state)
     } else {
-        Ok(_force_get(key).await?)
+        Ok(_force_get(peer.clone()).await?)
     }
 }
 
@@ -52,9 +53,9 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(key: &str) -> Self {
+    pub fn new(peer: Peer) -> Self {
         Self {
-            board: Arc::new(RwLock::new(Board::new(key))),
+            board: Arc::new(RwLock::new(Board::new(&peer))),
         }
     }
 

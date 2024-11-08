@@ -158,7 +158,7 @@ async_message_handler! {
         }
 
         // just echo the message back to the sender
-        send(Message::new(message.sender(), message.payload())).await?;
+        send(Message::send_to(message.sender(), message.zone(), message.payload())).await?;
 
         // exit if the message is "0"
         if message.payload() == "0" {
@@ -219,7 +219,7 @@ async_message_handler! {
         match message.is_control() {
             true => {
                 // start the echo exchange
-                send(Message::new("echo-client", "1000")).await?;
+                send(Message::send_to("echo-client", message.zone(), "1000")).await?;
             }
             false => {
                 // the message should be a number - we will decrement
@@ -229,7 +229,7 @@ async_message_handler! {
                 })?;
 
                 // echo the decremented number
-                send(Message::new(message.sender(), &(number - 1).to_string())).await?;
+                send(Message::send_to(message.sender(), message.zone(), &(number - 1).to_string())).await?;
 
                 if number <= 1 {
                     // blast off!
@@ -265,7 +265,7 @@ async fn run_server(
     // create the echo-server service
     let mut service = ServiceConfig::new("echo-server", url, ip, port, &None, &None)?;
 
-    let invite = service.add_client("echo-client", range)?;
+    let invite = service.add_client("echo-client", range, &None)?;
 
     // save the invitation to the requested file
     invite.save(invitation)?;

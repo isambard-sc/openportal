@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent;
-use crate::agent::Type as AgentType;
+use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
@@ -37,12 +37,12 @@ impl Default for ServiceDetails {
 static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
     Lazy::new(|| RwLock::new(ServiceDetails::default()));
 
-pub async fn set_service_details(
+pub async fn set_my_service_details(
     service: &str,
     agent_type: &agent::Type,
     runner: Option<AsyncRunnable>,
 ) -> Result<()> {
-    agent::register(service, agent_type).await;
+    agent::register_self(service, agent_type).await;
     let mut service_details = SERVICE_DETAILS.write().await;
     service_details.service = service.to_string();
     service_details.agent_type = agent_type.clone();
@@ -63,19 +63,22 @@ pub async fn set_service_details(
 async fn process_command(
     recipient: &str,
     sender: &str,
+    zone: &str,
     command: &Command,
     runner: &AsyncRunnable,
 ) -> Result<(), Error> {
     match command {
         Command::Register { agent } => {
             tracing::info!("Registering agent: {}", agent);
-            agent::register(sender, agent).await;
+            agent::register_peer(&Peer::new(sender, zone), agent).await;
         }
         Command::Update { job } => {
-            tracing::info!("Update job: {} to {} from {}", job, recipient, sender);
+            let peer = Peer::new(sender, zone);
+
+            tracing::info!("Update job: {} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
-            let job = job.received(sender).await?;
+            let job = job.received(&peer).await?;
 
             // now see if we need to send this to the next agent
             match job.destination().position(recipient, sender) {
@@ -83,78 +86,104 @@ async fn process_command(
                     // if we are upstream, then the job is moving backwards so we need to
                     // send it to the previous agent
                     if let Some(agent) = job.destination().previous(recipient) {
-                        let _ = job.update(&agent).await?;
+                        let _ = job.update(&Peer::new(&agent, zone)).await?;
                     }
                 }
                 Position::Downstream => {
                     // if we are downstream, then we continue to let the job
                     // flow downstream
                     if let Some(agent) = job.destination().next(recipient) {
-                        let _ = job.update(&agent).await?;
+                        let _ = job.update(&Peer::new(&agent, zone)).await?;
                     }
                 }
                 Position::Destination => {
                     tracing::info!("Job has arrived at its destination: {}", job);
                 }
-                _ => {
-                    tracing::warn!("Job {} is being updated, but is not moving?", job);
+                Position::Error => {
+                    tracing::error!("Job has got into an errored position: {}", job);
                 }
             }
         }
         Command::Put { job } => {
-            tracing::info!("Put job: {} to {} from {}", job, recipient, sender);
+            let peer = Peer::new(sender, zone);
+
+            tracing::info!("Put job: {} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
-            let job = job.received(sender).await?;
+            let mut job = match job.received(&peer).await {
+                Ok(job) => job,
+                Err(e) => {
+                    tracing::error!("Error receiving job: {}", e);
+                    job.errored(&e.to_string())?;
+                    let _ = job.update(&Peer::new(sender, zone)).await?;
+                    return Ok(());
+                }
+            };
 
             match job.destination().position(recipient, sender) {
                 Position::Downstream => {
                     // if we are downstream, then we continue to let the job
                     // flow downstream
                     if let Some(agent) = job.destination().next(recipient) {
-                        let _ = job.put(&agent).await?;
+                        job = match job.put(&Peer::new(&agent, zone)).await {
+                            Ok(job) => job,
+                            Err(e) => {
+                                tracing::error!("Error putting job: {}", e);
+                                job.errored(&e.to_string())?
+                            }
+                        }
                     }
                 }
                 Position::Destination => {
                     // we are the destination, so we need to take action
-                    let job = match runner(Envelope::new(recipient, sender, &job)).await {
+                    job = match runner(Envelope::new(recipient, sender, zone, &job)).await {
                         Ok(job) => job,
                         Err(e) => {
                             tracing::error!("Error running job: {}", e);
                             job.errored(&e.to_string())?
                         }
                     };
-
-                    tracing::info!("Job has finished: {}", job);
-
-                    // now the job has finished, update the sender's board
-                    let _ = job.update(sender).await?;
+                }
+                Position::Error => {
+                    tracing::error!("Job has got into an errored position: {}", job);
+                    job = job.errored("Job has got into an errored position")?;
                 }
                 _ => {
                     tracing::warn!("Job {} is being put, but is not moving?", job);
+                    job = job.errored("Job has got into an unknown position")?;
                 }
             }
+
+            tracing::info!("Job has finished: {}", job);
+
+            // now the job has finished, update the sender's board
+            let _ = job.update(&Peer::new(sender, zone)).await?;
         }
         Command::Delete { job } => {
-            tracing::info!("Delete job: {} to {} from {}", job, recipient, sender);
+            let peer = Peer::new(sender, zone);
+
+            tracing::info!("Delete job: {} to {} from {}", job, recipient, peer,);
 
             // record that the sender has deleted the job
-            let job = job.deleted(sender).await?;
+            let job = job.deleted(&peer).await?;
 
             match job.destination().position(recipient, sender) {
                 Position::Upstream => {
                     // if we are upstream, then the job is moving backwards so we need to
                     // send it to the previous agent
                     if let Some(agent) = job.destination().previous(recipient) {
-                        let _ = job.delete(&agent).await?;
+                        let _ = job.delete(&Peer::new(&agent, zone)).await?;
                     }
                 }
                 Position::Downstream => {
                     // if we are downstream, then we continue to let the job
                     // flow downstream
                     if let Some(agent) = job.destination().next(recipient) {
-                        let _ = job.delete(&agent).await?;
+                        let _ = job.delete(&Peer::new(&agent, zone)).await?;
                     }
+                }
+                Position::Error => {
+                    tracing::error!("Job has got into an errored position: {}", job);
                 }
                 _ => {
                     tracing::warn!("Job {} is being deleted, but is not moving?", job);
@@ -185,6 +214,7 @@ async_message_handler! {
             MessageType::KeepAlive => {
                 let sender: String = message.sender().to_owned();
                 let recipient: String = message.recipient().to_owned();
+                let zone: String = message.zone().to_owned();
 
                 if (recipient != service_info.service) {
                     return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
@@ -193,10 +223,10 @@ async_message_handler! {
                 // wait 20 seconds and send a keep alive message back
                 tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
 
-                match paddington::send(Message::keepalive(&sender)).await {
+                match paddington::send(Message::keepalive(&sender, &zone)).await {
                     Ok(_) => {}
                     Err(e) => {
-                        tracing::warn!("Error sending keepalive message to {} : {}", sender, e);
+                        tracing::warn!("Error sending keepalive message to {} in zone {}: {}", sender, zone, e);
                     }
                 }
 
@@ -205,13 +235,14 @@ async_message_handler! {
             MessageType::Message => {
                 let sender: String = message.sender().to_owned();
                 let recipient: String = message.recipient().to_owned();
+                let zone: String = message.zone().to_owned();
                 let command: Command = message.into();
 
                 if (recipient != service_info.service) {
                     return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
                 }
 
-                process_command(&recipient, &sender, &command, &service_info.runner).await?;
+                process_command(&recipient, &sender, &zone, &command, &service_info.runner).await?;
 
                 Ok(())
             }

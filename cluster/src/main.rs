@@ -71,17 +71,17 @@ async fn main() -> Result<()> {
                 AddUser(user) => {
                     // add the user to the cluster
                     tracing::info!("Adding user to cluster: {}", user);
-                    let mapping = create_account(&me, &user).await?;
+                    let mapping = create_account(me.name(), &user).await?;
 
                     job = job.running(Some("Step 1/3: Account created".to_string()))?;
                     job = job.update(&sender).await?;
 
-                    let homedir = create_directories(&me, &mapping).await?;
+                    let homedir = create_directories(me.name(), &mapping).await?;
 
                     job = job.running(Some("Step 2/3: Directories created".to_string()))?;
                     job = job.update(&sender).await?;
 
-                    let _ = update_homedir(&me, &user, &homedir).await?;
+                    let _ = update_homedir(me.name(), &user, &homedir).await?;
 
                     job = job.completed(mapping)?;
                 }
@@ -113,7 +113,7 @@ async fn create_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, 
     match agent::account().await {
         Some(account) => {
             // send the add_job to the account agent
-            let job = Job::parse(&format!("{}.{} add_user {}", me, account, user))?
+            let job = Job::parse(&format!("{}.{} add_user {}", me, account.name(), user))?
                 .put(&account)
                 .await?;
 
@@ -147,9 +147,14 @@ async fn create_directories(me: &str, mapping: &UserMapping) -> Result<String, E
     match agent::filesystem().await {
         Some(filesystem) => {
             // send the add_job to the filesystem agent
-            let job = Job::parse(&format!("{}.{} add_local_user {}", me, filesystem, mapping))?
-                .put(&filesystem)
-                .await?;
+            let job = Job::parse(&format!(
+                "{}.{} add_local_user {}",
+                me,
+                filesystem.name(),
+                mapping
+            ))?
+            .put(&filesystem)
+            .await?;
 
             // Wait for the add_job to complete
             let result = job.wait().await?.result::<String>()?;
@@ -183,7 +188,10 @@ async fn update_homedir(me: &str, user: &UserIdentifier, homedir: &str) -> Resul
             // send the add_job to the account agent
             let job = Job::parse(&format!(
                 "{}.{} update_homedir {} {}",
-                me, account, user, homedir
+                me,
+                account.name(),
+                user,
+                homedir
             ))?
             .put(&account)
             .await?;

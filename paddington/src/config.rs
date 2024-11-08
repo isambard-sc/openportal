@@ -9,7 +9,7 @@ use anyhow::Context;
 use iptools::iprange::IpRange;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use std::fmt::{self, Display};
+use std::fmt::Display;
 use std::net::IpAddr;
 use std::path;
 use url::Url;
@@ -148,7 +148,7 @@ pub struct ServerConfig {
 }
 
 impl Display for ServerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "ServerConfig {{ name: {}, url: {}, zone: {} }}",
@@ -279,7 +279,7 @@ pub enum IpOrRange {
 }
 
 impl Display for IpOrRange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IpOrRange::IP(ip) => write!(f, "{}", ip),
             IpOrRange::Range(range) => write!(f, "{}", range),
@@ -326,7 +326,7 @@ pub struct ClientConfig {
 }
 
 impl Display for ClientConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "ClientConfig {{ name: {}, ip: {}, zone: {} }}",
@@ -402,7 +402,7 @@ pub enum PeerConfig {
 }
 
 impl Display for PeerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PeerConfig::Server(server) => write!(f, "{}", server),
             PeerConfig::Client(client) => write!(f, "{}", client),

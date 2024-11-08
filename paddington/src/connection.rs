@@ -8,7 +8,8 @@ use futures::{SinkExt, StreamExt};
 use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
 use secrecy::ExposeSecret;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::fmt::Display;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
@@ -43,6 +44,42 @@ pub struct Connection {
     outer_key: Option<SecretKey>,
     peer: Option<PeerConfig>,
     tx: Option<Arc<TokioMutex<UnboundedSender<TokioMessage>>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PeerDetails {
+    name: String,
+    zone: String,
+    version: u32,
+}
+
+impl Display for PeerDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.zone)
+    }
+}
+
+impl PeerDetails {
+    fn new(name: &str, zone: &str) -> Self {
+        // everything is currently version 1
+        PeerDetails {
+            name: name.to_string(),
+            zone: zone.to_string(),
+            version: 1,
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn zone(&self) -> &str {
+        &self.zone
+    }
+
+    fn version(&self) -> u32 {
+        self.version
+    }
 }
 
 fn envelope_message<T>(
@@ -274,15 +311,12 @@ impl Connection {
                 }
             };
 
-        // the final step is to exchange names and aliases with the server.
-        // We send the server our name and alias, and the server will send
-        // us its name and alias. We will both validate that the names match
-        // the expected names, and then we can trust the connection.
-        let message = match envelope_message(
-            format!("{}:{}", self.config.name(), self.config.name()),
-            &inner_key,
-            &outer_key,
-        ) {
+        // the final step is for the client to send the server its PeerDetails,
+        // and for the server to respond. These should match up with
+        // what we expect
+        let peer_details = PeerDetails::new(&self.config.name(), &peer.zone());
+
+        let message = match envelope_message(peer_details, &inner_key, &outer_key) {
             Ok(message) => message,
             Err(e) => {
                 tracing::warn!("Error enveloping message: {:?}", e);
@@ -317,9 +351,9 @@ impl Connection {
             }
         };
 
-        // the response should be the server's name and alias, separated by a colon
-        let response: String = match deenvelope_message(response, &inner_key, &outer_key) {
-            Ok(response) => response,
+        // the response should be the server's peer details, which should match what we expect
+        let peer_details: PeerDetails = match deenvelope_message(response, &inner_key, &outer_key) {
+            Ok(peer_details) => peer_details,
             Err(e) => {
                 tracing::warn!("Error de-enveloping message: {:?}", e);
                 self.set_error().await;
@@ -327,27 +361,40 @@ impl Connection {
             }
         };
 
-        let parts: Vec<&str> = response.split(':').collect();
+        tracing::info!("Connecting to peer {}", peer_details);
 
-        if parts.len() != 2 {
-            tracing::warn!("Error parsing response from peer: {:?}", response);
-            self.set_error().await;
-            return Err(Error::InvalidPeer(
-                "Error parsing response from peer.".to_string(),
-            ));
-        }
-
-        tracing::info!("Connected to peer {}, alias {}", parts[0], parts[1]);
-
-        if parts[0] != peer_name {
+        if peer_details.name() != peer_name {
             tracing::warn!(
                 "Peer name does not match expected name: {} != {}",
-                parts[0],
+                peer_details.name(),
                 peer_name
             );
             self.set_error().await;
             return Err(Error::InvalidPeer(
                 "Peer name does not match expected name.".to_string(),
+            ));
+        }
+
+        if peer_details.zone() != peer.zone() {
+            tracing::warn!(
+                "Peer zone does not match expected zone: {} != {}",
+                peer_details.zone(),
+                peer.zone()
+            );
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Peer zone does not match expected zone.".to_string(),
+            ));
+        }
+
+        if peer_details.version() != 1 {
+            tracing::warn!(
+                "Peer version does not match expected version: {} != 1",
+                peer_details.version()
+            );
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Peer version does not match expected version.".to_string(),
             ));
         }
 
@@ -618,30 +665,21 @@ impl Connection {
             .await
             .with_context(|| "Error sending response to peer")?;
 
-        // the peer will now send us its name and alias, separated by a colon
+        // the peer will now send us its PeerDetails
         let message = incoming.next().await.ok_or_else(|| {
             tracing::warn!("No peer information received - closing connection.");
             Error::InvalidPeer("No peer information received - closing connection.".to_string())
         })??;
 
-        let message = deenvelope_message::<String>(message, &inner_key, &outer_key)
+        let peer_details = deenvelope_message::<PeerDetails>(message, &inner_key, &outer_key)
             .with_context(|| "Error de-enveloping message - closing connection.")?;
 
-        let parts: Vec<&str> = message.split(':').collect();
+        tracing::info!("Connected to peer {}", peer_details);
 
-        if parts.len() != 2 {
-            tracing::warn!("Error parsing response from peer: {:?}", message);
-            return Err(Error::InvalidPeer(
-                "Error parsing response from peer - closing connection.".to_string(),
-            ));
-        }
-
-        tracing::info!("Connected to peer {}, alias {}", parts[0], parts[1]);
-
-        if parts[0] != peer_name {
+        if peer_details.name() != peer_name {
             tracing::warn!(
                 "Peer name does not match expected name: {} != {}",
-                parts[0],
+                peer_details.name(),
                 peer_name
             );
             return Err(Error::InvalidPeer(
@@ -649,12 +687,31 @@ impl Connection {
             ));
         }
 
-        // now send back our name and alias
-        let message = envelope_message(
-            format!("{}:{}", service_name, service_name),
-            &inner_key,
-            &outer_key,
-        )?;
+        if peer_details.zone() != peer.zone() {
+            tracing::warn!(
+                "Peer zone does not match expected zone: {} != {}",
+                peer_details.zone(),
+                peer.zone()
+            );
+            return Err(Error::InvalidPeer(
+                "Peer zone does not match expected zone - closing connection.".to_string(),
+            ));
+        }
+
+        if peer_details.version() != 1 {
+            tracing::warn!(
+                "Peer version does not match expected version: {} != 1",
+                peer_details.version()
+            );
+            return Err(Error::InvalidPeer(
+                "Peer version does not match expected version - closing connection.".to_string(),
+            ));
+        }
+
+        // now send back our PeerDetials
+        let peer_details = PeerDetails::new(&service_name, &peer.zone());
+
+        let message = envelope_message(peer_details, &inner_key, &outer_key)?;
 
         outgoing
             .send(message)

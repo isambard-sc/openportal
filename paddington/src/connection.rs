@@ -99,6 +99,7 @@ impl Connection {
     /// Return the zone of the connection - both sides of the connection
     /// must agree on the same zone
     ///
+    #[allow(dead_code)]
     pub fn zone(&self) -> String {
         self.peer.as_ref().unwrap_or(&PeerConfig::None).zone()
     }

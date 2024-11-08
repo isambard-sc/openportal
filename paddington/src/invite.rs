@@ -4,6 +4,7 @@
 use crate::crypto::SecretKey;
 use crate::error::Error;
 use anyhow::Context;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::path;
@@ -54,6 +55,54 @@ impl Invite {
         self.outer_key.clone()
     }
 
+    pub fn assert_valid(&self) -> Result<(), Error> {
+        if self.name.is_empty() {
+            return Err(Error::Null("Invite name is empty".to_string()));
+        }
+
+        // check the name is alphanumeric
+        if !self
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::InvalidPeer(format!(
+                "Name '{}' contains invalid characters. It must be alphanumeric or - _",
+                self.name
+            )));
+        }
+
+        if self.url.is_empty() {
+            return Err(Error::Null("Invite url is empty".to_string()));
+        }
+
+        if self.zone.is_empty() {
+            return Err(Error::Null("Invite zone is empty".to_string()));
+        }
+
+        // check the zone is alphanumeric
+        if !self
+            .zone
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::InvalidPeer(format!(
+                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
+                self.zone
+            )));
+        }
+
+        if self.inner_key.expose_secret().is_null() {
+            return Err(Error::InvalidPeer("Invite inner key is null".to_string()));
+        }
+
+        if self.outer_key.expose_secret().is_null() {
+            return Err(Error::InvalidPeer("Invite outer key is null".to_string()));
+        }
+
+        Ok(())
+    }
+
     pub fn load(filename: &path::Path) -> Result<Self, Error> {
         let invite = std::fs::read_to_string(filename)
             .with_context(|| format!("Could not read invite file: {:?}", filename))?;
@@ -61,10 +110,14 @@ impl Invite {
         let invite: Invite = toml::from_str(&invite)
             .with_context(|| format!("Could not parse invite file from toml: {:?}", filename))?;
 
+        invite.assert_valid()?;
+
         Ok(invite)
     }
 
     pub fn save(&self, filename: &path::Path) -> Result<(), Error> {
+        self.assert_valid()?;
+
         let invite_toml =
             toml::to_string(&self).with_context(|| "Could not serialise invite to toml")?;
 
@@ -101,27 +154,28 @@ impl Display for Invite {
     }
 }
 
-pub fn load<T: serde::de::DeserializeOwned + serde::Serialize>(
-    invite_file: &path::PathBuf,
-) -> Result<T, Error> {
+pub fn load(invite_file: &path::PathBuf) -> Result<Invite, Error> {
     // read the invite file
     let invite = std::fs::read_to_string(invite_file)
         .with_context(|| format!("Could not read invite file: {:?}", invite_file))?;
 
     // parse the invite file
-    let invite: T = toml::from_str(&invite)
+    let invite: Invite = toml::from_str(&invite)
         .with_context(|| format!("Could not parse invite file from toml: {:?}", invite_file))?;
+
+    // assert valid after loading, in case it has been tampered with
+    invite.assert_valid()?;
 
     Ok(invite)
 }
 
-pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
-    config: T,
-    invite_file: &path::PathBuf,
-) -> Result<(), Error> {
+pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
+    // only save valid invites
+    invite.assert_valid()?;
+
     // serialise to toml
     let invite_toml =
-        toml::to_string(&config).with_context(|| "Could not serialise invite to toml")?;
+        toml::to_string(invite).with_context(|| "Could not serialise invite to toml")?;
 
     let invite_file_string = invite_file.to_string_lossy();
 

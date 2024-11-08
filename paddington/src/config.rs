@@ -14,6 +14,10 @@ use std::net::IpAddr;
 use std::path;
 use url::Url;
 
+fn default_zone() -> String {
+    "default".to_string()
+}
+
 pub fn load<T: serde::de::DeserializeOwned + serde::Serialize>(
     config_file: &path::PathBuf,
 ) -> Result<T, Error> {
@@ -36,7 +40,7 @@ pub fn load<T: serde::de::DeserializeOwned + serde::Serialize>(
 }
 
 pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
-    config: T,
+    config: &T,
     config_file: &path::PathBuf,
 ) -> Result<(), Error> {
     // write the config to a json file
@@ -137,6 +141,7 @@ impl Defaults {
 pub struct ServerConfig {
     name: String,
     url: String,
+    #[serde(default = "default_zone")]
     zone: String,
     inner_key: SecretKey,
     outer_key: SecretKey,
@@ -314,6 +319,7 @@ impl IpOrRange {
 pub struct ClientConfig {
     name: String,
     ip: IpOrRange,
+    #[serde(default = "default_zone")]
     zone: String,
     inner_key: SecretKey,
     outer_key: SecretKey,
@@ -491,6 +497,23 @@ impl ServiceConfig {
         healthcheck_port: &Option<u16>,
         proxy_header: &Option<String>,
     ) -> Result<Self, Error> {
+        let name = name.trim();
+
+        if name.is_empty() {
+            return Err(Error::Parse("No service name provided.".to_string()));
+        }
+
+        // check that the name is [a-zA-Z0-9_-]
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::Parse(format!(
+                "Service name '{}' contains invalid characters. It must be alphanumeric or - _",
+                name
+            )));
+        }
+
         Ok(ServiceConfig {
             name: name.to_string(),
             url: create_websocket_url(url)?,
@@ -574,7 +597,12 @@ impl ServiceConfig {
         self.proxy_header.clone()
     }
 
-    pub fn add_client(&mut self, name: &str, ip: &str, zone: &str) -> Result<Invite, Error> {
+    pub fn add_client(
+        &mut self,
+        name: &str,
+        ip: &str,
+        zone: &Option<String>,
+    ) -> Result<Invite, Error> {
         let ip = IpOrRange::new(ip)
             .with_context(|| format!("Could not parse into an IP address or IP range: {}", ip))?;
 
@@ -582,12 +610,30 @@ impl ServiceConfig {
             return Err(Error::Peer("No client name provided.".to_string()));
         }
 
-        // check if we already have a client with this name
+        let zone = zone.clone().unwrap_or_else(default_zone);
+        let zone = zone.trim();
+
+        if zone.is_empty() {
+            return Err(Error::Peer("No zone provided.".to_string()));
+        }
+
+        // make sure that zone is [a-zA-Z0-9_]
+        if !zone
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::Peer(format!(
+                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
+                zone
+            )));
+        }
+
+        // check if we already have a client with this name in this zone
         for c in self.clients.iter() {
-            if c.name == name {
+            if c.name == name && c.zone == zone {
                 return Err(Error::Peer(format!(
-                    "Client with name '{}' already exists.",
-                    name
+                    "Client with name '{}' already exists in zone {}.",
+                    name, zone
                 )));
             }
         }
@@ -605,11 +651,29 @@ impl ServiceConfig {
         ))
     }
 
-    pub fn remove_client(&mut self, name: &str) -> Result<(), Error> {
+    pub fn remove_client(&mut self, name: &str, zone: &Option<String>) -> Result<(), Error> {
+        let zone = zone.clone().unwrap_or_else(default_zone);
+        let zone = zone.trim();
+
+        if zone.is_empty() {
+            return Err(Error::Peer("No zone provided.".to_string()));
+        }
+
+        // make sure that zone is [a-zA-Z0-9_-]
+        if !zone
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::Peer(format!(
+                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
+                zone
+            )));
+        }
+
         self.clients = self
             .clients
             .iter()
-            .filter(|client| client.name != name)
+            .filter(|client| client.name != name || client.zone != zone)
             .cloned()
             .collect();
 
@@ -618,10 +682,11 @@ impl ServiceConfig {
 
     pub fn add_server(&mut self, invite: Invite) -> Result<(), Error> {
         for server in self.servers.iter() {
-            if server.name == invite.name() {
+            if server.name == invite.name() && server.zone == invite.zone() {
                 return Err(Error::Peer(format!(
-                    "Server with name '{}' already exists.",
-                    invite.name()
+                    "Server with name '{}' already exists in zone {}.",
+                    invite.name(),
+                    invite.zone()
                 )));
             }
         }
@@ -638,11 +703,29 @@ impl ServiceConfig {
         Ok(())
     }
 
-    pub fn remove_server(&mut self, name: &str) -> Result<(), Error> {
+    pub fn remove_server(&mut self, name: &str, zone: &Option<String>) -> Result<(), Error> {
+        let zone = zone.clone().unwrap_or_else(default_zone);
+        let zone = zone.trim();
+
+        if zone.is_empty() {
+            return Err(Error::Peer("No zone provided.".to_string()));
+        }
+
+        // make sure that zone is [a-zA-Z0-9_]
+        if !zone
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::Peer(format!(
+                "Zone '{}' contains invalid characters. It must be alphanumeric or - _.",
+                zone
+            )));
+        }
+
         self.servers = self
             .servers
             .iter()
-            .filter(|server| server.name != name)
+            .filter(|server| server.name != name || server.zone != zone)
             .cloned()
             .collect();
 
@@ -678,7 +761,7 @@ impl ServiceConfig {
             healthcheck_port,
             proxy_header,
         )?;
-        save::<ServiceConfig>(config.clone(), &config_file)?;
+        save::<ServiceConfig>(&config, &config_file)?;
 
         // check we can read the config and return it
         let config = load::<ServiceConfig>(&config_file)?;
@@ -726,7 +809,7 @@ mod tests {
             unreachable!("Could not create IP address: {:?}", e);
         });
 
-        let client = ClientConfig::new("test", &ip, "default");
+        let client = ClientConfig::new("test", &ip, &default_zone());
 
         assert_eq!(client.name, "test".to_string());
         assert_eq!(client.ip, ip);
@@ -766,7 +849,7 @@ mod tests {
 
         // introduce the secondary to the primary
         let invite = primary
-            .add_client(&secondary.name(), "127.0.0.1", "default")
+            .add_client(&secondary.name(), "127.0.0.1", &None)
             .unwrap_or_else(|e| {
                 unreachable!("Cannot add secondary to primary: {}", e);
             });

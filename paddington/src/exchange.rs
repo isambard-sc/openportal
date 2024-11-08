@@ -156,6 +156,14 @@ pub async fn set_handler(handler: AsyncMessageHandler) -> Result<(), Error> {
     Ok(())
 }
 
+fn get_recipient(message: &Message) -> String {
+    format!("{}@{}", message.recipient(), message.zone())
+}
+
+fn get_key(connection: &Connection) -> String {
+    format!("{}@{}", connection.name(), connection.zone())
+}
+
 pub async fn unregister(connection: &Connection) -> Result<(), Error> {
     let name = connection.name();
 
@@ -165,32 +173,11 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
         ));
     }
 
-    let mut exchange = match SINGLETON_EXCHANGE.write() {
-        Ok(exchange) => exchange,
-        Err(e) => {
-            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
-        }
-    };
+    let zone = connection.zone();
 
-    let key = name.clone();
-
-    if exchange.connections.contains_key(&key) {
-        exchange.connections.remove(&key);
-        Ok(())
-    } else {
-        Err(Error::UnnamedConnection(format!(
-            "Connection {} not found",
-            name
-        )))
-    }
-}
-
-pub async fn register(connection: Connection) -> Result<(), Error> {
-    let name = connection.name();
-
-    if name.is_empty() {
+    if zone.is_empty() {
         return Err(Error::UnnamedConnection(
-            "Connection must have a name".to_string(),
+            "Connection must have a zone".to_string(),
         ));
     }
 
@@ -201,12 +188,48 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
         }
     };
 
-    let key = name.clone();
+    let key = get_key(connection);
 
     if exchange.connections.contains_key(&key) {
-        return Err(Error::UnnamedConnection(format!(
+        exchange.connections.remove(&key);
+        Ok(())
+    } else {
+        Err(Error::UnnamedConnection(format!(
+            "Connection {} not found",
+            key
+        )))
+    }
+}
+
+pub async fn register(connection: Connection) -> Result<(), Error> {
+    let name = connection.name();
+    let zone = connection.zone();
+
+    if name.is_empty() {
+        return Err(Error::UnnamedConnection(
+            "Connection must have a name".to_string(),
+        ));
+    }
+
+    if zone.is_empty() {
+        return Err(Error::UnnamedConnection(
+            "Connection must have a zone".to_string(),
+        ));
+    }
+
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
+        }
+    };
+
+    let key = get_key(&connection);
+
+    if exchange.connections.contains_key(&key) {
+        return Err(Error::InvalidPeer(format!(
             "Connection {} already exists",
-            name
+            key
         )));
     }
 
@@ -222,7 +245,7 @@ pub async fn send(message: Message) -> Result<(), Error> {
         }
     }
     .connections
-    .get(message.sender())
+    .get(&get_recipient(&message))
     .cloned();
 
     if let Some(connection) = connection {
@@ -231,7 +254,7 @@ pub async fn send(message: Message) -> Result<(), Error> {
     } else {
         Err(Error::UnnamedConnection(format!(
             "Connection {} not found",
-            message.sender()
+            message.recipient()
         )))
     }
 }

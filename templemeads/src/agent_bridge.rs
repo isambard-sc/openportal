@@ -7,7 +7,7 @@ use crate::bridge_server::{
     Invite as BridgeInvite,
 };
 use crate::error::Error;
-use crate::handler::{process_message, set_service_details};
+use crate::handler::{process_message, set_my_service_details};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -38,7 +38,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
     }
 
     // pass the service details onto the handler
-    set_service_details(&config.service.name(), &config.agent, None).await?;
+    set_my_service_details(&config.service.name(), &config.agent, None).await?;
 
     // spawn the bridge server
     spawn(config.bridge).await?;

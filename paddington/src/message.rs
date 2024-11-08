@@ -4,10 +4,13 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
+use crate::error::Error;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     sender: String,
     recipient: String,
+    zone: String,
     payload: String,
 }
 
@@ -17,8 +20,8 @@ impl Display for Message {
             true => write!(f, "Control message: {}", self.payload),
             false => write!(
                 f,
-                "Message from {} to {}: {}",
-                self.sender, self.recipient, self.payload
+                "Message in zone {} from {} to {}: {}",
+                self.zone, self.sender, self.recipient, self.payload
             ),
         }
     }
@@ -31,10 +34,20 @@ pub enum MessageType {
 }
 
 impl Message {
-    pub fn new(sender: &str, payload: &str) -> Self {
+    pub fn received_from(sender: &str, zone: &str, payload: &str) -> Self {
         Self {
-            sender: sender.to_owned(),
+            sender: sender.trim().to_owned(),
             recipient: "".to_owned(),
+            zone: zone.trim().to_owned(),
+            payload: payload.to_owned(),
+        }
+    }
+
+    pub fn send_to(recipient: &str, zone: &str, payload: &str) -> Self {
+        Self {
+            sender: "".to_owned(),
+            recipient: recipient.trim().to_owned(),
+            zone: zone.trim().to_owned(),
             payload: payload.to_owned(),
         }
     }
@@ -43,18 +56,20 @@ impl Message {
         Self {
             sender: "".to_owned(),
             recipient: "".to_owned(),
+            zone: "".to_owned(),
             payload: payload.to_owned(),
         }
     }
 
     pub fn is_control(&self) -> bool {
-        self.sender.is_empty()
+        self.sender.is_empty() && self.zone.is_empty()
     }
 
-    pub fn keepalive(sender: &str) -> Self {
+    pub fn keepalive(recipient: &str, zone: &str) -> Self {
         Self {
-            sender: sender.to_owned(),
-            recipient: "".to_owned(),
+            sender: "".to_owned(),
+            recipient: recipient.trim().to_owned(),
+            zone: zone.trim().to_owned(),
             payload: "KEEPALIVE".to_owned(),
         }
     }
@@ -81,6 +96,10 @@ impl Message {
         self.recipient = recipient.to_owned();
     }
 
+    pub fn set_sender(&mut self, sender: &str) {
+        self.sender = sender.to_owned();
+    }
+
     pub fn sender(&self) -> &str {
         &self.sender
     }
@@ -91,5 +110,19 @@ impl Message {
 
     pub fn payload(&self) -> &str {
         &self.payload
+    }
+
+    pub fn zone(&self) -> &str {
+        &self.zone
+    }
+
+    pub fn assert_in_zone(&self, zone: &str) -> Result<(), Error> {
+        match self.zone == zone.trim() {
+            true => Ok(()),
+            false => Err(Error::InvalidPeer(format!(
+                "Message zone {} does not match expected zone {}",
+                self.zone, zone
+            ))),
+        }
     }
 }

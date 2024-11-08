@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::agent::Type as AgentType;
+use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
 use crate::error::Error;
 
@@ -13,12 +13,14 @@ pub async fn process_control_message(
     command: ControlCommand,
 ) -> Result<(), Error> {
     match command {
-        ControlCommand::Connected { agent } => {
-            tracing::info!("Connected to agent: {}", agent);
-            Command::register(agent_type).send_to(&agent).await?;
+        ControlCommand::Connected { agent, zone } => {
+            let peer = Peer::new(&agent, &zone);
+            tracing::info!("Connected to agent: {}", peer);
+            Command::register(agent_type).send_to(&peer).await?;
         }
-        ControlCommand::Disconnected { agent } => {
-            tracing::info!("Disconnected from agent: {}", agent);
+        ControlCommand::Disconnected { agent, zone } => {
+            let peer = Peer::new(&agent, &zone);
+            tracing::info!("Disconnected from agent: {}", peer);
         }
         ControlCommand::Error { error } => {
             tracing::error!("Received error: {}", error);

@@ -136,7 +136,6 @@ impl Connection {
     /// Return the zone of the connection - both sides of the connection
     /// must agree on the same zone
     ///
-    #[allow(dead_code)]
     pub fn zone(&self) -> String {
         self.peer.as_ref().unwrap_or(&PeerConfig::None).zone()
     }
@@ -176,6 +175,7 @@ impl Connection {
     /// to error (it will have been automatically closed)
     ///
     pub async fn set_error(&mut self) {
+        self.closed_connection().await;
         let mut state = self.state.lock().await;
         *state = ConnectionState::Error;
         self.tx = None;
@@ -242,6 +242,7 @@ impl Connection {
         // save the peer we are connecting to
         self.peer = Some(peer.clone());
         let peer_name = peer.name();
+        let peer_zone = peer.zone();
 
         let url = server.get_websocket_url()?.to_string();
 
@@ -314,7 +315,7 @@ impl Connection {
         // the final step is for the client to send the server its PeerDetails,
         // and for the server to respond. These should match up with
         // what we expect
-        let peer_details = PeerDetails::new(&self.config.name(), &peer.zone());
+        let peer_details = PeerDetails::new(&self.config.name(), &peer_zone);
 
         let message = match envelope_message(peer_details, &inner_key, &outer_key) {
             Ok(message) => message,
@@ -375,11 +376,11 @@ impl Connection {
             ));
         }
 
-        if peer_details.zone() != peer.zone() {
+        if peer_details.zone() != peer_zone {
             tracing::warn!(
                 "Peer zone does not match expected zone: {} != {}",
                 peer_details.zone(),
-                peer.zone()
+                peer_zone,
             );
             self.set_error().await;
             return Err(Error::InvalidPeer(
@@ -438,9 +439,10 @@ impl Connection {
                 }
             };
 
-            exchange::received(Message::new(&peer_name, &msg)).unwrap_or_else(|e| {
-                tracing::warn!("Error handling message: {:?}", e);
-            });
+            exchange::received(Message::received_from(&peer_name, &peer_zone, &msg))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Error handling message: {:?}", e);
+                });
 
             future::ok(())
         });
@@ -451,15 +453,26 @@ impl Connection {
         let send_to_peer = rx.map(Ok).forward(outgoing);
 
         // now tell ourselves who has connected
-        exchange::received(Command::connected(peer_name.clone()).into())
-            .with_context(|| "Error triggering /connected control message")?;
+        match exchange::received(Command::connected(&peer_name, &peer_zone).into()) {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::warn!("Error triggering /connected control message: {:?}", e);
+                self.set_error().await;
+                return Err(Error::Any(e.into()));
+            }
+        }
 
         // finally, send a keepalive message to the peer - this will start
         // a ping-pong with the peer that should keep it open
         // (client sends, as the server should already be set up now)
-        exchange::send(Message::keepalive(&peer_name))
-            .await
-            .with_context(|| "Error sending keepalive message to peer")?;
+        match exchange::send(Message::keepalive(&peer_name, &peer_zone)).await {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::warn!("Error sending keepalive message: {:?}", e);
+                self.set_error().await;
+                return Err(Error::Any(e.into()));
+            }
+        }
 
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;
@@ -633,6 +646,7 @@ impl Connection {
         let peer = clients[0].clone();
 
         let peer_name = peer.name();
+        let peer_zone = peer.zone();
 
         if peer_name.is_empty() {
             tracing::warn!("Peer must have a name to handle a connection.");
@@ -687,7 +701,7 @@ impl Connection {
             ));
         }
 
-        if peer_details.zone() != peer.zone() {
+        if peer_details.zone() != peer_zone {
             tracing::warn!(
                 "Peer zone does not match expected zone: {} != {}",
                 peer_details.zone(),
@@ -709,7 +723,7 @@ impl Connection {
         }
 
         // now send back our PeerDetials
-        let peer_details = PeerDetails::new(&service_name, &peer.zone());
+        let peer_details = PeerDetails::new(&service_name, &peer_zone);
 
         let message = envelope_message(peer_details, &inner_key, &outer_key)?;
 
@@ -751,9 +765,10 @@ impl Connection {
                 }
             };
 
-            exchange::received(Message::new(&peer_name, &msg)).unwrap_or_else(|e| {
-                tracing::warn!("Error handling message: {:?}", e);
-            });
+            exchange::received(Message::received_from(&peer_name, &peer_zone, &msg))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Error handling message: {:?}", e);
+                });
 
             future::ok(())
         });
@@ -764,7 +779,7 @@ impl Connection {
         let send_to_peer = rx.map(Ok).forward(outgoing);
 
         // now tell ourselves who has connected
-        exchange::received(Command::connected(peer_name.clone()).into())
+        exchange::received(Command::connected(&peer_name, &peer_zone).into())
             .with_context(|| "Error triggering /connected control message")?;
 
         pin_mut!(received_from_peer, send_to_peer);

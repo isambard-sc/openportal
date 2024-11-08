@@ -3,7 +3,7 @@
 
 [package]
 name = "op-filesystem"
-version = "0.0.1"
+version = "0.0.19"
 description = "Agent that interfaces OpenPortal with a filesystem"
 edition = "2021"
 license = "MIT"

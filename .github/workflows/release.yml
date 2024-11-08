@@ -82,7 +82,7 @@ jobs:
             echo 'Updating based on explicit version'
             cargo set-version ${{ inputs.version }}
           fi
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml
       - name: Save the version
         id: get_version
         run: echo version="$(cargo metadata --format-version 1 --no-deps | jq --raw-output '.packages[0].version')" >> "${GITHUB_OUTPUT}"
@@ -116,8 +116,8 @@ jobs:
       attestations: write
       id-token: write
 
-  attest:
-    name: Attest
+  attest-bridge:
+    name: Attest Bridge
     needs: build-release
     runs-on: ubuntu-latest
     permissions:
@@ -133,26 +133,232 @@ jobs:
         with:
           tool: cargo-sbom
       - name: Generate SBOM
-        run: cargo sbom --output-format=spdx_json_2_3 > sbom.spdx.json
+        run: cargo sbom --cargo-package op-bridge --output-format=spdx_json_2_3 > sbom-bridge.spdx.json
       - name: Fetch release artefacts
         uses: actions/download-artifact@v4
         with:
-          pattern: op-*
+          pattern: op-bridge
           merge-multiple: true
       - name: Attest SBOM
         uses: actions/attest-sbom@v1
         with:
-          subject-path: openportal
-          sbom-path: sbom.spdx.json
+          subject-path: op-bridge
+          sbom-path: sbom-bridge.spdx.json
       - name: Store SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: sbom.spdx.json
-          path: sbom.spdx.json
+          name: sbom-bridge.spdx.json
+          path: sbom-bridge.spdx.json
+
+  attest-cluster:
+    name: Attest Cluster
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --cargo-package op-cluster --output-format=spdx_json_2_3 > sbom-cluster.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-cluster
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-cluster
+          sbom-path: sbom-cluster.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cluster.spdx.json
+          path: sbom-cluster.spdx.json
+
+  attest-clusters:
+    name: Attest Clusters
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --cargo-package op-clusters --output-format=spdx_json_2_3 > sbom-clusters.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-clusters
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-clusters
+          sbom-path: sbom-clusters.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-clusters.spdx.json
+          path: sbom-clusters.spdx.json
+
+  attest-filesystem:
+    name: Attest Filesystem
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --cargo-package op-filesystem --output-format=spdx_json_2_3 > sbom-filesystem.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-filesystem
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-filesystem
+          sbom-path: sbom-filesystem.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-filesystem.spdx.json
+          path: sbom-filesystem.spdx.json
+
+  attest-freeipa:
+    name: Attest FreeIPA
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --cargo-package op-freeipa --output-format=spdx_json_2_3 > sbom-freeipa.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-freeipa
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-freeipa
+          sbom-path: sbom-freeipa.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-freeipa.spdx.json
+          path: sbom-freeipa.spdx.json
+
+  attest-portal:
+    name: Attest Portal
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --cargo-package op-portal --output-format=spdx_json_2_3 > sbom-portal.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-portal
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-portal
+          sbom-path: sbom-portal.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-portal.spdx.json
+          path: sbom-portal.spdx.json
+
+  attest-provider:
+    name: Attest Provider
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --cargo-package op-provider --output-format=spdx_json_2_3 > sbom-provider.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-provider
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-provider
+          sbom-path: sbom-provider.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-provider.spdx.json
+          path: sbom-provider.spdx.json
 
   make-release:
     name: Make release ${{ needs.tag-release.outputs.ref }}
-    needs: [build-release, tag-release, attest]
+    needs: [build-release, tag-release, attest-bridge, attest-cluster,
+            attest-clusters, attest-filesystem, attest-freeipa,
+            attest-portal, attest-provider]
     runs-on: ubuntu-latest
     permissions:
       contents: write

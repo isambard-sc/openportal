@@ -3,7 +3,7 @@
 
 [package]
 name = "op-bridge"
-version = "0.0.1"
+version = "0.0.19"
 description = "An example of an OpenPortal user portal to OpenPortal bridge"
 edition = "2021"
 license = "MIT"

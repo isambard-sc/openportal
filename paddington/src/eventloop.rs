@@ -8,6 +8,16 @@ use crate::error::Error;
 use crate::{client, server};
 
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Could not install default ring provider: {:?}", e);
+            return Err(Error::NotExists(
+                "Could not install default ring provider".to_owned(),
+            ));
+        }
+    }
+
     let mut server_handles = vec![];
     let mut client_handles = vec![];
 
@@ -57,7 +67,14 @@ mod tests {
     async fn test_run() -> Result<()> {
         // this tests that the service can be configured and will run
         // (it will exit immediately as there are no clients or servers)
-        let config = ServiceConfig::new("test_server", "http://localhost", "127.0.0.1", &5544)?;
+        let config = ServiceConfig::new(
+            "test_server",
+            "http://localhost",
+            "127.0.0.1",
+            &5544,
+            &None,
+            &None,
+        )?;
         run(config).await?;
 
         Ok(())

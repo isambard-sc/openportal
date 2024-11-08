@@ -9,7 +9,16 @@ metadata:
 spec:
   ports:
     - protocol: TCP
-      port: 80
+      port: {{ .Values.port }}
+      name: agent
       targetPort: {{ .Values.port }}
+    - protocol: TCP
+      port: {{ .Values.bridge_port }}
+      name: bridge
+      targetPort: {{ .Values.bridge_port }}
+    - protocol: TCP
+      port: {{ .Values.health_port }}
+      name: health
+      targetPort: {{ .Values.health_port }}
   selector:
     app.kubernetes.io/name: op-bridge

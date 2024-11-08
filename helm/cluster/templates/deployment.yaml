@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-FileCopyrightText: © 2024 Matt Williams <matt.williams@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: op-cluster
+  labels:
+    {{- include "op-cluster.labels" . | indent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: op-cluster
+  template:
+    metadata:
+      labels:
+        {{- include "op-cluster.labels" . | indent 8 }}
+    spec:
+      containers:
+        - name: op-cluster
+          image: "{{ print .Values.image.registry "/" }}{{ required "image_name must be set" .Values.image.name }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          args: ["--config-file=/config/config.toml", "run"]
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.log_level | quote }}
+          ports:
+            - containerPort: {{ .Values.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.health_port }}
+          volumeMounts:
+            - mountPath: "/config"
+              name: "config-file-volume"
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - "ALL"
+              add:
+                - "NET_BIND_SERVICE"
+      volumes:
+          - name: "config-file-volume"
+            secret:
+              secretName: {{ .Values.secret_name | quote }}

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-FileCopyrightText: © 2024 Matt Williams <matt.williams@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+---
+apiVersion: v2
+name: op-filesystem
+version: "0.0.0"  # Set by release script
+appVersion: "0.0.6"  # Set by release script
+sources:
+  - https://github.com/isambard-sc/openportal/

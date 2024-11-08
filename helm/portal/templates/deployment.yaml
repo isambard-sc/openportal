@@ -17,8 +17,6 @@ spec:
     metadata:
       labels:
         {{- include "op-portal.labels" . | indent 8 }}
-      annotations:
-        checksum/config: {{ pick (include (print $.Template.BasePath "/configmap.yaml") . | fromYaml) "data" | toString | sha1sum }}  # restart if config changed
     spec:
       containers:
         - name: op-portal
@@ -32,10 +30,10 @@ spec:
           readinessProbe:
             httpGet:
               path: /health
-              port: {{ .Values.port }}
+              port: {{ .Values.health_port }}
           volumeMounts:
-            - mountPath: {{ required "config_dir must be set" .Values.config_dir | quote }}
-              name: "config-volume"
+            - mountPath: "/config"
+              name: "config-file-volume"
               readOnly: true
           resources:
             requests:
@@ -56,6 +54,6 @@ spec:
               add:
                 - "NET_BIND_SERVICE"
       volumes:
-          - name: "config-volume"
+          - name: "config-file-volume"
             secret:
               secretName: {{ .Values.secret_name | quote }}

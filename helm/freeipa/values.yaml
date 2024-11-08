@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-FileCopyrightText: © 2024 Matt Williams <matt.williams@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+---
+config: {}
+image:
+  registry: ghcr.io/isambard-sc
+  name: op-freeipa
+  tag:  # defaults to appVersion if not set
+log_level: info
+secret_name: freeipa-config
+port: 80
+health_port: 8080

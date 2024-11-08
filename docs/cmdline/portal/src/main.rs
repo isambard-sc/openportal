@@ -20,6 +20,8 @@ async fn main() -> Result<()> {
         Some("ws://localhost:8090".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8090),
+        None,
+        None,
         Some(AgentType::Portal),
     );
 

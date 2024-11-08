@@ -181,8 +181,14 @@ async fn run_client(invitation: &Path) -> Result<(), Error> {
     // create the echo-client service - note that the url, ip and
     // port aren't used, as this service won't be listening for any
     // connecting clients
-    let mut service: ServiceConfig =
-        ServiceConfig::new("echo-client", "http://localhost:6502", "127.0.0.1", &6502)?;
+    let mut service: ServiceConfig = ServiceConfig::new(
+        "echo-client",
+        "http://localhost:6502",
+        "127.0.0.1",
+        &6502,
+        &None,
+        &None,
+    )?;
 
     // now give the invitation to connect to the server to the client
     service.add_server(invite)?;
@@ -257,7 +263,7 @@ async fn run_server(
     invitation: &Path,
 ) -> Result<(), Error> {
     // create the echo-server service
-    let mut service = ServiceConfig::new("echo-server", url, ip, port)?;
+    let mut service = ServiceConfig::new("echo-server", url, ip, port, &None, &None)?;
 
     let invite = service.add_client("echo-client", range)?;
 

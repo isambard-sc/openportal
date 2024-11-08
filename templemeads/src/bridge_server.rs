@@ -70,8 +70,27 @@ fn create_webserver_url(url: &str) -> Result<Url, Error> {
     };
 
     let host = url.host_str().unwrap_or("localhost");
-    let port = url.port().unwrap_or(3000);
+    let port = url.port().unwrap_or(match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => 443,
+    });
     let path = url.path();
+
+    // don't add the port if it is the default for the protocol
+    match scheme {
+        "http" => {
+            if port == 80 {
+                return Ok(format!("{}://{}{}", scheme, host, path).parse::<Url>()?);
+            }
+        }
+        "https" => {
+            if port == 443 {
+                return Ok(format!("{}://{}{}", scheme, host, path).parse::<Url>()?);
+            }
+        }
+        _ => {}
+    }
 
     Ok(format!("{}://{}:{}{}", scheme, host, port, path).parse::<Url>()?)
 }
@@ -81,12 +100,12 @@ impl Config {
         Self {
             url: create_webserver_url(url).unwrap_or_else(|e| {
                 tracing::error!(
-                    "Could not parse URL: {} because {}. Using http://localhost:3000 instead.",
-                    e,
-                    url
+                    "Could not parse URL: {} because '{}'. Using http://localhost:{port} instead.",
+                    url,
+                    e
                 );
                 #[allow(clippy::unwrap_used)]
-                "http://localhost:3000".parse().unwrap()
+                format!("http://localhost:{port}").parse().unwrap()
             }),
             ip,
             port,
@@ -105,7 +124,7 @@ pub struct Defaults {
 impl Defaults {
     pub fn parse(url: Option<String>, ip: Option<String>, port: Option<u16>) -> Self {
         Self {
-            url: url.unwrap_or("http://localhost:3000".to_owned()),
+            url: url.unwrap_or("http://localhost:8042".to_owned()),
             ip: ip.unwrap_or("127.0.0.1".to_owned()),
             port: port.unwrap_or(8042),
         }
@@ -365,6 +384,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
 
     Ok(())
 }
+
 // Errors
 
 #[derive(Debug)]

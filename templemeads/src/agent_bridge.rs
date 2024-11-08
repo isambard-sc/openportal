@@ -72,12 +72,22 @@ impl Defaults {
         url: Option<String>,
         ip: Option<String>,
         port: Option<u16>,
+        healthcheck_port: Option<u16>,
+        proxy_header: Option<String>,
         bridge_url: Option<String>,
         bridge_ip: Option<String>,
         bridge_port: Option<u16>,
     ) -> Self {
         Self {
-            service: ServiceDefaults::parse(name, config_file, url, ip, port),
+            service: ServiceDefaults::parse(
+                name,
+                config_file,
+                url,
+                ip,
+                port,
+                healthcheck_port,
+                proxy_header,
+            ),
             bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port),
         }
     }
@@ -115,10 +125,21 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             url,
             ip,
             port,
+            bridge_url,
             bridge_ip,
             bridge_port,
+            healthcheck_port,
+            proxy_header,
             force,
         }) => {
+            let local_healthcheck_port;
+
+            if let Some(healthcheck_port) = healthcheck_port {
+                local_healthcheck_port = Some(*healthcheck_port);
+            } else {
+                local_healthcheck_port = defaults.service.healthcheck_port();
+            }
+
             let config = Config {
                 service: {
                     ServiceConfig::new(
@@ -129,10 +150,12 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                             .parse::<IpAddr>()?
                             .to_string(),
                         &port.unwrap_or_else(|| defaults.service.port()),
+                        &local_healthcheck_port,
+                        proxy_header,
                     )?
                 },
                 bridge: BridgeConfig::new(
-                    &bridge_ip.clone().unwrap_or(defaults.bridge.url()),
+                    &bridge_url.clone().unwrap_or(defaults.bridge.url()),
                     bridge_ip
                         .clone()
                         .unwrap_or(defaults.bridge.ip())
@@ -362,8 +385,15 @@ enum Commands {
 
         #[arg(
             long,
+            short = 'r',
+            help = "URL of the bridge API server including port and route (e.g. http://localhost:3000)"
+        )]
+        bridge_url: Option<String>,
+
+        #[arg(
+            long,
             short = 'b',
-            help = "IP address on which to listen for bridge connections (e.g. '::')"
+            help = "IP address on which to listen for bridge connections (e.g. '0.0.0.0')"
         )]
         bridge_ip: Option<String>,
 
@@ -373,6 +403,20 @@ enum Commands {
             help = "Port on which to listen for bridge connections (e.g. 3000)"
         )]
         bridge_port: Option<u16>,
+
+        #[arg(
+            long,
+            short = 'k',
+            help = "Optional port on which to listen for health checks (e.g. 3001)"
+        )]
+        healthcheck_port: Option<u16>,
+
+        #[arg(
+            long,
+            short = 'x',
+            help = "Optional header to use for proxying requests - look in this for the client IP address"
+        )]
+        proxy_header: Option<String>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

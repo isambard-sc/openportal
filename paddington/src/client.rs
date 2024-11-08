@@ -5,6 +5,7 @@ use crate::config::{PeerConfig, ServiceConfig};
 use crate::connection::Connection;
 use crate::error::Error;
 use crate::exchange;
+use crate::healthcheck;
 
 pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
     let service_name = config.name();
@@ -43,6 +44,11 @@ pub async fn run_once(config: ServiceConfig, peer: PeerConfig) -> Result<(), Err
 pub async fn run(config: ServiceConfig, peer: PeerConfig) -> Result<(), Error> {
     // set the name of the service in the exchange
     exchange::set_name(&config.name()).await?;
+
+    if let Some(healthcheck_port) = config.healthcheck_port() {
+        // spawn the health check server
+        healthcheck::spawn(config.ip(), healthcheck_port).await?;
+    }
 
     loop {
         match run_once(config.clone(), peer.clone()).await {

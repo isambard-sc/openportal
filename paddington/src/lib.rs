@@ -8,6 +8,7 @@ mod crypto;
 mod error;
 mod eventloop;
 mod exchange;
+mod healthcheck;
 mod server;
 
 // public API

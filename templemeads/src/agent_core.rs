@@ -74,16 +74,27 @@ pub struct Defaults {
 }
 
 impl Defaults {
+    #[allow(clippy::too_many_arguments)]
     pub fn parse(
         name: Option<String>,
         config_file: Option<PathBuf>,
         url: Option<String>,
         ip: Option<String>,
         port: Option<u16>,
+        healthcheck_port: Option<u16>,
+        proxy_header: Option<String>,
         agent: Option<AgentType>,
     ) -> Self {
         Self {
-            service: ServiceDefaults::parse(name, config_file, url, ip, port),
+            service: ServiceDefaults::parse(
+                name,
+                config_file,
+                url,
+                ip,
+                port,
+                healthcheck_port,
+                proxy_header,
+            ),
             agent: agent.unwrap_or(AgentType::Portal),
             extras: HashMap::new(),
         }
@@ -130,8 +141,18 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             url,
             ip,
             port,
+            healthcheck_port,
+            proxy_header,
             force,
         }) => {
+            let local_healthcheck_port;
+
+            if let Some(healthcheck_port) = healthcheck_port {
+                local_healthcheck_port = Some(*healthcheck_port);
+            } else {
+                local_healthcheck_port = defaults.service.healthcheck_port();
+            }
+
             let config = Config {
                 service: {
                     ServiceConfig::new(
@@ -142,6 +163,8 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                             .parse::<IpAddr>()?
                             .to_string(),
                         &port.unwrap_or_else(|| defaults.service.port()),
+                        &local_healthcheck_port,
+                        proxy_header,
                     )?
                 },
                 agent: defaults.agent.clone(),
@@ -374,6 +397,20 @@ enum Commands {
             help = "Port on which to listen for connections (e.g. 8042)"
         )]
         port: Option<u16>,
+
+        #[arg(
+            long,
+            short = 'k',
+            help = "Optional port on which to listen for health checks (e.g. 8080)"
+        )]
+        healthcheck_port: Option<u16>,
+
+        #[arg(
+            long,
+            short = 'x',
+            help = "Proxy header to use for the client IP address - look here for the client IP address"
+        )]
+        proxy_header: Option<String>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

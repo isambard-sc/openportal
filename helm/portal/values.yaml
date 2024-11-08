@@ -8,7 +8,6 @@ image:
   name: op-portal
   tag:  # defaults to appVersion if not set
 log_level: info
-secret_key_dir: "/secret_key"
-config_dir: "/config"
 secret_name: portal-config
-port: 3000
+port: 80
+health_port: 8080

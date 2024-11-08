@@ -199,8 +199,14 @@ async fn run_cluster(invitation: &Path) -> Result<(), Error> {
     // create the paddington service for the cluster agent
     // - note that the url, ip and port aren't used, as this
     // agent won't be listening for any connecting clients
-    let mut service: ServiceConfig =
-        ServiceConfig::new("cluster", "http://localhost:6502", "127.0.0.1", &6502)?;
+    let mut service: ServiceConfig = ServiceConfig::new(
+        "cluster",
+        "http://localhost:6502",
+        "127.0.0.1",
+        &6502,
+        &None,
+        &None,
+    )?;
 
     // now give the invitation to connect to the server to the client
     service.add_server(invite)?;
@@ -255,7 +261,7 @@ async fn run_portal(
     invitation: &Path,
 ) -> Result<(), Error> {
     // create a paddington service configuration for the portal agent
-    let mut service = ServiceConfig::new("portal", url, ip, port)?;
+    let mut service = ServiceConfig::new("portal", url, ip, port, &None, &None)?;
 
     // add the cluster to the portal, returning an invitation
     let invite = service.add_client("cluster", range)?;

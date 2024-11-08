@@ -13,7 +13,7 @@ use crate::runnable::{default_runner, AsyncRunnable};
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use paddington::async_message_handler;
-use paddington::message::Message;
+use paddington::message::{Message, MessageType};
 use std::boxed::Box;
 use tokio::sync::RwLock;
 
@@ -176,9 +176,33 @@ async_message_handler! {
     pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
         let service_info: ServiceDetails = SERVICE_DETAILS.read().await.to_owned();
 
-        match message.is_control() {
-            true => Ok(process_control_message(&service_info.agent_type, message.into()).await?),
-            false => {
+        match message.typ() {
+            MessageType::Control => {
+                process_control_message(&service_info.agent_type, message.into()).await?;
+
+                Ok(())
+            }
+            MessageType::KeepAlive => {
+                let sender: String = message.sender().to_owned();
+                let recipient: String = message.recipient().to_owned();
+
+                if (recipient != service_info.service) {
+                    return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                }
+
+                // wait 20 seconds and send a keep alive message back
+                tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+
+                match paddington::send(Message::keepalive(&sender)).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Error sending keepalive message to {} : {}", sender, e);
+                    }
+                }
+
+                Ok(())
+            }
+            MessageType::Message => {
                 let sender: String = message.sender().to_owned();
                 let recipient: String = message.recipient().to_owned();
                 let command: Command = message.into();
@@ -187,7 +211,9 @@ async_message_handler! {
                     return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
                 }
 
-                Ok(process_command(&recipient, &sender, &command, &service_info.runner).await?)
+                process_command(&recipient, &sender, &command, &service_info.runner).await?;
+
+                Ok(())
             }
         }
     }

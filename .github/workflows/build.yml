@@ -37,10 +37,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
-      - name: Build op-portal OCI image
-        run: oci/portal/build.sh --release
+
       - name: Build op-bridge OCI image
         run: oci/bridge/build.sh --release
+      - name: Build op-cluster OCI image
+        run: oci/cluster/build.sh --release
+      - name: Build op-clusters OCI image
+        run: oci/clusters/build.sh --release
+      - name: Build op-filesystem OCI image
+        run: oci/filesystem/build.sh --release
+      - name: Build op-freeipa OCI image
+        run: oci/freeipa/build.sh --release
+      - name: Build op-portal OCI image
+        run: oci/portal/build.sh --release
+      - name: Build op-provider OCI image
+        run: oci/provider/build.sh --release
+
       - name: Get version
         id: get_version
         run: |
@@ -48,17 +60,34 @@ jobs:
       - name: Get version for Helm
         id: get_helm_version
         run: |
-          if [[ "${{ github.ref_name }}" == "master" ]]; then
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
             echo version="${{ steps.get_version.outputs.version }}" >> "${GITHUB_OUTPUT}"
           else
             echo version="${{ steps.get_version.outputs.version }}.${{ github.ref_name }}" >> "${GITHUB_OUTPUT}"
           fi
-      - name: package op-portal helm chart
-        run: |
-          helm package helm/portal --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+
       - name: package op-bridge helm chart
         run: |
           helm package helm/bridge --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+      - name: package op-cluster helm chart
+        run: |
+          helm package helm/cluster --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+      - name: package op-clusters helm chart
+        run: |
+          helm package helm/clusters --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+      - name: package op-filesystem helm chart
+        run: |
+          helm package helm/filesystem --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+      - name: package op-freeipa helm chart
+        run: |
+          helm package helm/freeipa --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+      - name: package op-portal helm chart
+        run: |
+          helm package helm/portal --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+      - name: package op-provider helm chart
+        run: |
+          helm package helm/provider --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+
       - name: Log in to GHCR
         uses: redhat-actions/podman-login@v1
         with:
@@ -69,13 +98,7 @@ jobs:
         run: echo $GITHUB_TOKEN | helm registry login "ghcr.io/${{ github.repository_owner }}" --username "${{ github.actor }}" --password-stdin
         env:
           GITHUB_TOKEN: "${{ github.token }}"
-      - name: Publish op-portal OCI image
-        id: push-portal-to-ghcr
-        uses: redhat-actions/push-to-registry@v2
-        with:
-          image: op-portal
-          tags: ${{ steps.get_version.outputs.version }}
-          registry: ghcr.io/${{ github.repository_owner }}
+
       - name: Publish op-bridge OCI image
         id: push-bridge-to-ghcr
         uses: redhat-actions/push-to-registry@v2
@@ -83,34 +106,152 @@ jobs:
           image: op-bridge
           tags: ${{ steps.get_version.outputs.version }}
           registry: ghcr.io/${{ github.repository_owner }}
-      - name: Attest op-portal image
-        uses: actions/attest-build-provenance@v1
-        id: attest-portal
+      - name: Publish op-cluster OCI image
+        id: push-cluster-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
         with:
-          subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.push-portal-to-ghcr.outputs.digest }}
-          push-to-registry: true
+          image: op-cluster
+          tags: ${{ steps.get_version.outputs.version }}
+          registry: ghcr.io/${{ github.repository_owner }}
+      - name: Publish op-clusters OCI image
+        id: push-clusters-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: op-clusters
+          tags: ${{ steps.get_version.outputs.version }}
+          registry: ghcr.io/${{ github.repository_owner }}
+      - name: Publish op-filesystem OCI image
+        id: push-filesystem-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: op-filesystem
+          tags: ${{ steps.get_version.outputs.version }}
+          registry: ghcr.io/${{ github.repository_owner }}
+      - name: Publish op-freeipa OCI image
+        id: push-freeipa-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: op-freeipa
+          tags: ${{ steps.get_version.outputs.version }}
+          registry: ghcr.io/${{ github.repository_owner }}
+      - name: Publish op-portal OCI image
+        id: push-portal-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: op-portal
+          tags: ${{ steps.get_version.outputs.version }}
+          registry: ghcr.io/${{ github.repository_owner }}
+      - name: Publish op-provider OCI image
+        id: push-provider-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: op-provider
+          tags: ${{ steps.get_version.outputs.version }}
+          registry: ghcr.io/${{ github.repository_owner }}
+
       - name: Attest op-bridge image
         uses: actions/attest-build-provenance@v1
         id: attest-bridge
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-bridge
           subject-digest: ${{ steps.push-bridge-to-ghcr.outputs.digest }}
           push-to-registry: true
-      - name: Push op-portal Helm chart
-        run: helm push "./op-portal-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Attest op-cluster image
+        uses: actions/attest-build-provenance@v1
+        id: attest-cluster
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-cluster
+          subject-digest: ${{ steps.push-cluster-to-ghcr.outputs.digest }}
+          push-to-registry: true
+      - name: Attest op-clusters image
+        uses: actions/attest-build-provenance@v1
+        id: attest-clusters
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-clusters
+          subject-digest: ${{ steps.push-clusters-to-ghcr.outputs.digest }}
+          push-to-registry: true
+      - name: Attest op-filesystem image
+        uses: actions/attest-build-provenance@v1
+        id: attest-filesystem
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-filesystem
+          subject-digest: ${{ steps.push-filesystem-to-ghcr.outputs.digest }}
+          push-to-registry: true
+      - name: Attest op-freeipa image
+        uses: actions/attest-build-provenance@v1
+        id: attest-freeipa
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-freeipa
+          subject-digest: ${{ steps.push-freeipa-to-ghcr.outputs.digest }}
+          push-to-registry: true
+      - name: Attest op-portal image
+        uses: actions/attest-build-provenance@v1
+        id: attest-portal
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-portal
+          subject-digest: ${{ steps.push-portal-to-ghcr.outputs.digest }}
+          push-to-registry: true
+      - name: Attest op-provider image
+        uses: actions/attest-build-provenance@v1
+        id: attest-provider
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-provider
+          subject-digest: ${{ steps.push-provider-to-ghcr.outputs.digest }}
+          push-to-registry: true
       - name: Push op-bridge Helm chart
         run: helm push "./op-bridge-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
-      - name: Store build artefacts
+      - name: Push op-cluster Helm chart
+        run: helm push "./op-cluster-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Push op-clusters Helm chart
+        run: helm push "./op-clusters-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Push op-filesystem Helm chart
+        run: helm push "./op-filesystem-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Push op-freeipa Helm chart
+        run: helm push "./op-freeipa-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Push op-portal Helm chart
+        run: helm push "./op-portal-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Push op-provider Helm chart
+        run: helm push "./op-provider-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
+      - name: Store bridge artefact
         uses: actions/upload-artifact@v4
         with:
-          name: openportal-agents
+          name: op-bridge
+          path: |
+            target/release/op-bridge
+      - name: Store cluster artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-cluster
+          path: |
+            target/release/op-cluster
+      - name: Store clusters artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-clusters
+          path: |
+            target/release/op-clusters
+      - name: Store filesystem artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-filesystem
+          path: |
+            target/release/op-filesystem
+      - name: Store freeipa artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-freeipa
+          path: |
+            target/release/op-freeipa
+      - name: Store portal artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-portal
           path: |
             target/release/op-portal
-            target/release/op-bridge
+      - name: Store provider artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-provider
+          path: |
             target/release/op-provider
-            target/release/op-cluster
-            target/release/op-slurm
-            target/release/op-filesystem
-            target/release/op-freeipa
-

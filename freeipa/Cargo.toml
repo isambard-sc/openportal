@@ -3,7 +3,7 @@
 
 [package]
 name = "op-freeipa"
-version = "0.0.1"
+version = "0.0.19"
 description = "Agent that interfaces OpenPortal with FreeIPA"
 edition = "2021"
 license = "MIT"

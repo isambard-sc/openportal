@@ -234,6 +234,13 @@ pub async fn get_all(agent_type: &Type) -> Vec<Peer> {
 }
 
 ///
+/// Return the name of this agent
+///
+pub async fn name() -> String {
+    REGISTAR.read().await.name.clone()
+}
+
+///
 /// Return the name of the first portal agent in the system
 ///
 pub async fn portal() -> Option<Peer> {

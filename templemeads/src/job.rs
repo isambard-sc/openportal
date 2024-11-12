@@ -67,16 +67,14 @@ struct Command {
 }
 
 impl Command {
-    pub fn new(command: &str) -> Self {
+    pub fn parse(command: &str) -> Result<Self, Error> {
         // the format of commands is "destination command arguments..."
         let mut parts = command.split_whitespace();
-        let destination = Destination::new(parts.next().unwrap_or(""));
-        let instruction = Instruction::new(&parts.collect::<Vec<&str>>().join(" "));
 
-        Self {
-            destination,
-            instruction,
-        }
+        Ok(Self {
+            destination: Destination::parse(parts.next().unwrap_or(""))?,
+            instruction: Instruction::parse(&parts.collect::<Vec<&str>>().join(" "))?,
+        })
     }
 
     pub fn destination(&self) -> Destination {
@@ -85,10 +83,6 @@ impl Command {
 
     pub fn instruction(&self) -> Instruction {
         self.instruction.clone()
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.destination.is_valid() && self.instruction.is_valid()
     }
 }
 
@@ -122,7 +116,10 @@ impl<'de> Deserialize<'de> for Command {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(Self::new(&s))
+        match Command::parse(&s) {
+            Ok(command) => Ok(command),
+            Err(e) => Err(serde::de::Error::custom(e.to_string())),
+        }
     }
 }
 
@@ -153,28 +150,21 @@ impl std::fmt::Display for Job {
 }
 
 impl Job {
-    pub fn new(command: &str) -> Self {
+    pub fn parse(command: &str) -> Result<Self, Error> {
+        tracing::info!("Parsing command: {:?}", command);
+
         let now = Utc::now();
-        Self {
+
+        Ok(Self {
             id: Uuid::new_v4(),
             created: now,
             changed: now,
             version: 1,
-            command: Command::new(command),
+            command: Command::parse(command)?,
             state: Status::Created,
             result: None,
             board: None,
-        }
-    }
-
-    pub fn parse(command: &str) -> Result<Self, Error> {
-        let job = Self::new(command);
-
-        if !job.command.is_valid() {
-            return Err(Error::Parse(format!("Invalid command {:?}", command)));
-        }
-
-        Ok(job)
+        })
     }
 
     pub fn id(&self) -> Uuid {
@@ -631,7 +621,8 @@ mod tests {
 
     #[test]
     fn test_command_new() {
-        let command = Command::new("portal.cluster add_user demo.proj.portal");
+        #[allow(clippy::unwrap_used)]
+        let command = Command::parse("portal.cluster add_user demo.proj.portal").unwrap();
         assert_eq!(command.destination().to_string(), "portal.cluster");
         assert_eq!(
             command.instruction().to_string(),
@@ -641,7 +632,8 @@ mod tests {
 
     #[test]
     fn test_command_display() {
-        let command = Command::new("portal.cluster add_user demo.proj.portal");
+        #[allow(clippy::unwrap_used)]
+        let command = Command::parse("portal.cluster add_user demo.proj.portal").unwrap();
         assert_eq!(
             command.to_string(),
             "portal.cluster add_user demo.proj.portal"
@@ -650,7 +642,8 @@ mod tests {
 
     #[test]
     fn test_job_new() {
-        let job = Job::new("portal.cluster add_user demo.proj.portal");
+        #[allow(clippy::unwrap_used)]
+        let job = Job::parse("portal.cluster add_user demo.proj.portal").unwrap();
         assert_eq!(
             job.command.to_string(),
             "portal.cluster add_user demo.proj.portal"
@@ -661,7 +654,8 @@ mod tests {
 
     #[test]
     fn test_job_state() {
-        let mut job = Job::new("portal.cluster add_user demo.proj.portal");
+        #[allow(clippy::unwrap_used)]
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal").unwrap();
 
         assert!(!job.is_finished());
         assert_eq!(job.state(), Status::Created);
@@ -697,7 +691,8 @@ mod tests {
 
     #[test]
     fn test_job_error() {
-        let mut job = Job::new("portal.cluster add_user demo.proj.portal");
+        #[allow(clippy::unwrap_used)]
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal").unwrap();
 
         assert!(!job.is_finished());
         assert_eq!(job.state(), Status::Created);

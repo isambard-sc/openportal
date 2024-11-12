@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use serde::{Deserialize, Serialize};
-
+use crate::destination::Destination;
 use crate::error::Error;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Grammar for all of the commands that can be sent to agents
 
@@ -188,10 +189,6 @@ impl UserMapping {
     pub fn local_project(&self) -> &str {
         &self.local_project
     }
-
-    pub fn is_valid(&self) -> bool {
-        self.user.is_valid() && !self.local_user.is_empty() && !self.local_project.is_empty()
-    }
 }
 
 impl std::fmt::Display for UserMapping {
@@ -230,6 +227,9 @@ impl<'de> Deserialize<'de> for UserMapping {
 ///
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
+    /// An instruction to submit a job to the portal
+    Submit(Destination, Arc<Instruction>),
+
     /// An instruction to add a user
     AddUser(UserIdentifier),
 
@@ -244,91 +244,126 @@ pub enum Instruction {
 
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
-
-    /// Placeholder for an invalid instruction
-    Invalid(),
-}
-
-impl Default for Instruction {
-    fn default() -> Self {
-        Instruction::Invalid()
-    }
 }
 
 impl Instruction {
-    pub fn new(s: &str) -> Self {
+    pub fn parse(s: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = s.split(' ').collect();
         match parts[0] {
+            "submit" => match Destination::parse(parts[1]) {
+                Ok(destination) => match Instruction::parse(&parts[2..].join(" ")) {
+                    Ok(instruction) => Ok(Instruction::Submit(
+                        destination,
+                        Arc::<Instruction>::new(instruction),
+                    )),
+                    Err(e) => {
+                        tracing::error!(
+                            "submit failed to parse the instruction for destination {}: {}. {}",
+                            parts[1],
+                            &parts[2..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "submit failed to parse the instruction for destination {}: {}. {}",
+                            parts[1],
+                            &parts[2..].join(" "),
+                            e
+                        )))
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(
+                        "submit failed to parse the destination for: {}. {}",
+                        &parts[1..].join(" "),
+                        e
+                    );
+                    Err(Error::Parse(format!(
+                        "submit failed to parse the destination for: {}. {}",
+                        &parts[1..].join(" "),
+                        e
+                    )))
+                }
+            },
             "add_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
-                Ok(user) => Instruction::AddUser(user),
+                Ok(user) => Ok(Instruction::AddUser(user)),
                 Err(_) => {
                     tracing::error!("add_user failed to parse: {}", &parts[1..].join(" "));
-                    Instruction::Invalid()
+                    Err(Error::Parse(format!(
+                        "add_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
                 }
             },
             "remove_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
-                Ok(user) => Instruction::RemoveUser(user),
+                Ok(user) => Ok(Instruction::RemoveUser(user)),
                 Err(_) => {
                     tracing::error!("remove_user failed to parse: {}", &parts[1..].join(" "));
-                    Instruction::Invalid()
+                    Err(Error::Parse(format!(
+                        "remove_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
                 }
             },
             "add_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
-                Ok(mapping) => Instruction::AddLocalUser(mapping),
+                Ok(mapping) => Ok(Instruction::AddLocalUser(mapping)),
                 Err(_) => {
                     tracing::error!("add_local_user failed to parse: {}", &parts[1..].join(" "));
-                    Instruction::Invalid()
+                    Err(Error::Parse(format!(
+                        "add_local_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
                 }
             },
             "remove_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
-                Ok(mapping) => Instruction::RemoveLocalUser(mapping),
+                Ok(mapping) => Ok(Instruction::RemoveLocalUser(mapping)),
                 Err(_) => {
                     tracing::error!(
                         "remove_local_user failed to parse: {}",
                         &parts[1..].join(" ")
                     );
-                    Instruction::Invalid()
+                    Err(Error::Parse(format!(
+                        "remove_local_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
                 }
             },
             "update_homedir" => {
                 if parts.len() < 3 {
                     tracing::error!("update_homedir failed to parse: {}", &parts[1..].join(" "));
-                    return Instruction::Invalid();
+                    return Err(Error::Parse(format!(
+                        "update_homedir failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
                 }
 
                 let homedir = parts[2].trim().to_string();
 
                 if homedir.is_empty() {
                     tracing::error!("update_homedir failed to parse: {}", &parts[1..].join(" "));
-                    return Instruction::Invalid();
+                    return Err(Error::Parse(format!(
+                        "update_homedir failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
                 }
 
                 match UserIdentifier::parse(parts[1]) {
-                    Ok(user) => Instruction::UpdateHomeDir(user, homedir),
+                    Ok(user) => Ok(Instruction::UpdateHomeDir(user, homedir)),
                     Err(_) => {
                         tracing::error!(
                             "update_homedir failed to parse: {}",
                             &parts[1..].join(" ")
                         );
-                        Instruction::Invalid()
+                        Err(Error::Parse(format!(
+                            "update_homedir failed to parse: {}",
+                            &parts[1..].join(" ")
+                        )))
                     }
                 }
             }
             _ => {
                 tracing::error!("Invalid instruction: {}", s);
-                Instruction::Invalid()
+                Err(Error::Parse(format!("Invalid instruction: {}", s)))
             }
-        }
-    }
-
-    pub fn is_valid(&self) -> bool {
-        match self {
-            Instruction::AddUser(user) => user.is_valid(),
-            Instruction::RemoveUser(user) => user.is_valid(),
-            Instruction::AddLocalUser(mapping) => mapping.is_valid(),
-            Instruction::RemoveLocalUser(mapping) => mapping.is_valid(),
-            Instruction::UpdateHomeDir(user, homedir) => user.is_valid() && !homedir.is_empty(),
-            Instruction::Invalid() => false,
         }
     }
 }
@@ -336,6 +371,9 @@ impl Instruction {
 impl std::fmt::Display for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Instruction::Submit(destination, command) => {
+                write!(f, "submit {} {}", destination, command)
+            }
             Instruction::AddUser(user) => write!(f, "add_user {}", user),
             Instruction::RemoveUser(user) => write!(f, "remove_user {}", user),
             Instruction::AddLocalUser(mapping) => write!(f, "add_local_user {}", mapping),
@@ -343,7 +381,6 @@ impl std::fmt::Display for Instruction {
             Instruction::UpdateHomeDir(user, homedir) => {
                 write!(f, "update_homedir {} {}", user, homedir)
             }
-            Instruction::Invalid() => write!(f, "invalid"),
         }
     }
 }
@@ -365,7 +402,10 @@ impl<'de> Deserialize<'de> for Instruction {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(Instruction::new(&s))
+        match Instruction::parse(&s) {
+            Ok(instruction) => Ok(instruction),
+            Err(e) => Err(serde::de::Error::custom(e.to_string())),
+        }
     }
 }
 
@@ -400,28 +440,33 @@ mod tests {
         let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
         let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
 
-        let instruction = Instruction::new("add_user user.project.portal");
+        #[allow(clippy::unwrap_used)]
+        let instruction = Instruction::parse("add_user user.project.portal").unwrap();
         assert_eq!(instruction, Instruction::AddUser(user.clone()));
 
-        let instruction = Instruction::new("remove_user user.project.portal");
+        #[allow(clippy::unwrap_used)]
+        let instruction = Instruction::parse("remove_user user.project.portal").unwrap();
         assert_eq!(instruction, Instruction::RemoveUser(user.clone()));
 
+        #[allow(clippy::unwrap_used)]
         let instruction =
-            Instruction::new("add_local_user user.project.portal:local_user:local_project");
+            Instruction::parse("add_local_user user.project.portal:local_user:local_project")
+                .unwrap();
         assert_eq!(instruction, Instruction::AddLocalUser(mapping.clone()));
 
+        #[allow(clippy::unwrap_used)]
         let instruction =
-            Instruction::new("remove_local_user user.project.portal:local_user:local_project");
+            Instruction::parse("remove_local_user user.project.portal:local_user:local_project")
+                .unwrap();
         assert_eq!(instruction, Instruction::RemoveLocalUser(mapping.clone()));
 
-        let instruction = Instruction::new("update_homedir user.project.portal /home/user");
+        #[allow(clippy::unwrap_used)]
+        let instruction =
+            Instruction::parse("update_homedir user.project.portal /home/user").unwrap();
         assert_eq!(
             instruction,
             Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string())
         );
-
-        let instruction = Instruction::new("invalid");
-        assert_eq!(instruction, Instruction::Invalid());
     }
 
     #[test]
@@ -493,45 +538,44 @@ mod tests {
             serialized,
             "\"update_homedir user.project.portal /home/user\""
         );
-
-        let instruction = Instruction::Invalid();
-        let serialized = serde_json::to_string(&instruction).unwrap_or_default();
-        assert_eq!(serialized, "\"invalid\"");
     }
 
     #[test]
     fn assert_deserialize_instruction() {
-        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap();
 
+        #[allow(clippy::unwrap_used)]
         let instruction: Instruction =
-            serde_json::from_str("\"add_user user.project.portal\"").unwrap_or_default();
+            serde_json::from_str("\"add_user user.project.portal\"").unwrap();
         assert_eq!(instruction, Instruction::AddUser(user.clone()));
 
+        #[allow(clippy::unwrap_used)]
         let instruction: Instruction =
-            serde_json::from_str("\"remove_user user.project.portal\"").unwrap_or_default();
+            serde_json::from_str("\"remove_user user.project.portal\"").unwrap();
         assert_eq!(instruction, Instruction::RemoveUser(user.clone()));
 
+        #[allow(clippy::unwrap_used)]
         let instruction: Instruction =
             serde_json::from_str("\"add_local_user user.project.portal:local_user:local_project\"")
-                .unwrap_or_default();
+                .unwrap();
         assert_eq!(instruction, Instruction::AddLocalUser(mapping.clone()));
 
+        #[allow(clippy::unwrap_used)]
         let instruction: Instruction = serde_json::from_str(
             "\"remove_local_user user.project.portal:local_user:local_project\"",
         )
-        .unwrap_or_default();
+        .unwrap();
         assert_eq!(instruction, Instruction::RemoveLocalUser(mapping.clone()));
 
+        #[allow(clippy::unwrap_used)]
         let instruction: Instruction =
-            serde_json::from_str("\"update_homedir user.project.portal /home/user\"")
-                .unwrap_or_default();
+            serde_json::from_str("\"update_homedir user.project.portal /home/user\"").unwrap();
         assert_eq!(
             instruction,
             Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string())
         );
-
-        let instruction: Instruction = serde_json::from_str("\"invalid\"").unwrap_or_default();
-        assert_eq!(instruction, Instruction::Invalid());
     }
 }

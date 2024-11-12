@@ -71,6 +71,16 @@ impl Destination {
         }
     }
 
+    pub fn first(&self) -> String {
+        // there are always at least two agents in a destination
+        self.agents.first().unwrap_or(&"".to_string()).clone()
+    }
+
+    pub fn last(&self) -> String {
+        // there are always at least two agents in a destination
+        self.agents.last().unwrap_or(&"".to_string()).clone()
+    }
+
     pub fn position(&self, agent: &str, previous: &str) -> Position {
         match self.agents.contains(&previous.to_string()) {
             false => Position::Error,

@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn test_command_display() {
         #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a").unwrap();
+        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
         let command = Command::put(&job);
         assert_eq!(format!("{}", command), format!("Put: {}", job));
     }
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn test_command_put() {
         #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a").unwrap();
+        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
         let command = Command::put(&job);
         assert_eq!(command, Command::Put { job });
     }
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn test_command_update() {
         #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a").unwrap();
+        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
         let command = Command::update(&job);
         assert_eq!(command, Command::Update { job });
     }
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn test_command_delete() {
         #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a").unwrap();
+        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
         let command = Command::delete(&job);
         assert_eq!(command, Command::Delete { job });
     }

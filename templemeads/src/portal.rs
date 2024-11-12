@@ -74,7 +74,7 @@ crate::async_runnable! {
                 })?;
 
                 // create the job and send it to the board for the next agent
-                let southbound_job = Job::parse(&format!("{} {}", destination, instruction))?.put(&next_agent).await?;
+                let southbound_job = Job::parse(&format!("{} {}", destination, instruction), true)?.put(&next_agent).await?;
 
                 job = job.running(Some("Job registered - processing...".to_string()))?;
                 job = job.update(&sender).await?;

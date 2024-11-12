@@ -43,7 +43,7 @@ pub async fn run(command: &str) -> Result<Job, Error> {
     tracing::info!("Received command: {}", command);
 
     match agent::portal().await {
-        Some(portal) => Ok(Job::parse(command)?.put(&portal).await?),
+        Some(portal) => Ok(Job::parse(command, true)?.put(&portal).await?),
         None => {
             tracing::error!("No portal agent found");
             Err(Error::NoPortal(

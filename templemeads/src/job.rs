@@ -67,13 +67,54 @@ struct Command {
 }
 
 impl Command {
-    pub fn parse(command: &str) -> Result<Self, Error> {
+    pub fn parse(command: &str, check_portal: bool) -> Result<Self, Error> {
         // the format of commands is "destination command arguments..."
         let mut parts = command.split_whitespace();
 
+        let destination = match Destination::parse(parts.next().unwrap_or("")) {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(Error::Parse(format!(
+                    "Could not parse destination from command '{}': {}",
+                    command, e
+                )))
+            }
+        };
+
+        let instruction = match Instruction::parse(&parts.collect::<Vec<&str>>().join(" ")) {
+            Ok(i) => i,
+            Err(e) => {
+                return Err(Error::Parse(format!(
+                    "Could not parse instruction from command '{}': {}",
+                    command, e
+                )))
+            }
+        };
+
+        if check_portal {
+            let user = match instruction.clone() {
+                Instruction::AddUser(user) => Some(user),
+                Instruction::RemoveUser(user) => Some(user),
+                _ => None,
+            };
+
+            if let Some(user) = user {
+                if user.portal() != destination.first() {
+                    tracing::error!(
+                    "Invalid command '{}'. Commands involving user '{}' can only be issued via the portal '{}', not '{}'.",
+                    command, user, user.portal(), destination.first()
+                );
+                    return Err(Error::Parse(format!(
+                    "Invalid command '{}'. Commands involving user '{}' can only be issued via the portal '{}', not '{}'.",
+                    command, user, user.portal(), destination.first()
+                )));
+                }
+            }
+        }
+
         Ok(Self {
-            destination: Destination::parse(parts.next().unwrap_or(""))?,
-            instruction: Instruction::parse(&parts.collect::<Vec<&str>>().join(" "))?,
+            destination,
+            instruction,
         })
     }
 
@@ -116,7 +157,7 @@ impl<'de> Deserialize<'de> for Command {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        match Command::parse(&s) {
+        match Command::parse(&s, false) {
             Ok(command) => Ok(command),
             Err(e) => Err(serde::de::Error::custom(e.to_string())),
         }
@@ -150,7 +191,7 @@ impl std::fmt::Display for Job {
 }
 
 impl Job {
-    pub fn parse(command: &str) -> Result<Self, Error> {
+    pub fn parse(command: &str, check_portal: bool) -> Result<Self, Error> {
         tracing::info!("Parsing command: {:?}", command);
 
         let now = Utc::now();
@@ -160,7 +201,7 @@ impl Job {
             created: now,
             changed: now,
             version: 1,
-            command: Command::parse(command)?,
+            command: Command::parse(command, check_portal)?,
             state: Status::Created,
             result: None,
             board: None,
@@ -622,7 +663,7 @@ mod tests {
     #[test]
     fn test_command_new() {
         #[allow(clippy::unwrap_used)]
-        let command = Command::parse("portal.cluster add_user demo.proj.portal").unwrap();
+        let command = Command::parse("portal.cluster add_user demo.proj.portal", true).unwrap();
         assert_eq!(command.destination().to_string(), "portal.cluster");
         assert_eq!(
             command.instruction().to_string(),
@@ -633,7 +674,7 @@ mod tests {
     #[test]
     fn test_command_display() {
         #[allow(clippy::unwrap_used)]
-        let command = Command::parse("portal.cluster add_user demo.proj.portal").unwrap();
+        let command = Command::parse("portal.cluster add_user demo.proj.portal", true).unwrap();
         assert_eq!(
             command.to_string(),
             "portal.cluster add_user demo.proj.portal"
@@ -643,7 +684,7 @@ mod tests {
     #[test]
     fn test_job_new() {
         #[allow(clippy::unwrap_used)]
-        let job = Job::parse("portal.cluster add_user demo.proj.portal").unwrap();
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true).unwrap();
         assert_eq!(
             job.command.to_string(),
             "portal.cluster add_user demo.proj.portal"
@@ -655,7 +696,7 @@ mod tests {
     #[test]
     fn test_job_state() {
         #[allow(clippy::unwrap_used)]
-        let mut job = Job::parse("portal.cluster add_user demo.proj.portal").unwrap();
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal", true).unwrap();
 
         assert!(!job.is_finished());
         assert_eq!(job.state(), Status::Created);
@@ -692,7 +733,7 @@ mod tests {
     #[test]
     fn test_job_error() {
         #[allow(clippy::unwrap_used)]
-        let mut job = Job::parse("portal.cluster add_user demo.proj.portal").unwrap();
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal", true).unwrap();
 
         assert!(!job.is_finished());
         assert_eq!(job.state(), Status::Created);

@@ -113,9 +113,12 @@ async fn create_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, 
     match agent::account().await {
         Some(account) => {
             // send the add_job to the account agent
-            let job = Job::parse(&format!("{}.{} add_user {}", me, account.name(), user))?
-                .put(&account)
-                .await?;
+            let job = Job::parse(
+                &format!("{}.{} add_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
 
             // Wait for the add_job to complete
             let result = job.wait().await?.result::<UserMapping>()?;
@@ -147,12 +150,10 @@ async fn create_directories(me: &str, mapping: &UserMapping) -> Result<String, E
     match agent::filesystem().await {
         Some(filesystem) => {
             // send the add_job to the filesystem agent
-            let job = Job::parse(&format!(
-                "{}.{} add_local_user {}",
-                me,
-                filesystem.name(),
-                mapping
-            ))?
+            let job = Job::parse(
+                &format!("{}.{} add_local_user {}", me, filesystem.name(), mapping),
+                false,
+            )?
             .put(&filesystem)
             .await?;
 
@@ -186,13 +187,16 @@ async fn update_homedir(me: &str, user: &UserIdentifier, homedir: &str) -> Resul
     match agent::account().await {
         Some(account) => {
             // send the add_job to the account agent
-            let job = Job::parse(&format!(
-                "{}.{} update_homedir {} {}",
-                me,
-                account.name(),
-                user,
-                homedir
-            ))?
+            let job = Job::parse(
+                &format!(
+                    "{}.{} update_homedir {} {}",
+                    me,
+                    account.name(),
+                    user,
+                    homedir
+                ),
+                false,
+            )?
             .put(&account)
             .await?;
 

@@ -42,8 +42,32 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
 pub async fn run(command: &str) -> Result<Job, Error> {
     tracing::info!("Received command: {}", command);
 
+    let my_name = agent::name().await;
+
     match agent::portal().await {
-        Some(portal) => Ok(Job::parse(command)?.put(&portal).await?),
+        Some(portal) => {
+            let job = Job::parse(command, true)?;
+
+            if job.destination().first() != portal.name() {
+                tracing::error!(
+                    "Job destination does not match portal name: {} != {}",
+                    job.destination(),
+                    portal.name()
+                );
+                return Err(Error::Delivery(format!(
+                    "Job destination does not match portal name: {} != {}",
+                    job.destination().first(),
+                    portal.name(),
+                )));
+            }
+
+            Ok(Job::parse(
+                &format!("{}.{} submit {}", my_name, portal.name(), command),
+                true,
+            )?
+            .put(&portal)
+            .await?)
+        }
         None => {
             tracing::error!("No portal agent found");
             Err(Error::NoPortal(

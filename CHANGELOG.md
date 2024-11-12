@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Moved all command and grammar parsing fully over to the parse pattern.
+  You cannot now create any commands that aren't valid. Added lots of
+  extra tests of validity, e.g. that commands that impact users must
+  come from the portal that manages that user.
+
+- Separated out the bridge so that it communicates via the portal in a
+  different zone. Added a "submit" command that is only used by the
+  bridge to submit instructions to the portal. Added lots of strict
+  validation to ensure the bridge<=>portal connection is verified and
+  all comamnds are sane, and pass all of the about parse tests.
+
+- Related to the above, changed commands so that you now don't specify
+  the bridge<=>portal connection when submitting commands via python.
+  You would now do "portal.provider.platform.instance add_user user.project.portal",
+  rather than "bridge.portal.provider.plaform.instance ...". It is a small
+  change, but it is easier to understand, and now the bridge is just
+  an invisible bridge between the "normal" work and the OpenPortal world.
 
 ## [0.0.20] - 2024-11-08
 ### Added

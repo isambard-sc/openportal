@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.0.20] - 2024-11-08
 ### Added
 - Added the concept of zones. Agents can now only send messages along chains
   within the same zone. This increases security, and makes it easier to
@@ -94,6 +96,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.0.20]: https://github.com/isambard-sc/openportal/releases/tag/0.0.20
 [0.0.19]: https://github.com/isambard-sc/openportal/releases/tag/0.0.19
 [0.0.18]: https://github.com/isambard-sc/openportal/releases/tag/0.0.18
 [0.0.17]: https://github.com/isambard-sc/openportal/releases/tag/0.0.17

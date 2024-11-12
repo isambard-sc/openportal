@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::agent::Type as AgentType;
+use crate::agent;
+use crate::agent::Type::{Bridge, Portal};
 use crate::agent_core::Config;
 use crate::error::Error;
 use crate::grammar::Instruction::Submit;
@@ -21,7 +22,22 @@ crate::async_runnable! {
     ///
     pub async fn portal_runner(envelope: Envelope) -> Result<Job, Error>
     {
-        let job = envelope.job();
+        let mut job = envelope.job();
+
+        // get information about the agent that sent this job
+        // - double check that they are a bridge agent
+        // (these are the only agent type that should be submitting
+        //  jobs to the portal)
+        match agent::agent_type(&envelope.sender()).await {
+            Some(Bridge) => {}
+            _ => {
+                return Err(Error::InvalidInstruction(
+                    format!("Invalid instruction: {}. Only bridge agents can submit instructions to the portal", job.instruction()),
+                ));
+            }
+        }
+
+        let sender = envelope.sender();
 
         match job.instruction() {
             Submit(destination, instruction) => {
@@ -31,6 +47,49 @@ crate::async_runnable! {
                 tracing::info!("Received instruction: {:?}", instruction);
                 tracing::info!("This is for destination: {:?}", destination);
                 tracing::info!("This was from {:?}", envelope);
+
+                if destination.agents().len() < 2 {
+                    return Err(Error::InvalidInstruction(
+                        format!("Invalid instruction: {}. Destination must have at least two agents", job.instruction()),
+                    ));
+                }
+
+                // the first agent in the destination is the agent should be this portal
+                let first_agent = destination.agents()[0].clone();
+
+                if first_agent != envelope.recipient().name() {
+                    return Err(Error::InvalidInstruction(
+                        format!("Invalid instruction: {}. First agent in destination should be this portal ({})",
+                                    job.instruction(),
+                                    envelope.recipient().name())
+                    ));
+                }
+
+                // who is next in line to receive this job? - find it, and its zone
+                let next_agent = agent::find(&destination.agents()[1]).await.ok_or_else(|| {
+                    Error::InvalidInstruction(
+                        format!("Invalid instruction: {}. Cannot find next agent in destination {}",
+                                job.instruction(), destination),
+                    )
+                })?;
+
+                // create the job and send it to the board for the next agent
+                let southbound_job = Job::parse(&format!("{} {}", destination, instruction))?.put(&next_agent).await?;
+
+                job = job.running(Some("Job registered - processing...".to_string()))?;
+                job = job.update(&sender).await?;
+
+                // Wait for the submitted job to complete
+                let result = southbound_job.wait().await?.result::<String>()?;
+
+                match southbound_job.is_error() {
+                    true => {
+                        job = job.errored(&result.unwrap_or("Something went wrong".to_owned()))?;
+                    }
+                    false => {
+                        job = job.completed(&result)?;
+                    }
+                }
 
                 Ok(job)
             }
@@ -51,7 +110,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
 
-    if config.agent() != AgentType::Portal {
+    if config.agent() != Portal {
         return Err(Error::Misconfigured(
             "Service agent is not a Portal".to_string(),
         ));

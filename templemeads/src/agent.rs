@@ -254,6 +254,31 @@ pub async fn filesystem() -> Option<Peer> {
     REGISTAR.read().await.filesystem()
 }
 
+///
+/// Return the type of the specified agent
+///
+pub async fn agent_type(peer: &Peer) -> Option<Type> {
+    REGISTAR.read().await.peers.get(peer).cloned()
+}
+
+///
+/// Return the first agent called 'name' - note that this
+/// will return the first agent with this name, even if there
+/// are multiple agents with the same name, but in different
+/// zones
+///
+pub async fn find(name: &str) -> Option<Peer> {
+    let registrar = REGISTAR.read().await;
+
+    for (peer, _) in registrar.peers.iter() {
+        if peer.name() == name {
+            return Some(peer.clone());
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

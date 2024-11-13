@@ -10,6 +10,9 @@ use templemeads::grammar::Instruction::{AddLocalUser, RemoveLocalUser};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
+// import filesystem as a module
+mod filesystem;
+
 ///
 /// Main function for the filesystem application
 ///
@@ -73,6 +76,14 @@ async fn main() -> Result<()> {
 
                     tracing::info!("Creating directories for {} - home = {}, project = {}",
                                    mapping.user(), home_dir, project_dir);
+
+                    filesystem::create_home_dir(&home_dir, mapping.local_user(),
+                                                mapping.local_project(),
+                                                home_permissions,
+                                                home_script).await?;
+
+                    filesystem::create_project_dir(&project_dir, mapping.local_project(),
+                                                   project_permissions, project_script).await?;
 
                     // update the job with the user's home directory
                     let job = job.completed(home_dir)?;

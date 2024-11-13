@@ -182,8 +182,8 @@ async fn create_dir(
             ));
         }
 
-        // check the permissions
-        if permissions != metadata.permissions().mode() {
+        // check the permissions - we should ignore the sticky bit
+        if metadata.permissions().mode() & 0o7777 != permissions {
             // permissions are wrong
             return Err(Error::State(
                 format!(

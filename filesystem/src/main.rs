@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
 
                     // create the project directories
                     for i in 0..project_dirs.len() {
-                        let project_dir = format!("{}/{}", project_dirs[i], mapping.local_project());
+                        let project_dir = format!("{}/{}", project_dirs[i], mapping.user().project());
                         filesystem::create_project_dir(&project_dir, mapping.local_project(),
                                                        &project_permissions[i]).await?;
                     }
@@ -137,8 +137,8 @@ async fn main() -> Result<()> {
                     // now create any necessary project links
                     for i in 0..project_links.len() {
                         if let Some(link) = project_links[i].as_ref() {
-                            filesystem::create_project_link(&format!("{}/{}", project_dirs[i], mapping.local_project()),
-                                                            link, mapping.local_project()).await?;
+                            filesystem::create_project_link(&format!("{}/{}", project_dirs[i], mapping.user().project()),
+                                                            link, &mapping.user().project()).await?;
                         }
                     }
 

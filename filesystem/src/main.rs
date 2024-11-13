@@ -149,12 +149,12 @@ async fn main() -> Result<()> {
                 },
                 RemoveLocalUser(mapping) => {
                     Err(Error::IncompleteCode(
-                        format!("RemoveUser instruction not implemented yet - cannot remove {}", mapping),
+                        format!("RemoveLocalUser instruction not implemented yet - cannot remove {}", mapping),
                     ))
                 },
                 _ => {
                     Err(Error::InvalidInstruction(
-                        format!("Invalid instruction: {}. Filesystem only supports add_user and remove_user", job.instruction()),
+                        format!("Invalid instruction: {}. Filesystem only supports add_local_user and remove_local_user", job.instruction()),
                     ))
                 }
             }

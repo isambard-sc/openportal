@@ -16,6 +16,7 @@ pub enum Type {
     Bridge,
     Account,
     Filesystem,
+    Scheduler,
 }
 
 impl std::fmt::Display for Type {
@@ -28,6 +29,7 @@ impl std::fmt::Display for Type {
             Type::Bridge => write!(f, "bridge"),
             Type::Account => write!(f, "account"),
             Type::Filesystem => write!(f, "filesystem"),
+            Type::Scheduler => write!(f, "scheduler"),
         }
     }
 }
@@ -81,6 +83,13 @@ pub mod provider {
     pub use crate::agent_core::Config;
     pub use crate::agent_core::Defaults;
     pub use crate::provider::run;
+}
+
+pub mod scheduler {
+    pub use crate::agent_core::process_args;
+    pub use crate::agent_core::Config;
+    pub use crate::agent_core::Defaults;
+    pub use crate::scheduler::run;
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]

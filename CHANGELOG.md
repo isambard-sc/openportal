@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Finished the "AddLocalUser" command for the filesystem agent. User home
+  dirs and project dirs are now created, following admin settings. This
+  includes multiple project dirs, plus links between dirs. Multiple checks
+  ensure that directories are only created if they don't exist, and that
+  they aren't created if the user or group don't exist. Also, checks to
+  ensure that they aren't written to anywhere sensitive on the filesystem.
 
 ## [0.0.21] - 2024-11-12
 ### Added

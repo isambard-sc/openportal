@@ -10,6 +10,9 @@ use templemeads::grammar::Instruction::{AddLocalUser, RemoveLocalUser};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
+mod cache;
+mod filesystem;
+
 ///
 /// Main function for the filesystem application
 ///
@@ -53,9 +56,35 @@ async fn main() -> Result<()> {
         }
     };
 
-    // get the details about the filesystem
-    // let home_root = config.option("home-root", "/home");
-    // let project_root: String = config.option("project-root", "/projects");
+    cache::set_home_root(&config.option("home-root", "/home")).await?;
+    cache::set_home_permissions(&config.option("home-permissions", "0755")).await?;
+
+    cache::set_project_roots(
+        &config
+            .option("project-roots", "/project")
+            .split(":")
+            .map(|s| s.to_owned())
+            .collect(),
+    )
+    .await?;
+
+    cache::set_project_permissions(
+        &config
+            .option("project-permissions", "2770")
+            .split(":")
+            .map(|s| s.to_owned())
+            .collect(),
+    )
+    .await?;
+
+    cache::set_project_links(
+        &config
+            .option("project-links", "")
+            .split(":")
+            .map(|s| s.to_owned())
+            .collect(),
+    )
+    .await?;
 
     async_runnable! {
         ///
@@ -68,11 +97,50 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 AddLocalUser(mapping) => {
-                    let home_dir = format!("/shared/home/{}", mapping.local_user());
-                    let project_dir = format!("/projects/{}", mapping.user().project());
+                    // home directory is, e.g. /home/project/user
+                    let home_root = format!("{}/{}", cache::get_home_root().await?, mapping.user().project());
+                    let home_dir = format!("{}/{}", home_root, mapping.local_user());
+                    let home_permissions = cache::get_home_permissions().await?;
 
-                    tracing::info!("Creating directories for {} - home = {}, project = {}",
-                                   mapping.user(), home_dir, project_dir);
+                    let project_dirs = cache::get_project_roots().await?;
+                    let project_permissions = cache::get_project_permissions().await?;
+                    let project_links = cache::get_project_links().await?;
+
+                    if project_dirs.len() != project_permissions.len() {
+                        return Err(Error::Misconfigured(
+                            "Number of project directories does not match number of permissions".to_owned(),
+                        ));
+                    }
+
+                    if project_dirs.len() != project_links.len() {
+                        return Err(Error::Misconfigured(
+                            "Number of project directories does not match number of links".to_owned(),
+                        ));
+                    }
+
+                    // create the root in which the user's home directory will be created - this is /{home_root}/{project}
+                    filesystem::create_project_dir(&home_root, mapping.local_project(),
+                                                   "0755").await?;
+
+                    filesystem::create_home_dir(&home_dir, mapping.local_user(),
+                                                mapping.local_project(),
+                                                &home_permissions).await?;
+
+
+                    // create the project directories
+                    for i in 0..project_dirs.len() {
+                        let project_dir = format!("{}/{}", project_dirs[i], mapping.user().project());
+                        filesystem::create_project_dir(&project_dir, mapping.local_project(),
+                                                       &project_permissions[i]).await?;
+                    }
+
+                    // now create any necessary project links
+                    for i in 0..project_links.len() {
+                        if let Some(link) = project_links[i].as_ref() {
+                            filesystem::create_project_link(&format!("{}/{}", project_dirs[i], mapping.user().project()),
+                                                            link, &mapping.user().project()).await?;
+                        }
+                    }
 
                     // update the job with the user's home directory
                     let job = job.completed(home_dir)?;

@@ -132,9 +132,31 @@ impl UserMapping {
             )));
         };
 
+        if local_user.starts_with(".")
+            || local_user.ends_with(".")
+            || local_user.starts_with("/")
+            || local_user.ends_with("/")
+        {
+            return Err(Error::Parse(format!(
+                "Invalid UserMapping - local user account contains invalid characters '{}'",
+                local_user
+            )));
+        };
+
         if local_project.is_empty() {
             return Err(Error::Parse(format!(
                 "Invalid UserMapping - local_project cannot be empty '{}'",
+                local_project
+            )));
+        };
+
+        if local_project.starts_with(".")
+            || local_project.ends_with(".")
+            || local_project.starts_with("/")
+            || local_project.ends_with("/")
+        {
+            return Err(Error::Parse(format!(
+                "Invalid UserMapping - local project contains invalid characters '{}'",
                 local_project
             )));
         };
@@ -157,25 +179,7 @@ impl UserMapping {
         let local_user = parts[1].trim();
         let local_project = parts[2].trim();
 
-        if local_user.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid UserMapping - local_user cannot be empty '{}'",
-                identifier
-            )));
-        };
-
-        if local_project.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid UserMapping - local_project cannot be empty '{}'",
-                identifier
-            )));
-        };
-
-        Ok(Self {
-            user,
-            local_user: local_user.to_string(),
-            local_project: local_project.to_string(),
-        })
+        Self::new(&user, local_user, local_project)
     }
 
     pub fn user(&self) -> &UserIdentifier {

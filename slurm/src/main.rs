@@ -10,6 +10,8 @@ use templemeads::grammar::Instruction::{AddLocalUser, RemoveLocalUser};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
+mod slurm;
+
 ///
 /// Main function for the slurm scheduler application
 ///
@@ -52,6 +54,33 @@ async fn main() -> Result<()> {
             return Ok(());
         }
     };
+
+    // get the extra options needed for the slurm scheduler
+    let token_command = config.option("token-command", "");
+    let slurm_server = config.option("slurm-server", "");
+    let slurm_user = config.option("slurm-user", "");
+
+    if token_command.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No token command provided. This should be the command needed to \
+             generate a valid JWT token. Set this in the token-command \
+             option."
+                .to_owned(),
+        ));
+    }
+
+    if slurm_server.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No Slurm server specified. Please set this in the slurm-server option.".to_owned(),
+        ));
+    }
+
+    // connect the single shared Slurm client - this will be used in the
+    // async function (we can't bind variables to async functions, or else
+    // we would just pass the client with the environment)
+    slurm::connect(&slurm_server, &slurm_user, &token_command).await?;
+
+    tracing::info!("Connected to slurm server at {}", slurm_server);
 
     async_runnable! {
         ///

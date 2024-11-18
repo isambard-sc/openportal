@@ -11,6 +11,7 @@ use templemeads::grammar::{UserIdentifier, UserMapping};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
+mod cache;
 mod slurm;
 
 ///

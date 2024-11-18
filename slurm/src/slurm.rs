@@ -1,23 +1,167 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use std::ops::Deref;
-
 use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use reqwest::Client;
 use secrecy::{ExposeSecret, Secret};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use templemeads::grammar::{UserIdentifier, UserMapping};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::fmt::Display;
+use templemeads::grammar::UserMapping;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
+
+use crate::cache;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FreeResponse {
     meta: serde_json::Value,
     errors: serde_json::Value,
     warnings: serde_json::Value,
+}
+
+///
+/// Call a get URL on the slurmrestd server described in 'auth'.
+///
+async fn call_get(backend: &str, function: &str) -> Result<serde_json::Value, Error> {
+    // get the auth details from the global Slurm client
+    let mut auth = auth().await?;
+    auth.num_reconnects = 0;
+
+    let url = format!(
+        "{}/{}/v{}/{}",
+        &auth.server, backend, &auth.version, function
+    );
+
+    tracing::info!("Calling function {}", url);
+
+    let client = Client::builder()
+        .build()
+        .context("Could not build client")?;
+
+    let mut result = client
+        .get(&url)
+        .header("Referer", format!("{}/ipa", &auth.server))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("X-SLURM-USER-NAME", &auth.user)
+        .header("X-SLURM-USER-TOKEN", auth.jwt.expose_secret().to_string())
+        .send()
+        .await
+        .with_context(|| format!("Could not call function: {}", url))?;
+
+    // if this is an authorisation error, try to reconnect
+    while result.status().as_u16() == 401 {
+        auth.num_reconnects += 1;
+
+        if auth.num_reconnects > 3 {
+            return Err(Error::Call(format!(
+                "Authorisation (401) error: Could not get response for function: {}. Status: {}. Response: {:?}",
+                url,
+                result.status(),
+                    result
+                )));
+        }
+
+        tracing::error!("Authorisation (401) error. Reconnecting.");
+
+        match login(&auth.server, &auth.user, &auth.token_command).await {
+            Ok(session) => {
+                auth.jwt = session.jwt;
+                auth.version = session.version;
+
+                // create a new client with the new cookies
+                let client = Client::builder()
+                    .build()
+                    .context("Could not build client")?;
+
+                // retry the call
+                result = client
+                    .get(&url)
+                    .header("Referer", format!("{}/ipa", &auth.server))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .send()
+                    .await
+                    .with_context(|| format!("Could not call function: {}", url))?;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Could not login to FreeIPA server: {}. Error: {}",
+                    auth.server,
+                    e
+                );
+            }
+        }
+    }
+
+    if result.status().as_u16() == 500 {
+        tracing::error!(
+            "500 error - slurmrestd error when calling {} as user {}.",
+            url,
+            auth.user
+        );
+
+        match result.json::<serde_json::Value>().await {
+            Ok(json) => tracing::error!("Server response: {}", json),
+            Err(_) => tracing::error!("Could not decode the server's response."),
+        };
+
+        return Err(Error::Call(format!(
+            "500 error - slurmrestd error when calling {} as user {}.",
+            url, auth.user
+        )));
+    }
+
+    // reset the number of reconnects, as we have clearly been successful
+    auth.num_reconnects = 0;
+
+    if result.status().is_success() {
+        let response: serde_json::Value = result
+            .json()
+            .await
+            .with_context(|| "Could not decode json from response".to_owned())?;
+
+        // are there any warnings - print them out if there are
+        if let Some(warnings) = response
+            .get("warnings")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !warnings.is_empty() {
+                tracing::warn!("Warnings: {:?}", warnings);
+            }
+        }
+
+        // are there any errors - raise these as errors if there are
+        if let Some(errors) = response
+            .get("errors")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !errors.is_empty() {
+                tracing::error!("Errors: {:?}", errors);
+                return Err(Error::Call(format!("Slurmrestd errors: {:?}", errors)));
+            }
+        }
+
+        Ok(response)
+    } else {
+        tracing::error!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            url,
+            result.status(),
+            result
+        );
+        Err(Error::Call(format!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            url,
+            result.status(),
+            result
+        )))
+    }
 }
 
 ///
@@ -53,7 +197,7 @@ async fn call_post(
         .json(&payload)
         .send()
         .await
-        .with_context(|| format!("Could not call function: {}", payload))?;
+        .with_context(|| format!("Could not call function: {}", url))?;
 
     // if this is an authorisation error, try to reconnect
     while result.status().as_u16() == 401 {
@@ -62,7 +206,7 @@ async fn call_post(
         if auth.num_reconnects > 3 {
             return Err(Error::Call(format!(
                 "Authorisation (401) error: Could not get response for function: {}. Status: {}. Response: {:?}",
-                payload,
+                url,
                 result.status(),
                     result
                 )));
@@ -89,7 +233,7 @@ async fn call_post(
                     .json(&payload)
                     .send()
                     .await
-                    .with_context(|| format!("Could not call function: {}", payload))?;
+                    .with_context(|| format!("Could not call function: {}", url))?;
             }
             Err(e) => {
                 tracing::error!(
@@ -162,7 +306,7 @@ async fn call_post(
         );
         Err(Error::Call(format!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
-            payload,
+            url,
             result.status(),
             result
         )))
@@ -358,9 +502,105 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, SlurmAuth>, Error> {
     Ok(SLURM_AUTH.lock().await)
 }
 
+async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
+    // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
+    // with
+    // {
+    //    accounts: [
+    //        {
+    //            name: "project",
+    //            description: "Account for project"
+    //            organization: "default"
+    //        }
+    //    ]
+    // }
+    // (we always use the default organization)
+
+    let payload = serde_json::json!({
+        "accounts": [
+            {
+                "name": account.name,
+                "description": account.description,
+                "organization": account.organization
+            }
+        ]
+    });
+
+    call_post("slurmdb", "accounts", &payload).await?;
+
+    Ok(account.clone())
+}
+
 ///
 /// Public API
 ///
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SlurmAccount {
+    name: String,
+    description: String,
+    organization: String,
+}
+
+impl Display for SlurmAccount {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "SlurmAccount {{ name: {}, description: {}, organization: {} }}",
+            self.name(),
+            self.description(),
+            self.organization()
+        )
+    }
+}
+
+impl SlurmAccount {
+    pub fn from_mapping(mapping: &UserMapping) -> Self {
+        SlurmAccount {
+            name: mapping.local_project().to_string(),
+            description: format!(
+                "Account for OpenPortal project {}",
+                mapping.user().project()
+            ),
+            organization: "default".to_string(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn organization(&self) -> &str {
+        &self.organization
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SlurmUser {
+    name: String,
+}
+
+impl Display for SlurmUser {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SlurmUser {{ name: {} }}", self.name())
+    }
+}
+
+impl SlurmUser {
+    pub fn from_mapping(mapping: &UserMapping) -> Self {
+        SlurmUser {
+            name: mapping.local_user().to_string(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<(), Error> {
     // overwrite the global FreeIPA client with a new one
@@ -400,43 +640,150 @@ pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<()
     }
 }
 
-pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
-    // get the unix username
-    let username = user.local_user();
+async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
+    // need to GET /slurm/vX.Y.Z/accounts/{account.name}
+    // and return the account if it exists
+    let account = cache::get_account(account).await?;
 
-    // get the unix project name
-    let project = user.local_project();
+    if let Some(account) = account {
+        // double-check that the account actually exists...
+        let response = match call_get("slurmdb", &format!("account/{}", account.name())).await {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!("Could not get account {}: {}", account.name(), e);
 
-    tracing::info!("Adding user {} to project {}", username, project);
+                // clear the cache as something has changed behind our back
+                cache::clear().await?;
+                return Ok(None);
+            }
+        };
 
-    // first create a slurm account for this project
+        // response should have a name, description and organization
+        let name = match response.get("name") {
+            Some(name) => name.as_str().context("Could not get name")?,
+            None => {
+                tracing::warn!("Could not get name from response: {:?}", response);
+                cache::clear().await?;
+                return Ok(None);
+            }
+        };
 
-    // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
-    // with
+        let description = match response.get("description") {
+            Some(description) => description.as_str().context("Could not get description")?,
+            None => {
+                tracing::warn!("Could not get description from response: {:?}", response);
+                cache::clear().await?;
+                return Ok(None);
+            }
+        };
+
+        let organization = match response.get("organization") {
+            Some(organization) => organization
+                .as_str()
+                .context("Could not get organization")?,
+            None => {
+                tracing::warn!("Could not get organization from response: {:?}", response);
+                cache::clear().await?;
+                return Ok(None);
+            }
+        };
+
+        let existing_account = SlurmAccount {
+            name: name.to_string(),
+            description: description.to_string(),
+            organization: organization.to_string(),
+        };
+
+        if account != existing_account {
+            tracing::warn!(
+                "Account {} exists, but with different details.",
+                account.name()
+            );
+            tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account);
+
+            // clear the cache as something has changed behind our back
+            cache::clear().await?;
+
+            // store the new account
+            cache::add_account(&existing_account).await?;
+
+            return Ok(Some(existing_account));
+        }
+    }
+
+    // the account doesn't exist
+    Ok(None)
+}
+
+async fn get_slurm_account_create_if_not_exists(
+    account: &SlurmAccount,
+) -> Result<SlurmAccount, Error> {
+    let existing_account = get_slurm_account(account.name()).await?;
+
+    if let Some(existing_account) = existing_account {
+        if existing_account.description() != account.description()
+            || existing_account.organization() != account.organization()
+        {
+            // the account exists, but the details are different
+            tracing::warn!(
+                "Account {} exists, but with different details.",
+                account.name()
+            );
+            tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account)
+        }
+
+        return Ok(existing_account);
+    }
+
+    // it doesn't, so create it
+    let account = force_add_slurm_account(account).await?;
+    cache::add_account(&account).await?;
+
+    Ok(account.clone())
+}
+
+async fn associate_slurm_user(
+    user: &SlurmUser,
+    account: &SlurmAccount,
+) -> Result<SlurmUser, Error> {
+    // need to POST to /slurm/vX.Y.Z/accounts/{account.name}/users
+    // with a JSON payload
     // {
-    //    accounts: [
+    //    users: [
     //        {
-    //            name: "project",
-    //            description: "Account for project"
-    //            organization: "default"
+    //            name: "user"
     //        }
     //    ]
     // }
-    // (we always use the default organization)
 
     let payload = serde_json::json!({
-        "accounts": [
+        "users": [
             {
-                "name": project,
-                "description": format!("Account for OpenPortal project {}", user.user().project()),
-                "organization": "default"
+                "name": user.name
             }
         ]
     });
 
-    call_post("slurmdb", "accounts", &payload).await?;
+    call_post(
+        "slurmdb",
+        &format!("account/{}/users", account.name),
+        &payload,
+    )
+    .await?;
 
-    tracing::info!("Success!");
+    Ok(user.clone())
+}
+
+pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
+    let account = get_slurm_account_create_if_not_exists(&SlurmAccount::from_mapping(user)).await?;
+
+    let test_account = get_slurm_account(account.name()).await?;
+
+    tracing::info!("Test account: {:?}", test_account);
+
+    let user = associate_slurm_user(&SlurmUser::from_mapping(user), &account).await?;
+
+    tracing::info!("Associated user {} with account {}", user, account);
 
     Ok(())
 }

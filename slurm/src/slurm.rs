@@ -1,50 +1,43 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use std::ops::Deref;
+
 use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use reqwest::Client;
-use secrecy::Secret;
+use secrecy::{ExposeSecret, Secret};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::HashMap;
+use templemeads::grammar::{UserIdentifier, UserMapping};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FreeResponse {
-    result: serde_json::Value,
-    principal: serde_json::Value,
-    error: serde_json::Value,
-    id: u16,
+    meta: serde_json::Value,
+    errors: serde_json::Value,
+    warnings: serde_json::Value,
 }
 
 ///
 /// Call a post URL on the slurmrestd server described in 'auth'.
 ///
-async fn call_post<T>(
-    func: &str,
-    args: Option<Vec<String>>,
-    kwargs: Option<HashMap<String, String>>,
-) -> Result<T, Error>
-where
-    T: DeserializeOwned,
-{
+async fn call_post(
+    backend: &str,
+    function: &str,
+    payload: &serde_json::Value,
+) -> Result<(), Error> {
     // get the auth details from the global Slurm client
     let mut auth = auth().await?;
     auth.num_reconnects = 0;
 
-    let url = format!("{}/ipa/session/json", &auth.server);
+    let url = format!(
+        "{}/{}/v{}/{}",
+        &auth.server, backend, &auth.version, function
+    );
 
-    let mut kwargs = kwargs.unwrap_or_default();
-
-    // the payload is a json object that contains the method, the parameters
-    // (as an array, plus a dict of the version) and a random id. The id
-    // will be passed back to us in the response.
-    let payload = serde_json::json!({
-        "method": func,
-        "params": [args.clone().unwrap_or_default(), kwargs.clone()],
-    });
+    tracing::info!("Calling function {} with payload: {:?}", url, payload);
 
     let client = Client::builder()
         .build()
@@ -55,6 +48,8 @@ where
         .header("Referer", format!("{}/ipa", &auth.server))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
+        .header("X-SLURM-USER-NAME", &auth.user)
+        .header("X-SLURM-USER-TOKEN", auth.jwt.expose_secret().to_string())
         .json(&payload)
         .send()
         .await
@@ -106,35 +101,58 @@ where
         }
     }
 
+    if result.status().as_u16() == 500 {
+        tracing::error!(
+            "500 error - slurmrestd error when calling {} with payload {} as user {}.",
+            url,
+            payload,
+            auth.user
+        );
+
+        match result.json::<serde_json::Value>().await {
+            Ok(json) => tracing::error!("Server response: {}", json),
+            Err(_) => tracing::error!("Could not decode the server's response."),
+        };
+
+        return Err(Error::Call(format!(
+            "500 error - slurmrestd error when calling {} with payload {} as user {}.",
+            url, payload, auth.user
+        )));
+    }
+
     // reset the number of reconnects, as we have clearly been successful
     auth.num_reconnects = 0;
 
     if result.status().is_success() {
-        let result = result
-            .json::<FreeResponse>()
+        let response: serde_json::Value = result
+            .json()
             .await
-            .context("Could not decode from json")?;
+            .with_context(|| "Could not decode json from response".to_owned())?;
 
-        // if there is an error, return it
-        if !result.error.is_null() {
-            return Err(Error::Call(format!(
-                "Error in response: {:?}",
-                result.error
-            )));
-        }
-
-        // return the result, encoded to the type T
-        match serde_json::from_value(result.result.clone()).context("Could not decode result") {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                tracing::error!("Could not decode result: {:?}. Error: {}", result.result, e);
-                tracing::error!("Response: {:?}", result);
-                Err(Error::Call(format!(
-                    "Could not decode result: {:?}. Error: {}",
-                    result.result, e
-                )))
+        // are there any warnings - print them out if there are
+        if let Some(warnings) = response
+            .get("warnings")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !warnings.is_empty() {
+                tracing::warn!("Warnings: {:?}", warnings);
             }
         }
+
+        // are there any errors - raise these as errors if there are
+        if let Some(errors) = response
+            .get("errors")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !errors.is_empty() {
+                tracing::error!("Errors: {:?}", errors);
+                return Err(Error::Call(format!("Slurmrestd errors: {:?}", errors)));
+            }
+        }
+
+        Ok(())
     } else {
         tracing::error!(
             "Could not get response for function: {}. Status: {}. Response: {:?}",
@@ -219,10 +237,7 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
         .output()
         .await
     {
-        Ok(jwt) => {
-            let jwt = String::from_utf8(jwt.stdout).context("Could not convert JWT to string")?;
-            jwt
-        }
+        Ok(jwt) => String::from_utf8(jwt.stdout).context("Could not convert JWT to string")?,
         Err(e) => {
             tracing::error!(
                 "Could not get JWT token using command '{:?}': {}",
@@ -295,6 +310,12 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
         .context("Could not convert version to string")?
         .split('v')
         .nth(1)
+        .context("Could not split version")?;
+
+    // sometimes there is an additional '&something' afterwards - remove it
+    let version = version
+        .split('&')
+        .next()
         .context("Could not split version")?;
 
     tracing::info!("Extracted version: {}", version);
@@ -377,4 +398,45 @@ pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<()
             }
         }
     }
+}
+
+pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
+    // get the unix username
+    let username = user.local_user();
+
+    // get the unix project name
+    let project = user.local_project();
+
+    tracing::info!("Adding user {} to project {}", username, project);
+
+    // first create a slurm account for this project
+
+    // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
+    // with
+    // {
+    //    accounts: [
+    //        {
+    //            name: "project",
+    //            description: "Account for project"
+    //            organization: "default"
+    //        }
+    //    ]
+    // }
+    // (we always use the default organization)
+
+    let payload = serde_json::json!({
+        "accounts": [
+            {
+                "name": project,
+                "description": format!("Account for OpenPortal project {}", user.user().project()),
+                "organization": "default"
+            }
+        ]
+    });
+
+    call_post("slurmdb", "accounts", &payload).await?;
+
+    tracing::info!("Success!");
+
+    Ok(())
 }

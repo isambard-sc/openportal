@@ -7,6 +7,7 @@ use templemeads::agent::scheduler::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{AddLocalUser, RemoveLocalUser};
+use templemeads::grammar::{UserIdentifier, UserMapping};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -82,6 +83,14 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to slurm server at {}", slurm_server);
 
+    let mapping = UserMapping::new(
+        &UserIdentifier::parse("chris.demo.brics")?,
+        "chris.demo",
+        "demo",
+    )?;
+
+    slurm::add_user(&mapping).await?;
+
     async_runnable! {
         ///
         /// Runnable function that will be called when a job is received
@@ -92,10 +101,10 @@ async fn main() -> Result<()> {
             let job = envelope.job();
 
             match job.instruction() {
-                AddLocalUser(mapping) => {
-                    Err(Error::IncompleteCode(
-                        format!("AddLocalUser instruction not implemented yet - cannot remove {}", mapping),
-                    ))
+                AddLocalUser(user) => {
+                    slurm::add_user(&user).await?;
+                    let job = job.completed("Success!")?;
+                    Ok(job)
                 },
                 RemoveLocalUser(mapping) => {
                     Err(Error::IncompleteCode(

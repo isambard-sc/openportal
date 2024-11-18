@@ -18,10 +18,12 @@ reqwest = { version = "0.12.7", default-features = false, features = ["cookies",
 secrecy = { version = "0.8.0", features = ["serde"] }
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.68"
+shlex = "1.3.0"
 templemeads = { path = "../templemeads" }
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
+whoami = "1.5.2"
 
 [lints.rust]
 unsafe_code = "forbid"

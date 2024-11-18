@@ -76,8 +76,9 @@ where
         tracing::error!("Authorisation (401) error. Reconnecting.");
 
         match login(&auth.server, &auth.user, &auth.token_command).await {
-            Ok(jwt) => {
-                auth.jwt = jwt;
+            Ok(session) => {
+                auth.jwt = session.jwt;
+                auth.version = session.version;
 
                 // create a new client with the new cookies
                 let client = Client::builder()
@@ -156,6 +157,7 @@ struct SlurmAuth {
     token_command: String,
     user: String,
     jwt: Secret<String>,
+    version: String,
     num_reconnects: u32,
 }
 
@@ -166,6 +168,7 @@ impl SlurmAuth {
             token_command: "".to_string(),
             user: "".to_string(),
             jwt: Secret::new("".to_string()),
+            version: "".to_string(),
             num_reconnects: 0,
         }
     }
@@ -173,23 +176,74 @@ impl SlurmAuth {
 
 static SLURM_AUTH: Lazy<Mutex<SlurmAuth>> = Lazy::new(|| Mutex::new(SlurmAuth::default()));
 
+struct SlurmSession {
+    jwt: Secret<String>,
+    version: String,
+}
+
 ///
 /// Login to the Slurm server using the passed passed command to generate
 /// the JWT token. This will return the valid JWT in a secret. This
 /// JWT can be used for subsequent calls to the server.
 ///
-async fn login(server: &str, user: &str, token_command: &str) -> Result<Secret<String>, Error> {
-    // for now just use the token_command as the token...
+async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSession, Error> {
+    tracing::info!("Logging into Slurm server: {} using user {}", server, user);
+
+    let mut token_command = token_command.to_string();
+
+    // find out the unix user that is running this process
+    let process_user = whoami::username();
+
+    if process_user != user {
+        tracing::info!(
+            "Token is for user '{}', but process is running as '{}'",
+            user,
+            process_user
+        );
+
+        // This is a different user - make sure to add 'username=user' to the token command
+        token_command = format!("{} username={}", token_command, user);
+    }
+
+    tracing::info!("Getting JWT token from command: {}", token_command);
+
+    // parse 'token_command' into an executable plus arguments
+    let token_command = shlex::split(&token_command).context("Could not parse token command")?;
+
+    let token_exe = token_command.first().context("No token command")?;
+    let token_args = token_command.get(1..).unwrap_or(&[]);
 
     // get the JWT token via a tokio process
-    /* let jwt = tokio::process::Command::new(token_command)
+    let jwt = match tokio::process::Command::new(token_exe)
+        .args(token_args)
         .output()
         .await
-        .with_context(|| "Could not get JWT token")?;
+    {
+        Ok(jwt) => {
+            let jwt = String::from_utf8(jwt.stdout).context("Could not convert JWT to string")?;
+            jwt
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not get JWT token using command '{:?}': {}",
+                token_command,
+                e
+            );
+            return Err(Error::Login("Could not get JWT token".to_string()));
+        }
+    };
 
-    let jwt = String::from_utf8(jwt.stdout).context("Could not convert JWT to string")?; */
-
-    let jwt = token_command.to_string();
+    // we expect the output to be something like "JWT: SLURM_JWT={TOKEN}"
+    // We will split with spaces, then find the work that is '{something}={token}",
+    // then split this with '=' and take the second part.
+    let jwt = jwt
+        .split_whitespace()
+        .find(|x| x.contains("="))
+        .context(format!("Could not find JWT token from '{}'", jwt))?
+        .split('=')
+        .nth(1)
+        .context(format!("Could not extract JWT token from '{}'", jwt))?
+        .to_string();
 
     // create a client
     let client = Client::builder()
@@ -208,29 +262,74 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<Secret<S
         .header("X-SLURM-USER-TOKEN", jwt.clone())
         .send()
         .await
-        .with_context(|| format!("Could not login calling URL: {}", url))?;
+        .with_context(|| format!("Could not get OpenAPI specification calling URL: {}", url))?;
 
-    tracing::info!("Login result: {:?}", result);
-    match &result.json::<serde_json::Value>().await {
-        Ok(json) => {
-            tracing::info!("Login JSON: {:?}", json);
-        }
+    // convert the response to JSON
+    let openapi_spec = match &result.json::<serde_json::Value>().await {
+        Ok(json) => json.clone(),
         Err(e) => {
             tracing::error!("Could not decode JSON: {}", e);
+            return Err(Error::Login(format!(
+                "Could not decode JSON from OpenAPI specification: {}",
+                e
+            )));
         }
-    }
+    };
 
-    /*match result.status() {
-        status if status.is_success() => Ok(Secret::new(jwt.clone())),
-        _ => Err(Error::Login(format!(
-            "Could not login to server: {}. Status: {}. Response: {:?}",
-            server,
-            result.status(),
-            result
-        ))),
-    }*/
+    // there should be a 'info' section in the openapi spec
+    let info = openapi_spec
+        .get("info")
+        .context("Could not find 'info' section in OpenAPI specification")?;
 
-    Ok(Secret::new(jwt.clone()))
+    // the version is in the 'version' field
+    let version = info
+        .get("version")
+        .context("Could not find 'version' field in OpenAPI specification")?;
+
+    tracing::info!("Slurm OpenAPI version: {}", version);
+
+    // the version number has the format 'dbvX.Y.Z`. We need to extract
+    // the X.Y.Z part.
+    let version = version
+        .as_str()
+        .context("Could not convert version to string")?
+        .split('v')
+        .nth(1)
+        .context("Could not split version")?;
+
+    tracing::info!("Extracted version: {}", version);
+
+    // now call the ping function to make sure that the server is
+    // up and running
+    let url = format!("{}/slurm/v{}/ping", server, version);
+
+    let result = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .header("X-SLURM-USER-NAME", user)
+        .header("X-SLURM-USER-TOKEN", jwt.clone())
+        .send()
+        .await
+        .with_context(|| format!("Could not ping slurm at URL: {}", url))?;
+
+    // convert the response to JSON
+    let ping_response = match &result.json::<serde_json::Value>().await {
+        Ok(json) => json.clone(),
+        Err(e) => {
+            tracing::error!("Could not decode JSON from ping response: {}", e);
+            return Err(Error::Login(format!(
+                "Could not decode JSON from ping response: {}",
+                e
+            )));
+        }
+    };
+
+    tracing::info!("Ping response: {:?}", ping_response);
+
+    Ok(SlurmSession {
+        jwt: Secret::new(jwt),
+        version: version.to_string(),
+    })
 }
 
 // function to return the client protected by a MutexGuard
@@ -244,7 +343,7 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, SlurmAuth>, Error> {
 
 pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<(), Error> {
     // overwrite the global FreeIPA client with a new one
-    let mut auth = SLURM_AUTH.lock().await;
+    let mut auth = auth().await?;
 
     auth.server = server.to_string();
     auth.user = user.to_string();
@@ -257,8 +356,9 @@ pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<()
 
     loop {
         match login(&auth.server, &auth.user, &auth.token_command).await {
-            Ok(jwt) => {
-                auth.jwt = jwt;
+            Ok(session) => {
+                auth.jwt = session.jwt;
+                auth.version = session.version;
                 return Ok(());
             }
             Err(e) => {

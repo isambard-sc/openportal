@@ -271,6 +271,18 @@ pub async fn filesystem() -> Option<Peer> {
 }
 
 ///
+/// Return the name of the first scheduler agent in the system
+///
+pub async fn scheduler() -> Option<Peer> {
+    REGISTAR
+        .read()
+        .await
+        .agents(&Type::Scheduler)
+        .first()
+        .cloned()
+}
+
+///
 /// Return the type of the specified agent
 ///
 pub async fn agent_type(peer: &Peer) -> Option<Type> {

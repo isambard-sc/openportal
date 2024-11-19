@@ -640,6 +640,113 @@ pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<()
     }
 }
 
+async fn get_slurm_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
+    let response = match call_get("slurmdb", &format!("account/{}", account)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("Could not get account {}: {}", account, e);
+            return Ok(None);
+        }
+    };
+
+    // there should be an accounts list, with a single entry for this account
+    let accounts = match response.get("accounts") {
+        Some(accounts) => accounts,
+        None => {
+            tracing::warn!("Could not get accounts from response: {:?}", response);
+            return Ok(None);
+        }
+    };
+
+    // this should be an array
+    let accounts = match accounts.as_array() {
+        Some(accounts) => accounts,
+        None => {
+            tracing::warn!("Accounts is not an array: {:?}", accounts);
+            return Ok(None);
+        }
+    };
+
+    // there should be an Account object in this array with the right name
+    let slurm_account = accounts.iter().find(|a| {
+        let name = a.get("name").and_then(|n| n.as_str());
+        name == Some(account)
+    });
+
+    let account = match slurm_account {
+        Some(account) => account,
+        None => {
+            tracing::warn!(
+                "Could not find account '{}' in response: {:?}",
+                account,
+                response
+            );
+            return Ok(None);
+        }
+    };
+
+    // response should have a name, description and organization
+    let name = match account.get("name") {
+        Some(name) => name,
+        None => {
+            tracing::warn!("Could not get name from account: {:?}", account);
+            return Ok(None);
+        }
+    };
+
+    let name = match name.as_str() {
+        Some(name) => name,
+        None => {
+            tracing::warn!("Could not get name as string from account: {:?}", name);
+            return Ok(None);
+        }
+    };
+
+    let description = match account.get("description") {
+        Some(description) => description,
+        None => {
+            tracing::warn!("Could not get description from account: {:?}", account);
+            return Ok(None);
+        }
+    };
+
+    let description = match description.as_str() {
+        Some(description) => description,
+        None => {
+            tracing::warn!(
+                "Could not get description as string from account: {:?}",
+                description
+            );
+            return Ok(None);
+        }
+    };
+
+    let organization = match account.get("organization") {
+        Some(organization) => organization,
+        None => {
+            tracing::warn!("Could not get organization from account: {:?}", account);
+            return Ok(None);
+        }
+    };
+
+    let organization = match organization.as_str() {
+        Some(organization) => organization,
+        None => {
+            tracing::warn!(
+                "Could not get organization as string from account: {:?}",
+                organization
+            );
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(SlurmAccount {
+        name: name.to_string(),
+        description: description.to_string(),
+        organization: organization.to_string(),
+    }))
+}
+
 async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
     // need to GET /slurm/vX.Y.Z/accounts/{account.name}
     // and return the account if it exists
@@ -647,67 +754,41 @@ async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error>
 
     if let Some(account) = account {
         // double-check that the account actually exists...
-        let response = match call_get("slurmdb", &format!("account/{}", account.name())).await {
-            Ok(response) => response,
+        let existing_account = match get_slurm_account_from_slurm(account.name()).await {
+            Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", account.name(), e);
+                cache::clear().await?;
+                return Ok(None);
+            }
+        };
+
+        if let Some(existing_account) = existing_account {
+            if account != existing_account {
+                tracing::warn!(
+                    "Account {} exists, but with different details.",
+                    account.name()
+                );
+                tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account);
 
                 // clear the cache as something has changed behind our back
                 cache::clear().await?;
-                return Ok(None);
+
+                // store the new account
+                cache::add_account(&existing_account).await?;
+
+                return Ok(Some(existing_account));
+            } else {
+                return Ok(Some(account));
             }
-        };
-
-        // response should have a name, description and organization
-        let name = match response.get("name") {
-            Some(name) => name.as_str().context("Could not get name")?,
-            None => {
-                tracing::warn!("Could not get name from response: {:?}", response);
-                cache::clear().await?;
-                return Ok(None);
-            }
-        };
-
-        let description = match response.get("description") {
-            Some(description) => description.as_str().context("Could not get description")?,
-            None => {
-                tracing::warn!("Could not get description from response: {:?}", response);
-                cache::clear().await?;
-                return Ok(None);
-            }
-        };
-
-        let organization = match response.get("organization") {
-            Some(organization) => organization
-                .as_str()
-                .context("Could not get organization")?,
-            None => {
-                tracing::warn!("Could not get organization from response: {:?}", response);
-                cache::clear().await?;
-                return Ok(None);
-            }
-        };
-
-        let existing_account = SlurmAccount {
-            name: name.to_string(),
-            description: description.to_string(),
-            organization: organization.to_string(),
-        };
-
-        if account != existing_account {
+        } else {
+            // the account doesn't exist
             tracing::warn!(
-                "Account {} exists, but with different details.",
+                "Account {} does not exist - it has been removed from slurm.",
                 account.name()
             );
-            tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account);
-
-            // clear the cache as something has changed behind our back
             cache::clear().await?;
-
-            // store the new account
-            cache::add_account(&existing_account).await?;
-
-            return Ok(Some(existing_account));
+            return Ok(None);
         }
     }
 

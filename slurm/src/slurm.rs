@@ -4,7 +4,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use secrecy::{ExposeSecret, Secret};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -25,15 +25,28 @@ struct FreeResponse {
 ///
 /// Call a get URL on the slurmrestd server described in 'auth'.
 ///
-async fn call_get(backend: &str, function: &str) -> Result<serde_json::Value, Error> {
+async fn call_get(
+    backend: &str,
+    function: &str,
+    query_params: &Vec<(&str, &str)>,
+) -> Result<serde_json::Value, Error> {
     // get the auth details from the global Slurm client
     let mut auth = auth().await?;
     auth.num_reconnects = 0;
 
-    let url = format!(
-        "{}/{}/v{}/{}",
-        &auth.server, backend, &auth.version, function
-    );
+    let url = match Url::parse_with_params(
+        &format!(
+            "{}/{}/v{}/{}",
+            &auth.server, backend, &auth.version, function
+        ),
+        query_params,
+    ) {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::error!("Could not parse URL: {}", e);
+            return Err(Error::Call("Could not parse URL".to_string()));
+        }
+    };
 
     tracing::info!("Calling function {}", url);
 
@@ -42,7 +55,7 @@ async fn call_get(backend: &str, function: &str) -> Result<serde_json::Value, Er
         .context("Could not build client")?;
 
     let mut result = client
-        .get(&url)
+        .get(url.clone())
         .header("Referer", format!("{}/ipa", &auth.server))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
@@ -79,7 +92,7 @@ async fn call_get(backend: &str, function: &str) -> Result<serde_json::Value, Er
 
                 // retry the call
                 result = client
-                    .get(&url)
+                    .get(url.clone())
                     .header("Referer", format!("{}/ipa", &auth.server))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
@@ -567,7 +580,7 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
 async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
-    let response = match call_get("slurmdb", &format!("account/{}", account)).await {
+    let response = match call_get("slurmdb", &format!("account/{}", account), &Vec::new()).await {
         Ok(response) => response,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -953,26 +966,33 @@ impl SlurmUser {
 
     pub fn construct(value: &serde_json::Value) -> Result<Self, Error> {
         let name = match value.get("name") {
-            Some(name) => name,
+            Some(name) => match name.as_str() {
+                Some(name) => name.to_string(),
+                None => {
+                    tracing::warn!("Could not get name as string from user: {:?}", name);
+                    return Err(Error::Call(
+                        "Could not get name as string from user".to_string(),
+                    ));
+                }
+            },
             None => {
                 tracing::warn!("Could not get name from user: {:?}", value);
                 return Err(Error::Call("Could not get name from user".to_string()));
             }
         };
 
-        let name = match name.as_str() {
-            Some(name) => name.to_string(),
-            None => {
-                tracing::warn!("Could not get name as string from user: {:?}", name);
-                return Err(Error::Call(
-                    "Could not get name as string from user".to_string(),
-                ));
-            }
-        };
-
-        let default_account = match value.get("default_account") {
-            Some(default_account) => match default_account.as_str() {
-                Some(default_account) => Some(clean_account_name(default_account)?),
+        let default_account = match value.get("default") {
+            Some(default_account) => match default_account.get("account") {
+                Some(default_account) => match default_account.as_str() {
+                    Some(default_account) => Some(default_account.to_string()),
+                    None => {
+                        tracing::warn!(
+                            "Could not get default_account as string from user: {:?}",
+                            default_account
+                        );
+                        None
+                    }
+                },
                 None => {
                     tracing::warn!(
                         "Could not get default_account as string from user: {:?}",
@@ -1066,7 +1086,9 @@ pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<()
 async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
     let user = clean_user_name(user)?;
 
-    let response = match call_get("slurmdb", &format!("user/{}", user)).await {
+    let query_params = vec![("with_assocs", "true"), ("default_account", "true")];
+
+    let response = match call_get("slurmdb", &format!("user/{}", user), &query_params).await {
         Ok(response) => response,
         Err(e) => {
             tracing::warn!("Could not get user {}: {}", user, e);
@@ -1175,7 +1197,28 @@ async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
     }
 }
 
-async fn add_association(
+async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
+    // eventually should check to see if this association already exists,
+    // and if so, not to do anything else
+
+    // add the association condition to the account
+    let payload = serde_json::json!({
+        "association_condition": {
+            "accounts": [account.name],
+            "clusters": ["linux"],
+            "association": {
+                "defaultqos": "normal",
+                "comment": format!("Association added by OpenPortal for account {}", account.name)
+            }
+        }
+    });
+
+    call_post("slurmdb", "accounts_association", &payload).await?;
+
+    Ok(())
+}
+
+async fn add_user_association(
     user: &SlurmUser,
     account: &SlurmAccount,
     make_default: bool,
@@ -1188,19 +1231,8 @@ async fn add_association(
         .iter()
         .any(|a| a.account() == account.name())
     {
-        // add the association condition to the account
-        let payload = serde_json::json!({
-            "association_condition": {
-                "accounts": [account.name],
-                "clusters": ["linux"],
-                "association": {
-                    "defaultqos": "normal",
-                    "comment": format!("Association added by OpenPortal for account {}", account.name)
-                }
-            }
-        });
-
-        call_post("slurmdb", "accounts_association", &payload).await?;
+        // make sure that we have this association on the account
+        add_account_association(account).await?;
 
         // now add the association to the user
         let payload = serde_json::json!({
@@ -1208,6 +1240,8 @@ async fn add_association(
                 {
                     "user": user.name,
                     "account": account.name,
+                    "comment": format!("Association added by OpenPortal between user {} and account {}",
+                                       user.name, account.name),
                     "cluster": "linux",
                     "is_default": true
                 }
@@ -1225,7 +1259,9 @@ async fn add_association(
                     user.name()
                 )))
             }
-        }
+        };
+
+        tracing::info!("Updated user: {}", user);
     }
 
     if make_default && *user.default_account() != Some(account.name().to_string()) {
@@ -1311,7 +1347,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
     };
 
     // now add the association to the account, making it the default
-    let slurm_user = add_association(&slurm_user, &slurm_account, true).await?;
+    let slurm_user = add_user_association(&slurm_user, &slurm_account, true).await?;
 
     let user = SlurmUser::from_mapping(user)?;
 

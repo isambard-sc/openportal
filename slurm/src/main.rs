@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
     let mapping = UserMapping::new(
         &UserIdentifier::parse("chris.demo.brics")?,
         "chris.demo",
-        "demo",
+        "brics.demo",
     )?;
 
     slurm::add_user(&mapping).await?;

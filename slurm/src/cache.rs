@@ -13,11 +13,23 @@ use crate::slurm::{SlurmAccount, SlurmUser};
 
 #[derive(Debug, Clone, Default)]
 struct Database {
+    cluster: Option<String>,
     accounts: HashMap<String, SlurmAccount>,
     users: HashMap<String, SlurmUser>,
 }
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
+
+pub async fn get_cluster() -> Result<Option<String>, Error> {
+    let cache = CACHE.read().await;
+    Ok(cache.cluster.clone())
+}
+
+pub async fn set_cluster(cluster: &str) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    cache.cluster = Some(cluster.to_string());
+    Ok(())
+}
 
 pub async fn get_account(name: &str) -> Result<Option<SlurmAccount>, Error> {
     let cache = CACHE.read().await;

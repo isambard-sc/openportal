@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
     let token_command = config.option("token-command", "");
     let slurm_server = config.option("slurm-server", "");
     let slurm_user = config.option("slurm-user", "");
+    let slurm_cluster = config.option("slurm-cluster", "");
 
     if token_command.is_empty() {
         return Err(anyhow::anyhow!(
@@ -75,6 +76,10 @@ async fn main() -> Result<()> {
         return Err(anyhow::anyhow!(
             "No Slurm server specified. Please set this in the slurm-server option.".to_owned(),
         ));
+    }
+
+    if !slurm_cluster.is_empty() {
+        cache::set_cluster(&slurm_cluster).await?;
     }
 
     // connect the single shared Slurm client - this will be used in the

@@ -556,6 +556,84 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
 
     tracing::info!("Using version {} of the Slurm API", version);
 
+    // now we have connected, we need to find the cluster that we
+    // should be working on
+    let result = client
+        .get(&format!("{}/slurmdb/v{}/clusters", server, version))
+        .header("Accept", "application/json")
+        .header("X-SLURM-USER-NAME", user)
+        .header("X-SLURM-USER-TOKEN", jwt.clone())
+        .send()
+        .await
+        .with_context(|| "Could not get cluster information")?;
+
+    let clusters = match &result.json::<serde_json::Value>().await {
+        Ok(json) => json.clone(),
+        Err(e) => {
+            tracing::error!("Could not decode JSON: {}", e);
+            return Err(Error::Login("Could not decode JSON".to_string()));
+        }
+    };
+
+    // there should be an array of cluster objects, each with a `name` field.
+    // Get all of the cluster names.
+    let clusters = match clusters.get("clusters") {
+        Some(clusters) => match clusters.as_array() {
+            Some(clusters) => {
+                let clusters: Vec<String> = clusters
+                    .iter()
+                    .map(|c| {
+                        c.get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown")
+                            .to_string()
+                    })
+                    .collect();
+
+                tracing::info!("Clusters: {:?}", clusters);
+
+                if clusters.is_empty() {
+                    tracing::error!("No clusters found in response: {:?}", clusters);
+                    return Err(Error::Login("No clusters found".to_string()));
+                }
+
+                clusters
+            }
+            None => {
+                tracing::error!("Clusters is not an array: {:?}", clusters);
+                return Err(Error::Login("Clusters is not an array".to_string()));
+            }
+        },
+        None => {
+            tracing::error!("Could not get clusters from response: {:?}", clusters);
+            return Err(Error::Login(
+                "Could not get clusters from response".to_string(),
+            ));
+        }
+    };
+
+    // now get the requested cluster from the cache
+    let requested_cluster = cache::get_cluster().await?;
+
+    if let Some(requested_cluster) = requested_cluster {
+        if clusters.contains(&requested_cluster) {
+            tracing::info!("Using requested cluster: {}", requested_cluster);
+        } else {
+            tracing::warn!(
+                "Requested cluster {} not found in list of clusters: {:?}",
+                requested_cluster,
+                clusters
+            );
+            return Err(Error::Login("Requested cluster not found".to_string()));
+        }
+    } else {
+        tracing::info!(
+            "Using the first cluster available by default: {}",
+            clusters[0]
+        );
+        cache::set_cluster(&clusters[0]).await?;
+    }
+
     Ok(SlurmSession {
         jwt: Secret::new(jwt),
         version: version.to_string(),
@@ -1240,11 +1318,14 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // eventually should check to see if this association already exists,
     // and if so, not to do anything else
 
+    // get the cluster name from the cache
+    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
+
     // add the association condition to the account
     let payload = serde_json::json!({
         "association_condition": {
             "accounts": [account.name],
-            "clusters": ["linux"],
+            "clusters": [cluster],
             "association": {
                 "defaultqos": "normal",
                 "comment": format!("Association added by OpenPortal for account {}", account.name)

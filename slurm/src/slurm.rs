@@ -502,6 +502,16 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, SlurmAuth>, Error> {
     Ok(SLURM_AUTH.lock().await)
 }
 
+fn clean_account_name(account: &str) -> Result<String, Error> {
+    let account = account.trim();
+
+    if account.is_empty() {
+        return Err(Error::Call("Account name is empty".to_string()));
+    }
+
+    Ok(account.replace("/", "_").replace(" ", "_"))
+}
+
 async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
     // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
     // with
@@ -531,116 +541,9 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     Ok(account.clone())
 }
 
-///
-/// Public API
-///
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct SlurmAccount {
-    name: String,
-    description: String,
-    organization: String,
-}
-
-impl Display for SlurmAccount {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "SlurmAccount {{ name: {}, description: {}, organization: {} }}",
-            self.name(),
-            self.description(),
-            self.organization()
-        )
-    }
-}
-
-impl SlurmAccount {
-    pub fn from_mapping(mapping: &UserMapping) -> Self {
-        SlurmAccount {
-            name: mapping.local_project().to_string(),
-            description: format!(
-                "Account for OpenPortal project {}",
-                mapping.user().project()
-            ),
-            organization: "default".to_string(),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    pub fn organization(&self) -> &str {
-        &self.organization
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct SlurmUser {
-    name: String,
-}
-
-impl Display for SlurmUser {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SlurmUser {{ name: {} }}", self.name())
-    }
-}
-
-impl SlurmUser {
-    pub fn from_mapping(mapping: &UserMapping) -> Self {
-        SlurmUser {
-            name: mapping.local_user().to_string(),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<(), Error> {
-    // overwrite the global FreeIPA client with a new one
-    let mut auth = auth().await?;
-
-    auth.server = server.to_string();
-    auth.user = user.to_string();
-    auth.token_command = token_command.to_string();
-    auth.jwt = Secret::new("".to_string());
-    auth.num_reconnects = 0;
-
-    const MAX_RECONNECTS: u32 = 3;
-    const RECONNECT_WAIT: u64 = 100;
-
-    loop {
-        match login(&auth.server, &auth.user, &auth.token_command).await {
-            Ok(session) => {
-                auth.jwt = session.jwt;
-                auth.version = session.version;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::error!("Could not login to Slurm server: {}. Error: {}", server, e);
-
-                auth.num_reconnects += 1;
-
-                if auth.num_reconnects > MAX_RECONNECTS {
-                    return Err(Error::Login(format!(
-                        "Could not login to Slurm server: {}. Error: {}",
-                        server, e
-                    )));
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_WAIT)).await;
-            }
-        }
-    }
-}
-
 async fn get_slurm_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
+    let account = clean_account_name(account)?;
+
     let response = match call_get("slurmdb", &format!("account/{}", account)).await {
         Ok(response) => response,
         Err(e) => {
@@ -670,7 +573,7 @@ async fn get_slurm_account_from_slurm(account: &str) -> Result<Option<SlurmAccou
     // there should be an Account object in this array with the right name
     let slurm_account = accounts.iter().find(|a| {
         let name = a.get("name").and_then(|n| n.as_str());
-        name == Some(account)
+        name == Some(&account)
     });
 
     let account = match slurm_account {
@@ -741,7 +644,7 @@ async fn get_slurm_account_from_slurm(account: &str) -> Result<Option<SlurmAccou
     };
 
     Ok(Some(SlurmAccount {
-        name: name.to_string(),
+        name: clean_account_name(name)?,
         description: description.to_string(),
         organization: organization.to_string(),
     }))
@@ -855,8 +758,118 @@ async fn associate_slurm_user(
     Ok(user.clone())
 }
 
+///
+/// Public API
+///
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SlurmAccount {
+    name: String,
+    description: String,
+    organization: String,
+}
+
+impl Display for SlurmAccount {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "SlurmAccount {{ name: {}, description: {}, organization: {} }}",
+            self.name(),
+            self.description(),
+            self.organization()
+        )
+    }
+}
+
+impl SlurmAccount {
+    pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
+        Ok(SlurmAccount {
+            name: clean_account_name(mapping.local_project())?,
+            description: format!(
+                "Account for OpenPortal project {}",
+                mapping.user().project()
+            ),
+            organization: "default".to_string(),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn organization(&self) -> &str {
+        &self.organization
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SlurmUser {
+    name: String,
+}
+
+impl Display for SlurmUser {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SlurmUser {{ name: {} }}", self.name())
+    }
+}
+
+impl SlurmUser {
+    pub fn from_mapping(mapping: &UserMapping) -> Self {
+        SlurmUser {
+            name: mapping.local_user().to_string(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<(), Error> {
+    // overwrite the global FreeIPA client with a new one
+    let mut auth = auth().await?;
+
+    auth.server = server.to_string();
+    auth.user = user.to_string();
+    auth.token_command = token_command.to_string();
+    auth.jwt = Secret::new("".to_string());
+    auth.num_reconnects = 0;
+
+    const MAX_RECONNECTS: u32 = 3;
+    const RECONNECT_WAIT: u64 = 100;
+
+    loop {
+        match login(&auth.server, &auth.user, &auth.token_command).await {
+            Ok(session) => {
+                auth.jwt = session.jwt;
+                auth.version = session.version;
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::error!("Could not login to Slurm server: {}. Error: {}", server, e);
+
+                auth.num_reconnects += 1;
+
+                if auth.num_reconnects > MAX_RECONNECTS {
+                    return Err(Error::Login(format!(
+                        "Could not login to Slurm server: {}. Error: {}",
+                        server, e
+                    )));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_WAIT)).await;
+            }
+        }
+    }
+}
+
 pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
-    let account = get_slurm_account_create_if_not_exists(&SlurmAccount::from_mapping(user)).await?;
+    let account =
+        get_slurm_account_create_if_not_exists(&SlurmAccount::from_mapping(user)?).await?;
 
     let test_account = get_slurm_account(account.name()).await?;
 

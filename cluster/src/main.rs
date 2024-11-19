@@ -76,12 +76,17 @@ async fn main() -> Result<()> {
                     job = job.running(Some("Step 1/3: Account created".to_string()))?;
                     job = job.update(&sender).await?;
 
+                    // now create their home directories
                     let homedir = create_directories(me.name(), &mapping).await?;
 
                     job = job.running(Some("Step 2/3: Directories created".to_string()))?;
                     job = job.update(&sender).await?;
 
-                    let _ = update_homedir(me.name(), &user, &homedir).await?;
+                    // update the home directory in the account
+                    update_homedir(me.name(), &user, &homedir).await?;
+
+                    // and finally add the user to the job scheduler
+                    add_to_scheduler(me.name(), &user, &mapping).await?;
 
                     job = job.completed(mapping)?;
                 }
@@ -220,6 +225,47 @@ async fn update_homedir(me: &str, user: &UserIdentifier, homedir: &str) -> Resul
             tracing::error!("No account agent found");
             Err(Error::MissingAgent(
                 "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn add_to_scheduler(
+    me: &str,
+    user: &UserIdentifier,
+    mapping: &UserMapping,
+) -> Result<(), Error> {
+    // find the Scheduler agent
+    match agent::scheduler().await {
+        Some(scheduler) => {
+            // send the add_job to the scheduler agent
+            let job = Job::parse(
+                &format!("{}.{} add_local_user {}", me, scheduler.name(), mapping),
+                false,
+            )?
+            .put(&scheduler)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<String>()?;
+
+            match result {
+                Some(_) => {
+                    tracing::info!("User {} added to scheduler", user);
+                    Ok(())
+                }
+                None => {
+                    tracing::error!("Error adding the user to the scheduler: {:?}", job);
+                    Err(Error::Call(
+                        format!("Error adding the user to the scheduler: {:?}", job).to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No scheduler agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
             ))
         }
     }

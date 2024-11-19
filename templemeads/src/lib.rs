@@ -15,6 +15,7 @@ mod instance;
 mod platform;
 mod portal;
 mod provider;
+mod scheduler;
 
 // public API
 pub mod agent;

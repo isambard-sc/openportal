@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added in a slurm agent as an example of an accounting agent. This can
+  now create accounting accounts on slurm when a user is added to
+  a cluster. The slurm account is created with the mapped username
+  and project name via the `add_local_user` command, in a similar
+  way to how the filesystem agent works. This uses the slurm REST
+  API to create and manage the account, using JWT tokens for
+  authentication.
 
 ## [0.0.22] - 2024-11-13
 ### Added

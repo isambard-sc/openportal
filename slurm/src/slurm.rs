@@ -484,38 +484,77 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
     let version = version
         .split('&')
         .next()
-        .context("Could not split version")?;
+        .context("Could not split version")?
+        .to_string();
 
-    tracing::info!("Extracted version: {}", version);
+    // extract the version string above into major.minor.patch numbers
+    let mut version_numbers: Vec<u32> = version
+        .split('.')
+        .map(|x| x.parse::<u32>())
+        .collect::<Result<Vec<u32>, _>>()
+        .context("Could not parse version numbers")?;
 
-    let version = "0.0.41";
+    let mut working_version = None;
 
-    // now call the ping function to make sure that the server is
-    // up and running
-    let url = format!("{}/slurm/v{}/ping", server, version);
+    // the Slurm API supports normally 3 versions - this has reported the
+    // lowest version - see how many higher versions we can use
+    tracing::info!("Auto detecting maximum version of the Slurm API...");
+    loop {
+        // create a test version by joining together the version numbers as strings
+        let test_version: String = version_numbers
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<String>>()
+            .join(".");
+        tracing::info!("Testing version {}", test_version);
 
-    let result = client
-        .get(&url)
-        .header("Accept", "application/json")
-        .header("X-SLURM-USER-NAME", user)
-        .header("X-SLURM-USER-TOKEN", jwt.clone())
-        .send()
-        .await
-        .with_context(|| format!("Could not ping slurm at URL: {}", url))?;
+        // call the ping function to make sure that the server is
+        // up and running
+        let url = format!("{}/slurm/v{}/ping", server, test_version);
 
-    // convert the response to JSON
-    let ping_response = match &result.json::<serde_json::Value>().await {
-        Ok(json) => json.clone(),
-        Err(e) => {
-            tracing::error!("Could not decode JSON from ping response: {}", e);
-            return Err(Error::Login(format!(
-                "Could not decode JSON from ping response: {}",
-                e
-            )));
+        let result = match client
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("X-SLURM-USER-NAME", user)
+            .header("X-SLURM-USER-TOKEN", jwt.clone())
+            .send()
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("Version {} is not supported. {}", test_version, e);
+                break;
+            }
+        };
+
+        // convert the response to JSON
+        let ping_response = match &result.json::<serde_json::Value>().await {
+            Ok(json) => json.clone(),
+            Err(e) => {
+                tracing::warn!(
+                    "Could not decode JSON - version {} is not supported: {}",
+                    e,
+                    test_version
+                );
+                break;
+            }
+        };
+
+        tracing::info!("Ping response: {:?}", ping_response);
+        working_version = Some(test_version);
+        version_numbers[2] += 1;
+    }
+
+    let version = match working_version {
+        Some(version) => version,
+        None => {
+            return Err(Error::Login(
+                "Could not find a working version of the Slurm API".to_string(),
+            ));
         }
     };
 
-    tracing::info!("Ping response: {:?}", ping_response);
+    tracing::info!("Using version {} of the Slurm API", version);
 
     Ok(SlurmSession {
         jwt: Secret::new(jwt),
@@ -1224,6 +1263,7 @@ async fn add_user_association(
     make_default: bool,
 ) -> Result<SlurmUser, Error> {
     let mut user = user.clone();
+    let mut user_changed = false;
 
     // first, add the association if it doesn't exist
     if !user
@@ -1261,6 +1301,8 @@ async fn add_user_association(
             }
         };
 
+        user_changed = true;
+
         tracing::info!("Updated user: {}", user);
     }
 
@@ -1287,11 +1329,17 @@ async fn add_user_association(
                     user.name()
                 )))
             }
-        }
+        };
+
+        user_changed = true;
     }
 
-    // now cache the updated user
-    cache::add_user(&user).await?;
+    if user_changed {
+        // now cache the updated user
+        cache::add_user(&user).await?;
+    } else {
+        tracing::info!("Using existing user: {}", user);
+    }
 
     Ok(user)
 }
@@ -1312,6 +1360,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
                 .iter()
                 .any(|a| a.account() == slurm_account.name())
         {
+            tracing::info!("Using existing user {}", slurm_user);
             return Ok(slurm_user);
         } else {
             tracing::warn!(

@@ -32,6 +32,17 @@ pub async fn add_account(account: &SlurmAccount) -> Result<(), Error> {
     Ok(())
 }
 
+pub async fn add_user(user: &SlurmUser) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    cache.users.insert(user.name().to_string(), user.clone());
+    Ok(())
+}
+
+pub async fn get_user(name: &str) -> Result<Option<SlurmUser>, Error> {
+    let cache = CACHE.read().await;
+    Ok(cache.users.get(name).cloned())
+}
+
 ///
 /// Clear the cache - we need to do this if Slurm is changed behine
 /// our back

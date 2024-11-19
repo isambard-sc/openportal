@@ -264,6 +264,17 @@ async fn call_post(
         )));
     }
 
+    if result.status().as_u16() == 304 {
+        // this is returned when the post causes no change on the server
+        tracing::warn!(
+            "Server returned '304'. No change for function: {} with payload {:?}",
+            url,
+            payload
+        );
+
+        return Ok(());
+    }
+
     // reset the number of reconnects, as we have clearly been successful
     auth.num_reconnects = 0;
 
@@ -464,6 +475,8 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
 
     tracing::info!("Extracted version: {}", version);
 
+    let version = "0.0.41";
+
     // now call the ping function to make sure that the server is
     // up and running
     let url = format!("{}/slurm/v{}/ping", server, version);
@@ -512,6 +525,16 @@ fn clean_account_name(account: &str) -> Result<String, Error> {
     Ok(account.replace("/", "_").replace(" ", "_"))
 }
 
+fn clean_user_name(user: &str) -> Result<String, Error> {
+    let user = user.trim();
+
+    if user.is_empty() {
+        return Err(Error::Call("User name is empty".to_string()));
+    }
+
+    Ok(user.replace("/", "_").replace(" ", "_"))
+}
+
 async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
     // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
     // with
@@ -541,7 +564,7 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     Ok(account.clone())
 }
 
-async fn get_slurm_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
+async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
     let response = match call_get("slurmdb", &format!("account/{}", account)).await {
@@ -597,14 +620,14 @@ async fn get_slurm_account_from_slurm(account: &str) -> Result<Option<SlurmAccou
     }
 }
 
-async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
+async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
     // need to GET /slurm/vX.Y.Z/accounts/{account.name}
     // and return the account if it exists
     let cached_account = cache::get_account(account).await?;
 
     if let Some(cached_account) = cached_account {
         // double-check that the account actually exists...
-        let existing_account = match get_slurm_account_from_slurm(cached_account.name()).await {
+        let existing_account = match get_account_from_slurm(cached_account.name()).await {
             Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
@@ -647,7 +670,7 @@ async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error>
     }
 
     // see if we can read the account from slurm
-    let account = match get_slurm_account_from_slurm(account).await {
+    let account = match get_account_from_slurm(account).await {
         Ok(account) => account,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -663,10 +686,8 @@ async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error>
     }
 }
 
-async fn get_slurm_account_create_if_not_exists(
-    account: &SlurmAccount,
-) -> Result<SlurmAccount, Error> {
-    let existing_account = get_slurm_account(account.name()).await?;
+async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
+    let existing_account = get_account(account.name()).await?;
 
     if let Some(existing_account) = existing_account {
         if existing_account.description() != account.description()
@@ -680,46 +701,16 @@ async fn get_slurm_account_create_if_not_exists(
             tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account)
         }
 
+        tracing::info!("Using existing slurm account {}", existing_account);
         return Ok(existing_account);
     }
 
     // it doesn't, so create it
+    tracing::info!("Creating new slurm account: {}", account.name());
     let account = force_add_slurm_account(account).await?;
     cache::add_account(&account).await?;
 
     Ok(account.clone())
-}
-
-async fn associate_slurm_user(
-    user: &SlurmUser,
-    account: &SlurmAccount,
-) -> Result<SlurmUser, Error> {
-    // need to POST to /slurm/vX.Y.Z/accounts/{account.name}/users
-    // with a JSON payload
-    // {
-    //    users: [
-    //        {
-    //            name: "user"
-    //        }
-    //    ]
-    // }
-
-    let payload = serde_json::json!({
-        "users": [
-            {
-                "name": user.name
-            }
-        ]
-    });
-
-    call_post(
-        "slurmdb",
-        &format!("account/{}/users", account.name),
-        &payload,
-    )
-    .await?;
-
-    Ok(user.clone())
 }
 
 ///
@@ -862,7 +853,7 @@ impl Display for SlurmAssociation {
 impl SlurmAssociation {
     pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
         Ok(SlurmAssociation {
-            user: mapping.local_user().to_string(),
+            user: clean_user_name(mapping.local_user())?,
             account: clean_account_name(mapping.local_project())?,
         })
     }
@@ -960,7 +951,7 @@ impl SlurmUser {
         })
     }
 
-    pub fn construct(value: serde_json::Value) -> Result<Self, Error> {
+    pub fn construct(value: &serde_json::Value) -> Result<Self, Error> {
         let name = match value.get("name") {
             Some(name) => name,
             None => {
@@ -1072,13 +1063,271 @@ pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<()
     }
 }
 
+async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
+    let user = clean_user_name(user)?;
+
+    let response = match call_get("slurmdb", &format!("user/{}", user)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("Could not get user {}: {}", user, e);
+            return Ok(None);
+        }
+    };
+
+    // there should be a users list, with a single entry for this user
+    let users = match response.get("users") {
+        Some(users) => users,
+        None => {
+            tracing::warn!("Could not get users from response: {:?}", response);
+            return Ok(None);
+        }
+    };
+
+    // this should be an array
+    let users = match users.as_array() {
+        Some(users) => users,
+        None => {
+            tracing::warn!("Users is not an array: {:?}", users);
+            return Ok(None);
+        }
+    };
+
+    // there should be an User object in this array with the right name
+    let slurm_user = users.iter().find(|u| {
+        let name = u.get("name").and_then(|n| n.as_str());
+        name == Some(&user)
+    });
+
+    let user = match slurm_user {
+        Some(user) => user,
+        None => {
+            tracing::warn!("Could not find user '{}' in response: {:?}", user, response);
+            return Ok(None);
+        }
+    };
+
+    match SlurmUser::construct(user) {
+        Ok(user) => Ok(Some(user)),
+        Err(e) => {
+            tracing::warn!("Could not construct user from response: {}", e);
+            Ok(None)
+        }
+    }
+}
+
+async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
+    let cached_user = cache::get_user(user).await?;
+
+    if let Some(cached_user) = cached_user {
+        // double-check that the user actually exists...
+        let existing_user = match get_user_from_slurm(cached_user.name()).await {
+            Ok(user) => user,
+            Err(e) => {
+                tracing::warn!("Could not get user {}: {}", cached_user.name(), e);
+                cache::clear().await?;
+                return Ok(None);
+            }
+        };
+
+        if let Some(existing_user) = existing_user {
+            if cached_user != existing_user {
+                tracing::warn!(
+                    "User {} exists, but with different details.",
+                    cached_user.name()
+                );
+                tracing::warn!("Existing: {:?}, new: {:?}", existing_user, cached_user);
+
+                // clear the cache as something has changed behind our back
+                cache::clear().await?;
+
+                // store the new user
+                cache::add_user(&existing_user).await?;
+
+                return Ok(Some(existing_user));
+            } else {
+                return Ok(Some(cached_user));
+            }
+        } else {
+            // the user doesn't exist
+            tracing::warn!(
+                "User {} does not exist - it has been removed from slurm.",
+                cached_user.name()
+            );
+            cache::clear().await?;
+            return Ok(None);
+        }
+    }
+
+    // see if we can read the user from slurm
+    let user = match get_user_from_slurm(user).await {
+        Ok(user) => user,
+        Err(e) => {
+            tracing::warn!("Could not get user {}: {}", user, e);
+            return Ok(None);
+        }
+    };
+
+    if let Some(user) = user {
+        cache::add_user(&user).await?;
+        Ok(Some(user))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn add_association(
+    user: &SlurmUser,
+    account: &SlurmAccount,
+    make_default: bool,
+) -> Result<SlurmUser, Error> {
+    let mut user = user.clone();
+
+    // first, add the association if it doesn't exist
+    if !user
+        .associations()
+        .iter()
+        .any(|a| a.account() == account.name())
+    {
+        // add the association condition to the account
+        let payload = serde_json::json!({
+            "association_condition": {
+                "accounts": [account.name],
+                "clusters": ["linux"],
+                "association": {
+                    "defaultqos": "normal",
+                    "comment": format!("Association added by OpenPortal for account {}", account.name)
+                }
+            }
+        });
+
+        call_post("slurmdb", "accounts_association", &payload).await?;
+
+        // now add the association to the user
+        let payload = serde_json::json!({
+            "associations": [
+                {
+                    "user": user.name,
+                    "account": account.name,
+                    "cluster": "linux",
+                    "is_default": true
+                }
+            ]
+        });
+
+        call_post("slurmdb", "associations", &payload).await?;
+
+        // update the user
+        user = match get_user_from_slurm(user.name()).await? {
+            Some(user) => user,
+            None => {
+                return Err(Error::Call(format!(
+                    "Could not get user that just had its associations updated! '{}'",
+                    user.name()
+                )))
+            }
+        }
+    }
+
+    if make_default && *user.default_account() != Some(account.name().to_string()) {
+        let payload = serde_json::json!({
+            "users": [
+                {
+                    "name": user.name,
+                    "default": {
+                        "account": account.name
+                    }
+                }
+            ]
+        });
+
+        call_post("slurmdb", "users", &payload).await?;
+
+        // update the user
+        user = match get_user_from_slurm(user.name()).await? {
+            Some(user) => user,
+            None => {
+                return Err(Error::Call(format!(
+                    "Could not get user that just had its default account updated! '{}'",
+                    user.name()
+                )))
+            }
+        }
+    }
+
+    // now cache the updated user
+    cache::add_user(&user).await?;
+
+    Ok(user)
+}
+
+async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, Error> {
+    // first, make sure that the account exists
+    let slurm_account =
+        get_account_create_if_not_exists(&SlurmAccount::from_mapping(user)?).await?;
+
+    // now get the user from slurm
+    let slurm_user = get_user(user.local_user()).await?;
+
+    if let Some(slurm_user) = slurm_user {
+        // the user exists - check that the account is associated with the user
+        if *slurm_user.default_account() == Some(slurm_account.name().to_string())
+            && slurm_user
+                .associations()
+                .iter()
+                .any(|a| a.account() == slurm_account.name())
+        {
+            return Ok(slurm_user);
+        } else {
+            tracing::warn!(
+                "User {} exists, but is not default associated with the requested account '{}'.",
+                user,
+                slurm_account
+            );
+        }
+    }
+
+    // first, create the user
+    let username = clean_user_name(user.local_user())?;
+
+    let payload = serde_json::json!({
+        "users": [
+            {
+                "name": username,
+            }
+        ]
+    });
+
+    call_post("slurmdb", "users", &payload).await?;
+
+    // now load the user from slurm to make sure it exists
+    let slurm_user = match get_user(user.local_user()).await? {
+        Some(user) => user,
+        None => {
+            return Err(Error::Call(format!(
+                "Could not get user that was just created! '{}'",
+                user.local_user()
+            )))
+        }
+    };
+
+    // now add the association to the account, making it the default
+    let slurm_user = add_association(&slurm_user, &slurm_account, true).await?;
+
+    let user = SlurmUser::from_mapping(user)?;
+
+    // check we have the user we expected
+    if slurm_user != user {
+        tracing::warn!("User {} exists, but with different details.", user.name());
+        tracing::warn!("Existing: {:?}, new: {:?}", slurm_user, user);
+    }
+
+    Ok(slurm_user)
+}
+
 pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
-    let account =
-        get_slurm_account_create_if_not_exists(&SlurmAccount::from_mapping(user)?).await?;
+    let user: SlurmUser = get_user_create_if_not_exists(user).await?;
 
-    let user = associate_slurm_user(&SlurmUser::from_mapping(user)?, &account).await?;
-
-    tracing::info!("Associated user {} with account {}", user, account);
+    tracing::info!("Added user: {}", user);
 
     Ok(())
 }

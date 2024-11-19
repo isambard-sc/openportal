@@ -7,7 +7,6 @@ use templemeads::agent::scheduler::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{AddLocalUser, RemoveLocalUser};
-use templemeads::grammar::{UserIdentifier, UserMapping};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -88,14 +87,6 @@ async fn main() -> Result<()> {
     slurm::connect(&slurm_server, &slurm_user, &token_command).await?;
 
     tracing::info!("Connected to slurm server at {}", slurm_server);
-
-    let mapping = UserMapping::new(
-        &UserIdentifier::parse("chris.demo.brics")?,
-        "chris.demo",
-        "brics.demo",
-    )?;
-
-    slurm::add_user(&mapping).await?;
 
     async_runnable! {
         ///

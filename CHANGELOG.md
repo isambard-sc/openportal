@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.0.23] - 2024-11-19
 ### Added
 - Added in a slurm agent as an example of an accounting agent. This can
   now create accounting accounts on slurm when a user is added to
@@ -131,6 +133,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.0.23]: https://github.com/isambard-sc/openportal/releases/tag/0.0.23
 [0.0.22]: https://github.com/isambard-sc/openportal/releases/tag/0.0.22
 [0.0.21]: https://github.com/isambard-sc/openportal/releases/tag/0.0.21
 [0.0.20]: https://github.com/isambard-sc/openportal/releases/tag/0.0.20

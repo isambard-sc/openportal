@@ -588,91 +588,42 @@ async fn get_slurm_account_from_slurm(account: &str) -> Result<Option<SlurmAccou
         }
     };
 
-    // response should have a name, description and organization
-    let name = match account.get("name") {
-        Some(name) => name,
-        None => {
-            tracing::warn!("Could not get name from account: {:?}", account);
-            return Ok(None);
+    match SlurmAccount::construct(account) {
+        Ok(account) => Ok(Some(account)),
+        Err(e) => {
+            tracing::warn!("Could not construct account from response: {}", e);
+            Ok(None)
         }
-    };
-
-    let name = match name.as_str() {
-        Some(name) => name,
-        None => {
-            tracing::warn!("Could not get name as string from account: {:?}", name);
-            return Ok(None);
-        }
-    };
-
-    let description = match account.get("description") {
-        Some(description) => description,
-        None => {
-            tracing::warn!("Could not get description from account: {:?}", account);
-            return Ok(None);
-        }
-    };
-
-    let description = match description.as_str() {
-        Some(description) => description,
-        None => {
-            tracing::warn!(
-                "Could not get description as string from account: {:?}",
-                description
-            );
-            return Ok(None);
-        }
-    };
-
-    let organization = match account.get("organization") {
-        Some(organization) => organization,
-        None => {
-            tracing::warn!("Could not get organization from account: {:?}", account);
-            return Ok(None);
-        }
-    };
-
-    let organization = match organization.as_str() {
-        Some(organization) => organization,
-        None => {
-            tracing::warn!(
-                "Could not get organization as string from account: {:?}",
-                organization
-            );
-            return Ok(None);
-        }
-    };
-
-    Ok(Some(SlurmAccount {
-        name: clean_account_name(name)?,
-        description: description.to_string(),
-        organization: organization.to_string(),
-    }))
+    }
 }
 
 async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
     // need to GET /slurm/vX.Y.Z/accounts/{account.name}
     // and return the account if it exists
-    let account = cache::get_account(account).await?;
+    let cached_account = cache::get_account(account).await?;
 
-    if let Some(account) = account {
+    if let Some(cached_account) = cached_account {
         // double-check that the account actually exists...
-        let existing_account = match get_slurm_account_from_slurm(account.name()).await {
+        let existing_account = match get_slurm_account_from_slurm(cached_account.name()).await {
             Ok(account) => account,
             Err(e) => {
-                tracing::warn!("Could not get account {}: {}", account.name(), e);
+                tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
                 cache::clear().await?;
                 return Ok(None);
             }
         };
 
         if let Some(existing_account) = existing_account {
-            if account != existing_account {
+            if cached_account != existing_account {
                 tracing::warn!(
                     "Account {} exists, but with different details.",
-                    account.name()
+                    cached_account.name()
                 );
-                tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account);
+                tracing::warn!(
+                    "Existing: {:?}, new: {:?}",
+                    existing_account,
+                    cached_account
+                );
 
                 // clear the cache as something has changed behind our back
                 cache::clear().await?;
@@ -682,21 +633,34 @@ async fn get_slurm_account(account: &str) -> Result<Option<SlurmAccount>, Error>
 
                 return Ok(Some(existing_account));
             } else {
-                return Ok(Some(account));
+                return Ok(Some(cached_account));
             }
         } else {
             // the account doesn't exist
             tracing::warn!(
                 "Account {} does not exist - it has been removed from slurm.",
-                account.name()
+                cached_account.name()
             );
             cache::clear().await?;
             return Ok(None);
         }
     }
 
-    // the account doesn't exist
-    Ok(None)
+    // see if we can read the account from slurm
+    let account = match get_slurm_account_from_slurm(account).await {
+        Ok(account) => account,
+        Err(e) => {
+            tracing::warn!("Could not get account {}: {}", account, e);
+            return Ok(None);
+        }
+    };
+
+    if let Some(account) = account {
+        cache::add_account(&account).await?;
+        Ok(Some(account))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn get_slurm_account_create_if_not_exists(
@@ -793,6 +757,78 @@ impl SlurmAccount {
         })
     }
 
+    pub fn construct(result: &serde_json::Value) -> Result<Self, Error> {
+        let name = match result.get("name") {
+            Some(name) => name,
+            None => {
+                tracing::warn!("Could not get name from account: {:?}", result);
+                return Err(Error::Call("Could not get name from account".to_string()));
+            }
+        };
+
+        let name = match name.as_str() {
+            Some(name) => name,
+            None => {
+                tracing::warn!("Could not get name as string from account: {:?}", name);
+                return Err(Error::Call(
+                    "Could not get name as string from account".to_string(),
+                ));
+            }
+        };
+
+        let description = match result.get("description") {
+            Some(description) => description,
+            None => {
+                tracing::warn!("Could not get description from account: {:?}", result);
+                return Err(Error::Call(
+                    "Could not get description from account".to_string(),
+                ));
+            }
+        };
+
+        let description = match description.as_str() {
+            Some(description) => description,
+            None => {
+                tracing::warn!(
+                    "Could not get description as string from account: {:?}",
+                    description
+                );
+                return Err(Error::Call(
+                    "Could not get description as string from account".to_string(),
+                ));
+            }
+        };
+
+        let organization = match result.get("organization") {
+            Some(organization) => organization,
+            None => {
+                tracing::warn!("Could not get organization from account: {:?}", result);
+                return Err(Error::Call(
+                    "Could not get organization from account".to_string(),
+                ));
+            }
+        };
+
+        let organization = match organization.as_str() {
+            Some(organization) => organization,
+            None => {
+                tracing::warn!(
+                    "Could not get organization as string from account: {:?}",
+                    organization
+                );
+                return Err(Error::Call(
+                    "Could not get organization as string from account".to_string(),
+                ));
+            }
+        };
+
+        Ok(SlurmAccount {
+            name: clean_account_name(name)?,
+            description: description.to_string(),
+            organization: organization.to_string(),
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -806,26 +842,195 @@ impl SlurmAccount {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlurmAssociation {
+    user: String,
+    account: String,
+}
+
+impl Display for SlurmAssociation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "SlurmAssociation {{ user: {}, account: {} }}",
+            self.user(),
+            self.account()
+        )
+    }
+}
+
+impl SlurmAssociation {
+    pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
+        Ok(SlurmAssociation {
+            user: mapping.local_user().to_string(),
+            account: clean_account_name(mapping.local_project())?,
+        })
+    }
+
+    pub fn construct(value: &serde_json::Value) -> Result<Self, Error> {
+        let user = match value.get("user") {
+            Some(user) => user,
+            None => {
+                tracing::warn!("Could not get user from association: {:?}", value);
+                return Err(Error::Call(
+                    "Could not get user from association".to_string(),
+                ));
+            }
+        };
+
+        let user = match user.as_str() {
+            Some(user) => user,
+            None => {
+                tracing::warn!("Could not get user as string from association: {:?}", user);
+                return Err(Error::Call(
+                    "Could not get user as string from association".to_string(),
+                ));
+            }
+        };
+
+        let account = match value.get("account") {
+            Some(account) => account,
+            None => {
+                tracing::warn!("Could not get account from association: {:?}", value);
+                return Err(Error::Call(
+                    "Could not get account from association".to_string(),
+                ));
+            }
+        };
+
+        let account = match account.as_str() {
+            Some(account) => account,
+            None => {
+                tracing::warn!(
+                    "Could not get account as string from association: {:?}",
+                    account
+                );
+                return Err(Error::Call(
+                    "Could not get account as string from association".to_string(),
+                ));
+            }
+        };
+
+        Ok(SlurmAssociation {
+            user: user.to_string(),
+            account: clean_account_name(account)?,
+        })
+    }
+
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SlurmUser {
     name: String,
+    default_account: Option<String>,
+    associations: Vec<SlurmAssociation>,
 }
 
 impl Display for SlurmUser {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SlurmUser {{ name: {} }}", self.name())
+        write!(
+            f,
+            "SlurmUser {{ name: {}, default: {}, associations: [{}] }}",
+            self.name(),
+            self.default_account()
+                .as_ref()
+                .unwrap_or(&"None".to_string()),
+            self.associations()
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        )
     }
 }
 
 impl SlurmUser {
-    pub fn from_mapping(mapping: &UserMapping) -> Self {
-        SlurmUser {
+    pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
+        Ok(SlurmUser {
             name: mapping.local_user().to_string(),
-        }
+            default_account: Some(clean_account_name(mapping.local_project())?),
+            associations: vec![SlurmAssociation::from_mapping(mapping)?],
+        })
+    }
+
+    pub fn construct(value: serde_json::Value) -> Result<Self, Error> {
+        let name = match value.get("name") {
+            Some(name) => name,
+            None => {
+                tracing::warn!("Could not get name from user: {:?}", value);
+                return Err(Error::Call("Could not get name from user".to_string()));
+            }
+        };
+
+        let name = match name.as_str() {
+            Some(name) => name.to_string(),
+            None => {
+                tracing::warn!("Could not get name as string from user: {:?}", name);
+                return Err(Error::Call(
+                    "Could not get name as string from user".to_string(),
+                ));
+            }
+        };
+
+        let default_account = match value.get("default_account") {
+            Some(default_account) => match default_account.as_str() {
+                Some(default_account) => Some(clean_account_name(default_account)?),
+                None => {
+                    tracing::warn!(
+                        "Could not get default_account as string from user: {:?}",
+                        default_account
+                    );
+                    return Err(Error::Call(
+                        "Could not get default_account as string from user".to_string(),
+                    ));
+                }
+            },
+            None => None,
+        };
+
+        let associations = match value.get("associations") {
+            Some(associations) => match associations.as_array() {
+                Some(associations) => {
+                    let mut slurm_associations: Vec<SlurmAssociation> = Vec::new();
+
+                    for association in associations {
+                        slurm_associations.push(SlurmAssociation::construct(association)?);
+                    }
+
+                    slurm_associations
+                }
+                None => {
+                    tracing::warn!("Associations is not an array: {:?}", associations);
+                    return Err(Error::Call("Associations is not an array".to_string()));
+                }
+            },
+            None => Vec::new(),
+        };
+
+        Ok(SlurmUser {
+            name,
+            default_account,
+            associations,
+        })
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn default_account(&self) -> &Option<String> {
+        &self.default_account
+    }
+
+    pub fn associations(&self) -> &Vec<SlurmAssociation> {
+        &self.associations
     }
 }
 
@@ -871,11 +1076,7 @@ pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
     let account =
         get_slurm_account_create_if_not_exists(&SlurmAccount::from_mapping(user)?).await?;
 
-    let test_account = get_slurm_account(account.name()).await?;
-
-    tracing::info!("Test account: {:?}", test_account);
-
-    let user = associate_slurm_user(&SlurmUser::from_mapping(user), &account).await?;
+    let user = associate_slurm_user(&SlurmUser::from_mapping(user)?, &account).await?;
 
     tracing::info!("Associated user {} with account {}", user, account);
 

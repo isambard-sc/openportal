@@ -215,7 +215,7 @@ jobs:
         id: attest-slurm
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-slurm
-          subject-digest: ${{ steps.push-provider-to-ghcr.outputs.digest }}
+          subject-digest: ${{ steps.push-slurm-to-ghcr.outputs.digest }}
           push-to-registry: true
 
       - name: Push op-bridge Helm chart

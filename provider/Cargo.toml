@@ -3,7 +3,7 @@
 
 [package]
 name = "op-provider"
-version = "0.0.24"
+version = "0.0.25"
 description = "An example of an OpenPortal provider interface service"
 edition = "2021"
 license = "MIT"

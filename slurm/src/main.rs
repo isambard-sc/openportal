@@ -61,6 +61,22 @@ async fn main() -> Result<()> {
     let slurm_server = config.option("slurm-server", "");
     let slurm_user = config.option("slurm-user", "");
     let slurm_cluster = config.option("slurm-cluster", "");
+    let token_lifespan = config.option("token-lifespan", "1800");
+
+    let mut token_lifespan: u32 = match token_lifespan.parse() {
+        Ok(lifespan) => lifespan,
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Invalid token lifespan provided. This should be a number of seconds.".to_owned(),
+            ));
+        }
+    };
+
+    if token_lifespan < 10 {
+        tracing::warn!("Cannot set the token lifespan to less than 10 seconds.");
+        tracing::warn!("Setting it to a minimum of 10 seconds...");
+        token_lifespan = 10;
+    }
 
     if token_command.is_empty() {
         return Err(anyhow::anyhow!(
@@ -84,7 +100,7 @@ async fn main() -> Result<()> {
     // connect the single shared Slurm client - this will be used in the
     // async function (we can't bind variables to async functions, or else
     // we would just pass the client with the environment)
-    slurm::connect(&slurm_server, &slurm_user, &token_command).await?;
+    slurm::connect(&slurm_server, &slurm_user, &token_command, token_lifespan).await?;
 
     tracing::info!("Connected to slurm server at {}", slurm_server);
 

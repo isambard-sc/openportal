@@ -34,6 +34,51 @@ async fn call_get(
     let mut auth = auth().await?;
     auth.num_reconnects = 0;
 
+    // has the token expired?
+    if auth.token_expired()? {
+        tracing::warn!("Token has expired. Reconnecting.");
+
+        // try to reconnect to the server
+        loop {
+            match login(
+                &auth.server,
+                &auth.user,
+                &auth.token_command,
+                auth.token_lifespan,
+            )
+            .await
+            {
+                Ok(session) => {
+                    auth.jwt = session.jwt;
+                    auth.jwt_creation_time = session.start_time;
+                    auth.version = session.version;
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Could not login to FreeIPA server: {}. Error: {}",
+                        auth.server,
+                        e
+                    );
+
+                    auth.num_reconnects += 1;
+
+                    if auth.num_reconnects > 3 {
+                        auth.num_reconnects = 0;
+                        return Err(Error::Call(
+                            "Failed multiple reconnection attempts!".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // sleep for 100 ms before trying again
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        auth.num_reconnects = 0;
+    }
+
     let url = match Url::parse_with_params(
         &format!(
             "{}/{}/v{}/{}",
@@ -80,9 +125,17 @@ async fn call_get(
 
         tracing::error!("Authorisation (401) error. Reconnecting.");
 
-        match login(&auth.server, &auth.user, &auth.token_command).await {
+        match login(
+            &auth.server,
+            &auth.user,
+            &auth.token_command,
+            auth.token_lifespan,
+        )
+        .await
+        {
             Ok(session) => {
                 auth.jwt = session.jwt;
+                auth.jwt_creation_time = session.start_time;
                 auth.version = session.version;
 
                 // create a new client with the new cookies
@@ -189,6 +242,51 @@ async fn call_post(
     let mut auth = auth().await?;
     auth.num_reconnects = 0;
 
+    // has the token expired?
+    if auth.token_expired()? {
+        tracing::warn!("Token has expired. Reconnecting.");
+
+        // try to reconnect to the server
+        loop {
+            match login(
+                &auth.server,
+                &auth.user,
+                &auth.token_command,
+                auth.token_lifespan,
+            )
+            .await
+            {
+                Ok(session) => {
+                    auth.jwt = session.jwt;
+                    auth.jwt_creation_time = session.start_time;
+                    auth.version = session.version;
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Could not login to FreeIPA server: {}. Error: {}",
+                        auth.server,
+                        e
+                    );
+
+                    auth.num_reconnects += 1;
+
+                    if auth.num_reconnects > 3 {
+                        auth.num_reconnects = 0;
+                        return Err(Error::Call(
+                            "Failed multiple reconnection attempts!".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // sleep for 100 ms before trying again
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        auth.num_reconnects = 0;
+    }
+
     let url = format!(
         "{}/{}/v{}/{}",
         &auth.server, backend, &auth.version, function
@@ -227,9 +325,17 @@ async fn call_post(
 
         tracing::error!("Authorisation (401) error. Reconnecting.");
 
-        match login(&auth.server, &auth.user, &auth.token_command).await {
+        match login(
+            &auth.server,
+            &auth.user,
+            &auth.token_command,
+            auth.token_lifespan,
+        )
+        .await
+        {
             Ok(session) => {
                 auth.jwt = session.jwt;
+                auth.jwt_creation_time = session.start_time;
                 auth.version = session.version;
 
                 // create a new client with the new cookies
@@ -341,8 +447,10 @@ async fn call_post(
 struct SlurmAuth {
     server: String,
     token_command: String,
+    token_lifespan: u32,
     user: String,
     jwt: Secret<String>,
+    jwt_creation_time: u64,
     version: String,
     num_reconnects: u32,
 }
@@ -352,11 +460,22 @@ impl SlurmAuth {
         SlurmAuth {
             server: "".to_string(),
             token_command: "".to_string(),
+            token_lifespan: 1800,
             user: "".to_string(),
             jwt: Secret::new("".to_string()),
+            jwt_creation_time: 0,
             version: "".to_string(),
             num_reconnects: 0,
         }
+    }
+
+    fn token_expired(&self) -> Result<bool, Error> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("Could not get current time")?;
+
+        // we give ourselves a 10 second margin of error
+        Ok(10 + now.as_secs() - self.jwt_creation_time > self.token_lifespan as u64)
     }
 }
 
@@ -365,6 +484,7 @@ static SLURM_AUTH: Lazy<Mutex<SlurmAuth>> = Lazy::new(|| Mutex::new(SlurmAuth::d
 struct SlurmSession {
     jwt: Secret<String>,
     version: String,
+    start_time: u64,
 }
 
 ///
@@ -372,7 +492,12 @@ struct SlurmSession {
 /// the JWT token. This will return the valid JWT in a secret. This
 /// JWT can be used for subsequent calls to the server.
 ///
-async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSession, Error> {
+async fn login(
+    server: &str,
+    user: &str,
+    token_command: &str,
+    token_lifespan: u32,
+) -> Result<SlurmSession, Error> {
     tracing::info!("Logging into Slurm server: {} using user {}", server, user);
 
     let mut token_command = token_command.to_string();
@@ -391,6 +516,9 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
         token_command = format!("{} username={}", token_command, user);
     }
 
+    // add on the lifespan to the token command
+    token_command = format!("{} lifespan={}", token_command, token_lifespan);
+
     tracing::info!("Getting JWT token from command: {}", token_command);
 
     // parse 'token_command' into an executable plus arguments
@@ -398,6 +526,12 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
 
     let token_exe = token_command.first().context("No token command")?;
     let token_args = token_command.get(1..).unwrap_or(&[]);
+
+    // get the current datetime in seconds since the epoch - we will use this
+    // to check the token expiry
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("Could not get current time")?;
 
     // get the JWT token via a tokio process
     let jwt = match tokio::process::Command::new(token_exe)
@@ -559,7 +693,7 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
     // now we have connected, we need to find the cluster that we
     // should be working on
     let result = client
-        .get(&format!("{}/slurmdb/v{}/clusters", server, version))
+        .get(format!("{}/slurmdb/v{}/clusters", server, version))
         .header("Accept", "application/json")
         .header("X-SLURM-USER-NAME", user)
         .header("X-SLURM-USER-TOKEN", jwt.clone())
@@ -637,6 +771,7 @@ async fn login(server: &str, user: &str, token_command: &str) -> Result<SlurmSes
     Ok(SlurmSession {
         jwt: Secret::new(jwt),
         version: version.to_string(),
+        start_time: now.as_secs(),
     })
 }
 
@@ -1452,7 +1587,18 @@ impl SlurmUser {
     }
 }
 
-pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<(), Error> {
+pub async fn connect(
+    server: &str,
+    user: &str,
+    token_command: &str,
+    token_lifespan: u32,
+) -> Result<(), Error> {
+    // make sure that the token lifespan is at least 10 seconds
+    let token_lifespan = match token_lifespan < 10 {
+        true => 10,
+        false => token_lifespan,
+    };
+
     // overwrite the global FreeIPA client with a new one
     let mut auth = auth().await?;
 
@@ -1460,15 +1606,24 @@ pub async fn connect(server: &str, user: &str, token_command: &str) -> Result<()
     auth.user = user.to_string();
     auth.token_command = token_command.to_string();
     auth.jwt = Secret::new("".to_string());
+    auth.token_lifespan = token_lifespan;
     auth.num_reconnects = 0;
 
     const MAX_RECONNECTS: u32 = 3;
     const RECONNECT_WAIT: u64 = 100;
 
     loop {
-        match login(&auth.server, &auth.user, &auth.token_command).await {
+        match login(
+            &auth.server,
+            &auth.user,
+            &auth.token_command,
+            auth.token_lifespan,
+        )
+        .await
+        {
             Ok(session) => {
                 auth.jwt = session.jwt;
+                auth.jwt_creation_time = session.start_time;
                 auth.version = session.version;
                 return Ok(());
             }

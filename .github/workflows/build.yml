@@ -52,6 +52,8 @@ jobs:
         run: oci/portal/build.sh --release
       - name: Build op-provider OCI image
         run: oci/provider/build.sh --release
+      - name: Build op-slurm OCI image
+        run: oci/slurm/build.sh --release
 
       - name: Get version
         id: get_version
@@ -87,6 +89,9 @@ jobs:
       - name: package op-provider helm chart
         run: |
           helm package helm/provider --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
+      - name: package op-slurm helm chart
+        run: |
+          helm package helm/slurm --version "${{ steps.get_helm_version.outputs.version }}" --app-version "${{ steps.get_version.outputs.version }}"
 
       - name: Log in to GHCR
         uses: redhat-actions/podman-login@v1
@@ -148,6 +153,13 @@ jobs:
           image: op-provider
           tags: ${{ steps.get_version.outputs.version }}
           registry: ghcr.io/${{ github.repository_owner }}
+      - name: Publish op-slurm OCI image
+        id: push-slurm-to-ghcr
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: op-slurm
+          tags: ${{ steps.get_version.outputs.version }}
+          registry: ghcr.io/${{ github.repository_owner }}
 
       - name: Attest op-bridge image
         uses: actions/attest-build-provenance@v1
@@ -198,6 +210,14 @@ jobs:
           subject-name: ghcr.io/${{ github.repository_owner }}/op-provider
           subject-digest: ${{ steps.push-provider-to-ghcr.outputs.digest }}
           push-to-registry: true
+      - name: Attest op-slurm image
+        uses: actions/attest-build-provenance@v1
+        id: attest-slurm
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/op-slurm
+          subject-digest: ${{ steps.push-provider-to-ghcr.outputs.digest }}
+          push-to-registry: true
+
       - name: Push op-bridge Helm chart
         run: helm push "./op-bridge-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
       - name: Push op-cluster Helm chart
@@ -212,6 +232,8 @@ jobs:
         run: helm push "./op-portal-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
       - name: Push op-provider Helm chart
         run: helm push "./op-provider-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Push op-slurm Helm chart
+        run: helm push "./op-slurm-${{ steps.get_helm_version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
 
       - name: Store bridge artefact
         uses: actions/upload-artifact@v4
@@ -255,3 +277,9 @@ jobs:
           name: op-provider
           path: |
             target/release/op-provider
+      - name: Store slurm artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-slurm
+          path: |
+            target/release/op-slurm

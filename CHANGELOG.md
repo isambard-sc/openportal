@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added control over the lifetime of the slurm JWT token, plus a check
+  to automatically refresh the token before it expires.
+
+### Fixed
+- Fixed the lack of op-slurm containers and helm charts - these are now
+  built automatically by GH Actions
 
 ## [0.0.23] - 2024-11-19
 ### Added

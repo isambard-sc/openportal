@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-FileCopyrightText: © 2024 Matt Williams <matt.williams@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: op-slurm
+spec:
+  ports:
+    - protocol: TCP
+      port: {{ .Values.port }}
+      name: agent
+      targetPort: {{ .Values.port }}
+    - protocol: TCP
+      port: {{ .Values.health_port }}
+      name: health
+      targetPort: {{ .Values.health_port }}
+  selector:
+    app.kubernetes.io/name: op-slurm

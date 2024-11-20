@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
-### Fixed
+
+## [0.0.25] - 2024-11-20
+### Fixed
 - Fixed attestation issue for slurm container
 
 ## [0.0.24] - 2024-11-20
@@ -144,6 +146,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.0.25]: https://github.com/isambard-sc/openportal/releases/tag/0.0.25
 [0.0.24]: https://github.com/isambard-sc/openportal/releases/tag/0.0.24
 [0.0.23]: https://github.com/isambard-sc/openportal/releases/tag/0.0.23
 [0.0.22]: https://github.com/isambard-sc/openportal/releases/tag/0.0.22

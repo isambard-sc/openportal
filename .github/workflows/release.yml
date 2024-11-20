@@ -354,11 +354,45 @@ jobs:
           name: sbom-provider.spdx.json
           path: sbom-provider.spdx.json
 
+  attest-slurm:
+    name: Attest Slurm
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - name: Generate SBOM
+        run: cargo sbom --cargo-package op-slurm --output-format=spdx_json_2_3 > sbom-slurm.spdx.json
+      - name: Fetch release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: op-slurm
+          merge-multiple: true
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: op-slurm
+          sbom-path: sbom-slurm.spdx.json
+      - name: Store SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-slurm.spdx.json
+          path: sbom-slurm.spdx.json
+
   make-release:
     name: Make release ${{ needs.tag-release.outputs.ref }}
     needs: [build-release, tag-release, attest-bridge, attest-cluster,
             attest-clusters, attest-filesystem, attest-freeipa,
-            attest-portal, attest-provider]
+            attest-portal, attest-provider, attest-slurm]
     runs-on: ubuntu-latest
     permissions:
       contents: write

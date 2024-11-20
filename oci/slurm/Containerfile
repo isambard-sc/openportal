@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-FileCopyrightText: © 2024 Matt Williams <matt.williams@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+
+FROM gcr.io/distroless/static-debian12
+COPY op-slurm /
+USER 65534:65534
+ENTRYPOINT ["/op-slurm"]

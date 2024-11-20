@@ -693,7 +693,7 @@ async fn login(
     // now we have connected, we need to find the cluster that we
     // should be working on
     let result = client
-        .get(&format!("{}/slurmdb/v{}/clusters", server, version))
+        .get(format!("{}/slurmdb/v{}/clusters", server, version))
         .header("Accept", "application/json")
         .header("X-SLURM-USER-NAME", user)
         .header("X-SLURM-USER-TOKEN", jwt.clone())

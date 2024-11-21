@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::agent::Peer;
+use crate::command::Command as ControlCommand;
 use crate::error::Error;
 use crate::job::Job;
 
@@ -14,6 +15,10 @@ use crate::job::Job;
 pub struct Board {
     peer: Peer,
     jobs: HashMap<Uuid, Job>,
+
+    // all of the queued jobs that are waiting for the connection
+    // to re-open, so that they can be sent
+    queued_jobs: Vec<ControlCommand>,
 
     // do not serialise or clone the waiters
     #[serde(skip)]
@@ -26,6 +31,7 @@ impl Clone for Board {
         Self {
             peer: self.peer.clone(),
             jobs: self.jobs.clone(),
+            queued_jobs: self.queued_jobs.clone(),
             waiters: HashMap::new(),
         }
     }
@@ -36,6 +42,7 @@ impl Board {
         Self {
             peer: peer.clone(),
             jobs: HashMap::new(),
+            queued_jobs: Vec::new(),
             waiters: HashMap::new(),
         }
     }
@@ -162,6 +169,25 @@ impl Board {
             Some(j) => Ok(j.clone()),
             None => Err(Error::NotFound(format!("Job not found: {:?}", id))),
         }
+    }
+
+    ///
+    /// Add a job to the board that should be sent later, e.g.
+    /// because the connection to the agent is currently unavailable
+    ///
+    pub fn queue(&mut self, command: ControlCommand) {
+        tracing::info!("Queuing job: {:?}", command);
+        self.queued_jobs.push(command);
+    }
+
+    ///
+    /// Take all of the queued jobs - this removes the jobs from this
+    /// board and returns them as a list
+    ///
+    pub fn take_queued(&mut self) -> Vec<ControlCommand> {
+        let mut queued_jobs = Vec::new();
+        std::mem::swap(&mut queued_jobs, &mut self.queued_jobs);
+        queued_jobs
     }
 }
 

@@ -474,7 +474,16 @@ impl Job {
         }
 
         // now send it to the agent for processing
-        ControlCommand::put(&job).send_to(peer).await?;
+        match ControlCommand::put(&job).send_to(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                // if we can't send the command, then we need to need to add
+                // it to a queue for sending once the peer is back online
+                tracing::error!("Error sending command to agent: {:?}", e);
+                let mut board = board.write().await;
+                board.queue(ControlCommand::put(&job));
+            }
+        }
 
         Ok(job)
     }
@@ -543,7 +552,16 @@ impl Job {
         }
 
         // now send it to the agent for processing
-        ControlCommand::update(&job).send_to(peer).await?;
+        match ControlCommand::update(&job).send_to(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                // if we can't send the command, then we need to need to add
+                // it to a queue for sending once the peer is back online
+                tracing::error!("Error sending command to agent: {:?}", e);
+                let mut board = board.write().await;
+                board.queue(ControlCommand::update(&job));
+            }
+        }
 
         Ok(job)
     }
@@ -606,7 +624,16 @@ impl Job {
         }
 
         // now send it to the agent for processing
-        ControlCommand::delete(&job).send_to(peer).await?;
+        match ControlCommand::delete(&job).send_to(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                // if we can't send the command, then we need to need to add
+                // it to a queue for sending once the peer is back online
+                tracing::error!("Error sending command to agent: {:?}", e);
+                let mut board = board.write().await;
+                board.queue(ControlCommand::delete(&job));
+            }
+        }
 
         Ok(job)
     }
@@ -654,6 +681,53 @@ impl Job {
 
         Ok(result)
     }
+}
+
+///
+/// Function used to send all jobs that were queued for the specified peer
+///
+pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
+    // get a RwLock to the board from the shared state
+    let board = match state::get(peer).await {
+        Ok(b) => b.board().await,
+        Err(e) => {
+            tracing::error!(
+                "Error getting board for agent: {:?}. Is this agent known to us?",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // get all of the queued jobs
+    let queued: Vec<ControlCommand>;
+
+    // in a scope so we drop the lock asap
+    {
+        // get the mutable board from the Arc<RwLock> board - this is the
+        // blocking operation
+        let mut board = board.write().await;
+        queued = board.take_queued();
+    }
+
+    // now send all of the queued jobs - if anything goes wrong, then
+    // put the failed jobs back into the queue
+    for job in queued {
+        tracing::info!("Running queued job: {:?}", job);
+
+        match job.send_to(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                // if we can't send the command, then we need to need to add
+                // it to a queue for sending once the peer is back online
+                tracing::error!("Error sending queued command to agent: {:?}", e);
+                let mut board = board.write().await;
+                board.queue(job);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

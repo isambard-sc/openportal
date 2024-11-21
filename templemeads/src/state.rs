@@ -54,6 +54,8 @@ pub struct State {
 
 impl State {
     pub fn new(peer: Peer) -> Self {
+        tracing::info!("Creating new board for agent {}", peer);
+
         Self {
             board: Arc::new(RwLock::new(Board::new(&peer))),
         }

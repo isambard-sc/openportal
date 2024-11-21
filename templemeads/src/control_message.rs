@@ -4,6 +4,7 @@
 use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
 use crate::error::Error;
+use crate::job;
 
 use anyhow::Result;
 use paddington::command::Command as ControlCommand;
@@ -17,6 +18,9 @@ pub async fn process_control_message(
             let peer = Peer::new(&agent, &zone);
             tracing::info!("Connected to agent: {}", peer);
             Command::register(agent_type).send_to(&peer).await?;
+
+            // now we need to send all of the queued jobs for this peer
+            job::send_queued(&peer).await?;
         }
         ControlCommand::Disconnected { agent, zone } => {
             let peer = Peer::new(&agent, &zone);

@@ -9,6 +9,7 @@ use anyhow::Result;
 use paddington::message::Message;
 use paddington::send as send_to_peer;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {
@@ -63,6 +64,26 @@ impl Command {
             &serde_json::to_string(self)?,
         ))
         .await?)
+    }
+
+    pub fn job(&self) -> Option<Job> {
+        match self {
+            Command::Put { job } => Some(job.clone()),
+            Command::Update { job } => Some(job.clone()),
+            Command::Delete { job } => Some(job.clone()),
+            Command::Register { agent: _ } => None,
+            Command::Error { error: _ } => None,
+        }
+    }
+
+    pub fn job_id(&self) -> Option<Uuid> {
+        match self {
+            Command::Put { job } => Some(job.id()),
+            Command::Update { job } => Some(job.id()),
+            Command::Delete { job } => Some(job.id()),
+            Command::Register { agent: _ } => None,
+            Command::Error { error: _ } => None,
+        }
     }
 }
 

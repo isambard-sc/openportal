@@ -710,19 +710,23 @@ pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
         queued = board.take_queued();
     }
 
-    // now send all of the queued jobs - if anything goes wrong, then
-    // put the failed jobs back into the queue
-    for job in queued {
-        tracing::info!("Running queued job: {:?}", job);
+    // now send all of the queued jobs - if anything goes wrong,
+    // the job will automatically put itself back on the queue
+    for command in queued {
+        tracing::info!("Running queued command: {:?}", command);
 
-        match job.send_to(peer).await {
-            Ok(_) => (),
-            Err(e) => {
-                // if we can't send the command, then we need to need to add
-                // it to a queue for sending once the peer is back online
-                tracing::error!("Error sending queued command to agent: {:?}", e);
-                let mut board = board.write().await;
-                board.queue(job);
+        match command {
+            ControlCommand::Put { job } => {
+                job.put(peer).await?;
+            }
+            ControlCommand::Update { job } => {
+                job.update(peer).await?;
+            }
+            ControlCommand::Delete { job } => {
+                job.delete(peer).await?;
+            }
+            _ => {
+                tracing::error!("Unknown command: {:?}", command);
             }
         }
     }

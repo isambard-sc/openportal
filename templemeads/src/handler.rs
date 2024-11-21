@@ -208,7 +208,6 @@ async_message_handler! {
         match message.typ() {
             MessageType::Control => {
                 process_control_message(&service_info.agent_type, message.into()).await?;
-
                 Ok(())
             }
             MessageType::KeepAlive => {

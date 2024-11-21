@@ -16,9 +16,9 @@ pub struct Board {
     peer: Peer,
     jobs: HashMap<Uuid, Job>,
 
-    // all of the queued jobs that are waiting for the connection
+    // all of the queued commands that are waiting for the connection
     // to re-open, so that they can be sent
-    queued_jobs: Vec<ControlCommand>,
+    queued_commands: Vec<ControlCommand>,
 
     // do not serialise or clone the waiters
     #[serde(skip)]
@@ -31,7 +31,7 @@ impl Clone for Board {
         Self {
             peer: self.peer.clone(),
             jobs: self.jobs.clone(),
-            queued_jobs: self.queued_jobs.clone(),
+            queued_commands: self.queued_commands.clone(),
             waiters: HashMap::new(),
         }
     }
@@ -42,7 +42,7 @@ impl Board {
         Self {
             peer: peer.clone(),
             jobs: HashMap::new(),
-            queued_jobs: Vec::new(),
+            queued_commands: Vec::new(),
             waiters: HashMap::new(),
         }
     }
@@ -63,7 +63,25 @@ impl Board {
                 }
             }
             None => {
-                return Err(Error::NotFound(format!("Job not found: {:?}", job.id())));
+                // look through the queued commands...
+                let mut found = false;
+
+                for command in &self.queued_commands {
+                    if let Some(j) = command.job() {
+                        if j.id() == job.id() {
+                            if j.is_finished() {
+                                return Ok(Waiter::finished(j.clone()));
+                            }
+
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                if !found {
+                    return Err(Error::NotFound(format!("Job not found: {:?}", job.id())));
+                }
             }
         }
 
@@ -167,7 +185,18 @@ impl Board {
     pub fn get(&self, id: &Uuid) -> Result<Job, Error> {
         match self.jobs.get(id) {
             Some(j) => Ok(j.clone()),
-            None => Err(Error::NotFound(format!("Job not found: {:?}", id))),
+            None => {
+                // look through the queued jobs...
+                for command in &self.queued_commands {
+                    if let Some(job) = command.job() {
+                        if &job.id() == id {
+                            return Ok(job);
+                        }
+                    }
+                }
+
+                Err(Error::NotFound(format!("Job not found: {:?}", id)))
+            }
         }
     }
 
@@ -176,18 +205,26 @@ impl Board {
     /// because the connection to the agent is currently unavailable
     ///
     pub fn queue(&mut self, command: ControlCommand) {
-        tracing::info!("Queuing job: {:?}", command);
-        self.queued_jobs.push(command);
+        tracing::info!("Queuing command: {:?}", command);
+
+        // remove the job from the main board as it never made it
+        // to the destination
+        if let Some(job_id) = command.job_id() {
+            self.jobs.remove(&job_id);
+            self.queued_commands.push(command);
+        } else {
+            tracing::error!("Cannot queue command without a job id: {:?}", command);
+        }
     }
 
     ///
-    /// Take all of the queued jobs - this removes the jobs from this
+    /// Take all of the queued commands - this removes the commands from this
     /// board and returns them as a list
     ///
     pub fn take_queued(&mut self) -> Vec<ControlCommand> {
-        let mut queued_jobs = Vec::new();
-        std::mem::swap(&mut queued_jobs, &mut self.queued_jobs);
-        queued_jobs
+        let mut queued_commands = Vec::new();
+        std::mem::swap(&mut queued_commands, &mut self.queued_commands);
+        queued_commands
     }
 }
 

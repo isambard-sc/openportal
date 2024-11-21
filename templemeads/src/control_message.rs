@@ -19,7 +19,12 @@ pub async fn process_control_message(
             tracing::info!("Connected to agent: {}", peer);
             Command::register(agent_type).send_to(&peer).await?;
 
-            // now we need to send all of the queued jobs for this peer
+            // now send the current board to the peer, so that they
+            // can restore their state
+            job::sync_board(&peer).await?;
+
+            // now they have their new state, we need to send all of the
+            // queued jobs for this peer
             job::send_queued(&peer).await?;
         }
         ControlCommand::Disconnected { agent, zone } => {

@@ -11,6 +11,11 @@ use crate::command::Command as ControlCommand;
 use crate::error::Error;
 use crate::job::Job;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SyncState {
+    jobs: Vec<Job>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Board {
     peer: Peer,
@@ -44,6 +49,16 @@ impl Board {
             jobs: HashMap::new(),
             queued_commands: Vec::new(),
             waiters: HashMap::new(),
+        }
+    }
+
+    ///
+    /// Return the sync state that can be used to synchronise this board
+    /// with its copy on the peer
+    ///
+    pub fn sync_state(&self) -> SyncState {
+        SyncState {
+            jobs: self.jobs.values().cloned().collect(),
         }
     }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::{Peer, Type as AgentType};
+use crate::board::SyncState;
 use crate::error::Error;
 use crate::job::Job;
 
@@ -18,6 +19,7 @@ pub enum Command {
     Update { job: Job },
     Delete { job: Job },
     Register { agent: AgentType },
+    Sync { state: SyncState },
 }
 
 impl std::fmt::Display for Command {
@@ -28,6 +30,7 @@ impl std::fmt::Display for Command {
             Command::Update { job } => write!(f, "Update: {}", job),
             Command::Delete { job } => write!(f, "Delete: {}", job),
             Command::Register { agent } => write!(f, "Register: {}", agent),
+            Command::Sync { state: _ } => write!(f, "Sync: State"),
         }
     }
 }
@@ -57,6 +60,12 @@ impl Command {
         }
     }
 
+    pub fn sync(state: &SyncState) -> Self {
+        Self::Sync {
+            state: state.clone(),
+        }
+    }
+
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
         Ok(send_to_peer(Message::send_to(
             peer.name(),
@@ -71,6 +80,7 @@ impl Command {
             Command::Put { job } => Some(job.clone()),
             Command::Update { job } => Some(job.clone()),
             Command::Delete { job } => Some(job.clone()),
+            Command::Sync { state: _ } => None,
             Command::Register { agent: _ } => None,
             Command::Error { error: _ } => None,
         }
@@ -81,6 +91,7 @@ impl Command {
             Command::Put { job } => Some(job.id()),
             Command::Update { job } => Some(job.id()),
             Command::Delete { job } => Some(job.id()),
+            Command::Sync { state: _ } => None,
             Command::Register { agent: _ } => None,
             Command::Error { error: _ } => None,
         }

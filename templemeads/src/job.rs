@@ -684,6 +684,40 @@ impl Job {
 }
 
 ///
+/// Function used to sync the board with the specified peer.
+/// We will send our board, while the peer should also send its
+/// board. From the two exchanges we should recover our true
+/// shared state
+///
+pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
+    // get a RwLock to the board from the shared state
+    let board = match state::get(peer).await {
+        Ok(b) => b.board().await,
+        Err(e) => {
+            tracing::error!(
+                "Error getting board for agent: {:?}. Is this agent known to us?",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // get the board sync state
+    let sync_state = board.read().await.sync_state();
+
+    // now send this to the peer
+    match ControlCommand::sync(&sync_state).send_to(peer).await {
+        Ok(_) => (),
+        Err(e) => {
+            tracing::error!("Error sending sync command to agent: {:?}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+///
 /// Function used to send all jobs that were queued for the specified peer
 ///
 pub async fn send_queued(peer: &Peer) -> Result<(), Error> {

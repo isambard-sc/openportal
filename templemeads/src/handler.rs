@@ -190,6 +190,9 @@ async fn process_command(
                 }
             }
         }
+        Command::Sync { state } => {
+            tracing::info!("Syncing state: {:?}", state);
+        }
         _ => {
             tracing::warn!("Command {} not recognised", command);
         }

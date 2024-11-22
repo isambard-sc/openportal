@@ -384,6 +384,11 @@ impl Job {
     }
 
     fn update(&mut self) -> PyResult<()> {
+        // don't update if the job is already finished
+        if self.is_finished()? {
+            return Ok(());
+        }
+
         match status(self.clone()) {
             Ok(updated) => {
                 *self = updated;

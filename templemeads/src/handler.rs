@@ -42,6 +42,12 @@ pub async fn set_my_service_details(
     agent_type: &agent::Type,
     runner: Option<AsyncRunnable>,
 ) -> Result<()> {
+    tracing::info!(
+        "Agent layer: {} version {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
     agent::register_self(service, agent_type).await;
     let mut service_details = SERVICE_DETAILS.write().await;
     service_details.service = service.to_string();

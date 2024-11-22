@@ -7,7 +7,7 @@ use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
 use crate::error::Error;
-use crate::job::Envelope;
+use crate::job::{sync_from_peer, Envelope};
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
@@ -191,7 +191,8 @@ async fn process_command(
             }
         }
         Command::Sync { state } => {
-            tracing::info!("Syncing state: {:?}", state);
+            let peer = Peer::new(sender, zone);
+            sync_from_peer(&recipient, &peer, state).await?;
         }
         _ => {
             tracing::warn!("Command {} not recognised", command);

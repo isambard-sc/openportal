@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Peer;
-use crate::board::Waiter;
+use crate::board::{SyncState, Waiter};
 use crate::command::Command as ControlCommand;
-use crate::destination::Destination;
+use crate::destination::{Destination, Position};
 use crate::error::Error;
 use crate::grammar::Instruction;
 use crate::state;
@@ -747,6 +747,90 @@ pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
         Err(e) => {
             tracing::error!("Error sending sync command to agent: {:?}", e);
             return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+///
+/// Function used to process the sync message received from the specified
+/// peer
+///
+pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> Result<(), Error> {
+    tracing::info!("Syncing state from peer {}", peer);
+
+    let jobs = sync.jobs();
+
+    if jobs.is_empty() {
+        tracing::info!("No jobs to sync from peer {}", peer);
+        return Ok(());
+    }
+
+    let mut update_jobs = Vec::new();
+    let mut put_jobs = Vec::new();
+
+    // loop over all of the jobs in the sync state and process them
+    {
+        // get a RwLock to the board from the shared state
+        let board = match state::get(peer).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        let board = board.read().await;
+
+        // loop through each job and see if we have them already in the board?
+        for job in jobs {
+            if board.would_be_changed_by(job) {
+                // the board would be changed by this job - we now need to work
+                // out if this is a put or an update. Assume that it is a put
+                // if the job is moving downstream or we are the destination,
+                // or an update if moving upstream
+                match job.destination().position(recipient, peer.name()) {
+                    Position::Upstream => {
+                        update_jobs.push(job);
+                    }
+                    Position::Downstream => {
+                        put_jobs.push(job);
+                    }
+                    Position::Destination => {
+                        put_jobs.push(job);
+                    }
+                    _ => {
+                        tracing::error!("Job has got into an errored position: {:?}", job);
+                        tracing::error!("Ignoring this job during the state update");
+                    }
+                }
+            }
+        }
+    }
+
+    // ok - we now have all of the put and updates - send all the
+    // updates first, then the puts
+    for job in update_jobs {
+        match ControlCommand::update(&job).send_to_self_from(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("Error sending update command to agent: {:?}", e);
+                tracing::error!("Ignoring this job during the state update");
+            }
+        }
+    }
+
+    for job in put_jobs {
+        match ControlCommand::put(&job).send_to_self_from(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("Error sending put command to agent: {:?}", e);
+                tracing::error!("Ignoring this job during the state update");
+            }
         }
     }
 

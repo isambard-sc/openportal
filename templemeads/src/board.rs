@@ -16,6 +16,12 @@ pub struct SyncState {
     jobs: Vec<Job>,
 }
 
+impl SyncState {
+    pub fn jobs(&self) -> &Vec<Job> {
+        &self.jobs
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Board {
     peer: Peer,

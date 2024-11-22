@@ -75,6 +75,15 @@ impl Command {
         .await?)
     }
 
+    pub async fn received_from(&self, peer: &Peer) -> Result<(), Error> {
+        Ok(received(Message::received_from(
+            peer.name(),
+            peer.zone(),
+            &serde_json::to_string(self)?,
+        ))
+        .await?)
+    }
+
     pub fn job(&self) -> Option<Job> {
         match self {
             Command::Put { job } => Some(job.clone()),

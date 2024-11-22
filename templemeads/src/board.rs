@@ -122,9 +122,11 @@ impl Board {
     ///
     /// The indicated board for the job must match the name of this board
     ///
-    /// This returns the job (it may be updated to be on a new board)
+    /// This returns whether or not the board has changed
+    /// (i.e. whether the job is not already on the board with this
+    ///  version)
     ///
-    pub fn add(&mut self, job: &Job) -> Result<(), Error> {
+    pub fn add(&mut self, job: &Job) -> Result<bool, Error> {
         job.assert_is_for_board(&self.peer)?;
 
         let mut updated = false;
@@ -149,6 +151,10 @@ impl Board {
                 }
             }
             None => {
+                // don't need to check if this has been queued, as
+                // the next step would re-queue the job if there was
+                // a problem, and job changes are idempotent (i.e.
+                // it doesn't matter if this happens twice)
                 self.jobs.insert(job.id(), job.clone());
                 updated = true;
             }
@@ -164,15 +170,17 @@ impl Board {
             }
         }
 
-        Ok(())
+        Ok(updated)
     }
 
     ///
     /// Remove the passed job from our board
     /// If the job doesn't exist then we fail silently
-    /// This returns the removed job
     ///
-    pub fn remove(&mut self, job: &Job) -> Result<(), Error> {
+    /// This returns whether or not the board has changed
+    /// (i.e. whether the job was on the board)
+    ///
+    pub fn remove(&mut self, job: &Job) -> Result<bool, Error> {
         job.assert_is_for_board(&self.peer)?;
 
         // if we have any waiters for this job then notify them with an error
@@ -188,9 +196,9 @@ impl Board {
             }
         }
 
-        self.jobs.remove(&job.id());
+        let removed = self.jobs.remove(&job.id()).is_some();
 
-        Ok(())
+        Ok(removed)
     }
 
     ///

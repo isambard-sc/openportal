@@ -439,7 +439,13 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            board.add(&job)?;
+
+            if !board.add(&job)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         Ok(job)
@@ -470,7 +476,13 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            board.add(&job)?;
+
+            if !board.add(&job)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         // now send it to the agent for processing
@@ -518,7 +530,12 @@ impl Job {
 
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
-            board.add(self)?;
+            if !board.add(self)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(self.clone());
+            }
         }
 
         Ok(self.clone())
@@ -548,7 +565,12 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            board.add(&job)?;
+            if !board.add(&job)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         // now send it to the agent for processing
@@ -589,8 +611,15 @@ impl Job {
 
             // remove the job to the board
             job.board = Some(peer.clone());
-            board.remove(&job)?;
+            let changed = board.remove(&job)?;
             job.board = None;
+
+            if !changed {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         Ok(job)
@@ -619,8 +648,15 @@ impl Job {
 
             // remove the job from the board
             job.board = Some(peer.clone());
-            board.remove(&job)?;
+            let changed = board.remove(&job)?;
             job.board = None;
+
+            if !changed {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         // now send it to the agent for processing

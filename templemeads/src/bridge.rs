@@ -61,12 +61,18 @@ pub async fn run(command: &str) -> Result<Job, Error> {
                 )));
             }
 
-            Ok(Job::parse(
+            let job = Job::parse(
                 &format!("{}.{} submit {}", my_name, portal.name(), command),
                 true,
-            )?
-            .put(&portal)
-            .await?)
+            )?;
+
+            // use a longer duration for this job so that there is plenty of
+            // time for the portal to collect the result - in reality, the
+            // actual job on the system will have a much shorter lifetime,
+            // e.g. 1 minute
+            let job = job.set_lifetime(chrono::Duration::minutes(60));
+
+            Ok(job.put(&portal).await?)
         }
         None => {
             tracing::error!("No portal agent found");

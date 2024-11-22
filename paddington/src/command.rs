@@ -6,16 +6,28 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {
-    Error { error: String },
-    Connected { agent: String, zone: String },
-    Disconnected { agent: String, zone: String },
+    Error {
+        error: String,
+    },
+    Connected {
+        agent: String,
+        zone: String,
+        engine: String,
+        version: String,
+    },
+    Disconnected {
+        agent: String,
+        zone: String,
+    },
 }
 
 impl Command {
-    pub fn connected(agent: &str, zone: &str) -> Self {
+    pub fn connected(agent: &str, zone: &str, engine: &str, version: &str) -> Self {
         Self::Connected {
             agent: agent.to_owned(),
             zone: zone.to_owned(),
+            engine: engine.to_owned(),
+            version: version.to_owned(),
         }
     }
 

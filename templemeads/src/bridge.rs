@@ -12,7 +12,7 @@ use uuid::Uuid;
 pub async fn status(job: &Uuid) -> Result<Job, Error> {
     tracing::info!("Received status request for job: {}", job);
 
-    match agent::portal().await {
+    match agent::portal(30).await {
         Some(portal) => {
             // get the (shared) board for the portal
             let board = match state::get(&portal).await {
@@ -44,7 +44,7 @@ pub async fn run(command: &str) -> Result<Job, Error> {
 
     let my_name = agent::name().await;
 
-    match agent::portal().await {
+    match agent::portal(30).await {
         Some(portal) => {
             let job = Job::parse(command, true)?;
 

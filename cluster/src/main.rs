@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
 
 async fn create_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
     // find the Account agent
-    match agent::account().await {
+    match agent::account(30).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -152,7 +152,7 @@ async fn create_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, 
 
 async fn create_directories(me: &str, mapping: &UserMapping) -> Result<String, Error> {
     // find the Filesystem agent
-    match agent::filesystem().await {
+    match agent::filesystem(30).await {
         Some(filesystem) => {
             // send the add_job to the filesystem agent
             let job = Job::parse(
@@ -189,7 +189,7 @@ async fn create_directories(me: &str, mapping: &UserMapping) -> Result<String, E
 
 async fn update_homedir(me: &str, user: &UserIdentifier, homedir: &str) -> Result<String, Error> {
     // find the Account agent
-    match agent::account().await {
+    match agent::account(30).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -236,7 +236,7 @@ async fn add_to_scheduler(
     mapping: &UserMapping,
 ) -> Result<(), Error> {
     // find the Scheduler agent
-    match agent::scheduler().await {
+    match agent::scheduler(30).await {
         Some(scheduler) => {
             // send the add_job to the scheduler agent
             let job = Job::parse(

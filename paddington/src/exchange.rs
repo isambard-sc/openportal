@@ -192,13 +192,9 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
 
     if exchange.connections.contains_key(&key) {
         exchange.connections.remove(&key);
-        Ok(())
-    } else {
-        Err(Error::UnnamedConnection(format!(
-            "Connection {} not found",
-            key
-        )))
     }
+
+    Ok(())
 }
 
 pub async fn register(connection: Connection) -> Result<(), Error> {

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use tokio::sync::RwLock;
 
+use crate::error::Error;
+
 #[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize)]
 pub enum Type {
     Portal,
@@ -145,7 +147,7 @@ impl Registrar {
         self.typ = agent_type.clone();
     }
 
-    fn register_peer(&mut self, peer: &Peer, agent_type: &Type) {
+    fn register_peer(&mut self, peer: &Peer, agent_type: &Type, _engine: &str, _version: &str) {
         self.peers.insert(peer.clone(), agent_type.clone());
         self.peers_by_type
             .entry(agent_type.clone())
@@ -208,6 +210,15 @@ impl Registrar {
             .get(&Type::Filesystem)
             .and_then(|v| v.first().cloned())
     }
+
+    ///
+    /// Return the name of the first scheduler agent in the system
+    ///
+    fn scheduler(&self) -> Option<Peer> {
+        self.peers_by_type
+            .get(&Type::Scheduler)
+            .and_then(|v| v.first().cloned())
+    }
 }
 
 static REGISTAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
@@ -216,8 +227,11 @@ static REGISTAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::c
 /// Register that the peer agent called 'name' is of type 'agent_type'
 /// and is connecting from zone `zone`
 ///
-pub async fn register_peer(peer: &Peer, agent_type: &Type) {
-    REGISTAR.write().await.register_peer(peer, agent_type)
+pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version: &str) {
+    REGISTAR
+        .write()
+        .await
+        .register_peer(peer, agent_type, engine, version)
 }
 
 ///
@@ -225,7 +239,7 @@ pub async fn register_peer(peer: &Peer, agent_type: &Type) {
 /// is of type `agent_type`
 ///
 pub async fn register_self(name: &str, agent_type: &Type) {
-    REGISTAR.write().await.register_self(name, agent_type)
+    REGISTAR.write().await.register_self(name, agent_type);
 }
 
 ///
@@ -250,36 +264,142 @@ pub async fn name() -> String {
 }
 
 ///
-/// Return the name of the first portal agent in the system
+/// Return the name of the first portal agent in the system.
+/// Note that this will wait for up to 30 seconds for a portal
+/// agent to be registered before returning None
 ///
-pub async fn portal() -> Option<Peer> {
-    REGISTAR.read().await.portal()
+pub async fn portal(wait: u64) -> Option<Peer> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
+
+    loop {
+        match REGISTAR.read().await.portal() {
+            Some(peer) => return Some(peer),
+            None => match now.elapsed() {
+                Ok(elapsed) => {
+                    if elapsed > wait {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            },
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 ///
 /// Return the name of the first account agent in the system
+/// Note that this will wait for up to 30 seconds for an account
+/// agent to be registered before returning None
 ///
-pub async fn account() -> Option<Peer> {
-    REGISTAR.read().await.account()
+pub async fn account(wait: u64) -> Option<Peer> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
+
+    loop {
+        match REGISTAR.read().await.account() {
+            Some(peer) => return Some(peer),
+            None => match now.elapsed() {
+                Ok(elapsed) => {
+                    if elapsed > wait {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            },
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 ///
 /// Return the name of the first filesystem agent in the system
+/// Note that this will wait for up to 30 seconds for a filesystem
+/// agent to be registered before returning None
 ///
-pub async fn filesystem() -> Option<Peer> {
-    REGISTAR.read().await.filesystem()
+pub async fn filesystem(wait: u64) -> Option<Peer> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
+
+    loop {
+        match REGISTAR.read().await.filesystem() {
+            Some(peer) => return Some(peer),
+            None => match now.elapsed() {
+                Ok(elapsed) => {
+                    if elapsed > wait {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            },
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 ///
 /// Return the name of the first scheduler agent in the system
+/// Note that this will wait for up to 30 seconds for a scheduler
+/// agent to be registered before returning None
 ///
-pub async fn scheduler() -> Option<Peer> {
-    REGISTAR
-        .read()
-        .await
-        .agents(&Type::Scheduler)
-        .first()
-        .cloned()
+pub async fn scheduler(wait: u64) -> Option<Peer> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
+
+    loop {
+        match REGISTAR.read().await.scheduler() {
+            Some(peer) => return Some(peer.clone()),
+            None => match now.elapsed() {
+                Ok(elapsed) => {
+                    if elapsed > wait {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            },
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+///
+/// Wait for up to 'wait' seconds for the agent 'peer' to be registered.
+/// This will raise an error if there is no agent registered within
+/// this time.
+///
+pub async fn wait_for(peer: &Peer, wait: u64) -> Result<(), Error> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
+
+    loop {
+        if REGISTAR.read().await.peers.contains_key(peer) {
+            return Ok(());
+        }
+
+        match now.elapsed() {
+            Ok(elapsed) => {
+                if elapsed > wait {
+                    return Err(Error::NotFound(format!(
+                        "Agent {} not found as it is not connected",
+                        peer
+                    )));
+                }
+            }
+            Err(_) => {
+                return Err(Error::NotFound(format!(
+                    "Agent {} not found as it is not connected",
+                    peer
+                )))
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 ///
@@ -295,16 +415,30 @@ pub async fn agent_type(peer: &Peer) -> Option<Type> {
 /// are multiple agents with the same name, but in different
 /// zones
 ///
-pub async fn find(name: &str) -> Option<Peer> {
-    let registrar = REGISTAR.read().await;
+pub async fn find(name: &str, wait: u64) -> Option<Peer> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
 
-    for (peer, _) in registrar.peers.iter() {
-        if peer.name() == name {
-            return Some(peer.clone());
+    loop {
+        let registrar = REGISTAR.read().await;
+
+        for (peer, _) in registrar.peers.iter() {
+            if peer.name() == name {
+                return Some(peer.clone());
+            }
         }
-    }
 
-    None
+        match now.elapsed() {
+            Ok(elapsed) => {
+                if elapsed > wait {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 #[cfg(test)]
@@ -325,36 +459,80 @@ mod tests {
     async fn test_register() {
         // run all tests in one function, as they need to be serial
         // or they overwrite each other
+        let engine = "templemeads";
+        let version = "0.0.10";
         clear().await;
-        register_peer(&Peer::new("test", "default"), &Type::Portal).await;
+        register_peer(
+            &Peer::new("test", "default"),
+            &Type::Portal,
+            engine,
+            version,
+        )
+        .await;
         let agents = get_all(&Type::Portal).await;
         assert_eq!(agents, vec![Peer::new("test", "default")]);
 
         clear().await;
-        register_peer(&Peer::new("test", "internal"), &Type::Portal).await;
+        register_peer(
+            &Peer::new("test", "internal"),
+            &Type::Portal,
+            engine,
+            version,
+        )
+        .await;
         remove(&Peer::new("test", "internal")).await;
         let agents = get_all(&Type::Portal).await;
         assert!(agents.is_empty());
 
         clear().await;
-        register_peer(&Peer::new("test", "internal"), &Type::Portal).await;
-        let agent = portal().await;
+        register_peer(
+            &Peer::new("test", "internal"),
+            &Type::Portal,
+            engine,
+            version,
+        )
+        .await;
+        let agent = portal(0).await;
         assert_eq!(agent, Some(Peer::new("test", "internal")));
 
         clear().await;
-        register_peer(&Peer::new("test", "local"), &Type::Account).await;
-        let agent = account().await;
+        register_peer(&Peer::new("test", "local"), &Type::Account, engine, version).await;
+        let agent = account(0).await;
         assert_eq!(agent, Some(Peer::new("test", "local")));
 
         clear().await;
-        register_peer(&Peer::new("test", "something"), &Type::Filesystem).await;
-        let agent = filesystem().await;
+        register_peer(
+            &Peer::new("test", "something"),
+            &Type::Filesystem,
+            engine,
+            version,
+        )
+        .await;
+        let agent = filesystem(0).await;
         assert_eq!(agent, Some(Peer::new("test", "something")));
 
         clear().await;
-        register_peer(&Peer::new("test1", "internal"), &Type::Portal).await;
-        register_peer(&Peer::new("test2", "default"), &Type::Portal).await;
-        register_peer(&Peer::new("test3", "internal"), &Type::Provider).await;
+        register_peer(
+            &Peer::new("test1", "internal"),
+            &Type::Portal,
+            engine,
+            version,
+        )
+        .await;
+        register_peer(
+            &Peer::new("test2", "default"),
+            &Type::Portal,
+            engine,
+            version,
+        )
+        .await;
+        register_peer(
+            &Peer::new("test3", "internal"),
+            &Type::Provider,
+            engine,
+            version,
+        )
+        .await;
         remove(&Peer::new("test1", "internal")).await;
 
         let agents = get_all(&Type::Portal).await;
@@ -362,8 +540,8 @@ mod tests {
         let agents = get_all(&Type::Provider).await;
         assert_eq!(agents, vec![Peer::new("test3", "internal")]);
 
-        assert_eq!(portal().await, Some(Peer::new("test2", "default")));
-        assert_eq!(account().await, None);
-        assert_eq!(filesystem().await, None);
+        assert_eq!(portal(0).await, Some(Peer::new("test2", "default")));
+        assert_eq!(account(0).await, None);
+        assert_eq!(filesystem(0).await, None);
     }
 }

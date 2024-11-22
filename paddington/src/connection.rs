@@ -9,6 +9,7 @@ use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
 use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::env;
 use std::fmt::Display;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -110,6 +111,13 @@ where
             .expose_secret()
             .decrypt::<String>(message.to_text()?)?,
     )?)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Handshake {
+    session_key: SecretKey,
+    engine: String,
+    version: String,
 }
 
 impl Connection {
@@ -260,19 +268,25 @@ impl Connection {
         // Split the WebSocket stream into incoming and outgoing parts
         let (mut outgoing, mut incoming) = socket.split();
 
-        // the client generates the new session outer key, and sends this to the server
+        // the client generates a handshake that contains the new session outer key,
+        // the name of its comms engine and version, and sends this to the server
         // using the pre-shared client/server inner and outer keys
         let outer_key = Key::generate();
 
-        let message =
-            match envelope_message(outer_key.clone(), &server.inner_key(), &server.outer_key()) {
-                Ok(message) => message,
-                Err(e) => {
-                    tracing::warn!("Error enveloping message: {:?}", e);
-                    self.set_error().await;
-                    return Err(e.into());
-                }
-            };
+        let handshake = Handshake {
+            session_key: outer_key.clone(),
+            engine: env!("CARGO_PKG_NAME").to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        let message = match envelope_message(handshake, &server.inner_key(), &server.outer_key()) {
+            Ok(message) => message,
+            Err(e) => {
+                tracing::warn!("Error enveloping message: {:?}", e);
+                self.set_error().await;
+                return Err(e.into());
+            }
+        };
 
         if let Err(r) = outgoing.send(message).await {
             self.set_error().await;
@@ -300,9 +314,10 @@ impl Connection {
             }
         };
 
-        // the server has generated a new session inner key, and has sent that
+        // the server has generated a new session inner key, and has put this into
+        // a handshake with its comms engine and version, and sent that
         // wrapped using the client/server inner key and the new session outer key
-        let inner_key: SecretKey =
+        let handshake: Handshake =
             match deenvelope_message(response, &server.inner_key(), &outer_key) {
                 Ok(inner_key) => inner_key,
                 Err(e) => {
@@ -311,6 +326,8 @@ impl Connection {
                     return Err(e.into());
                 }
             };
+
+        let inner_key = handshake.session_key.clone();
 
         // the final step is for the client to send the server its PeerDetails,
         // and for the server to respond. These should match up with
@@ -362,7 +379,15 @@ impl Connection {
             }
         };
 
-        tracing::info!("Connecting to peer {}", peer_details);
+        tracing::info!(
+            "Connecting to peer {}, comms engine {} version {}",
+            peer_details,
+            handshake.engine,
+            handshake.version
+        );
+
+        // eventually we could check the engine and version here,
+        // and do different things based on compatibility, but not for now
 
         if peer_details.name() != peer_name {
             tracing::warn!(
@@ -453,7 +478,15 @@ impl Connection {
         let send_to_peer = rx.map(Ok).forward(outgoing);
 
         // now tell ourselves who has connected
-        match exchange::received(Command::connected(&peer_name, &peer_zone).into()) {
+        match exchange::received(
+            Command::connected(
+                &peer_name,
+                &peer_zone,
+                &handshake.engine,
+                &handshake.version,
+            )
+            .into(),
+        ) {
             Ok(_) => (),
             Err(e) => {
                 tracing::warn!("Error triggering /connected control message: {:?}", e);
@@ -605,7 +638,7 @@ impl Connection {
                 // but then we would lose tracing messages - these are very helpful
                 // to debug issues
 
-                match deenvelope_message::<SecretKey>(
+                match deenvelope_message::<Handshake>(
                     message.clone(),
                     &client.inner_key(),
                     &client.outer_key(),
@@ -663,15 +696,26 @@ impl Connection {
 
         // the peer has sent us the new session outer key that should be used,
         // wrapped in the client/server inner and outer keys
-        let outer_key =
-            deenvelope_message::<SecretKey>(message, &peer.inner_key(), &peer.outer_key())
+        let handshake =
+            deenvelope_message::<Handshake>(message, &peer.inner_key(), &peer.outer_key())
                 .with_context(|| "Error de-enveloping message - closing connection.")?;
+
+        let outer_key = handshake.session_key.clone();
+
+        let peer_engine = handshake.engine;
+        let peer_version = handshake.version;
 
         // we will create a new session inner key and send it back to the
         // client, wrapped in the client/server inner key and session outer key
         let inner_key = Key::generate();
 
-        let response = envelope_message(inner_key.clone(), &peer.inner_key(), &outer_key)
+        let handshake = Handshake {
+            session_key: inner_key.clone(),
+            engine: env!("CARGO_PKG_NAME").to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        let response = envelope_message(handshake, &peer.inner_key(), &outer_key)
             .with_context(|| "Error enveloping message - closing connection.")?;
 
         outgoing
@@ -688,7 +732,12 @@ impl Connection {
         let peer_details = deenvelope_message::<PeerDetails>(message, &inner_key, &outer_key)
             .with_context(|| "Error de-enveloping message - closing connection.")?;
 
-        tracing::info!("Connected to peer {}", peer_details);
+        tracing::info!(
+            "Connected to peer {}, using engine {}, version {}",
+            peer_details,
+            peer_engine,
+            peer_version
+        );
 
         if peer_details.name() != peer_name {
             tracing::warn!(
@@ -779,8 +828,10 @@ impl Connection {
         let send_to_peer = rx.map(Ok).forward(outgoing);
 
         // now tell ourselves who has connected
-        exchange::received(Command::connected(&peer_name, &peer_zone).into())
-            .with_context(|| "Error triggering /connected control message")?;
+        exchange::received(
+            Command::connected(&peer_name, &peer_zone, &peer_engine, &peer_version).into(),
+        )
+        .with_context(|| "Error triggering /connected control message")?;
 
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;

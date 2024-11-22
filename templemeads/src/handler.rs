@@ -7,7 +7,7 @@ use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
 use crate::error::Error;
-use crate::job::{sync_from_peer, Envelope};
+use crate::job::{sync_from_peer, Envelope, Status};
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
@@ -74,9 +74,18 @@ async fn process_command(
     runner: &AsyncRunnable,
 ) -> Result<(), Error> {
     match command {
-        Command::Register { agent } => {
-            tracing::info!("Registering agent: {}", agent);
-            agent::register_peer(&Peer::new(sender, zone), agent).await;
+        Command::Register {
+            agent,
+            engine,
+            version,
+        } => {
+            tracing::info!(
+                "Registering agent: {}, engine={} version={}",
+                agent,
+                engine,
+                version
+            );
+            agent::register_peer(&Peer::new(sender, zone), agent, engine, version).await;
         }
         Command::Update { job } => {
             let peer = Peer::new(sender, zone);
@@ -92,14 +101,18 @@ async fn process_command(
                     // if we are upstream, then the job is moving backwards so we need to
                     // send it to the previous agent
                     if let Some(agent) = job.destination().previous(recipient) {
-                        let _ = job.update(&Peer::new(&agent, zone)).await?;
+                        let peer = Peer::new(&agent, zone);
+                        agent::wait_for(&peer, 30).await?;
+                        job.update(&peer).await?;
                     }
                 }
                 Position::Downstream => {
                     // if we are downstream, then we continue to let the job
                     // flow downstream
                     if let Some(agent) = job.destination().next(recipient) {
-                        let _ = job.update(&Peer::new(&agent, zone)).await?;
+                        let peer = Peer::new(&agent, zone);
+                        agent::wait_for(&peer, 30).await?;
+                        job.update(&peer).await?;
                     }
                 }
                 Position::Destination => {
@@ -131,7 +144,10 @@ async fn process_command(
                     // if we are downstream, then we continue to let the job
                     // flow downstream
                     if let Some(agent) = job.destination().next(recipient) {
-                        job = match job.put(&Peer::new(&agent, zone)).await {
+                        let peer = Peer::new(&agent, zone);
+                        agent::wait_for(&peer, 30).await?;
+
+                        job = match job.put(&peer).await {
                             Ok(job) => job,
                             Err(e) => {
                                 tracing::error!("Error putting job: {}", e);
@@ -142,13 +158,23 @@ async fn process_command(
                 }
                 Position::Destination => {
                     // we are the destination, so we need to take action
-                    job = match runner(Envelope::new(recipient, sender, zone, &job)).await {
-                        Ok(job) => job,
-                        Err(e) => {
-                            tracing::error!("Error running job: {}", e);
-                            job.errored(&e.to_string())?
+                    match job.state() {
+                        Status::Complete => {
+                            tracing::info!("Not rerunning job that has already completed: {}", job);
                         }
-                    };
+                        Status::Error => {
+                            tracing::error!("Not rerunning job that has already errored: {}", job);
+                        }
+                        _ => {
+                            job = match runner(Envelope::new(recipient, sender, zone, &job)).await {
+                                Ok(job) => job,
+                                Err(e) => {
+                                    tracing::error!("Error running job: {}", e);
+                                    job.errored(&e.to_string())?
+                                }
+                            };
+                        }
+                    }
                 }
                 Position::Error => {
                     tracing::error!("Job has got into an errored position: {}", job);
@@ -163,7 +189,10 @@ async fn process_command(
             tracing::info!("Job has finished: {}", job);
 
             // now the job has finished, update the sender's board
-            let _ = job.update(&Peer::new(sender, zone)).await?;
+            let peer = Peer::new(sender, zone);
+            agent::wait_for(&peer, 30).await?;
+
+            let _ = job.update(&peer).await?;
         }
         Command::Delete { job } => {
             let peer = Peer::new(sender, zone);
@@ -178,14 +207,18 @@ async fn process_command(
                     // if we are upstream, then the job is moving backwards so we need to
                     // send it to the previous agent
                     if let Some(agent) = job.destination().previous(recipient) {
-                        let _ = job.delete(&Peer::new(&agent, zone)).await?;
+                        let peer = Peer::new(&agent, zone);
+                        agent::wait_for(&peer, 30).await?;
+                        job.delete(&peer).await?;
                     }
                 }
                 Position::Downstream => {
                     // if we are downstream, then we continue to let the job
                     // flow downstream
                     if let Some(agent) = job.destination().next(recipient) {
-                        let _ = job.delete(&Peer::new(&agent, zone)).await?;
+                        let peer = Peer::new(&agent, zone);
+                        agent::wait_for(&peer, 30).await?;
+                        job.delete(&peer).await?;
                     }
                 }
                 Position::Error => {

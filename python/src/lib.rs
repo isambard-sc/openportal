@@ -244,6 +244,8 @@ struct Job {
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
     changed: chrono::DateTime<Utc>,
+    #[serde(with = "ts_seconds")]
+    expires: chrono::DateTime<Utc>,
     version: u64,
     command: String,
     state: Status,
@@ -257,14 +259,29 @@ impl Job {
         Ok(self.id.to_string())
     }
 
+    fn _is_expired(&self) -> bool {
+        match self.state {
+            Status::Complete => false,
+            Status::Error => false,
+            _ => Utc::now() > self.expires,
+        }
+    }
+
     #[getter]
     fn state(&self) -> PyResult<String> {
-        match self.state {
-            Status::Created => Ok("Created".to_owned()),
-            Status::Pending => Ok("Pending".to_owned()),
-            Status::Running => Ok("Running".to_owned()),
-            Status::Complete => Ok("Complete".to_owned()),
-            Status::Error => Ok("Error".to_owned()),
+        if self._is_expired() {
+            match self.state {
+                Status::Complete => Ok("Complete".to_owned()),
+                _ => Ok("Error".to_owned()),
+            }
+        } else {
+            match self.state {
+                Status::Created => Ok("Created".to_owned()),
+                Status::Pending => Ok("Pending".to_owned()),
+                Status::Running => Ok("Running".to_owned()),
+                Status::Complete => Ok("Complete".to_owned()),
+                Status::Error => Ok("Error".to_owned()),
+            }
         }
     }
 
@@ -284,23 +301,13 @@ impl Job {
     }
 
     #[getter]
+    fn expires(&self) -> PyResult<String> {
+        Ok(self.expires.to_rfc3339())
+    }
+
+    #[getter]
     fn result(&self) -> PyResult<Option<String>> {
-        Ok(self.result.clone())
-    }
-
-    #[getter]
-    fn is_finished(&self) -> PyResult<bool> {
-        Ok(self.state == Status::Complete || self.state == Status::Error)
-    }
-
-    #[getter]
-    fn is_error(&self) -> PyResult<bool> {
-        Ok(self.state == Status::Error)
-    }
-
-    #[getter]
-    fn error_message(&self) -> PyResult<Option<String>> {
-        if self.state == Status::Error {
+        if self.state == Status::Complete {
             Ok(self.result.clone())
         } else {
             Ok(None)
@@ -308,19 +315,66 @@ impl Job {
     }
 
     #[getter]
-    fn progress_message(&self) -> PyResult<String> {
-        match self.state {
-            Status::Running => {
-                if let Some(result) = &self.result {
-                    Ok(result.clone())
+    fn is_finished(&self) -> PyResult<bool> {
+        Ok(self.state == Status::Complete || self.state == Status::Error || self._is_expired())
+    }
+
+    #[getter]
+    fn is_expired(&self) -> PyResult<bool> {
+        Ok(self._is_expired())
+    }
+
+    #[getter]
+    fn is_error(&self) -> PyResult<bool> {
+        match self._is_expired() {
+            true => Ok(self.state != Status::Complete),
+            false => Ok(self.state == Status::Error),
+        }
+    }
+
+    #[getter]
+    fn error_message(&self) -> PyResult<Option<String>> {
+        match self._is_expired() {
+            true => {
+                if self.state == Status::Error {
+                    Ok(self.result.clone())
+                } else if self.state == Status::Complete {
+                    Ok(None)
                 } else {
-                    Ok("Running".to_owned())
+                    Ok(Some("Job has expired".to_owned()))
                 }
             }
-            Status::Created => Ok("Created".to_owned()),
-            Status::Pending => Ok("Pending".to_owned()),
-            Status::Complete => Ok("Complete".to_owned()),
-            Status::Error => Ok("Error".to_owned()),
+            false => {
+                if self.state == Status::Error {
+                    Ok(self.result.clone())
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    #[getter]
+    fn progress_message(&self) -> PyResult<String> {
+        match self._is_expired() {
+            true => match self.state {
+                Status::Complete => Ok("Complete".to_owned()),
+                Status::Error => Ok("Error".to_owned()),
+                _ => Ok("Error (expired)".to_owned()),
+            },
+            false => match self.state {
+                Status::Running => {
+                    if let Some(result) = &self.result {
+                        Ok(result.clone())
+                    } else {
+                        Ok("Running".to_owned())
+                    }
+                }
+                Status::Created => Ok("Created".to_owned()),
+                Status::Pending => Ok("Pending".to_owned()),
+                Status::Complete => Ok("Complete".to_owned()),
+                Status::Error => Ok("Error".to_owned()),
+            },
         }
     }
 
@@ -340,10 +394,42 @@ impl Job {
     }
 
     fn __str__(&self) -> PyResult<String> {
-        Ok(format!(
-            "Job( command: {}, status: {:?} )",
-            self.command, self.state
-        ))
+        match self._is_expired() {
+            true => match self.state {
+                Status::Complete => Ok(format!(
+                    "Job( command: {}, status: completed, result: {} )",
+                    self.command,
+                    self.result.clone().unwrap_or("None".to_owned())
+                )),
+                Status::Error => Ok(format!(
+                    "Job( command: {}, status: error, message: {} )",
+                    self.command,
+                    self.result.clone().unwrap_or("None".to_owned())
+                )),
+                _ => Ok(format!(
+                    "Job( command: {}, status: error, message: Job has expired )",
+                    self.command
+                )),
+            },
+            false => match self.state {
+                Status::Complete => Ok(format!(
+                    "Job( command: {}, status: completed, result: {} )",
+                    self.command,
+                    self.result.clone().unwrap_or("None".to_owned())
+                )),
+                Status::Error => Ok(format!(
+                    "Job( command: {}, status: error, message: {} )",
+                    self.command,
+                    self.result.clone().unwrap_or("None".to_owned())
+                )),
+                _ => Ok(format!(
+                    "Job( command: {}, status: {:?}, message: {} )",
+                    self.command,
+                    self.state,
+                    self.result.clone().unwrap_or("None".to_owned())
+                )),
+            },
+        }
     }
 
     fn __repr__(&self) -> PyResult<String> {

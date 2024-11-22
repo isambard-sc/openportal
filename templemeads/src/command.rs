@@ -8,6 +8,7 @@ use crate::job::Job;
 
 use anyhow::Result;
 use paddington::message::Message;
+use paddington::received as received_from_peer;
 use paddington::send as send_to_peer;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -75,13 +76,15 @@ impl Command {
         .await?)
     }
 
-    pub async fn received_from(&self, peer: &Peer) -> Result<(), Error> {
-        Ok(received(Message::received_from(
+    pub fn received_from(&self, peer: &Peer) -> Result<(), Error> {
+        match received_from_peer(Message::received_from(
             peer.name(),
             peer.zone(),
             &serde_json::to_string(self)?,
-        ))
-        .await?)
+        )) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(Error::from(e)),
+        }
     }
 
     pub fn job(&self) -> Option<Job> {

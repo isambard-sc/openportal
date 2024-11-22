@@ -171,6 +171,8 @@ pub struct Job {
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
     changed: chrono::DateTime<Utc>,
+    #[serde(with = "ts_seconds")]
+    expires: chrono::DateTime<Utc>,
     version: u64,
     command: Command,
     state: Status,
@@ -200,6 +202,11 @@ impl Job {
             id: Uuid::new_v4(),
             created: now,
             changed: now,
+            // settled on 1 minute as this makes the interface with the
+            // user portal more responsive - any task that takes longer
+            // than a minute can have its lifetime changed using the
+            // set_lifetime method
+            expires: now + chrono::Duration::minutes(1),
             version: 1,
             command: Command::parse(command, check_portal)?,
             state: Status::Created,
@@ -218,6 +225,24 @@ impl Job {
 
     pub fn instruction(&self) -> Instruction {
         self.command.instruction()
+    }
+
+    pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
+        Self {
+            id: self.id,
+            created: self.created,
+            changed: self.changed,
+            expires: self.created + lifetime,
+            version: self.version,
+            command: self.command.clone(),
+            state: self.state.clone(),
+            result: self.result.clone(),
+            board: self.board.clone(),
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.expires < Utc::now()
     }
 
     pub fn is_finished(&self) -> bool {
@@ -245,6 +270,7 @@ impl Job {
             id: self.id,
             created: self.created,
             changed: Utc::now(),
+            expires: self.expires,
             version: self.version + 1,
             command: self.command.clone(),
             state: self.state.clone(),
@@ -275,12 +301,23 @@ impl Job {
         }
     }
 
+    pub fn assert_is_not_expired(&self) -> Result<(), Error> {
+        if self.is_expired() {
+            Err(Error::Expired(
+                format!("Job {} has expired", self.id).to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn pending(&self) -> Result<Job, Error> {
         match self.state {
             Status::Created => Ok(Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1,
                 command: self.command.clone(),
                 state: Status::Pending,
@@ -300,6 +337,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1,
                 command: self.command.clone(),
                 state: Status::Running,
@@ -321,6 +359,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1000, // make sure this is the newest version
                 command: self.command.clone(),
                 state: Status::Complete,
@@ -339,6 +378,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1000, // make sure this is the newest version
                 command: self.command.clone(),
                 state: Status::Error,
@@ -398,6 +438,8 @@ impl Job {
     }
 
     pub async fn execute(&self) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         match self.state() {
             Status::Pending => {
                 tracing::info!("Running job.execute() for job: {:?}", self);
@@ -415,6 +457,8 @@ impl Job {
                 format!("A created job should not have been received? {:?}", self).to_owned(),
             ));
         }
+
+        self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
@@ -452,6 +496,8 @@ impl Job {
     }
 
     pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         // transition the job to pending, recording where it was sent
         let mut job = self.pending()?;
 
@@ -501,6 +547,8 @@ impl Job {
     }
 
     pub async fn updated(&self) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let agent = match self.board {
             Some(ref a) => a,
             None => {
@@ -542,6 +590,8 @@ impl Job {
     }
 
     pub async fn update(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
@@ -589,6 +639,8 @@ impl Job {
     }
 
     pub async fn deleted(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
@@ -626,6 +678,8 @@ impl Job {
     }
 
     pub async fn delete(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
@@ -770,6 +824,8 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
     let mut update_jobs = Vec::new();
     let mut put_jobs = Vec::new();
 
+    let mut num_synced = 0;
+
     // loop over all of the jobs in the sync state and process them
     {
         // get a RwLock to the board from the shared state
@@ -789,25 +845,36 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
         // loop through each job and see if we have them already in the board?
         for job in jobs {
             if board.would_be_changed_by(job) {
-                // the board would be changed by this job - we now need to work
-                // out if this is a put or an update. Assume that it is a put
-                // if the job is moving downstream or we are the destination,
-                // or an update if moving upstream
-                match job.destination().position(recipient, peer.name()) {
-                    Position::Upstream => {
+                match job.state() {
+                    Status::Complete => {
+                        // we don't need to run this again, so just update
                         update_jobs.push(job);
                     }
-                    Position::Downstream => {
-                        put_jobs.push(job);
+                    Status::Error => {
+                        // we don't need to run this again, so just update
+                        update_jobs.push(job);
                     }
-                    Position::Destination => {
-                        put_jobs.push(job);
-                    }
-                    _ => {
-                        tracing::error!("Job has got into an errored position: {:?}", job);
-                        tracing::error!("Ignoring this job during the state update");
-                    }
+                    _ => match job.destination().position(recipient, peer.name()) {
+                        Position::Upstream => {
+                            // sending the results back up to the putter
+                            update_jobs.push(job);
+                        }
+                        Position::Downstream => {
+                            // putting the job down to the destination
+                            put_jobs.push(job);
+                        }
+                        Position::Destination => {
+                            // we are the destination, so re-run the job
+                            put_jobs.push(job);
+                        }
+                        _ => {
+                            tracing::error!("Job has got into an errored position: {:?}", job);
+                            tracing::error!("Ignoring this job during the state update");
+                        }
+                    },
                 }
+            } else {
+                tracing::info!("Already have job: {} on the board", job);
             }
         }
     }
@@ -815,23 +882,39 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
     // ok - we now have all of the put and updates - send all the
     // updates first, then the puts
     for job in update_jobs {
-        match ControlCommand::update(&job).send_to_self_from(peer).await {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("Error sending update command to agent: {:?}", e);
-                tracing::error!("Ignoring this job during the state update");
+        if !job.is_expired() {
+            tracing::info!("Updating job: {}", job);
+            num_synced += 1;
+
+            match ControlCommand::update(job).received_from(peer) {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Error sending update command to agent: {:?}", e);
+                    tracing::error!("Ignoring this job during the state update");
+                }
             }
         }
     }
 
     for job in put_jobs {
-        match ControlCommand::put(&job).send_to_self_from(peer).await {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("Error sending put command to agent: {:?}", e);
-                tracing::error!("Ignoring this job during the state update");
+        if !job.is_expired() {
+            tracing::info!("Putting job: {}", job);
+            num_synced += 1;
+
+            match ControlCommand::put(job).received_from(peer) {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Error sending put command to agent: {:?}", e);
+                    tracing::error!("Ignoring this job during the state update");
+                }
             }
         }
+    }
+
+    match num_synced {
+        0 => tracing::info!("No jobs synced from peer {}", peer),
+        1 => tracing::info!("1 job synced from peer {}", peer),
+        _ => tracing::info!("{} jobs synced from peer {}", num_synced, peer),
     }
 
     Ok(())

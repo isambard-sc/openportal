@@ -97,7 +97,7 @@ async fn process_command(
                     }
                 }
                 Position::Destination => {
-                    tracing::info!("Job has arrived at its destination: {}", job);
+                    tracing::info!("Updated job has arrived at its destination: {}", job);
                 }
                 Position::Error => {
                     tracing::error!("Job has got into an errored position: {}", job);
@@ -192,7 +192,7 @@ async fn process_command(
         }
         Command::Sync { state } => {
             let peer = Peer::new(sender, zone);
-            sync_from_peer(&recipient, &peer, state).await?;
+            sync_from_peer(recipient, &peer, state).await?;
         }
         _ => {
             tracing::warn!("Command {} not recognised", command);

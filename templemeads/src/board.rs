@@ -255,6 +255,76 @@ impl Board {
         std::mem::swap(&mut queued_commands, &mut self.queued_commands);
         queued_commands
     }
+
+    ///
+    /// Return whether or not this board would be changed by the
+    /// passed job
+    ///
+    pub fn would_be_changed_by(&self, job: &Job) -> bool {
+        if job.is_expired() {
+            return false;
+        }
+
+        match self.jobs.get(&job.id()) {
+            Some(j) => {
+                // only update if newer
+                job.version() > j.version()
+            }
+            None => true,
+        }
+    }
+
+    ///
+    /// Remove all expired jobs from the board
+    ///
+    pub fn remove_expired_jobs(&mut self) {
+        let expired_jobs: Vec<Uuid> = self
+            .jobs
+            .iter()
+            .filter_map(|(id, job)| {
+                if job.is_expired() {
+                    // remove any listeners for this job
+                    tracing::info!("Removing expired job {}", job);
+
+                    if let Some(listeners) = self.waiters.remove(id) {
+                        for listener in listeners {
+                            listener.notify(job.clone());
+                        }
+                    }
+
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for job_id in expired_jobs.iter() {
+            let _ = self.jobs.remove(job_id);
+        }
+
+        // now remove any queued expired jobs
+        self.queued_commands.retain(|command| {
+            if let Some(job) = command.job() {
+                if job.is_expired() {
+                    tracing::info!("Removing expired queued job {}", job);
+
+                    // remove any listeners for this job
+                    if let Some(listeners) = self.waiters.remove(&job.id()) {
+                        for listener in listeners {
+                            listener.notify(job.clone());
+                        }
+                    }
+
+                    false
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        });
+    }
 }
 
 ///

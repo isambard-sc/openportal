@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added full recovery support, so that agents can restore their boards
+  after they restart. Also added a queue, so that messages are queued
+  if the agent is down. Plus added a wait when looking for agents, so that
+  time is given for an agent to first connect and identify itself. All of
+  this makes the system more robust and reliable, as most jobs are now
+  tolerant of individual agents going down.
+
+- Added a better handshake so that agents communicate both their comms
+  engine details (e.g. paddington version 0.0.25) and their agent
+  engine details (e.g. templemeads version 0.0.25). This will future proof
+  us if we make any future changes to the protocols. Note that this
+  is BREAKING, so agents cannot commnunicate with older versions of
+  openportal
+
+- Added an expiry to jobs, default to 1 minute, that means that both
+  jobs are now cleaned automatically from boards once expired (by a
+  quiet background tokio task), and that putter of jobs can get a signal
+  that the job has expired, and thus return an error, if the job gets
+  lost in the system. This is a breaking change, as the job expiry
+  is a new field. It again significantly improves the robustness of the
+  system, both stopping putters getting stuck indefinitely, and also
+  preventing memory exhaustion by jobs that are never cleaned up. Have
+  set the bridge agent to put jobs with a expiry of 60 minutes, so that
+  there is plenty of time for the web portal to fetch the results without
+  worrying about them being expired.
+
+### Fixed
+
+- General bug fixes and cleaning of output logging to improve resilience
+  and make it easier to debug issues.
+
 
 ## [0.0.25] - 2024-11-20
 ### Fixed

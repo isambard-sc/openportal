@@ -19,9 +19,49 @@ static STATES: Lazy<RwLock<States>> = Lazy::new(|| RwLock::new(States::new()));
 
 impl States {
     fn new() -> Self {
+        start_cleaner();
+
         Self {
             states: HashMap::new(),
         }
+    }
+}
+
+///
+/// Function called in a tokio task to clean up the boards
+///
+fn start_cleaner() {
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            clean_boards().await;
+        }
+    });
+}
+
+///
+/// Call this function to clean up the expired jobs from the boards
+///
+async fn clean_boards() {
+    let peers = STATES
+        .read()
+        .await
+        .states
+        .keys()
+        .cloned()
+        .collect::<Vec<Peer>>();
+
+    for peer in peers.iter() {
+        let state = match get(peer).await {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::error!("Error getting state for {}: {}", peer, e);
+                continue;
+            }
+        };
+
+        let board = state.board().await;
+        board.write().await.remove_expired_jobs();
     }
 }
 
@@ -54,6 +94,8 @@ pub struct State {
 
 impl State {
     pub fn new(peer: Peer) -> Self {
+        tracing::info!("Creating new board for agent {}", peer);
+
         Self {
             board: Arc::new(RwLock::new(Board::new(&peer))),
         }

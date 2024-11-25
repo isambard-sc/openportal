@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Peer;
-use crate::board::Waiter;
+use crate::board::{SyncState, Waiter};
 use crate::command::Command as ControlCommand;
-use crate::destination::Destination;
+use crate::destination::{Destination, Position};
 use crate::error::Error;
 use crate::grammar::Instruction;
 use crate::state;
@@ -171,6 +171,8 @@ pub struct Job {
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
     changed: chrono::DateTime<Utc>,
+    #[serde(with = "ts_seconds")]
+    expires: chrono::DateTime<Utc>,
     version: u64,
     command: Command,
     state: Status,
@@ -200,6 +202,11 @@ impl Job {
             id: Uuid::new_v4(),
             created: now,
             changed: now,
+            // settled on 1 minute as this makes the interface with the
+            // user portal more responsive - any task that takes longer
+            // than a minute can have its lifetime changed using the
+            // set_lifetime method
+            expires: now + chrono::Duration::minutes(1),
             version: 1,
             command: Command::parse(command, check_portal)?,
             state: Status::Created,
@@ -218,6 +225,24 @@ impl Job {
 
     pub fn instruction(&self) -> Instruction {
         self.command.instruction()
+    }
+
+    pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
+        Self {
+            id: self.id,
+            created: self.created,
+            changed: self.changed,
+            expires: self.created + lifetime,
+            version: self.version,
+            command: self.command.clone(),
+            state: self.state.clone(),
+            result: self.result.clone(),
+            board: self.board.clone(),
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.expires < Utc::now()
     }
 
     pub fn is_finished(&self) -> bool {
@@ -245,6 +270,7 @@ impl Job {
             id: self.id,
             created: self.created,
             changed: Utc::now(),
+            expires: self.expires,
             version: self.version + 1,
             command: self.command.clone(),
             state: self.state.clone(),
@@ -275,12 +301,23 @@ impl Job {
         }
     }
 
+    pub fn assert_is_not_expired(&self) -> Result<(), Error> {
+        if self.is_expired() {
+            Err(Error::Expired(
+                format!("Job {} has expired", self.id).to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn pending(&self) -> Result<Job, Error> {
         match self.state {
             Status::Created => Ok(Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1,
                 command: self.command.clone(),
                 state: Status::Pending,
@@ -300,6 +337,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1,
                 command: self.command.clone(),
                 state: Status::Running,
@@ -321,6 +359,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1000, // make sure this is the newest version
                 command: self.command.clone(),
                 state: Status::Complete,
@@ -339,6 +378,7 @@ impl Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
+                expires: self.expires,
                 version: self.version + 1000, // make sure this is the newest version
                 command: self.command.clone(),
                 state: Status::Error,
@@ -398,6 +438,8 @@ impl Job {
     }
 
     pub async fn execute(&self) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         match self.state() {
             Status::Pending => {
                 tracing::info!("Running job.execute() for job: {:?}", self);
@@ -415,6 +457,8 @@ impl Job {
                 format!("A created job should not have been received? {:?}", self).to_owned(),
             ));
         }
+
+        self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
@@ -439,13 +483,21 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            board.add(&job)?;
+
+            if !board.add(&job)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         Ok(job)
     }
 
     pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         // transition the job to pending, recording where it was sent
         let mut job = self.pending()?;
 
@@ -470,16 +522,33 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            board.add(&job)?;
+
+            if !board.add(&job)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         // now send it to the agent for processing
-        ControlCommand::put(&job).send_to(peer).await?;
+        match ControlCommand::put(&job).send_to(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                // if we can't send the command, then we need to need to add
+                // it to a queue for sending once the peer is back online
+                tracing::error!("Error sending command to agent: {:?}", e);
+                let mut board = board.write().await;
+                board.queue(ControlCommand::put(&job));
+            }
+        }
 
         Ok(job)
     }
 
     pub async fn updated(&self) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let agent = match self.board {
             Some(ref a) => a,
             None => {
@@ -509,13 +578,20 @@ impl Job {
 
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
-            board.add(self)?;
+            if !board.add(self)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(self.clone());
+            }
         }
 
         Ok(self.clone())
     }
 
     pub async fn update(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
@@ -539,16 +615,32 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            board.add(&job)?;
+            if !board.add(&job)? {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         // now send it to the agent for processing
-        ControlCommand::update(&job).send_to(peer).await?;
+        match ControlCommand::update(&job).send_to(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                // if we can't send the command, then we need to need to add
+                // it to a queue for sending once the peer is back online
+                tracing::error!("Error sending command to agent: {:?}", e);
+                let mut board = board.write().await;
+                board.queue(ControlCommand::update(&job));
+            }
+        }
 
         Ok(job)
     }
 
     pub async fn deleted(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
@@ -571,14 +663,23 @@ impl Job {
 
             // remove the job to the board
             job.board = Some(peer.clone());
-            board.remove(&job)?;
+            let changed = board.remove(&job)?;
             job.board = None;
+
+            if !changed {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         Ok(job)
     }
 
     pub async fn delete(&self, peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
@@ -601,12 +702,28 @@ impl Job {
 
             // remove the job from the board
             job.board = Some(peer.clone());
-            board.remove(&job)?;
+            let changed = board.remove(&job)?;
             job.board = None;
+
+            if !changed {
+                // The board already contains this version of the job
+                // There is no change, so no need to send to the peer
+                // (the job has already been sent)
+                return Ok(job);
+            }
         }
 
         // now send it to the agent for processing
-        ControlCommand::delete(&job).send_to(peer).await?;
+        match ControlCommand::delete(&job).send_to(peer).await {
+            Ok(_) => (),
+            Err(e) => {
+                // if we can't send the command, then we need to need to add
+                // it to a queue for sending once the peer is back online
+                tracing::error!("Error sending command to agent: {:?}", e);
+                let mut board = board.write().await;
+                board.queue(ControlCommand::delete(&job));
+            }
+        }
 
         Ok(job)
     }
@@ -654,6 +771,204 @@ impl Job {
 
         Ok(result)
     }
+}
+
+///
+/// Function used to sync the board with the specified peer.
+/// We will send our board, while the peer should also send its
+/// board. From the two exchanges we should recover our true
+/// shared state
+///
+pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
+    // get a RwLock to the board from the shared state
+    let board = match state::get(peer).await {
+        Ok(b) => b.board().await,
+        Err(e) => {
+            tracing::error!(
+                "Error getting board for agent: {:?}. Is this agent known to us?",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // get the board sync state
+    let sync_state = board.read().await.sync_state();
+
+    // now send this to the peer
+    match ControlCommand::sync(&sync_state).send_to(peer).await {
+        Ok(_) => (),
+        Err(e) => {
+            tracing::error!("Error sending sync command to agent: {:?}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+///
+/// Function used to process the sync message received from the specified
+/// peer
+///
+pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> Result<(), Error> {
+    tracing::info!("Syncing state from peer {}", peer);
+
+    let jobs = sync.jobs();
+
+    if jobs.is_empty() {
+        tracing::info!("No jobs to sync from peer {}", peer);
+        return Ok(());
+    }
+
+    let mut update_jobs = Vec::new();
+    let mut put_jobs = Vec::new();
+
+    let mut num_synced = 0;
+
+    // loop over all of the jobs in the sync state and process them
+    {
+        // get a RwLock to the board from the shared state
+        let board = match state::get(peer).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        let board = board.read().await;
+
+        // loop through each job and see if we have them already in the board?
+        for job in jobs {
+            if board.would_be_changed_by(job) {
+                match job.state() {
+                    Status::Complete => {
+                        // we don't need to run this again, so just update
+                        update_jobs.push(job);
+                    }
+                    Status::Error => {
+                        // we don't need to run this again, so just update
+                        update_jobs.push(job);
+                    }
+                    _ => match job.destination().position(recipient, peer.name()) {
+                        Position::Upstream => {
+                            // sending the results back up to the putter
+                            update_jobs.push(job);
+                        }
+                        Position::Downstream => {
+                            // putting the job down to the destination
+                            put_jobs.push(job);
+                        }
+                        Position::Destination => {
+                            // we are the destination, so re-run the job
+                            put_jobs.push(job);
+                        }
+                        _ => {
+                            tracing::error!("Job has got into an errored position: {:?}", job);
+                            tracing::error!("Ignoring this job during the state update");
+                        }
+                    },
+                }
+            } else {
+                tracing::info!("Already have job: {} on the board", job);
+            }
+        }
+    }
+
+    // ok - we now have all of the put and updates - send all the
+    // updates first, then the puts
+    for job in update_jobs {
+        if !job.is_expired() {
+            tracing::info!("Updating job: {}", job);
+            num_synced += 1;
+
+            match ControlCommand::update(job).received_from(peer) {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Error sending update command to agent: {:?}", e);
+                    tracing::error!("Ignoring this job during the state update");
+                }
+            }
+        }
+    }
+
+    for job in put_jobs {
+        if !job.is_expired() {
+            tracing::info!("Putting job: {}", job);
+            num_synced += 1;
+
+            match ControlCommand::put(job).received_from(peer) {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Error sending put command to agent: {:?}", e);
+                    tracing::error!("Ignoring this job during the state update");
+                }
+            }
+        }
+    }
+
+    match num_synced {
+        0 => tracing::info!("No jobs synced from peer {}", peer),
+        1 => tracing::info!("1 job synced from peer {}", peer),
+        _ => tracing::info!("{} jobs synced from peer {}", num_synced, peer),
+    }
+
+    Ok(())
+}
+
+///
+/// Function used to send all jobs that were queued for the specified peer
+///
+pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
+    // get a RwLock to the board from the shared state
+    let board = match state::get(peer).await {
+        Ok(b) => b.board().await,
+        Err(e) => {
+            tracing::error!(
+                "Error getting board for agent: {:?}. Is this agent known to us?",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // get all of the queued jobs
+    let queued: Vec<ControlCommand>;
+
+    // in a scope so we drop the lock asap
+    {
+        // get the mutable board from the Arc<RwLock> board - this is the
+        // blocking operation
+        let mut board = board.write().await;
+        queued = board.take_queued();
+    }
+
+    // now send all of the queued jobs - if anything goes wrong,
+    // the job will automatically put itself back on the queue
+    for command in queued {
+        tracing::info!("Running queued command: {:?}", command);
+
+        match command {
+            ControlCommand::Put { job } => {
+                job.put(peer).await?;
+            }
+            ControlCommand::Update { job } => {
+                job.update(peer).await?;
+            }
+            ControlCommand::Delete { job } => {
+                job.delete(peer).await?;
+            }
+            _ => {
+                tracing::error!("Unknown command: {:?}", command);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

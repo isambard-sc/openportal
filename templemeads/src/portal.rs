@@ -66,7 +66,7 @@ crate::async_runnable! {
                 }
 
                 // who is next in line to receive this job? - find it, and its zone
-                let next_agent = agent::find(&destination.agents()[1]).await.ok_or_else(|| {
+                let next_agent = agent::find(&destination.agents()[1], 30).await.ok_or_else(|| {
                     Error::InvalidInstruction(
                         format!("Invalid instruction: {}. Cannot find next agent in destination {}",
                                 job.instruction(), destination),
@@ -80,16 +80,28 @@ crate::async_runnable! {
                 job = job.update(&sender).await?;
 
                 // Wait for the submitted job to complete
-                let result = southbound_job.wait().await?.result::<String>()?;
+                let southbound_job = southbound_job.wait().await?;
 
-                match southbound_job.is_error() {
-                    true => {
-                        job = job.errored(&result.unwrap_or("Something went wrong".to_owned()))?;
+                if southbound_job.is_expired() {
+                    job = job.errored("ExpirationError{{}}")?;
+                 } else if (southbound_job.is_error()) {
+                    if let Some(message) = southbound_job.error_message() {
+                        job = job.errored(&format!("RuntimeError{{{}}}", message))?;
                     }
-                    false => {
-                        job = job.completed(&result)?;
+                    else {
+                        job = job.errored("UnknownError{{}}")?;
                     }
-                }
+                 }
+                 else {
+                    match southbound_job.result::<String>() {
+                        Ok(result) => {
+                            job = job.completed(result)?;
+                        }
+                        Err(e) => {
+                            job = job.errored(&format!("ResultError{{{}}}", e))?;
+                        }
+                    }
+                 }
 
                 Ok(job)
             }

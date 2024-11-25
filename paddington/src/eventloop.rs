@@ -21,6 +21,12 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     let mut server_handles = vec![];
     let mut client_handles = vec![];
 
+    tracing::info!(
+        "Communication layer: {} version {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
     if !config.clients().is_empty() {
         let my_config = config.clone();
         server_handles.push(tokio::spawn(async move { server::run(my_config).await }));

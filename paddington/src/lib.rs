@@ -17,6 +17,7 @@ pub mod config;
 pub use crypto::{Key, SecretKey, Signature};
 pub use error::Error;
 pub use eventloop::run;
+pub use exchange::received;
 pub use exchange::send;
 pub use exchange::set_handler;
 pub mod invite;

@@ -49,6 +49,9 @@ pub enum Error {
     InvalidState(String),
 
     #[error("{0}")]
+    Expired(String),
+
+    #[error("{0}")]
     LockError(String),
 
     #[error("{0}")]

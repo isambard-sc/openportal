@@ -7,13 +7,29 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::agent::Peer;
+use crate::command::Command as ControlCommand;
 use crate::error::Error;
 use crate::job::Job;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SyncState {
+    jobs: Vec<Job>,
+}
+
+impl SyncState {
+    pub fn jobs(&self) -> &Vec<Job> {
+        &self.jobs
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Board {
     peer: Peer,
     jobs: HashMap<Uuid, Job>,
+
+    // all of the queued commands that are waiting for the connection
+    // to re-open, so that they can be sent
+    queued_commands: Vec<ControlCommand>,
 
     // do not serialise or clone the waiters
     #[serde(skip)]
@@ -26,6 +42,7 @@ impl Clone for Board {
         Self {
             peer: self.peer.clone(),
             jobs: self.jobs.clone(),
+            queued_commands: self.queued_commands.clone(),
             waiters: HashMap::new(),
         }
     }
@@ -36,7 +53,18 @@ impl Board {
         Self {
             peer: peer.clone(),
             jobs: HashMap::new(),
+            queued_commands: Vec::new(),
             waiters: HashMap::new(),
+        }
+    }
+
+    ///
+    /// Return the sync state that can be used to synchronise this board
+    /// with its copy on the peer
+    ///
+    pub fn sync_state(&self) -> SyncState {
+        SyncState {
+            jobs: self.jobs.values().cloned().collect(),
         }
     }
 
@@ -56,7 +84,25 @@ impl Board {
                 }
             }
             None => {
-                return Err(Error::NotFound(format!("Job not found: {:?}", job.id())));
+                // look through the queued commands...
+                let mut found = false;
+
+                for command in &self.queued_commands {
+                    if let Some(j) = command.job() {
+                        if j.id() == job.id() {
+                            if j.is_finished() {
+                                return Ok(Waiter::finished(j.clone()));
+                            }
+
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                if !found {
+                    return Err(Error::NotFound(format!("Job not found: {:?}", job.id())));
+                }
             }
         }
 
@@ -82,9 +128,11 @@ impl Board {
     ///
     /// The indicated board for the job must match the name of this board
     ///
-    /// This returns the job (it may be updated to be on a new board)
+    /// This returns whether or not the board has changed
+    /// (i.e. whether the job is not already on the board with this
+    ///  version)
     ///
-    pub fn add(&mut self, job: &Job) -> Result<(), Error> {
+    pub fn add(&mut self, job: &Job) -> Result<bool, Error> {
         job.assert_is_for_board(&self.peer)?;
 
         let mut updated = false;
@@ -109,6 +157,10 @@ impl Board {
                 }
             }
             None => {
+                // don't need to check if this has been queued, as
+                // the next step would re-queue the job if there was
+                // a problem, and job changes are idempotent (i.e.
+                // it doesn't matter if this happens twice)
                 self.jobs.insert(job.id(), job.clone());
                 updated = true;
             }
@@ -124,15 +176,17 @@ impl Board {
             }
         }
 
-        Ok(())
+        Ok(updated)
     }
 
     ///
     /// Remove the passed job from our board
     /// If the job doesn't exist then we fail silently
-    /// This returns the removed job
     ///
-    pub fn remove(&mut self, job: &Job) -> Result<(), Error> {
+    /// This returns whether or not the board has changed
+    /// (i.e. whether the job was on the board)
+    ///
+    pub fn remove(&mut self, job: &Job) -> Result<bool, Error> {
         job.assert_is_for_board(&self.peer)?;
 
         // if we have any waiters for this job then notify them with an error
@@ -148,9 +202,9 @@ impl Board {
             }
         }
 
-        self.jobs.remove(&job.id());
+        let removed = self.jobs.remove(&job.id()).is_some();
 
-        Ok(())
+        Ok(removed)
     }
 
     ///
@@ -160,8 +214,116 @@ impl Board {
     pub fn get(&self, id: &Uuid) -> Result<Job, Error> {
         match self.jobs.get(id) {
             Some(j) => Ok(j.clone()),
-            None => Err(Error::NotFound(format!("Job not found: {:?}", id))),
+            None => {
+                // look through the queued jobs...
+                for command in &self.queued_commands {
+                    if let Some(job) = command.job() {
+                        if &job.id() == id {
+                            return Ok(job);
+                        }
+                    }
+                }
+
+                Err(Error::NotFound(format!("Job not found: {:?}", id)))
+            }
         }
+    }
+
+    ///
+    /// Add a job to the board that should be sent later, e.g.
+    /// because the connection to the agent is currently unavailable
+    ///
+    pub fn queue(&mut self, command: ControlCommand) {
+        tracing::info!("Queuing command: {:?}", command);
+
+        // remove the job from the main board as it never made it
+        // to the destination
+        if let Some(job_id) = command.job_id() {
+            self.jobs.remove(&job_id);
+            self.queued_commands.push(command);
+        } else {
+            tracing::error!("Cannot queue command without a job id: {:?}", command);
+        }
+    }
+
+    ///
+    /// Take all of the queued commands - this removes the commands from this
+    /// board and returns them as a list
+    ///
+    pub fn take_queued(&mut self) -> Vec<ControlCommand> {
+        let mut queued_commands = Vec::new();
+        std::mem::swap(&mut queued_commands, &mut self.queued_commands);
+        queued_commands
+    }
+
+    ///
+    /// Return whether or not this board would be changed by the
+    /// passed job
+    ///
+    pub fn would_be_changed_by(&self, job: &Job) -> bool {
+        if job.is_expired() {
+            return false;
+        }
+
+        match self.jobs.get(&job.id()) {
+            Some(j) => {
+                // only update if newer
+                job.version() > j.version()
+            }
+            None => true,
+        }
+    }
+
+    ///
+    /// Remove all expired jobs from the board
+    ///
+    pub fn remove_expired_jobs(&mut self) {
+        let expired_jobs: Vec<Uuid> = self
+            .jobs
+            .iter()
+            .filter_map(|(id, job)| {
+                if job.is_expired() {
+                    // remove any listeners for this job
+                    tracing::info!("Removing expired job {}", job);
+
+                    if let Some(listeners) = self.waiters.remove(id) {
+                        for listener in listeners {
+                            listener.notify(job.clone());
+                        }
+                    }
+
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for job_id in expired_jobs.iter() {
+            let _ = self.jobs.remove(job_id);
+        }
+
+        // now remove any queued expired jobs
+        self.queued_commands.retain(|command| {
+            if let Some(job) = command.job() {
+                if job.is_expired() {
+                    tracing::info!("Removing expired queued job {}", job);
+
+                    // remove any listeners for this job
+                    if let Some(listeners) = self.waiters.remove(&job.id()) {
+                        for listener in listeners {
+                            listener.notify(job.clone());
+                        }
+                    }
+
+                    false
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        });
     }
 }
 

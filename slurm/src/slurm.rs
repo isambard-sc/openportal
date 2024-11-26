@@ -747,7 +747,7 @@ async fn login(
     };
 
     // now get the requested cluster from the cache
-    let requested_cluster = cache::get_cluster().await?;
+    let requested_cluster = cache::get_option_cluster().await?;
 
     if let Some(requested_cluster) = requested_cluster {
         if clusters.contains(&requested_cluster) {
@@ -1109,7 +1109,7 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     }
 
     // get the cluster name from the cache
-    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
+    let cluster = cache::get_cluster().await?;
 
     // add the association condition to the account
     let payload = serde_json::json!({

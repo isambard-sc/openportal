@@ -10,8 +10,7 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use crate::cache;
 use crate::slurm::{
-    clean_account_name, clean_user_name, get_managed_organization, SlurmAccount, SlurmAssociation,
-    SlurmUser,
+    clean_account_name, clean_user_name, get_managed_organization, SlurmAccount, SlurmUser,
 };
 
 #[derive(Debug, Clone)]
@@ -145,7 +144,7 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     }
 
     // get the cluster name from the cache
-    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
+    let cluster = cache::get_cluster().await?;
 
     runner()
         .await?
@@ -451,9 +450,16 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     }
 
     // get the cluster name from the cache
-    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
+    let cluster = cache::get_cluster().await?;
 
-    tracing::info!("Will create association here!");
+    runner().await?.run(
+        &format!(
+            "SACCTMGR --immediate add account name=\"{}\" Clusters=\"{}\" Associations=\"{}\" Comment=\"Created by OpenPortal\"",
+            account.name(),
+            cluster,
+            account.name()
+        )
+    ).await?;
 
     Ok(())
 }
@@ -476,17 +482,35 @@ async fn add_user_association(
 
     let mut user = user.clone();
     let mut user_changed = false;
+    let cluster = cache::get_cluster().await?;
 
-    // first, add the association if it doesn't exist
-    if !user
+    if user
         .associations()
         .iter()
         .any(|a| a.account() == account.name())
     {
-        // make sure that we have this association on the account
+        // the association already exists
+        tracing::info!(
+            "User {} already associated with account {}",
+            user.name(),
+            account.name()
+        );
+    } else {
+        // create the account association first
         add_account_association(account).await?;
 
-        tracing::info!("Adding user association here");
+        // add the association
+        runner()
+            .await?
+            .run(
+                &format!(
+                    "SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" Comment=\"Created by OpenPortal\"",
+                    user.name(),
+                    cluster,
+                    account.name()
+                )
+            )
+            .await?;
 
         // update the user
         user = match get_user_from_slurm(user.name()).await? {
@@ -506,6 +530,17 @@ async fn add_user_association(
 
     if make_default && *user.default_account() != Some(account.name().to_string()) {
         tracing::info!("Will set user default account here");
+
+        runner()
+            .await?
+            .run(&format!(
+                "SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\"",
+                user.name(),
+                cluster,
+                account.name(),
+                account.name()
+            ))
+            .await?;
 
         // update the user
         user = match get_user_from_slurm(user.name()).await? {
@@ -562,7 +597,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
     let username = clean_user_name(user.local_user())?;
     let account = clean_account_name(user.local_project())?;
 
-    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
+    let cluster = cache::get_cluster().await?;
 
     runner().await?.run(
         &format!("SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\" Comment=\"Created by OpenPortal\"",
@@ -608,6 +643,47 @@ pub async fn set_commands(sacctmgr: &str, scontrol: &str) {
     let mut runner = SLURM_RUNNER.lock().await;
     runner.sacctmgr = sacctmgr.to_string();
     runner.scontrol = scontrol.to_string();
+}
+
+pub async fn find_cluster() -> Result<(), Error> {
+    // now get the requested cluster from the cache
+    let requested_cluster = cache::get_option_cluster().await?;
+
+    // ask slurm for all of the clusters
+    let clusters = runner()
+        .await?
+        .run("SACCTMGR --noheader --parsable2 list clusters")
+        .await?;
+
+    // the output is the list of clusters, one per line, separated by '|', where
+    // the cluster name is the first column
+    let clusters: Vec<String> = clusters
+        .lines()
+        .map(|line| line.split('|').next().unwrap_or_default().to_string())
+        .collect();
+
+    tracing::info!("Clusters: {:?}", clusters);
+
+    if let Some(requested_cluster) = requested_cluster {
+        if clusters.contains(&requested_cluster) {
+            tracing::info!("Using requested cluster: {}", requested_cluster);
+        } else {
+            tracing::warn!(
+                "Requested cluster {} not found in list of clusters: {:?}",
+                requested_cluster,
+                clusters
+            );
+            return Err(Error::Login("Requested cluster not found".to_string()));
+        }
+    } else {
+        tracing::info!(
+            "Using the first cluster available by default: {}",
+            clusters[0]
+        );
+        cache::set_cluster(&clusters[0]).await?;
+    }
+
+    Ok(())
 }
 
 pub async fn add_user(user: &UserMapping) -> Result<(), Error> {

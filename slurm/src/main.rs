@@ -75,6 +75,7 @@ async fn main() -> Result<()> {
         let scontrol_command = config.option("scontrol", "scontrol");
 
         sacctmgr::set_commands(&sacctmgr_command, &scontrol_command).await;
+        sacctmgr::find_cluster().await?;
 
         async_runnable! {
             ///

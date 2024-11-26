@@ -32,6 +32,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   there is plenty of time for the web portal to fetch the results without
   worrying about them being expired.
 
+- Added a command line support for the slurm agent, so that it can use
+  `sacctmgr` to create accounts on slurm in addition to the REST API.
+  You choose the command line option by not setting the `slurm-server`
+  value in the config file.
+
 ### Fixed
 
 - General bug fixes and cleaning of output logging to improve resilience

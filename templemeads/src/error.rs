@@ -89,6 +89,9 @@ pub enum Error {
 
     #[error("{0}")]
     UnmanagedUser(String),
+
+    #[error("{0}")]
+    UnmanagedGroup(String),
 }
 
 // implement into a paddington::Error

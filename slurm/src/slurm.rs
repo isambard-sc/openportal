@@ -443,6 +443,13 @@ async fn call_post(
     }
 }
 
+///
+/// Return the organization that indicates that this user / account is managed
+///
+fn get_managed_organization() -> String {
+    "openportal".to_string()
+}
+
 #[derive(Debug, Clone)]
 struct SlurmAuth {
     server: String,
@@ -955,6 +962,17 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
     let existing_account = get_account(account.name()).await?;
 
     if let Some(existing_account) = existing_account {
+        if account.organization() != get_managed_organization() {
+            tracing::warn!(
+                "Account {} is not managed by the openportal organization - we cannot manage it.",
+                account
+            );
+            return Err(Error::UnmanagedGroup(format!(
+                "Cannot add Slurm account as {} is not managed by openportal",
+                account
+            )));
+        }
+
         if existing_account.description() != account.description()
             || existing_account.organization() != account.organization()
         {
@@ -1096,6 +1114,17 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // eventually should check to see if this association already exists,
     // and if so, not to do anything else
 
+    if account.organization() != get_managed_organization() {
+        tracing::warn!(
+            "Account {} is not managed by the openportal organization - we cannot manage it.",
+            account
+        );
+        return Err(Error::UnmanagedGroup(format!(
+            "Cannot add Slurm account as {} is not managed by openportal",
+            account
+        )));
+    }
+
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
 
@@ -1121,6 +1150,17 @@ async fn add_user_association(
     account: &SlurmAccount,
     make_default: bool,
 ) -> Result<SlurmUser, Error> {
+    if account.organization() != get_managed_organization() {
+        tracing::warn!(
+            "Account {} is not managed by the openportal organization - we cannot manage it.",
+            account
+        );
+        return Err(Error::UnmanagedGroup(format!(
+            "Cannot add Slurm account as {} is not managed by openportal",
+            account
+        )));
+    }
+
     let mut user = user.clone();
     let mut user_changed = false;
 
@@ -1299,7 +1339,7 @@ impl SlurmAccount {
                 "Account for OpenPortal project {}",
                 mapping.user().project()
             ),
-            organization: "default".to_string(),
+            organization: get_managed_organization(),
         })
     }
 

@@ -70,7 +70,16 @@ impl SlurmRunner {
             .context("Could not run command")?;
 
         if output.status.success() {
-            Ok(String::from_utf8(output.stdout).context("Could not parse output")?)
+            let output = match String::from_utf8(output.stdout.clone()) {
+                Ok(output) => output,
+                Err(e) => {
+                    tracing::error!("Could not parse output: {}", e);
+                    tracing::error!("Output: {:?}", output.stdout);
+                    return Err(Error::Call("Could not parse output".to_string()));
+                }
+            };
+
+            Ok(output)
         } else {
             tracing::error!(
                 "Command failed: {}",
@@ -80,6 +89,19 @@ impl SlurmRunner {
                 "Command failed: {}",
                 String::from_utf8(output.stderr).context("Could not parse error")?
             )))
+        }
+    }
+
+    pub async fn run_json(&self, cmd: &str) -> Result<serde_json::Value, Error> {
+        let output = self.run(cmd).await?;
+
+        match serde_json::from_str(&output) {
+            Ok(output) => Ok(output),
+            Err(e) => {
+                tracing::error!("Could not parse json: {}", e);
+                tracing::error!("Output: {:?}", output);
+                Err(Error::Call("Could not parse json".to_string()))
+            }
         }
     }
 }
@@ -104,11 +126,15 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
         )));
     }
 
+    // get the cluster name from the cache
+    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
+
     runner()
         .await?
         .run(&format!(
-            "SACCTMGR --immediate add account {} organization={} description=\"{}\"",
+            "SACCTMGR --immediate add account {} cluster={} organization={} description=\"{}\"",
             account.name(),
+            cluster,
             account.organization(),
             account.description()
         ))
@@ -120,16 +146,11 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
 async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
-    let response = runner()
+    let response = match runner()
         .await?
-        .run(&format!(
-            "SACCTMGR --noheader --parseable2 list account {}",
-            account
-        ))
-        .await;
-
-    // this should have worked if the account existed
-    let accounts = match response {
+        .run_json(&format!("SACCTMGR --json list accounts name={}", account))
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -137,24 +158,46 @@ async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, E
         }
     };
 
-    // convert the lines into a vector of SlurmAccounts
-    let accounts: Vec<SlurmAccount> = accounts
-        .lines()
-        .map(|line| SlurmAccount::from_sacctmgr(line))
-        .filter_map(Result::ok)
-        .collect();
+    // there should be an accounts list, with a single entry for this account
+    let accounts = match response.get("accounts") {
+        Some(accounts) => accounts,
+        None => {
+            tracing::warn!("Could not get accounts from response: {:?}", response);
+            return Ok(None);
+        }
+    };
 
-    // there should be a single account with this name
-    let slurm_account = accounts.iter().find(|a| a.name() == account);
+    // this should be an array
+    let accounts = match accounts.as_array() {
+        Some(accounts) => accounts,
+        None => {
+            tracing::warn!("Accounts is not an array: {:?}", accounts);
+            return Ok(None);
+        }
+    };
 
-    match slurm_account {
-        Some(account) => Ok(Some(account.clone())),
+    // there should be an Account object in this array with the right name
+    let slurm_account = accounts.iter().find(|a| {
+        let name = a.get("name").and_then(|n| n.as_str());
+        name == Some(&account)
+    });
+
+    let account = match slurm_account {
+        Some(account) => account,
         None => {
             tracing::warn!(
                 "Could not find account '{}' in response: {:?}",
                 account,
-                accounts
+                response
             );
+            return Ok(None);
+        }
+    };
+
+    match SlurmAccount::construct(account) {
+        Ok(account) => Ok(Some(account)),
+        Err(e) => {
+            tracing::warn!("Could not construct account from response: {}", e);
             Ok(None)
         }
     }
@@ -267,15 +310,10 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
 async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
     let user = clean_user_name(user)?;
 
-    let query_params = vec![("with_assocs", "true"), ("default_account", "true")];
-
-    let response = match call_get("slurmdb", &format!("user/{}", user), &query_params).await {
-        Ok(response) => response,
-        Err(e) => {
-            tracing::warn!("Could not get user {}: {}", user, e);
-            return Ok(None);
-        }
-    };
+    let response = runner()
+        .await?
+        .run_json(&format!("SACCTMGR --json list user name={}", user))
+        .await?;
 
     // there should be a users list, with a single entry for this user
     let users = match response.get("users") {
@@ -396,19 +434,7 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
 
-    // add the association condition to the account
-    let payload = serde_json::json!({
-        "association_condition": {
-            "accounts": [account.name],
-            "clusters": [cluster],
-            "association": {
-                "defaultqos": "normal",
-                "comment": format!("Association added by OpenPortal for account {}", account.name)
-            }
-        }
-    });
-
-    call_post("slurmdb", "accounts_association", &payload).await?;
+    tracing::info!("Will create association here!");
 
     Ok(())
 }
@@ -441,21 +467,7 @@ async fn add_user_association(
         // make sure that we have this association on the account
         add_account_association(account).await?;
 
-        // now add the association to the user
-        let payload = serde_json::json!({
-            "associations": [
-                {
-                    "user": user.name,
-                    "account": account.name,
-                    "comment": format!("Association added by OpenPortal between user {} and account {}",
-                                       user.name, account.name),
-                    "cluster": "linux",
-                    "is_default": true
-                }
-            ]
-        });
-
-        call_post("slurmdb", "associations", &payload).await?;
+        tracing::info!("Adding user association here");
 
         // update the user
         user = match get_user_from_slurm(user.name()).await? {
@@ -474,18 +486,7 @@ async fn add_user_association(
     }
 
     if make_default && *user.default_account() != Some(account.name().to_string()) {
-        let payload = serde_json::json!({
-            "users": [
-                {
-                    "name": user.name,
-                    "default": {
-                        "account": account.name
-                    }
-                }
-            ]
-        });
-
-        call_post("slurmdb", "users", &payload).await?;
+        tracing::info!("Will set user default account here");
 
         // update the user
         user = match get_user_from_slurm(user.name()).await? {
@@ -540,16 +541,14 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 
     // first, create the user
     let username = clean_user_name(user.local_user())?;
+    let account = clean_account_name(user.local_project())?;
 
-    let payload = serde_json::json!({
-        "users": [
-            {
-                "name": username,
-            }
-        ]
-    });
+    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
 
-    call_post("slurmdb", "users", &payload).await?;
+    runner().await?.run(
+        &format!("SACCTMGR add user name={} Clusters={} Accounts={} DefaultAccount={} Comment=\"Created by OpenPortal\"",
+                    username, cluster, account, account)
+    ).await?;
 
     // now load the user from slurm to make sure it exists
     let slurm_user = match get_user(user.local_user()).await? {

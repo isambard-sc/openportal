@@ -1359,23 +1359,6 @@ impl SlurmAccount {
         })
     }
 
-    pub fn from_sacctmgr(line: &str) -> Result<Self, Error> {
-        let parts: Vec<&str> = line.split('|').collect();
-
-        if parts.len() < 2 {
-            return Err(Error::Call(format!(
-                "Could not parse sacctmgr line: {}",
-                line
-            )));
-        }
-
-        Ok(SlurmAccount {
-            name: clean_account_name(parts[0])?,
-            description: parts[1].to_string(),
-            organization: parts[2].to_string(),
-        })
-    }
-
     pub fn construct(result: &serde_json::Value) -> Result<Self, Error> {
         let name = match result.get("name") {
             Some(name) => name,

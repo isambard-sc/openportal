@@ -443,13 +443,6 @@ async fn call_post(
     }
 }
 
-///
-/// Return the organization that indicates that this user / account is managed
-///
-fn get_managed_organization() -> String {
-    "openportal".to_string()
-}
-
 #[derive(Debug, Clone)]
 struct SlurmAuth {
     server: String,
@@ -787,26 +780,6 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, SlurmAuth>, Error> {
     Ok(SLURM_AUTH.lock().await)
 }
 
-fn clean_account_name(account: &str) -> Result<String, Error> {
-    let account = account.trim();
-
-    if account.is_empty() {
-        return Err(Error::Call("Account name is empty".to_string()));
-    }
-
-    Ok(account.replace("/", "_").replace(" ", "_"))
-}
-
-fn clean_user_name(user: &str) -> Result<String, Error> {
-    let user = user.trim();
-
-    if user.is_empty() {
-        return Err(Error::Call("User name is empty".to_string()));
-    }
-
-    Ok(user.replace("/", "_").replace(" ", "_"))
-}
-
 async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
     // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
     // with
@@ -815,11 +788,21 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     //        {
     //            name: "project",
     //            description: "Account for project"
-    //            organization: "default"
+    //            organization: "openportal"
     //        }
     //    ]
     // }
-    // (we always use the default organization)
+
+    if account.organization() != get_managed_organization() {
+        tracing::warn!(
+            "Account {} is not managed by the openportal organization - we cannot manage it.",
+            account
+        );
+        return Err(Error::UnmanagedGroup(format!(
+            "Cannot add Slurm account as {} is not managed by openportal",
+            account
+        )));
+    }
 
     let payload = serde_json::json!({
         "accounts": [
@@ -1312,6 +1295,39 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 /// Public API
 ///
 
+///
+/// Return the organization that indicates that this user / account is managed
+///
+pub fn get_managed_organization() -> String {
+    "openportal".to_string()
+}
+
+pub fn clean_account_name(account: &str) -> Result<String, Error> {
+    let account = account.trim();
+
+    if account.is_empty() {
+        return Err(Error::Call("Account name is empty".to_string()));
+    }
+
+    Ok(account
+        .replace("/", "_")
+        .replace(" ", "_")
+        .to_ascii_lowercase())
+}
+
+pub fn clean_user_name(user: &str) -> Result<String, Error> {
+    let user = user.trim();
+
+    if user.is_empty() {
+        return Err(Error::Call("User name is empty".to_string()));
+    }
+
+    Ok(user
+        .replace("/", "_")
+        .replace(" ", "_")
+        .to_ascii_lowercase())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SlurmAccount {
     name: String,
@@ -1340,6 +1356,23 @@ impl SlurmAccount {
                 mapping.user().project()
             ),
             organization: get_managed_organization(),
+        })
+    }
+
+    pub fn from_sacctmgr(line: &str) -> Result<Self, Error> {
+        let parts: Vec<&str> = line.split('|').collect();
+
+        if parts.len() < 2 {
+            return Err(Error::Call(format!(
+                "Could not parse sacctmgr line: {}",
+                line
+            )));
+        }
+
+        Ok(SlurmAccount {
+            name: clean_account_name(parts[0])?,
+            description: parts[1].to_string(),
+            organization: parts[2].to_string(),
         })
     }
 

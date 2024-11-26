@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.1.0] - 2024-11-26
 ### Added
 - Added full recovery support, so that agents can restore their boards
   after they restart. Also added a queue, so that messages are queued
@@ -12,14 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   time is given for an agent to first connect and identify itself. All of
   this makes the system more robust and reliable, as most jobs are now
   tolerant of individual agents going down.
-
 - Added a better handshake so that agents communicate both their comms
   engine details (e.g. paddington version 0.0.25) and their agent
   engine details (e.g. templemeads version 0.0.25). This will future proof
   us if we make any future changes to the protocols. Note that this
   is BREAKING, so agents cannot commnunicate with older versions of
   openportal
-
 - Added an expiry to jobs, default to 1 minute, that means that both
   jobs are now cleaned automatically from boards once expired (by a
   quiet background tokio task), and that putter of jobs can get a signal
@@ -31,17 +31,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   set the bridge agent to put jobs with a expiry of 60 minutes, so that
   there is plenty of time for the web portal to fetch the results without
   worrying about them being expired.
-
 - Added a command line support for the slurm agent, so that it can use
   `sacctmgr` to create accounts on slurm in addition to the REST API.
   You choose the command line option by not setting the `slurm-server`
   value in the config file.
 
 ### Fixed
-
 - General bug fixes and cleaning of output logging to improve resilience
   and make it easier to debug issues.
-
 
 ## [0.0.25] - 2024-11-20
 ### Fixed
@@ -183,6 +180,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.1.0]: https://github.com/isambard-sc/openportal/releases/tag/0.1.0
 [0.0.25]: https://github.com/isambard-sc/openportal/releases/tag/0.0.25
 [0.0.24]: https://github.com/isambard-sc/openportal/releases/tag/0.0.24
 [0.0.23]: https://github.com/isambard-sc/openportal/releases/tag/0.0.23

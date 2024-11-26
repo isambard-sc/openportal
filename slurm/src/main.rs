@@ -69,6 +69,13 @@ async fn main() -> Result<()> {
     if slurm_server.is_empty() {
         // we are using sacctmgr and the commandline to interact
         // with slurm, because slurmrestd is not available
+
+        // get the sacctmgr and scontrol commands
+        let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
+        let scontrol_command = config.option("scontrol", "scontrol");
+
+        sacctmgr::set_commands(&sacctmgr_command, &scontrol_command).await;
+
         async_runnable! {
             ///
             /// Runnable function that will be called when a job is received

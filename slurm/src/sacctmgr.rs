@@ -45,6 +45,10 @@ impl SlurmRunner {
 
         // the command should start with SACCTMGR or SCONTROL
         if !cmd.starts_with("SACCTMGR") && !cmd.starts_with("SCONTROL") {
+            tracing::error!(
+                "Slurm command '{}' does not start with SACCTMGR or SCONTROL",
+                cmd
+            );
             return Err(Error::Call(format!(
                 "Command does not start with SACCTMGR or SCONTROL: {}",
                 cmd
@@ -56,18 +60,30 @@ impl SlurmRunner {
                 .replace("SCONTROL", self.scontrol()),
         ) {
             Some(cmd) => Ok(cmd),
-            None => Err(Error::Call(format!("Could not parse command: {}", cmd))),
+            None => {
+                tracing::error!("Unable to parse slurm command '{}'", cmd);
+                Err(Error::Call(format!("Could not parse command: {}", cmd)))
+            }
         }
     }
 
     pub async fn run(&self, cmd: &str) -> Result<String, Error> {
-        let cmd = self.process(cmd)?;
+        let processed_cmd = self.process(cmd)?;
 
-        let output = tokio::process::Command::new(&cmd[0])
-            .args(&cmd[1..])
+        tracing::info!("Running command: {:?}", processed_cmd);
+
+        let output = match tokio::process::Command::new(&processed_cmd[0])
+            .args(&processed_cmd[1..])
             .output()
             .await
-            .context("Could not run command")?;
+        {
+            Ok(output) => output,
+            Err(e) => {
+                tracing::error!("Could not run command '{}': {}", cmd, e);
+                tracing::error!("Processed command: {:?}", processed_cmd);
+                return Err(Error::Call("Could not run command".to_string()));
+            }
+        };
 
         if output.status.success() {
             let output = match String::from_utf8(output.stdout.clone()) {
@@ -82,11 +98,13 @@ impl SlurmRunner {
             Ok(output)
         } else {
             tracing::error!(
-                "Command failed: {}",
+                "Command '{}' failed: {}",
+                cmd,
                 String::from_utf8(output.stderr.clone()).context("Could not parse error")?
             );
             Err(Error::Call(format!(
-                "Command failed: {}",
+                "Command '{}' failed: {}",
+                cmd,
                 String::from_utf8(output.stderr).context("Could not parse error")?
             )))
         }
@@ -132,7 +150,7 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     runner()
         .await?
         .run(&format!(
-            "SACCTMGR --immediate add account {} cluster={} organization={} description=\"{}\"",
+            "SACCTMGR --immediate add account name=\"{}\" cluster=\"{}\" organization=\"{}\" description=\"{}\"",
             account.name(),
             cluster,
             account.organization(),
@@ -284,9 +302,7 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
             )));
         }
 
-        if existing_account.description() != account.description()
-            || existing_account.organization() != account.organization()
-        {
+        if existing_account != *account {
             // the account exists, but the details are different
             tracing::warn!(
                 "Account {} exists, but with different details.",
@@ -312,7 +328,10 @@ async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
 
     let response = runner()
         .await?
-        .run_json(&format!("SACCTMGR --json list user name={}", user))
+        .run_json(&format!(
+            "SACCTMGR --json list users name={} WithAssoc",
+            user
+        ))
         .await?;
 
     // there should be a users list, with a single entry for this user
@@ -546,7 +565,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
     let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
 
     runner().await?.run(
-        &format!("SACCTMGR add user name={} Clusters={} Accounts={} DefaultAccount={} Comment=\"Created by OpenPortal\"",
+        &format!("SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\" Comment=\"Created by OpenPortal\"",
                     username, cluster, account, account)
     ).await?;
 
@@ -578,6 +597,18 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 ///
 /// Public API
 ///
+
+pub async fn set_commands(sacctmgr: &str, scontrol: &str) {
+    tracing::info!(
+        "Using command line slurmd commands: sacctmgr: {}, scontrol: {}",
+        sacctmgr,
+        scontrol
+    );
+
+    let mut runner = SLURM_RUNNER.lock().await;
+    runner.sacctmgr = sacctmgr.to_string();
+    runner.scontrol = scontrol.to_string();
+}
 
 pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
     let user: SlurmUser = get_user_create_if_not_exists(user).await?;

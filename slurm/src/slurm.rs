@@ -1328,11 +1328,19 @@ pub fn clean_user_name(user: &str) -> Result<String, Error> {
         .to_ascii_lowercase())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlurmAccount {
     name: String,
     description: String,
     organization: String,
+}
+
+impl PartialEq for SlurmAccount {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.organization == other.organization
+            && self.description.to_ascii_lowercase() == other.description.to_ascii_lowercase()
+    }
 }
 
 impl Display for SlurmAccount {

@@ -11,6 +11,7 @@ use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
 mod cache;
+mod sacctmgr;
 mod slurm;
 
 ///
@@ -57,83 +58,124 @@ async fn main() -> Result<()> {
     };
 
     // get the extra options needed for the slurm scheduler
-    let token_command = config.option("token-command", "");
-    let slurm_server = config.option("slurm-server", "");
-    let slurm_user = config.option("slurm-user", "");
     let slurm_cluster = config.option("slurm-cluster", "");
-    let token_lifespan = config.option("token-lifespan", "1800");
-
-    let mut token_lifespan: u32 = match token_lifespan.parse() {
-        Ok(lifespan) => lifespan,
-        Err(_) => {
-            return Err(anyhow::anyhow!(
-                "Invalid token lifespan provided. This should be a number of seconds.".to_owned(),
-            ));
-        }
-    };
-
-    if token_lifespan < 10 {
-        tracing::warn!("Cannot set the token lifespan to less than 10 seconds.");
-        tracing::warn!("Setting it to a minimum of 10 seconds...");
-        token_lifespan = 10;
-    }
-
-    if token_command.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No token command provided. This should be the command needed to \
-             generate a valid JWT token. Set this in the token-command \
-             option."
-                .to_owned(),
-        ));
-    }
-
-    if slurm_server.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No Slurm server specified. Please set this in the slurm-server option.".to_owned(),
-        ));
-    }
 
     if !slurm_cluster.is_empty() {
         cache::set_cluster(&slurm_cluster).await?;
     }
 
-    // connect the single shared Slurm client - this will be used in the
-    // async function (we can't bind variables to async functions, or else
-    // we would just pass the client with the environment)
-    slurm::connect(&slurm_server, &slurm_user, &token_command, token_lifespan).await?;
+    let slurm_server = config.option("slurm-server", "");
 
-    tracing::info!("Connected to slurm server at {}", slurm_server);
+    if slurm_server.is_empty() {
+        // we are using sacctmgr and the commandline to interact
+        // with slurm, because slurmrestd is not available
 
-    async_runnable! {
-        ///
-        /// Runnable function that will be called when a job is received
-        /// by the agent
-        ///
-        pub async fn slurm_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
-        {
-            let job = envelope.job();
+        // get the sacctmgr and scontrol commands
+        let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
+        let scontrol_command = config.option("scontrol", "scontrol");
 
-            match job.instruction() {
-                AddLocalUser(user) => {
-                    slurm::add_user(&user).await?;
-                    let job = job.completed("Success!")?;
-                    Ok(job)
-                },
-                RemoveLocalUser(mapping) => {
-                    Err(Error::IncompleteCode(
-                        format!("RemoveLocalUser instruction not implemented yet - cannot remove {}", mapping),
-                    ))
-                },
-                _ => {
-                    Err(Error::InvalidInstruction(
-                        format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
-                    ))
+        sacctmgr::set_commands(&sacctmgr_command, &scontrol_command).await;
+        sacctmgr::find_cluster().await?;
+
+        async_runnable! {
+            ///
+            /// Runnable function that will be called when a job is received
+            /// by the agent
+            ///
+            pub async fn sacctmgr_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
+            {
+                let job = envelope.job();
+
+                match job.instruction() {
+                    AddLocalUser(user) => {
+                        sacctmgr::add_user(&user).await?;
+                        let job = job.completed("Success!")?;
+                        Ok(job)
+                    },
+                    RemoveLocalUser(mapping) => {
+                        Err(Error::IncompleteCode(
+                            format!("RemoveLocalUser instruction not implemented yet - cannot remove {}", mapping),
+                        ))
+                    },
+                    _ => {
+                        Err(Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
+                        ))
+                    }
                 }
             }
         }
-    }
 
-    run(config, slurm_runner).await?;
+        run(config, sacctmgr_runner).await?;
+    } else {
+        // we will use slurmrestd to interact with slurm
+        let slurm_user = config.option("slurm-user", "");
+        let token_command = config.option("token-command", "");
+        let token_lifespan = config.option("token-lifespan", "1800");
+
+        let mut token_lifespan: u32 = match token_lifespan.parse() {
+            Ok(lifespan) => lifespan,
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Invalid token lifespan provided. This should be a number of seconds."
+                        .to_owned(),
+                ));
+            }
+        };
+
+        if token_lifespan < 10 {
+            tracing::warn!("Cannot set the token lifespan to less than 10 seconds.");
+            tracing::warn!("Setting it to a minimum of 10 seconds...");
+            token_lifespan = 10;
+        }
+
+        if token_command.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No token command provided. This should be the command needed to \
+             generate a valid JWT token. Set this in the token-command \
+             option."
+                    .to_owned(),
+            ));
+        }
+
+        // connect the single shared Slurm client - this will be used in the
+        // async function (we can't bind variables to async functions, or else
+        // we would just pass the client with the environment)
+        slurm::connect(&slurm_server, &slurm_user, &token_command, token_lifespan).await?;
+
+        tracing::info!("Connected to slurm server at {}", slurm_server);
+
+        async_runnable! {
+            ///
+            /// Runnable function that will be called when a job is received
+            /// by the agent
+            ///
+            pub async fn slurm_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
+            {
+                let job = envelope.job();
+
+                match job.instruction() {
+                    AddLocalUser(user) => {
+                        slurm::add_user(&user).await?;
+                        let job = job.completed("Success!")?;
+                        Ok(job)
+                    },
+                    RemoveLocalUser(mapping) => {
+                        Err(Error::IncompleteCode(
+                            format!("RemoveLocalUser instruction not implemented yet - cannot remove {}", mapping),
+                        ))
+                    },
+                    _ => {
+                        Err(Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
+                        ))
+                    }
+                }
+            }
+        }
+
+        run(config, slurm_runner).await?;
+    }
 
     Ok(())
 }

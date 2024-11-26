@@ -747,7 +747,7 @@ async fn login(
     };
 
     // now get the requested cluster from the cache
-    let requested_cluster = cache::get_cluster().await?;
+    let requested_cluster = cache::get_option_cluster().await?;
 
     if let Some(requested_cluster) = requested_cluster {
         if clusters.contains(&requested_cluster) {
@@ -780,26 +780,6 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, SlurmAuth>, Error> {
     Ok(SLURM_AUTH.lock().await)
 }
 
-fn clean_account_name(account: &str) -> Result<String, Error> {
-    let account = account.trim();
-
-    if account.is_empty() {
-        return Err(Error::Call("Account name is empty".to_string()));
-    }
-
-    Ok(account.replace("/", "_").replace(" ", "_"))
-}
-
-fn clean_user_name(user: &str) -> Result<String, Error> {
-    let user = user.trim();
-
-    if user.is_empty() {
-        return Err(Error::Call("User name is empty".to_string()));
-    }
-
-    Ok(user.replace("/", "_").replace(" ", "_"))
-}
-
 async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
     // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
     // with
@@ -808,11 +788,21 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     //        {
     //            name: "project",
     //            description: "Account for project"
-    //            organization: "default"
+    //            organization: "openportal"
     //        }
     //    ]
     // }
-    // (we always use the default organization)
+
+    if account.organization() != get_managed_organization() {
+        tracing::warn!(
+            "Account {} is not managed by the openportal organization - we cannot manage it.",
+            account
+        );
+        return Err(Error::UnmanagedGroup(format!(
+            "Cannot add Slurm account as {} is not managed by openportal",
+            account
+        )));
+    }
 
     let payload = serde_json::json!({
         "accounts": [
@@ -955,6 +945,17 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
     let existing_account = get_account(account.name()).await?;
 
     if let Some(existing_account) = existing_account {
+        if account.organization() != get_managed_organization() {
+            tracing::warn!(
+                "Account {} is not managed by the openportal organization - we cannot manage it.",
+                account
+            );
+            return Err(Error::UnmanagedGroup(format!(
+                "Cannot add Slurm account as {} is not managed by openportal",
+                account
+            )));
+        }
+
         if existing_account.description() != account.description()
             || existing_account.organization() != account.organization()
         {
@@ -1096,8 +1097,19 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // eventually should check to see if this association already exists,
     // and if so, not to do anything else
 
+    if account.organization() != get_managed_organization() {
+        tracing::warn!(
+            "Account {} is not managed by the openportal organization - we cannot manage it.",
+            account
+        );
+        return Err(Error::UnmanagedGroup(format!(
+            "Cannot add Slurm account as {} is not managed by openportal",
+            account
+        )));
+    }
+
     // get the cluster name from the cache
-    let cluster = cache::get_cluster().await?.unwrap_or("linux".to_string());
+    let cluster = cache::get_cluster().await?;
 
     // add the association condition to the account
     let payload = serde_json::json!({
@@ -1121,6 +1133,17 @@ async fn add_user_association(
     account: &SlurmAccount,
     make_default: bool,
 ) -> Result<SlurmUser, Error> {
+    if account.organization() != get_managed_organization() {
+        tracing::warn!(
+            "Account {} is not managed by the openportal organization - we cannot manage it.",
+            account
+        );
+        return Err(Error::UnmanagedGroup(format!(
+            "Cannot add Slurm account as {} is not managed by openportal",
+            account
+        )));
+    }
+
     let mut user = user.clone();
     let mut user_changed = false;
 
@@ -1272,11 +1295,52 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 /// Public API
 ///
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+///
+/// Return the organization that indicates that this user / account is managed
+///
+pub fn get_managed_organization() -> String {
+    "openportal".to_string()
+}
+
+pub fn clean_account_name(account: &str) -> Result<String, Error> {
+    let account = account.trim();
+
+    if account.is_empty() {
+        return Err(Error::Call("Account name is empty".to_string()));
+    }
+
+    Ok(account
+        .replace("/", "_")
+        .replace(" ", "_")
+        .to_ascii_lowercase())
+}
+
+pub fn clean_user_name(user: &str) -> Result<String, Error> {
+    let user = user.trim();
+
+    if user.is_empty() {
+        return Err(Error::Call("User name is empty".to_string()));
+    }
+
+    Ok(user
+        .replace("/", "_")
+        .replace(" ", "_")
+        .to_ascii_lowercase())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlurmAccount {
     name: String,
     description: String,
     organization: String,
+}
+
+impl PartialEq for SlurmAccount {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.organization == other.organization
+            && self.description.to_ascii_lowercase() == other.description.to_ascii_lowercase()
+    }
 }
 
 impl Display for SlurmAccount {
@@ -1299,7 +1363,7 @@ impl SlurmAccount {
                 "Account for OpenPortal project {}",
                 mapping.user().project()
             ),
-            organization: "default".to_string(),
+            organization: get_managed_organization(),
         })
     }
 

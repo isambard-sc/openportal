@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  linux:
+  x86_64:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -42,13 +42,13 @@ jobs:
           name: wheels-linux-${{ matrix.platform.target }}
           path: python/dist
 
-  musllinux:
+  aarch64:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
         platform:
           - runner: ubuntu-latest
-            target: x86_64
+            target: aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -60,19 +60,19 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: 'true'
-          manylinux: musllinux_1_2
+          manylinux: auto
           working-directory: python
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-musllinux-${{ matrix.platform.target }}
+          name: wheels-linux-${{ matrix.platform.target }}
           path: python/dist
 
   release:
     name: Release
     runs-on: ubuntu-latest
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
-    needs: [linux, musllinux]
+    needs: [x86_64, aarch64]
     permissions:
       # Use to sign the release artifacts
       id-token: write

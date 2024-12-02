@@ -544,6 +544,12 @@ impl IPAGroup {
     }
 
     pub fn parse_system_groups(groups: &str) -> Result<Vec<IPAGroup>, Error> {
+        let groups = groups.trim();
+
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut g = Vec::new();
         let mut errors = Vec::new();
 
@@ -570,6 +576,12 @@ impl IPAGroup {
     }
 
     pub fn parse_instance_groups(groups: &str) -> Result<HashMap<Peer, Vec<IPAGroup>>, Error> {
+        let groups = groups.trim();
+
+        if groups.is_empty() {
+            return Ok(HashMap::new());
+        }
+
         let mut g: HashMap<Peer, Vec<IPAGroup>> = HashMap::new();
         let mut errors = Vec::new();
 

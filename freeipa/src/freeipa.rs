@@ -14,6 +14,8 @@ use templemeads::grammar::{UserIdentifier, UserMapping};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
+use templemeads::agent::Peer;
+
 use crate::cache;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -488,6 +490,16 @@ impl std::fmt::Display for IPAGroup {
 impl IPAGroup {
     fn new(groupid: &str, description: &str) -> Result<Self, Error> {
         // check that the groupid is valid .... PARSING RULES
+        let groupid = groupid.trim();
+        let description = description.trim();
+
+        if groupid.is_empty() {
+            return Err(Error::Parse("Group identifier is empty".to_string()));
+        }
+
+        if description.is_empty() {
+            return Err(Error::Parse("Group description is empty".to_string()));
+        }
 
         Ok(IPAGroup {
             groupid: groupid.to_string(),
@@ -531,7 +543,13 @@ impl IPAGroup {
         Ok(groups)
     }
 
-    pub fn parse(groups: &str) -> Result<Vec<IPAGroup>, Error> {
+    pub fn parse_system_groups(groups: &str) -> Result<Vec<IPAGroup>, Error> {
+        let groups = groups.trim();
+
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut g = Vec::new();
         let mut errors = Vec::new();
 
@@ -539,7 +557,76 @@ impl IPAGroup {
             if !group.is_empty() {
                 match IPAGroup::new(group, "OpenPortal-managed group") {
                     Ok(group) => g.push(group),
-                    Err(_) => errors.push(group),
+                    Err(e) => {
+                        tracing::error!("Could not parse group: {}. Error: {}", group, e);
+                        errors.push(group)
+                    }
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(Error::Parse(format!(
+                "Could not parse groups: {:?}",
+                errors.join(",")
+            )));
+        }
+
+        Ok(g)
+    }
+
+    pub fn parse_instance_groups(groups: &str) -> Result<HashMap<Peer, Vec<IPAGroup>>, Error> {
+        let groups = groups.trim();
+
+        if groups.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut g: HashMap<Peer, Vec<IPAGroup>> = HashMap::new();
+        let mut errors = Vec::new();
+
+        for group in groups.split(',') {
+            let parts: Vec<&str> = group.split(':').collect();
+
+            if parts.len() != 2 {
+                errors.push(group);
+                continue;
+            }
+
+            let instance = parts[0].trim();
+
+            if instance.is_empty() {
+                errors.push(group);
+                continue;
+            }
+
+            let peer = match Peer::parse(instance) {
+                Ok(peer) => peer,
+                Err(e) => {
+                    tracing::error!("Could not parse instance: {}. Error: {}", instance, e);
+                    errors.push(group);
+                    continue;
+                }
+            };
+
+            let group = parts[1].trim();
+
+            if group.is_empty() {
+                errors.push(group);
+                continue;
+            }
+
+            match IPAGroup::new(group, "OpenPortal-managed group") {
+                Ok(group) => {
+                    if let Some(groups) = g.get_mut(&peer) {
+                        groups.push(group);
+                    } else {
+                        g.insert(peer.clone(), vec![group]);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Could not parse group: {}. Error: {}", group, e);
+                    errors.push(group)
                 }
             }
         }
@@ -753,10 +840,13 @@ fn get_primary_group(user: &UserIdentifier) -> String {
 /// or removes them as necessary. Groups will match the project group,
 /// the system groups, and the openportal group.
 ///
-async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
+async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> {
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
     let mut groups = cache::get_system_groups().await?;
+
+    // add in the groups for this instance
+    groups.extend(cache::get_instance_groups(instance).await?);
 
     // add in the "openportal" group, to which all users managed by
     // OpenPortal must belong
@@ -872,11 +962,11 @@ async fn sync_groups(user: &IPAUser) -> Result<IPAUser, Error> {
     }
 }
 
-pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
+pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(user) = get_user(user).await? {
         // make sure that the groups are correct
-        match sync_groups(&user).await {
+        match sync_groups(&user, instance).await {
             Ok(user) => {
                 tracing::info!("Added user [cached] {}", user);
                 return Ok(user);
@@ -982,7 +1072,7 @@ pub async fn add_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
 
     // now synchronise the groups - this won't do anything if another
     // thread has already beaten us to creating the user
-    match sync_groups(&user).await {
+    match sync_groups(&user, instance).await {
         Ok(user) => {
             tracing::info!("Added user: {}", user);
             Ok(user)

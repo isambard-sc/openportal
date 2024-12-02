@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use std::collections::HashMap;
 
 // import freeipa directory as a module
 mod freeipa;
@@ -10,7 +11,7 @@ use freeipa::IPAGroup;
 mod cache;
 
 use templemeads::agent::account::{process_args, run, Defaults};
-use templemeads::agent::Type as AgentType;
+use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{AddUser, RemoveUser, UpdateHomeDir};
 use templemeads::job::{Envelope, Job};
@@ -61,7 +62,10 @@ async fn main() -> Result<()> {
     // get the details about the FreeIPA server - this must be set
     let freeipa_server = config.option("freeipa-server", "");
     let freeipa_user: String = config.option("freeipa-user", "admin");
-    let system_groups: Vec<IPAGroup> = IPAGroup::parse(&config.option("system-groups", ""))?;
+    let system_groups: Vec<IPAGroup> =
+        IPAGroup::parse_system_groups(&config.option("system-groups", ""))?;
+    let instance_groups: HashMap<Peer, Vec<IPAGroup>> =
+        IPAGroup::parse_instance_groups(&config.option("instance-groups", ""))?;
 
     if freeipa_server.is_empty() {
         return Err(anyhow::anyhow!(
@@ -79,6 +83,7 @@ async fn main() -> Result<()> {
     };
 
     cache::set_system_groups(&system_groups).await?;
+    cache::set_instance_groups(&instance_groups).await?;
 
     // connect the single shared FreeIPA client - this will be used in the
     // async function (we can't bind variables to async functions, or else
@@ -94,10 +99,11 @@ async fn main() -> Result<()> {
         pub async fn freeipa_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
         {
             let job = envelope.job();
+            let sender = envelope.sender();
 
             match job.instruction() {
                 AddUser(user) => {
-                    let user = freeipa::add_user(&user).await?;
+                    let user = freeipa::add_user(&user, &sender).await?;
                     let job = job.completed(user.mapping()?)?;
                     Ok(job)
                 },

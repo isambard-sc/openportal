@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.1.1] - 2024-12-02
 ### Added
 - Added `instance_groups` to the FreeIPA agent, so that is is possible to
   specify additional groups that a user should be added to when they are
@@ -185,6 +187,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.1.1]: https://github.com/isambard-sc/openportal/releases/tag/0.1.1
 [0.1.0]: https://github.com/isambard-sc/openportal/releases/tag/0.1.0
 [0.0.25]: https://github.com/isambard-sc/openportal/releases/tag/0.0.25
 [0.0.24]: https://github.com/isambard-sc/openportal/releases/tag/0.0.24

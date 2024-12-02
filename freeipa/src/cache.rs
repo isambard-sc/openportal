@@ -4,6 +4,7 @@
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use templemeads::agent::Peer;
 use templemeads::grammar::UserIdentifier;
 use templemeads::Error;
 use tokio::sync::RwLock;
@@ -17,6 +18,7 @@ struct Database {
     users: HashMap<UserIdentifier, IPAUser>,
     groups: HashMap<String, IPAGroup>,
     system_groups: Vec<IPAGroup>,
+    instance_groups: HashMap<Peer, Vec<IPAGroup>>,
 }
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
@@ -48,6 +50,32 @@ pub async fn set_system_groups(groups: &[IPAGroup]) -> Result<(), Error> {
     cache.system_groups = groups.to_vec();
     tracing::info!("Setting system groups to {:?}", cache.system_groups);
     Ok(())
+}
+
+///
+/// Set the list of all instance groups that should be used for each
+/// instance that connects to this agent. These groups should be added
+/// for all users managed by OpenPortal who are added to this instance
+///
+pub async fn set_instance_groups(groups: &HashMap<Peer, Vec<IPAGroup>>) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    cache.instance_groups = groups.clone();
+    tracing::info!("Setting instance groups to {:?}", cache.instance_groups);
+    Ok(())
+}
+
+///
+/// Return all of the instance groups that should be used for users
+/// added via the specified instance. Returns an empty list if there
+/// are on instance groups for this instance
+///
+pub async fn get_instance_groups(instance: &Peer) -> Result<Vec<IPAGroup>, Error> {
+    let cache = CACHE.read().await;
+    Ok(cache
+        .instance_groups
+        .get(instance)
+        .cloned()
+        .unwrap_or_default())
 }
 
 ///

@@ -108,6 +108,26 @@ impl Peer {
         }
     }
 
+    pub fn parse(name: &str) -> Result<Self, Error> {
+        let parts: Vec<&str> = name.split('@').collect();
+
+        if parts.len() != 2 {
+            return Err(Error::InvalidPeer(name.to_string()));
+        }
+
+        let peer_name = parts[0].trim();
+        let peer_zone = parts[1].trim();
+
+        if peer_name.is_empty() || peer_zone.is_empty() {
+            return Err(Error::InvalidPeer(name.to_string()));
+        }
+
+        Ok(Self {
+            name: peer_name.to_string(),
+            zone: peer_zone.to_string(),
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

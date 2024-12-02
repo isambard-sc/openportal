@@ -46,6 +46,9 @@ pub enum Error {
     InvalidInstruction(String),
 
     #[error("{0}")]
+    InvalidPeer(String),
+
+    #[error("{0}")]
     InvalidState(String),
 
     #[error("{0}")]

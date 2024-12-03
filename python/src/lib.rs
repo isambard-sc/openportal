@@ -177,6 +177,17 @@ fn load_config(config_file: path::PathBuf) -> PyResult<()> {
 }
 
 ///
+/// Return whether or not a valid configuration has been loaded
+///
+#[pyfunction]
+fn is_config_loaded() -> PyResult<bool> {
+    match SINGLETON_CONFIG.read() {
+        Ok(guard) => Ok(guard.is_some()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
 /// Initialize log tracing for the OpenPortal client. This will print
 /// logs to stdout.
 ///
@@ -467,12 +478,26 @@ fn status(job: Job) -> PyResult<Job> {
     }
 }
 
+///
+/// Return the Job with the specified ID. Raises an error if the
+/// job does not exist.
+///
+#[pyfunction]
+fn get(job_id: &str) -> PyResult<Job> {
+    match call_post::<Job>("status", serde_json::json!({"job": job_id.to_string()})) {
+        Ok(response) => Ok(response),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
+    m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
+    m.add_function(wrap_pyfunction!(get, m)?)?;
     Ok(())
 }

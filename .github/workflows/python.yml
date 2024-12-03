@@ -33,9 +33,8 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
-          sccache: 'false'
-          manylinux: auto
-          container: quay.io/pypa/manylinux2014_x86_64:latest
+          sccache: 'true'
+          manylinux: 2_17
           working-directory: python
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -60,10 +59,8 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
-          sccache: 'false'
-          manylinux: auto
-          container: ghcr.io/rust-cross/manylinux2014-cross:aarch64
-          docker-options: -e CFLAGS_aarch64_unknown_linux_gnu="-D__ARM_ARCH=8"
+          sccache: 'true'
+          manylinux: 2_24
           working-directory: python
       - name: Upload wheels
         uses: actions/upload-artifact@v4

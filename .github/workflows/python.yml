@@ -59,6 +59,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
+          docker-options: -e UNSAFE_PYO3_BUILD_FREE_THREADED=1
           sccache: 'true'
           manylinux: 2_24
           working-directory: python

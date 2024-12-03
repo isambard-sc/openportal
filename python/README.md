@@ -45,7 +45,7 @@ Binaries for Linux X86-64 and Linux aarch64 are provided. If you need to
 compile yourself, then it is easiest to follow the instructions below
 to compile using `maturin`.
 
-## Developing the Python wrappers
+## Developing the Python wrappers
 
 First, clone the repository, e.g.
 

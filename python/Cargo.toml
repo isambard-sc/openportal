@@ -7,8 +7,8 @@ version = "0.1.1"
 description = "Python wrappers for OpenPortal"
 edition = "2021"
 license = "MIT"
-homepage = "https://github.com/chryswoods/openportal/"
-repository = "https://github.com/chryswoods/openportal/"
+homepage = "https://github.com/isambard-sc/openportal/"
+repository = "https://github.com/isambard-sc/openportal/"
 
 [lib]
 name = "openportal"

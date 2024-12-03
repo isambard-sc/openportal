@@ -33,7 +33,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
-          sccache: 'true'
+          sccache: 'false'
           manylinux: auto
           container: quay.io/pypa/manylinux2014_x86_64:latest
           working-directory: python
@@ -60,7 +60,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
-          sccache: 'true'
+          sccache: 'false'
           manylinux: auto
           container: ghcr.io/rust-cross/manylinux2014-cross:aarch64
           working-directory: python

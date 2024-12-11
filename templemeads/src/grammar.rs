@@ -196,6 +196,96 @@ impl<'de> Deserialize<'de> for UserIdentifier {
 }
 
 ///
+/// Struct that holds the mapping of a ProjectIdentifier to a local
+/// project on a system
+///
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ProjectMapping {
+    project: ProjectIdentifier,
+    local_project: String,
+}
+
+impl ProjectMapping {
+    pub fn new(project: &ProjectIdentifier, local_project: &str) -> Result<Self, Error> {
+        let local_project = local_project.trim();
+
+        if local_project.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectMapping - local_project cannot be empty '{}'",
+                local_project
+            )));
+        };
+
+        if local_project.starts_with(".")
+            || local_project.ends_with(".")
+            || local_project.starts_with("/")
+            || local_project.ends_with("/")
+        {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectMapping - local project contains invalid characters '{}'",
+                local_project
+            )));
+        };
+
+        Ok(Self {
+            project: project.clone(),
+            local_project: local_project.to_string(),
+        })
+    }
+
+    pub fn parse(identifier: &str) -> Result<Self, Error> {
+        let parts: Vec<&str> = identifier.split(':').collect();
+
+        if parts.len() != 2 {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectMapping: {}",
+                identifier
+            )));
+        }
+
+        let project = ProjectIdentifier::parse(parts[0])?;
+        let local_project = parts[1].trim();
+
+        Self::new(&project, local_project)
+    }
+
+    pub fn project(&self) -> &ProjectIdentifier {
+        &self.project
+    }
+
+    pub fn local_project(&self) -> &str {
+        &self.local_project
+    }
+}
+
+impl std::fmt::Display for ProjectMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.project, self.local_project)
+    }
+}
+
+/// Serialize and Deserialize via the string representation
+
+impl Serialize for ProjectMapping {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectMapping {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
 /// Struct that holds the mapping of a UserIdentifier to a local
 /// username on a system
 ///
@@ -348,6 +438,12 @@ pub enum Instruction {
     /// An instruction to remove a local user
     RemoveLocalUser(UserMapping),
 
+    /// An instruction to add a local project
+    AddLocalProject(ProjectMapping),
+
+    /// An instruction to remove a local project
+    RemoveLocalProject(ProjectMapping),
+
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
 }
@@ -407,6 +503,32 @@ impl Instruction {
                     tracing::error!("remove_project failed to parse: {}", &parts[1..].join(" "));
                     Err(Error::Parse(format!(
                         "remove_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "add_local_project" => match ProjectMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Ok(Instruction::AddLocalProject(mapping)),
+                Err(_) => {
+                    tracing::error!(
+                        "add_local_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "add_local_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "remove_local_project" => match ProjectMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Ok(Instruction::RemoveLocalProject(mapping)),
+                Err(_) => {
+                    tracing::error!(
+                        "remove_local_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "remove_local_project failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }
@@ -517,6 +639,10 @@ impl std::fmt::Display for Instruction {
             Instruction::GetUsers(project) => write!(f, "get_users {}", project),
             Instruction::AddUser(user) => write!(f, "add_user {}", user),
             Instruction::RemoveUser(user) => write!(f, "remove_user {}", user),
+            Instruction::AddLocalProject(mapping) => write!(f, "add_local_project {}", mapping),
+            Instruction::RemoveLocalProject(mapping) => {
+                write!(f, "remove_local_project {}", mapping)
+            }
             Instruction::AddLocalUser(mapping) => write!(f, "add_local_user {}", mapping),
             Instruction::RemoveLocalUser(mapping) => write!(f, "remove_local_user {}", mapping),
             Instruction::UpdateHomeDir(user, homedir) => {

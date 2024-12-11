@@ -13,7 +13,9 @@ mod cache;
 use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{AddUser, RemoveUser, UpdateHomeDir};
+use templemeads::grammar::Instruction::{
+    AddProject, AddUser, RemoveProject, RemoveUser, UpdateHomeDir,
+};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -102,6 +104,16 @@ async fn main() -> Result<()> {
             let sender = envelope.sender();
 
             match job.instruction() {
+                AddProject(project) => {
+                    let project = freeipa::add_project(&project).await?;
+                    let job = job.completed(project.mapping()?)?;
+                    Ok(job)
+                },
+                RemoveProject(project) => {
+                    Err(Error::IncompleteCode(
+                        format!("RemoveProject instruction not implemented yet - cannot remove {}", project),
+                    ))
+                },
                 AddUser(user) => {
                     let user = freeipa::add_user(&user, &sender).await?;
                     let job = job.completed(user.mapping()?)?;

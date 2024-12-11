@@ -409,6 +409,34 @@ impl Job {
         }
     }
 
+    #[pyo3(signature = (max_ms=1000))]
+    fn wait(&mut self, max_ms: i64) -> PyResult<bool> {
+        if max_ms < 0 {
+            // wait forever...
+            while !self.is_finished()? {
+                // sleep for 100ms
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                self.update()?;
+            }
+        } else {
+            let max_ms: u64 = max_ms as u64;
+
+            let mut total_waited: u64 = 0;
+
+            // check at least 10 times, with a minimum of 1ms and a maximum of 100ms
+            let delta: u64 = (max_ms / 10).clamp(1, 100);
+
+            while !self.is_finished()? && total_waited < max_ms {
+                // sleep for 100ms
+                std::thread::sleep(std::time::Duration::from_millis(delta));
+                self.update()?;
+                total_waited += delta;
+            }
+        }
+
+        self.is_finished()
+    }
+
     fn __str__(&self) -> PyResult<String> {
         match self._is_expired() {
             true => match self.state {

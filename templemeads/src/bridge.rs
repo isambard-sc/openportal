@@ -10,7 +10,7 @@ use anyhow::Result;
 use uuid::Uuid;
 
 pub async fn status(job: &Uuid) -> Result<Job, Error> {
-    tracing::info!("Received status request for job: {}", job);
+    tracing::debug!("Received status request for job: {}", job);
 
     match agent::portal(30).await {
         Some(portal) => {

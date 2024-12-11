@@ -9,6 +9,89 @@ use std::sync::Arc;
 /// Grammar for all of the commands that can be sent to agents
 
 ///
+/// A project identifier - this is a double of project.portal
+///
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct ProjectIdentifier {
+    project: String,
+    portal: String,
+}
+
+impl ProjectIdentifier {
+    pub fn parse(identifier: &str) -> Result<Self, Error> {
+        let parts: Vec<&str> = identifier.split('.').collect();
+
+        if parts.len() != 2 {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectIdentifier: {}",
+                identifier
+            )));
+        }
+
+        let project = parts[0].trim();
+        let portal = parts[1].trim();
+
+        if project.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectIdentifier - project cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        if portal.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectIdentifier - portal cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        Ok(Self {
+            project: project.to_string(),
+            portal: portal.to_string(),
+        })
+    }
+
+    pub fn project(&self) -> String {
+        self.project.clone()
+    }
+
+    pub fn portal(&self) -> String {
+        self.portal.clone()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.project.is_empty() && !self.portal.is_empty()
+    }
+}
+
+impl std::fmt::Display for ProjectIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.project, self.portal)
+    }
+}
+
+/// Serialize and Deserialize via the string representation
+
+impl Serialize for ProjectIdentifier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectIdentifier {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
 /// A user identifier - this is a triple of username.project.portal
 ///
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
@@ -71,6 +154,13 @@ impl UserIdentifier {
 
     pub fn portal(&self) -> String {
         self.portal.clone()
+    }
+
+    pub fn project_identifier(&self) -> ProjectIdentifier {
+        ProjectIdentifier {
+            project: self.project.clone(),
+            portal: self.portal.clone(),
+        }
     }
 
     pub fn is_valid(&self) -> bool {
@@ -234,6 +324,18 @@ pub enum Instruction {
     /// An instruction to submit a job to the portal
     Submit(Destination, Arc<Instruction>),
 
+    /// An instruction to get all projects
+    GetProjects(),
+
+    /// An instruction to add a project
+    AddProject(ProjectIdentifier),
+
+    /// An instruction to remove a project
+    RemoveProject(ProjectIdentifier),
+
+    /// An instruction to get all users in a project
+    GetUsers(ProjectIdentifier),
+
     /// An instruction to add a user
     AddUser(UserIdentifier),
 
@@ -285,6 +387,37 @@ impl Instruction {
                         "submit failed to parse the destination for: {}. {}",
                         &parts[1..].join(" "),
                         e
+                    )))
+                }
+            },
+            "get_projects" => Ok(Instruction::GetProjects()),
+            "add_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::AddProject(project)),
+                Err(_) => {
+                    tracing::error!("add_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "add_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "remove_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::RemoveProject(project)),
+                Err(_) => {
+                    tracing::error!("remove_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "remove_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_users" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::GetUsers(project)),
+                Err(_) => {
+                    tracing::error!("get_users failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_users failed to parse: {}",
+                        &parts[1..].join(" ")
                     )))
                 }
             },
@@ -378,6 +511,10 @@ impl std::fmt::Display for Instruction {
             Instruction::Submit(destination, command) => {
                 write!(f, "submit {} {}", destination, command)
             }
+            Instruction::GetProjects() => write!(f, "get_projects"),
+            Instruction::AddProject(project) => write!(f, "add_project {}", project),
+            Instruction::RemoveProject(project) => write!(f, "remove_project {}", project),
+            Instruction::GetUsers(project) => write!(f, "get_users {}", project),
             Instruction::AddUser(user) => write!(f, "add_user {}", user),
             Instruction::RemoveUser(user) => write!(f, "remove_user {}", user),
             Instruction::AddLocalUser(mapping) => write!(f, "add_local_user {}", mapping),

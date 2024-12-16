@@ -110,6 +110,26 @@ impl Command {
                 )));
                 }
             }
+
+            let project = match instruction.clone() {
+                Instruction::AddProject(project) => Some(project),
+                Instruction::GetUsers(project) => Some(project),
+                Instruction::RemoveProject(project) => Some(project),
+                _ => None,
+            };
+
+            if let Some(project) = project {
+                if project.portal() != destination.first() {
+                    tracing::error!(
+                    "Invalid command '{}'. Commands involving project '{}' can only be issued via the portal '{}', not '{}'.",
+                    command, project, project.portal(), destination.first()
+                );
+                    return Err(Error::Parse(format!(
+                    "Invalid command '{}'. Commands involving project '{}' can only be issued via the portal '{}', not '{}'.",
+                    command, project, project.portal(), destination.first()
+                )));
+                }
+            }
         }
 
         Ok(Self {

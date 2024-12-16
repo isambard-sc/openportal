@@ -6,7 +6,9 @@ use anyhow::Result;
 use templemeads::agent::scheduler::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{AddLocalUser, RemoveLocalUser};
+use templemeads::grammar::Instruction::{
+    AddLocalProject, AddLocalUser, RemoveLocalProject, RemoveLocalUser,
+};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -87,6 +89,16 @@ async fn main() -> Result<()> {
                 let job = envelope.job();
 
                 match job.instruction() {
+                    AddLocalProject(project) => {
+                        sacctmgr::add_project(&project).await?;
+                        let job = job.completed("Success!")?;
+                        Ok(job)
+                    },
+                    RemoveLocalProject(project) => {
+                        Err(Error::IncompleteCode(
+                            format!("RemoveLocalProject instruction not implemented yet - cannot remove {}", project),
+                        ))
+                    },
                     AddLocalUser(user) => {
                         sacctmgr::add_user(&user).await?;
                         let job = job.completed("Success!")?;
@@ -155,6 +167,16 @@ async fn main() -> Result<()> {
                 let job = envelope.job();
 
                 match job.instruction() {
+                    AddLocalProject(project) => {
+                        slurm::add_project(&project).await?;
+                        let job = job.completed("Success!")?;
+                        Ok(job)
+                    },
+                    RemoveLocalProject(project) => {
+                        Err(Error::IncompleteCode(
+                            format!("RemoveLocalProject instruction not implemented yet - cannot remove {}", project),
+                        ))
+                    },
                     AddLocalUser(user) => {
                         slurm::add_user(&user).await?;
                         let job = job.completed("Success!")?;

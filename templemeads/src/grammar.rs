@@ -70,6 +70,15 @@ impl std::fmt::Display for ProjectIdentifier {
     }
 }
 
+impl From<UserIdentifier> for ProjectIdentifier {
+    fn from(user: UserIdentifier) -> Self {
+        Self {
+            project: user.project().to_string(),
+            portal: user.portal().to_string(),
+        }
+    }
+}
+
 /// Serialize and Deserialize via the string representation
 
 impl Serialize for ProjectIdentifier {
@@ -261,6 +270,15 @@ impl ProjectMapping {
 impl std::fmt::Display for ProjectMapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.project, self.local_project)
+    }
+}
+
+impl From<UserMapping> for ProjectMapping {
+    fn from(mapping: UserMapping) -> Self {
+        Self {
+            project: mapping.user().project_identifier(),
+            local_project: mapping.local_project().to_string(),
+        }
     }
 }
 

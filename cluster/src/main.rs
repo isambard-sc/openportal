@@ -73,12 +73,12 @@ async fn main() -> Result<()> {
                 GetProjects() => {
                     // get the list of projects from the cluster
                     tracing::info!("Getting list of projects");
-                    job = job.completed("Projects retrieved")?;
+                    job = job.completed("Projects retrieved".to_string())?;
                 },
                 GetUsers(project) => {
                     // get the list of users from the cluster
                     tracing::info!("Getting list of users in project {}", project);
-                    job = job.completed("Users retrieved")?;
+                    job = job.completed("Users retrieved".to_string())?;
                 },
                 AddProject(project) => {
                     // add the project to the cluster
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
                 RemoveProject(project) => {
                     // remove the project from the cluster
                     tracing::info!("Removing project from cluster: {}", project);
-                    job = job.completed("Project removed")?;
+                    job = job.completed("Project removed".to_string())?;
                 },
                 AddUser(user) => {
                     // add the user to the cluster
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
                 RemoveUser(user) => {
                     // remove the user from the cluster
                     tracing::info!("Removing user from cluster: {}", user);
-                    job = job.completed("User removed")?;
+                    job = job.completed("User removed".to_string())?;
                 }
                 _ => {
                     tracing::error!("Unknown instruction: {:?}", job.instruction());

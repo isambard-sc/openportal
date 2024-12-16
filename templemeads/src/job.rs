@@ -6,7 +6,7 @@ use crate::board::{SyncState, Waiter};
 use crate::command::Command as ControlCommand;
 use crate::destination::{Destination, Position};
 use crate::error::Error;
-use crate::grammar::Instruction;
+use crate::grammar::{Instruction, NamedType};
 use crate::state;
 
 use anyhow::Result;
@@ -197,6 +197,7 @@ pub struct Job {
     command: Command,
     state: Status,
     result: Option<String>,
+    result_type: Option<String>,
     #[serde(skip)]
     board: Option<Peer>,
 }
@@ -204,11 +205,13 @@ pub struct Job {
 // implement display for Job
 impl std::fmt::Display for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{{{}}}: version={}, created={}, changed={}, state={:?}",
-            self.command, self.version, self.created, self.changed, self.state,
-        )
+        match &self.state {
+            Status::Created => write!(f, "{{{}}}: Created", self.command),
+            Status::Pending => write!(f, "{{{}}}: Pending", self.command),
+            Status::Running => write!(f, "{{{}}}: Running", self.command),
+            Status::Complete => write!(f, "{{{}}}: Complete - {:?}", self.command, self.result),
+            Status::Error => write!(f, "{{{}}}: Error - {:?}", self.command, self.result),
+        }
     }
 }
 
@@ -231,6 +234,7 @@ impl Job {
             command: Command::parse(command, check_portal)?,
             state: Status::Created,
             result: None,
+            result_type: None,
             board: None,
         })
     }
@@ -257,6 +261,7 @@ impl Job {
             command: self.command.clone(),
             state: self.state.clone(),
             result: self.result.clone(),
+            result_type: self.result_type.clone(),
             board: self.board.clone(),
         }
     }
@@ -295,6 +300,7 @@ impl Job {
             command: self.command.clone(),
             state: self.state.clone(),
             result: self.result.clone(),
+            result_type: self.result_type.clone(),
             board: self.board.clone(),
         }
     }
@@ -342,6 +348,7 @@ impl Job {
                 command: self.command.clone(),
                 state: Status::Pending,
                 result: self.result.clone(),
+                result_type: self.result_type.clone(),
                 board: self.board.clone(),
             }),
             Status::Pending => Ok(self.clone()),
@@ -362,6 +369,7 @@ impl Job {
                 command: self.command.clone(),
                 state: Status::Running,
                 result: progress,
+                result_type: None,
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -370,9 +378,37 @@ impl Job {
         }
     }
 
+    pub fn copy_result_from(&self, other: &Job) -> Result<Job, Error> {
+        // check other has finished and is error or completed
+        if !other.is_finished() {
+            return Err(Error::InvalidState(
+                format!("Cannot copy result from job in state: {:?}", other.state).to_owned(),
+            ));
+        }
+
+        match self.state {
+            Status::Pending | Status::Running => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                expires: self.expires,
+                version: self.version + 1000,
+                command: self.command.clone(),
+                state: other.state.clone(),
+                result: other.result.clone(),
+                result_type: other.result_type.clone(),
+                board: self.board.clone(),
+            }),
+            _ => Err(Error::InvalidState(
+                format!("Cannot copy result from job in state: {:?}", self.state).to_owned(),
+            )),
+        }
+    }
+
     pub fn completed<T>(&self, result: T) -> Result<Job, Error>
     where
         T: serde::Serialize,
+        T: NamedType,
     {
         match self.state {
             Status::Pending | Status::Running => Ok(Job {
@@ -384,6 +420,7 @@ impl Job {
                 command: self.command.clone(),
                 state: Status::Complete,
                 result: Some(serde_json::to_string(&result)?),
+                result_type: Some(T::type_name().to_string()),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -403,6 +440,7 @@ impl Job {
                 command: self.command.clone(),
                 state: Status::Error,
                 result: Some(message.to_owned()),
+                result_type: Some("Error".to_string()),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -1052,7 +1090,7 @@ mod tests {
         assert!(job.changed() > job.created());
         assert_eq!(job.version(), 3);
 
-        job = job.completed("done").unwrap_or(job);
+        job = job.completed("done".to_string()).unwrap_or(job);
 
         assert!(job.is_finished());
         assert_eq!(job.state(), Status::Complete);

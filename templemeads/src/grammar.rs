@@ -8,6 +8,16 @@ use std::sync::Arc;
 
 /// Grammar for all of the commands that can be sent to agents
 
+pub trait NamedType {
+    fn type_name() -> &'static str;
+}
+
+impl NamedType for String {
+    fn type_name() -> &'static str {
+        "String"
+    }
+}
+
 ///
 /// A project identifier - this is a double of project.portal
 ///
@@ -15,6 +25,12 @@ use std::sync::Arc;
 pub struct ProjectIdentifier {
     project: String,
     portal: String,
+}
+
+impl NamedType for ProjectIdentifier {
+    fn type_name() -> &'static str {
+        "ProjectIdentifier"
+    }
 }
 
 impl ProjectIdentifier {
@@ -108,6 +124,12 @@ pub struct UserIdentifier {
     username: String,
     project: String,
     portal: String,
+}
+
+impl NamedType for UserIdentifier {
+    fn type_name() -> &'static str {
+        "UserIdentifier"
+    }
 }
 
 impl UserIdentifier {
@@ -214,6 +236,12 @@ pub struct ProjectMapping {
     local_project: String,
 }
 
+impl NamedType for ProjectMapping {
+    fn type_name() -> &'static str {
+        "ProjectMapping"
+    }
+}
+
 impl ProjectMapping {
     pub fn new(project: &ProjectIdentifier, local_project: &str) -> Result<Self, Error> {
         let local_project = local_project.trim();
@@ -312,6 +340,12 @@ pub struct UserMapping {
     user: UserIdentifier,
     local_user: String,
     local_project: String,
+}
+
+impl NamedType for UserMapping {
+    fn type_name() -> &'static str {
+        "UserMapping"
+    }
 }
 
 impl UserMapping {

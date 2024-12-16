@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
                 match job.instruction() {
                     AddLocalProject(project) => {
                         sacctmgr::add_project(&project).await?;
-                        let job = job.completed("Success!")?;
+                        let job = job.completed("Success!".to_string())?;
                         Ok(job)
                     },
                     RemoveLocalProject(project) => {
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
                     },
                     AddLocalUser(user) => {
                         sacctmgr::add_user(&user).await?;
-                        let job = job.completed("Success!")?;
+                        let job = job.completed("Success!".to_string())?;
                         Ok(job)
                     },
                     RemoveLocalUser(mapping) => {
@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
                 match job.instruction() {
                     AddLocalProject(project) => {
                         slurm::add_project(&project).await?;
-                        let job = job.completed("Success!")?;
+                        let job = job.completed("Success!".to_string())?;
                         Ok(job)
                     },
                     RemoveLocalProject(project) => {
@@ -179,7 +179,7 @@ async fn main() -> Result<()> {
                     },
                     AddLocalUser(user) => {
                         slurm::add_user(&user).await?;
-                        let job = job.completed("Success!")?;
+                        let job = job.completed("Success!".to_string())?;
                         Ok(job)
                     },
                     RemoveLocalUser(mapping) => {

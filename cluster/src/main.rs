@@ -73,12 +73,12 @@ async fn main() -> Result<()> {
                 GetProjects() => {
                     // get the list of projects from the cluster
                     tracing::info!("Getting list of projects");
-                    job = job.completed("Projects retrieved".to_string())?;
+                    job = job.completed(Vec::new::<ProjectIdentifier>())?;
                 },
                 GetUsers(project) => {
                     // get the list of users from the cluster
                     tracing::info!("Getting list of users in project {}", project);
-                    job = job.completed("Users retrieved".to_string())?;
+                    job = job.completed(Vec::new::<UserIdentifer>())?;
                 },
                 AddProject(project) => {
                     // add the project to the cluster

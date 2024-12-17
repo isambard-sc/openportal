@@ -14,6 +14,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added automatic building of Python Linux aarch64 binaries, so that
   the Python module can be used on ARM64 systems.
 
+- Cleaned up the Python API and added in lots of convenience functions.
+  Objects are now correctly returned from the `run` function, so that you
+  don't need to parse anything. Also added in the ability to default
+  wait for a command to run
+
+- Added in extra commands to add and remove projects, list users in a
+  project, and list projects in a portal. Some of these are still stubbed.
+
+- Added in `ProjectIdentifier` and `ProjectMapping` to mirror the
+  equivalent `User` classes. Also cleaned up the concept of local
+  users and groups, so that a `UserMapping` maps a user to a local
+  unix username and unix group, while the `ProjectMapping` maps a
+  project to a local unix group.
 
 ## [0.1.1] - 2024-12-02
 ### Added

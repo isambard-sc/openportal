@@ -93,15 +93,8 @@ crate::async_runnable! {
                     }
                  }
                  else {
-                    match southbound_job.result::<String>() {
-                        Ok(result) => {
-                            job = job.completed(result)?;
-                        }
-                        Err(e) => {
-                            job = job.errored(&format!("ResultError{{{}}}", e))?;
-                        }
-                    }
-                 }
+                    job = job.copy_result_from(&southbound_job)?;
+                }
 
                 Ok(job)
             }

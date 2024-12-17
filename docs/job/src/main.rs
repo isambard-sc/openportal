@@ -161,7 +161,7 @@ async_runnable! {
 
                 tracing::info!("Here we would implement the business logic to add the user to the cluster");
 
-                job = job.completed("account created")?;
+                job = job.completed("account created".to_string())?;
             }
             RemoveUser(user) => {
                 // remove the user from the cluster
@@ -173,7 +173,7 @@ async_runnable! {
                     job = job.errored(&format!("You are not allowed to remove the account for {:?}",
                                       user.username()))?;
                 } else {
-                    job = job.completed("account removed")?;
+                    job = job.completed("account removed".to_string())?;
                 }
             }
             _ => {

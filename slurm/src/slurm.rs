@@ -9,7 +9,7 @@ use secrecy::{ExposeSecret, Secret};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Display;
-use templemeads::grammar::UserMapping;
+use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -1229,7 +1229,8 @@ async fn add_user_association(
 async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, Error> {
     // first, make sure that the account exists
     let slurm_account =
-        get_account_create_if_not_exists(&SlurmAccount::from_mapping(user)?).await?;
+        get_account_create_if_not_exists(&SlurmAccount::from_mapping(&user.clone().into())?)
+            .await?;
 
     // now get the user from slurm
     let slurm_user = get_user(user.local_user()).await?;
@@ -1356,13 +1357,10 @@ impl Display for SlurmAccount {
 }
 
 impl SlurmAccount {
-    pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
+    pub fn from_mapping(mapping: &ProjectMapping) -> Result<Self, Error> {
         Ok(SlurmAccount {
-            name: clean_account_name(mapping.local_project())?,
-            description: format!(
-                "Account for OpenPortal project {}",
-                mapping.user().project()
-            ),
+            name: clean_account_name(mapping.local_group())?,
+            description: format!("Account for OpenPortal project {}", mapping.project()),
             organization: get_managed_organization(),
         })
     }
@@ -1473,7 +1471,7 @@ impl SlurmAssociation {
     pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
         Ok(SlurmAssociation {
             user: clean_user_name(mapping.local_user())?,
-            account: clean_account_name(mapping.local_project())?,
+            account: clean_account_name(mapping.local_group())?,
         })
     }
 
@@ -1565,7 +1563,7 @@ impl SlurmUser {
     pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
         Ok(SlurmUser {
             name: mapping.local_user().to_string(),
-            default_account: Some(clean_account_name(mapping.local_project())?),
+            default_account: Some(clean_account_name(mapping.local_group())?),
             associations: vec![SlurmAssociation::from_mapping(mapping)?],
         })
     }
@@ -1713,6 +1711,16 @@ pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
     let user: SlurmUser = get_user_create_if_not_exists(user).await?;
 
     tracing::info!("Added user: {}", user);
+
+    Ok(())
+}
+
+pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
+    let account = SlurmAccount::from_mapping(project)?;
+
+    let account = get_account_create_if_not_exists(&account).await?;
+
+    tracing::info!("Added account: {}", account);
 
     Ok(())
 }

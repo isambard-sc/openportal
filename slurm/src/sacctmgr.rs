@@ -4,7 +4,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
-use templemeads::grammar::UserMapping;
+use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -569,7 +569,8 @@ async fn add_user_association(
 async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, Error> {
     // first, make sure that the account exists
     let slurm_account =
-        get_account_create_if_not_exists(&SlurmAccount::from_mapping(user)?).await?;
+        get_account_create_if_not_exists(&SlurmAccount::from_mapping(&user.clone().into())?)
+            .await?;
 
     // now get the user from slurm
     let slurm_user = get_user(user.local_user()).await?;
@@ -595,7 +596,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 
     // first, create the user
     let username = clean_user_name(user.local_user())?;
-    let account = clean_account_name(user.local_project())?;
+    let account = clean_account_name(user.local_group())?;
 
     let cluster = cache::get_cluster().await?;
 
@@ -682,6 +683,16 @@ pub async fn find_cluster() -> Result<(), Error> {
         );
         cache::set_cluster(&clusters[0]).await?;
     }
+
+    Ok(())
+}
+
+pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
+    let account = SlurmAccount::from_mapping(project)?;
+
+    let account = get_account_create_if_not_exists(&account).await?;
+
+    tracing::info!("Added account: {}", account);
 
     Ok(())
 }

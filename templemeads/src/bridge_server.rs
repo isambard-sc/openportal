@@ -302,7 +302,7 @@ async fn health(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     verify_headers(&state, &headers, "get", "health", None)?;
-    tracing::info!("Health check");
+    tracing::debug!("Health check");
     Ok(Json(json!({"status": "ok"})))
 }
 
@@ -372,7 +372,7 @@ async fn status(
         Some(serde_json::json!({"job": payload.job})),
     )?;
 
-    tracing::info!("Status request for job: {:?}", payload);
+    tracing::debug!("Status request for job: {:?}", payload);
 
     match bridge_status(&payload.job).await {
         Ok(job) => Ok(Json(job)),

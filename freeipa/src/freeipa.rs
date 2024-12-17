@@ -10,7 +10,7 @@ use secrecy::Secret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use templemeads::grammar::{UserIdentifier, UserMapping};
+use templemeads::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -280,10 +280,11 @@ impl std::fmt::Display for IPAUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: local_name={}, givenname={}, primary_group={}, memberof={}, home={}",
+            "{}: local_name={}, givenname={}, userclass={}, primary_group={}, memberof={}, home={}",
             self.identifier(),
             self.userid(),
             self.givenname(),
+            self.userclass(),
             self.primary_group(),
             self.memberof().join(","),
             self.home(),
@@ -361,11 +362,15 @@ impl IPAUser {
                 .unwrap_or_default();
 
             // try to find the primary group for this user
-            let primary_group = get_primary_group(&cn);
+            let primary_group = get_primary_group(&cn)?.groupid().to_string();
             let primary_group = match memberof.contains(&primary_group) {
                 true => primary_group,
                 false => {
-                    tracing::warn!("Could not find primary group for user: {}", cn);
+                    tracing::warn!(
+                        "Could not find primary group {} for user: {}",
+                        primary_group,
+                        cn
+                    );
                     "".to_string()
                 }
             };
@@ -466,7 +471,7 @@ impl IPAUser {
     ///
     pub fn is_managed(&self) -> bool {
         let managed_group = match get_managed_group() {
-            Ok(group) => group.identifier().to_string(),
+            Ok(group) => group.groupid().to_string(),
             Err(_) => return false,
         };
 
@@ -477,18 +482,29 @@ impl IPAUser {
 #[derive(Debug, Clone, Default)]
 pub struct IPAGroup {
     groupid: String,
+    identifier: ProjectIdentifier,
     description: String,
 }
 
 // implement display for IPAGroup
 impl std::fmt::Display for IPAGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: description={}", self.groupid(), self.description())
+        write!(
+            f,
+            "{}: identifier={} description={}",
+            self.groupid(),
+            self.identifier(),
+            self.description()
+        )
     }
 }
 
 impl IPAGroup {
-    fn new(groupid: &str, description: &str) -> Result<Self, Error> {
+    fn new(
+        groupid: &str,
+        identifier: &ProjectIdentifier,
+        description: &str,
+    ) -> Result<Self, Error> {
         // check that the groupid is valid .... PARSING RULES
         let groupid = groupid.trim();
         let description = description.trim();
@@ -503,6 +519,7 @@ impl IPAGroup {
 
         Ok(IPAGroup {
             groupid: groupid.to_string(),
+            identifier: identifier.clone(),
             description: description.to_string(),
         })
     }
@@ -534,8 +551,27 @@ impl IPAGroup {
                 .unwrap_or_default()
                 .to_string();
 
+            // get the identifier from the description (if possible)
+            let identifier = match description.split("|").next() {
+                Some(identifier) => match ProjectIdentifier::parse(identifier.trim()) {
+                    Ok(identifier) => identifier,
+                    Err(e) => {
+                        tracing::warn!("Could not parse identifier: {}. Error: {}", identifier, e);
+                        ProjectIdentifier::default()
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        "Could not parse identifier from description: {}",
+                        description
+                    );
+                    ProjectIdentifier::default()
+                }
+            };
+
             groups.push(IPAGroup {
                 groupid,
+                identifier,
                 description,
             });
         }
@@ -555,7 +591,9 @@ impl IPAGroup {
 
         for group in groups.split(',') {
             if !group.is_empty() {
-                match IPAGroup::new(group, "OpenPortal-managed group") {
+                let project_id = ProjectIdentifier::parse(&format!("{}.system", group))?;
+
+                match IPAGroup::new(group, &project_id, "OpenPortal-managed group") {
                     Ok(group) => g.push(group),
                     Err(e) => {
                         tracing::error!("Could not parse group: {}. Error: {}", group, e);
@@ -616,7 +654,9 @@ impl IPAGroup {
                 continue;
             }
 
-            match IPAGroup::new(group, "OpenPortal-managed group") {
+            let project_id = ProjectIdentifier::parse(&format!("{}.instance", group))?;
+
+            match IPAGroup::new(group, &project_id, "OpenPortal-managed group") {
                 Ok(group) => {
                     if let Some(groups) = g.get_mut(&peer) {
                         groups.push(group);
@@ -641,12 +681,16 @@ impl IPAGroup {
         Ok(g)
     }
 
-    pub fn identifier(&self) -> &str {
-        &self.groupid
+    pub fn identifier(&self) -> &ProjectIdentifier {
+        &self.identifier
     }
 
     pub fn groupid(&self) -> &str {
         &self.groupid
+    }
+
+    pub fn mapping(&self) -> Result<ProjectMapping, Error> {
+        ProjectMapping::new(&self.identifier, &self.groupid)
     }
 
     pub fn description(&self) -> &str {
@@ -695,16 +739,46 @@ pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Res
 }
 
 ///
+/// Return the Unix project name associated with the passed ProjectIdentifier.
+///
+/// Eventually we will need to deal with federation, and work
+/// out a way to uniquely convert project identifiers to Unix groups.
+/// Currently, for the identifier group.portal, we require that
+/// a portal ensures group is unique within the portal. For now,
+/// we will just use group (as brics is the only portal)
+///
+/// Note that we also have system groups, which are of the form
+/// system.group, and instance groups, which are of the form
+/// instance.group. These two names should be reserved and not
+/// used for any portals
+///
+fn identifier_to_projectid(project: &ProjectIdentifier) -> Result<String, Error> {
+    // if the project.portal() is in ["openportal", "system", "instance"]
+    // then we just return the project.project()
+    let system_portals: Vec<String> = vec![
+        "openportal".to_owned(),
+        "system".to_owned(),
+        "instance".to_owned(),
+    ];
+
+    if system_portals.contains(&project.portal()) {
+        Ok(project.project().to_string())
+    } else {
+        Ok(format!("{}.{}", project.portal(), project.project()))
+    }
+}
+
+///
 /// Return the specified group from FreeIPA, or None if it does
 /// not exist
 ///
-pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
-    match cache::get_group(group).await? {
+pub async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Error> {
+    match cache::get_group(project).await? {
         Some(group) => Ok(Some(group)),
         None => {
             let kwargs = {
                 let mut kwargs = HashMap::new();
-                kwargs.insert("cn".to_string(), group.to_string());
+                kwargs.insert("cn".to_string(), identifier_to_projectid(project)?);
                 kwargs
             };
 
@@ -712,8 +786,21 @@ pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
 
             match result.groups()?.first() {
                 Some(group) => {
-                    cache::add_existing_group(group).await?;
-                    Ok(Some(group.clone()))
+                    if group.identifier() != project {
+                        tracing::warn!(
+                            "Disagreement of identifier of found group: {} versus {}",
+                            group.identifier(),
+                            project
+                        );
+
+                        let group = IPAGroup::new(group.groupid(), project, group.description())?;
+
+                        cache::add_existing_group(&group).await?;
+                        Ok(Some(group))
+                    } else {
+                        cache::add_existing_group(group).await?;
+                        Ok(Some(group.clone()))
+                    }
                 }
                 None => Ok(None),
             }
@@ -750,8 +837,10 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 
     // this isn't one line because we need to specify the
     // type of 'users'
-    let users: Vec<IPAUser> = result
-        .users()?
+    let all_users = result.users()?;
+
+    let users: Vec<IPAUser> = all_users
+        .clone()
         .into_iter()
         .filter(|user| user.is_managed())
         .collect();
@@ -761,7 +850,21 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
             cache::add_existing_user(user).await?;
             Ok(Some(user.clone()))
         }
-        None => Ok(None),
+        None => {
+            if !all_users.is_empty() {
+                tracing::warn!(
+                    "User {} not found in FreeIPA, but found {} user(s) that matched who were not managed.",
+                    user,
+                    all_users.len()
+                );
+
+                for user in all_users {
+                    tracing::warn!("User: {}, is_managed={}", user, user.is_managed());
+                }
+            }
+
+            Ok(None)
+        }
     }
 }
 
@@ -788,11 +891,14 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
         return Ok(group);
     }
 
-    // it doesn't - try to create the group
+    // it doesn't - try to create the group - we will encode the ProjectIdentifier
+    // in the description
+    let description = format!("{} | {}", group.identifier(), group.description());
+
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("cn".to_string(), group.groupid().to_string());
-        kwargs.insert("description".to_string(), group.description().to_string());
+        kwargs.insert("description".to_string(), description);
         kwargs
     };
 
@@ -824,14 +930,27 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
 /// Return the group that indicates that this user is managed
 ///
 fn get_managed_group() -> Result<IPAGroup, Error> {
-    IPAGroup::new("openportal", "Group for all users managed by OpenPortal")
+    IPAGroup::new(
+        "openportal",
+        &ProjectIdentifier::parse("openportal.openportal")?,
+        "Group for all users managed by OpenPortal",
+    )
 }
 
 ///
 /// Return the name of the primary group for the user
 ///
-fn get_primary_group(user: &UserIdentifier) -> String {
-    format!("{}.{}", user.portal(), user.project())
+fn get_primary_group(user: &UserIdentifier) -> Result<IPAGroup, Error> {
+    let project = user.project_identifier();
+
+    IPAGroup::new(
+        &identifier_to_projectid(&project)?,
+        &project,
+        &format!(
+            "Primary group for all users in the {} project",
+            project.project()
+        ),
+    )
 }
 
 ///
@@ -853,15 +972,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
     groups.push(get_managed_group()?);
 
     // also add in the group for the user's project (this is their primary group)
-    let primary_group = get_primary_group(user.identifier());
-
-    groups.push(IPAGroup::new(
-        &primary_group,
-        &format!(
-            "Primary group for all users in the {} project",
-            user.identifier().project()
-        ),
-    )?);
+    groups.push(get_primary_group(user.identifier())?);
 
     // first step, make sure that all of the groups exist - and get their CNs
     let mut group_cns = Vec::new();
@@ -882,7 +993,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
             )));
         }
 
-        group_cns.push(group.identifier().to_string());
+        group_cns.push(group.groupid().to_string());
     }
 
     // return the user in the system - check that the groups match
@@ -962,6 +1073,17 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
     }
 }
 
+pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error> {
+    let project_group = get_group_create_if_not_exists(&IPAGroup::new(
+        &identifier_to_projectid(project)?,
+        project,
+        "OpenPortal-managed group",
+    )?)
+    .await?;
+
+    Ok(project_group)
+}
+
 pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(user) = get_user(user).await? {
@@ -996,20 +1118,38 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
         kwargs.insert("uid".to_string(), identifier_to_userid(user).await?);
         kwargs.insert("givenname".to_string(), user.username().to_string());
         kwargs.insert("sn".to_string(), user.project().to_string());
-        kwargs.insert(
-            "userclass".to_string(),
-            managed_group.identifier().to_string(),
-        );
+        kwargs.insert("userclass".to_string(), managed_group.groupid().to_string());
         kwargs.insert("cn".to_string(), user.to_string());
 
         kwargs
     };
 
-    let result = call_post::<IPAResponse>("user_add", None, Some(kwargs)).await?;
-    let user = result.users()?.first().cloned().ok_or(Error::Call(format!(
-        "User {} could not be found after adding?",
-        user
-    )))?;
+    // try to add the user...
+    let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs)).await {
+        Ok(result) => {
+            tracing::info!("Successfully added user: {}", user);
+            result.users()?.first().cloned().ok_or(Error::Call(format!(
+                "User {} could not be found after adding?",
+                user
+            )))?
+        }
+        Err(e) => {
+            // failed to add - maybe they already exist?
+            tracing::error!("Could not add user: {}. Error: {}", user, e);
+            match get_user(user).await? {
+                Some(user) => {
+                    tracing::info!("User already exists: {}", user);
+                    user
+                }
+                None => {
+                    return Err(Error::Call(format!(
+                        "Could not add user: {}. Error: {}",
+                        user, e
+                    )));
+                }
+            }
+        }
+    };
 
     // add this user to the managed group so that it can be managed
     let userid = user.userid().to_string();
@@ -1079,12 +1219,12 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
         }
         Err(e) => {
             tracing::warn!(
-                "Failed to add user {} - they have been removed from FreeIPA? {}",
+                "Failed to synchronise groups for user {}: {}",
                 user.identifier(),
                 e
             );
             Err(Error::Call(format!(
-                "Failed to add user {} - they have been removed from FreeIPA? {}",
+                "Failed to synchronise groups for user {}: {}",
                 user.identifier(),
                 e
             )))

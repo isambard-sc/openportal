@@ -5,7 +5,7 @@ use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use templemeads::agent::Peer;
-use templemeads::grammar::UserIdentifier;
+use templemeads::grammar::{ProjectIdentifier, UserIdentifier};
 use templemeads::Error;
 use tokio::sync::RwLock;
 
@@ -16,7 +16,7 @@ use crate::freeipa::{IPAGroup, IPAUser};
 #[derive(Debug, Clone, Default)]
 struct Database {
     users: HashMap<UserIdentifier, IPAUser>,
-    groups: HashMap<String, IPAGroup>,
+    groups: HashMap<ProjectIdentifier, IPAGroup>,
     system_groups: Vec<IPAGroup>,
     instance_groups: HashMap<Peer, Vec<IPAGroup>>,
 }
@@ -102,7 +102,7 @@ pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
 /// Return the IPAGroup for the named group (or None)
 /// if it doesn't exist
 ///
-pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
+pub async fn get_group(group: &ProjectIdentifier) -> Result<Option<IPAGroup>, Error> {
     let cache = CACHE.read().await;
     Ok(cache.groups.get(group).cloned())
 }
@@ -111,18 +111,18 @@ pub async fn get_group(group: &str) -> Result<Option<IPAGroup>, Error> {
 /// Add an existing group to the database
 ///
 pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
-    match group.identifier().is_empty() {
+    match group.identifier().is_valid() {
         true => {
+            let mut cache = CACHE.write().await;
+            cache
+                .groups
+                .insert(group.identifier().clone(), group.clone());
+        }
+        false => {
             tracing::error!(
                 "Unable to register {:?} as the group identifier is not valid",
                 group
             );
-        }
-        false => {
-            let mut cache = CACHE.write().await;
-            cache
-                .groups
-                .insert(group.identifier().to_owned(), group.clone());
         }
     }
 

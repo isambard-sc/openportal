@@ -219,11 +219,17 @@ pub struct Job {
 impl std::fmt::Display for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.state {
-            Status::Created => write!(f, "{{{}}}: Created", self.command),
-            Status::Pending => write!(f, "{{{}}}: Pending", self.command),
-            Status::Running => write!(f, "{{{}}}: Running", self.command),
-            Status::Complete => write!(f, "{{{}}}: Complete - {:?}", self.command, self.result),
-            Status::Error => write!(f, "{{{}}}: Error - {:?}", self.command, self.result),
+            Status::Created => write!(f, "{{{}: Created}}", self.command),
+            Status::Pending => write!(f, "{{{}: Pending}}", self.command),
+            Status::Running => write!(f, "{{{}: Running}}", self.command),
+            Status::Complete => match self.result.clone() {
+                Some(result) => write!(f, "{{{}: Complete - {}}}", self.command, result),
+                None => write!(f, "{{{}: Complete}}", self.command),
+            },
+            Status::Error => match self.result.clone() {
+                Some(result) => write!(f, "{{{}: Error - {}}}", self.command, result),
+                None => write!(f, "{{{}: Unknown Error}}", self.command),
+            },
         }
     }
 }

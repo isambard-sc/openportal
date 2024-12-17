@@ -596,7 +596,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 
     // first, create the user
     let username = clean_user_name(user.local_user())?;
-    let account = clean_account_name(user.local_project())?;
+    let account = clean_account_name(user.local_group())?;
 
     let cluster = cache::get_cluster().await?;
 

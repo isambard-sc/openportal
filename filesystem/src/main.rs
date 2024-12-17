@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
                     let home_permissions = cache::get_home_permissions().await?;
 
                     filesystem::create_home_dir(&home_dir, mapping.local_user(),
-                                                mapping.local_project(),
+                                                mapping.local_group(),
                                                 &home_permissions).await?;
 
                     // update the job with the user's home directory
@@ -158,8 +158,8 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Strin
     // Eventually we would need to encode the portal into this...
     let project_dir_name = mapping.project().project();
 
-    // The group name for any project dirs are the mapping local project IDs
-    let group_name = mapping.local_project();
+    // The group name for any project dirs are the mapping local group IDs
+    let group_name = mapping.local_group();
 
     // home directory is, e.g. /home/project/user
     let home_root = format!("{}/{}", cache::get_home_root().await?, project_dir_name);

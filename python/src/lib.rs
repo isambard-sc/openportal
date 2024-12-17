@@ -260,6 +260,14 @@ impl From<job::Job> for Job {
 
 #[pymethods]
 impl Job {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
     #[getter]
     fn id(&self) -> PyResult<Uuid> {
         Ok(self.0.id().into())
@@ -515,6 +523,21 @@ impl Uuid {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    #[staticmethod]
+    fn from_string(uuid: &str) -> PyResult<Uuid> {
+        Ok(Uuid::from(uuid.to_string()))
+    }
+
+    fn to_string(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+}
+
+impl From<String> for Uuid {
+    fn from(uuid: String) -> Self {
+        Uuid(uuid::Uuid::parse_str(&uuid).unwrap())
+    }
 }
 
 impl From<uuid::Uuid> for Uuid {
@@ -633,8 +656,8 @@ impl UserMapping {
     }
 
     #[getter]
-    fn local_project(&self) -> PyResult<String> {
-        Ok(self.0.local_project().to_string())
+    fn local_group(&self) -> PyResult<String> {
+        Ok(self.0.local_group().to_string())
     }
 
     fn __str__(&self) -> PyResult<String> {
@@ -664,8 +687,8 @@ impl ProjectMapping {
     }
 
     #[getter]
-    fn local_project(&self) -> PyResult<String> {
-        Ok(self.0.local_project().to_string())
+    fn local_group(&self) -> PyResult<String> {
+        Ok(self.0.local_group().to_string())
     }
 
     fn __str__(&self) -> PyResult<String> {
@@ -713,8 +736,8 @@ fn status(job: Job) -> PyResult<Job> {
 /// job does not exist.
 ///
 #[pyfunction]
-fn get(job_id: &str) -> PyResult<Job> {
-    match call_post::<job::Job>("status", serde_json::json!({"job": job_id.to_string()})) {
+fn get(job_id: &Uuid) -> PyResult<Job> {
+    match call_post::<job::Job>("status", serde_json::json!({"job": job_id.to_string()?})) {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }

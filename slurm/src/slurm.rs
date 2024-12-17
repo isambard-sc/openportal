@@ -1359,7 +1359,7 @@ impl Display for SlurmAccount {
 impl SlurmAccount {
     pub fn from_mapping(mapping: &ProjectMapping) -> Result<Self, Error> {
         Ok(SlurmAccount {
-            name: clean_account_name(mapping.local_project())?,
+            name: clean_account_name(mapping.local_group())?,
             description: format!("Account for OpenPortal project {}", mapping.project()),
             organization: get_managed_organization(),
         })
@@ -1471,7 +1471,7 @@ impl SlurmAssociation {
     pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
         Ok(SlurmAssociation {
             user: clean_user_name(mapping.local_user())?,
-            account: clean_account_name(mapping.local_project())?,
+            account: clean_account_name(mapping.local_group())?,
         })
     }
 
@@ -1563,7 +1563,7 @@ impl SlurmUser {
     pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
         Ok(SlurmUser {
             name: mapping.local_user().to_string(),
-            default_account: Some(clean_account_name(mapping.local_project())?),
+            default_account: Some(clean_account_name(mapping.local_group())?),
             associations: vec![SlurmAssociation::from_mapping(mapping)?],
         })
     }

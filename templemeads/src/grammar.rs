@@ -233,7 +233,7 @@ impl<'de> Deserialize<'de> for UserIdentifier {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ProjectMapping {
     project: ProjectIdentifier,
-    local_project: String,
+    local_group: String,
 }
 
 impl NamedType for ProjectMapping {
@@ -243,30 +243,30 @@ impl NamedType for ProjectMapping {
 }
 
 impl ProjectMapping {
-    pub fn new(project: &ProjectIdentifier, local_project: &str) -> Result<Self, Error> {
-        let local_project = local_project.trim();
+    pub fn new(project: &ProjectIdentifier, local_group: &str) -> Result<Self, Error> {
+        let local_group = local_group.trim();
 
-        if local_project.is_empty() {
+        if local_group.is_empty() {
             return Err(Error::Parse(format!(
-                "Invalid ProjectMapping - local_project cannot be empty '{}'",
-                local_project
+                "Invalid ProjectMapping - local_group cannot be empty '{}'",
+                local_group
             )));
         };
 
-        if local_project.starts_with(".")
-            || local_project.ends_with(".")
-            || local_project.starts_with("/")
-            || local_project.ends_with("/")
+        if local_group.starts_with(".")
+            || local_group.ends_with(".")
+            || local_group.starts_with("/")
+            || local_group.ends_with("/")
         {
             return Err(Error::Parse(format!(
-                "Invalid ProjectMapping - local project contains invalid characters '{}'",
-                local_project
+                "Invalid ProjectMapping - local group contains invalid characters '{}'",
+                local_group
             )));
         };
 
         Ok(Self {
             project: project.clone(),
-            local_project: local_project.to_string(),
+            local_group: local_group.to_string(),
         })
     }
 
@@ -281,23 +281,23 @@ impl ProjectMapping {
         }
 
         let project = ProjectIdentifier::parse(parts[0])?;
-        let local_project = parts[1].trim();
+        let local_group = parts[1].trim();
 
-        Self::new(&project, local_project)
+        Self::new(&project, local_group)
     }
 
     pub fn project(&self) -> &ProjectIdentifier {
         &self.project
     }
 
-    pub fn local_project(&self) -> &str {
-        &self.local_project
+    pub fn local_group(&self) -> &str {
+        &self.local_group
     }
 }
 
 impl std::fmt::Display for ProjectMapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.project, self.local_project)
+        write!(f, "{}:{}", self.project, self.local_group)
     }
 }
 
@@ -305,7 +305,7 @@ impl From<UserMapping> for ProjectMapping {
     fn from(mapping: UserMapping) -> Self {
         Self {
             project: mapping.user().project_identifier(),
-            local_project: mapping.local_project().to_string(),
+            local_group: mapping.local_group().to_string(),
         }
     }
 }
@@ -339,7 +339,7 @@ impl<'de> Deserialize<'de> for ProjectMapping {
 pub struct UserMapping {
     user: UserIdentifier,
     local_user: String,
-    local_project: String,
+    local_group: String,
 }
 
 impl NamedType for UserMapping {
@@ -349,13 +349,9 @@ impl NamedType for UserMapping {
 }
 
 impl UserMapping {
-    pub fn new(
-        user: &UserIdentifier,
-        local_user: &str,
-        local_project: &str,
-    ) -> Result<Self, Error> {
+    pub fn new(user: &UserIdentifier, local_user: &str, local_group: &str) -> Result<Self, Error> {
         let local_user = local_user.trim();
-        let local_project = local_project.trim();
+        let local_group = local_group.trim();
 
         if local_user.is_empty() {
             return Err(Error::Parse(format!(
@@ -370,33 +366,33 @@ impl UserMapping {
             || local_user.ends_with("/")
         {
             return Err(Error::Parse(format!(
-                "Invalid UserMapping - local user account contains invalid characters '{}'",
+                "Invalid UserMapping - local_user account contains invalid characters '{}'",
                 local_user
             )));
         };
 
-        if local_project.is_empty() {
+        if local_group.is_empty() {
             return Err(Error::Parse(format!(
-                "Invalid UserMapping - local_project cannot be empty '{}'",
-                local_project
+                "Invalid UserMapping - local_group cannot be empty '{}'",
+                local_group
             )));
         };
 
-        if local_project.starts_with(".")
-            || local_project.ends_with(".")
-            || local_project.starts_with("/")
-            || local_project.ends_with("/")
+        if local_group.starts_with(".")
+            || local_group.ends_with(".")
+            || local_group.starts_with("/")
+            || local_group.ends_with("/")
         {
             return Err(Error::Parse(format!(
-                "Invalid UserMapping - local project contains invalid characters '{}'",
-                local_project
+                "Invalid UserMapping - local_group contains invalid characters '{}'",
+                local_group
             )));
         };
 
         Ok(Self {
             user: user.clone(),
             local_user: local_user.to_string(),
-            local_project: local_project.to_string(),
+            local_group: local_group.to_string(),
         })
     }
 
@@ -409,9 +405,9 @@ impl UserMapping {
 
         let user = UserIdentifier::parse(parts[0])?;
         let local_user = parts[1].trim();
-        let local_project = parts[2].trim();
+        let local_group = parts[2].trim();
 
-        Self::new(&user, local_user, local_project)
+        Self::new(&user, local_user, local_group)
     }
 
     pub fn user(&self) -> &UserIdentifier {
@@ -422,18 +418,14 @@ impl UserMapping {
         &self.local_user
     }
 
-    pub fn local_project(&self) -> &str {
-        &self.local_project
+    pub fn local_group(&self) -> &str {
+        &self.local_group
     }
 }
 
 impl std::fmt::Display for UserMapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}",
-            self.user, self.local_user, self.local_project
-        )
+        write!(f, "{}:{}:{}", self.user, self.local_user, self.local_group)
     }
 }
 
@@ -744,20 +736,20 @@ mod tests {
     #[test]
     fn test_user_mapping() {
         let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
         assert_eq!(mapping.user(), &user);
         assert_eq!(mapping.local_user(), "local_user");
-        assert_eq!(mapping.local_project(), "local_project");
+        assert_eq!(mapping.local_group(), "local_group");
         assert_eq!(
             mapping.to_string(),
-            "user.project.portal:local_user:local_project"
+            "user.project.portal:local_user:local_group"
         );
     }
 
     #[test]
     fn test_instruction() {
         let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
 
         #[allow(clippy::unwrap_used)]
         let instruction = Instruction::parse("add_user user.project.portal").unwrap();
@@ -769,13 +761,13 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         let instruction =
-            Instruction::parse("add_local_user user.project.portal:local_user:local_project")
+            Instruction::parse("add_local_user user.project.portal:local_user:local_group")
                 .unwrap();
         assert_eq!(instruction, Instruction::AddLocalUser(mapping.clone()));
 
         #[allow(clippy::unwrap_used)]
         let instruction =
-            Instruction::parse("remove_local_user user.project.portal:local_user:local_project")
+            Instruction::parse("remove_local_user user.project.portal:local_user:local_group")
                 .unwrap();
         assert_eq!(instruction, Instruction::RemoveLocalUser(mapping.clone()));
 
@@ -805,29 +797,26 @@ mod tests {
     #[test]
     fn assert_serialize_mapping() {
         let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
         let serialized = serde_json::to_string(&mapping).unwrap_or_default();
-        assert_eq!(
-            serialized,
-            "\"user.project.portal:local_user:local_project\""
-        );
+        assert_eq!(serialized, "\"user.project.portal:local_user:local_group\"");
     }
 
     #[test]
     fn assert_deserialize_mapping() {
         let mapping: UserMapping =
-            serde_json::from_str("\"user.project.portal:local_user:local_project\"")
+            serde_json::from_str("\"user.project.portal:local_user:local_group\"")
                 .unwrap_or_default();
         assert_eq!(
             mapping.to_string(),
-            "user.project.portal:local_user:local_project"
+            "user.project.portal:local_user:local_group"
         );
     }
 
     #[test]
     fn assert_serialize_instruction() {
         let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap_or_default();
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
 
         let instruction = Instruction::AddUser(user.clone());
         let serialized = serde_json::to_string(&instruction).unwrap_or_default();
@@ -841,14 +830,14 @@ mod tests {
         let serialized = serde_json::to_string(&instruction).unwrap_or_default();
         assert_eq!(
             serialized,
-            "\"add_local_user user.project.portal:local_user:local_project\""
+            "\"add_local_user user.project.portal:local_user:local_group\""
         );
 
         let instruction = Instruction::RemoveLocalUser(mapping.clone());
         let serialized = serde_json::to_string(&instruction).unwrap_or_default();
         assert_eq!(
             serialized,
-            "\"remove_local_user user.project.portal:local_user:local_project\""
+            "\"remove_local_user user.project.portal:local_user:local_group\""
         );
 
         let instruction = Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string());
@@ -864,7 +853,7 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let user = UserIdentifier::parse("user.project.portal").unwrap();
         #[allow(clippy::unwrap_used)]
-        let mapping = UserMapping::new(&user, "local_user", "local_project").unwrap();
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap();
 
         #[allow(clippy::unwrap_used)]
         let instruction: Instruction =
@@ -878,13 +867,13 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         let instruction: Instruction =
-            serde_json::from_str("\"add_local_user user.project.portal:local_user:local_project\"")
+            serde_json::from_str("\"add_local_user user.project.portal:local_user:local_group\"")
                 .unwrap();
         assert_eq!(instruction, Instruction::AddLocalUser(mapping.clone()));
 
         #[allow(clippy::unwrap_used)]
         let instruction: Instruction = serde_json::from_str(
-            "\"remove_local_user user.project.portal:local_user:local_project\"",
+            "\"remove_local_user user.project.portal:local_user:local_group\"",
         )
         .unwrap();
         assert_eq!(instruction, Instruction::RemoveLocalUser(mapping.clone()));

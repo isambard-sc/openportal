@@ -5,23 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.2.0] - 2024-12-17
 ### Added
 - Added some extra functions to the Python layer to make it easier to
   integrate OpenPortal with, e.g. Waldur. These include `is_config_loaded`
   to check if the config has been loaded, and `get` to get the
   Job that matches the passed ID.
-
 - Added automatic building of Python Linux aarch64 binaries, so that
   the Python module can be used on ARM64 systems.
-
 - Cleaned up the Python API and added in lots of convenience functions.
   Objects are now correctly returned from the `run` function, so that you
   don't need to parse anything. Also added in the ability to default
   wait for a command to run
-
 - Added in extra commands to add and remove projects, list users in a
   project, and list projects in a portal. Some of these are still stubbed.
-
 - Added in `ProjectIdentifier` and `ProjectMapping` to mirror the
   equivalent `User` classes. Also cleaned up the concept of local
   users and groups, so that a `UserMapping` maps a user to a local
@@ -209,6 +207,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.2.0]: https://github.com/isambard-sc/openportal/releases/tag/0.2.0
 [0.1.1]: https://github.com/isambard-sc/openportal/releases/tag/0.1.1
 [0.1.0]: https://github.com/isambard-sc/openportal/releases/tag/0.1.0
 [0.0.25]: https://github.com/isambard-sc/openportal/releases/tag/0.0.25

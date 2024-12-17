@@ -300,12 +300,20 @@ impl Job {
 
     #[getter]
     fn created<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
-        PyDateTime::from_timestamp(py, self.0.created().timestamp() as f64, None)
+        PyDateTime::from_timestamp(
+            py,
+            self.0.created().timestamp() as f64,
+            Some(&pyo3::types::timezone_utc(py)),
+        )
     }
 
     #[getter]
     fn changed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
-        PyDateTime::from_timestamp(py, self.0.changed().timestamp() as f64, None)
+        PyDateTime::from_timestamp(
+            py,
+            self.0.changed().timestamp() as f64,
+            Some(&pyo3::types::timezone_utc(py)),
+        )
     }
 
     #[getter]
@@ -711,11 +719,28 @@ impl From<grammar::ProjectMapping> for ProjectMapping {
 /// This will return a Job object that can be used to query the
 /// status of the job and get the results.
 ///
+/// By default, this will not wait for the job to finish. If you
+/// want to wait for the job to finish, pass a maximum number of
+/// milliseconds to wait as 'max_ms', or a negative number if you want
+/// to wait indefinitely.
+///
 #[pyfunction]
-fn run(command: String) -> PyResult<Job> {
-    match call_post::<job::Job>("run", serde_json::json!({"command": command})) {
-        Ok(response) => Ok(response.into()),
-        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+#[pyo3(signature = (command, max_ms=0))]
+fn run(command: String, max_ms: i64) -> PyResult<Job> {
+    let mut job: Job = match call_post::<job::Job>("run", serde_json::json!({"command": command})) {
+        Ok(response) => response.into(),
+        Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    };
+
+    job.update()?;
+
+    if max_ms != 0 {
+        match job.wait(max_ms) {
+            Ok(_) => Ok(job),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    } else {
+        Ok(job)
     }
 }
 
@@ -736,8 +761,20 @@ fn status(job: Job) -> PyResult<Job> {
 /// job does not exist.
 ///
 #[pyfunction]
-fn get(job_id: &Uuid) -> PyResult<Job> {
-    match call_post::<job::Job>("status", serde_json::json!({"job": job_id.to_string()?})) {
+fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
+    let job_id = match job_id.extract::<Uuid>(py) {
+        Ok(uid) => uid.to_string()?,
+        Err(_) => match job_id.extract::<String>(py) {
+            Ok(uid) => uid,
+            Err(_) => {
+                return Err(PyErr::new::<PyOSError, _>(
+                    "Job ID must be a string or a Uuid",
+                ))
+            }
+        },
+    };
+
+    match call_post::<job::Job>("status", serde_json::json!({"job": job_id})) {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }

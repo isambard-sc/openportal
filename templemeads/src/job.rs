@@ -13,6 +13,7 @@ use anyhow::Result;
 use chrono::serde::ts_seconds;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +54,18 @@ pub enum Status {
     Running,
     Complete,
     Error,
+}
+
+impl Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Status::Created => write!(f, "created"),
+            Status::Pending => write!(f, "pending"),
+            Status::Running => write!(f, "running"),
+            Status::Complete => write!(f, "complete"),
+            Status::Error => write!(f, "error"),
+        }
+    }
 }
 
 ///
@@ -473,6 +486,22 @@ impl Job {
             Status::Pending => Some("Pending".to_owned()),
             Status::Complete => Some("Complete".to_owned()),
             Status::Error => Some("Error".to_owned()),
+        }
+    }
+
+    pub fn result_type(&self) -> Result<String, Error> {
+        match self.state {
+            Status::Created => Ok("None".to_string()),
+            Status::Pending => Ok("None".to_string()),
+            Status::Running => Ok("None".to_string()),
+            Status::Error => match &self.result_type {
+                Some(t) => Ok(t.clone()),
+                None => Ok("Error".to_string()),
+            },
+            Status::Complete => match &self.result_type {
+                Some(t) => Ok(t.clone()),
+                None => Ok("None".to_string()),
+            },
         }
     }
 

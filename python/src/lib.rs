@@ -2,20 +2,21 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
-use chrono::serde::ts_seconds;
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use paddington::SecretKey;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
+use pyo3::types::{PyDateTime, PyNone, PyString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path;
 use std::sync::RwLock;
-use templemeads::job::Status;
+use templemeads::destination;
+use templemeads::grammar;
+use templemeads::job;
 use templemeads::server::sign_api_call;
 use templemeads::Error;
 use url::Url;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
@@ -249,149 +250,80 @@ fn health() -> PyResult<Health> {
 ///
 #[pyclass]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Job {
-    id: Uuid,
-    #[serde(with = "ts_seconds")]
-    created: chrono::DateTime<Utc>,
-    #[serde(with = "ts_seconds")]
-    changed: chrono::DateTime<Utc>,
-    #[serde(with = "ts_seconds")]
-    expires: chrono::DateTime<Utc>,
-    version: u64,
-    command: String,
-    state: Status,
-    result: Option<String>,
+struct Job(job::Job);
+
+impl From<job::Job> for Job {
+    fn from(job: job::Job) -> Self {
+        Job(job)
+    }
 }
 
 #[pymethods]
 impl Job {
     #[getter]
-    fn id(&self) -> PyResult<String> {
-        Ok(self.id.to_string())
-    }
-
-    fn _is_expired(&self) -> bool {
-        match self.state {
-            Status::Complete => false,
-            Status::Error => false,
-            _ => Utc::now() > self.expires,
-        }
+    fn id(&self) -> PyResult<Uuid> {
+        Ok(self.0.id().into())
     }
 
     #[getter]
-    fn state(&self) -> PyResult<String> {
-        if self._is_expired() {
-            match self.state {
-                Status::Complete => Ok("Complete".to_owned()),
-                _ => Ok("Error".to_owned()),
-            }
-        } else {
-            match self.state {
-                Status::Created => Ok("Created".to_owned()),
-                Status::Pending => Ok("Pending".to_owned()),
-                Status::Running => Ok("Running".to_owned()),
-                Status::Complete => Ok("Complete".to_owned()),
-                Status::Error => Ok("Error".to_owned()),
-            }
-        }
+    fn destination(&self) -> PyResult<Destination> {
+        Ok(self.0.destination().into())
     }
 
     #[getter]
-    fn command(&self) -> PyResult<String> {
-        Ok(self.command.clone())
-    }
-
-    #[getter]
-    fn created(&self) -> PyResult<String> {
-        Ok(self.created.to_rfc3339())
-    }
-
-    #[getter]
-    fn changed(&self) -> PyResult<String> {
-        Ok(self.changed.to_rfc3339())
-    }
-
-    #[getter]
-    fn expires(&self) -> PyResult<String> {
-        Ok(self.expires.to_rfc3339())
-    }
-
-    #[getter]
-    fn result(&self) -> PyResult<Option<String>> {
-        if self.state == Status::Complete {
-            Ok(self.result.clone())
-        } else {
-            Ok(None)
-        }
-    }
-
-    #[getter]
-    fn is_finished(&self) -> PyResult<bool> {
-        Ok(self.state == Status::Complete || self.state == Status::Error || self._is_expired())
+    fn instruction(&self) -> PyResult<Instruction> {
+        Ok(self.0.instruction().into())
     }
 
     #[getter]
     fn is_expired(&self) -> PyResult<bool> {
-        Ok(self._is_expired())
+        Ok(self.0.is_expired())
     }
 
     #[getter]
-    fn is_error(&self) -> PyResult<bool> {
-        match self._is_expired() {
-            true => Ok(self.state != Status::Complete),
-            false => Ok(self.state == Status::Error),
-        }
+    fn is_finished(&self) -> PyResult<bool> {
+        Ok(self.0.is_finished())
     }
 
     #[getter]
-    fn error_message(&self) -> PyResult<Option<String>> {
-        match self._is_expired() {
-            true => {
-                if self.state == Status::Error {
-                    Ok(self.result.clone())
-                } else if self.state == Status::Complete {
-                    Ok(None)
-                } else {
-                    Ok(Some("Job has expired".to_owned()))
-                }
-            }
-            false => {
-                if self.state == Status::Error {
-                    Ok(self.result.clone())
-                } else {
-                    Ok(None)
-                }
-            }
+    fn state(&self) -> PyResult<Status> {
+        Ok(self.0.state().into())
+    }
+
+    #[getter]
+    fn created<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(py, self.0.created().timestamp() as f64, None)
+    }
+
+    #[getter]
+    fn changed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(py, self.0.changed().timestamp() as f64, None)
+    }
+
+    #[getter]
+    fn version(&self) -> PyResult<u64> {
+        Ok(self.0.version())
+    }
+
+    #[getter]
+    fn is_error(&self) -> bool {
+        self.0.is_error()
+    }
+
+    #[getter]
+    fn error_message(&self) -> PyResult<String> {
+        match self.0.error_message() {
+            Some(message) => Ok(message.clone()),
+            None => Ok("".to_string()),
         }
     }
 
     #[getter]
     fn progress_message(&self) -> PyResult<String> {
-        match self._is_expired() {
-            true => match self.state {
-                Status::Complete => Ok("Complete".to_owned()),
-                Status::Error => Ok("Error".to_owned()),
-                _ => Ok("Error (expired)".to_owned()),
-            },
-            false => match self.state {
-                Status::Running => {
-                    if let Some(result) = &self.result {
-                        Ok(result.clone())
-                    } else {
-                        Ok("Running".to_owned())
-                    }
-                }
-                Status::Created => Ok("Created".to_owned()),
-                Status::Pending => Ok("Pending".to_owned()),
-                Status::Complete => Ok("Complete".to_owned()),
-                Status::Error => Ok("Error".to_owned()),
-            },
+        match self.0.progress_message() {
+            Some(message) => Ok(message.clone()),
+            None => Ok("".to_string()),
         }
-    }
-
-    #[getter]
-    fn version(&self) -> PyResult<u64> {
-        Ok(self.version)
     }
 
     fn update(&mut self) -> PyResult<()> {
@@ -437,47 +369,317 @@ impl Job {
         self.is_finished()
     }
 
-    fn __str__(&self) -> PyResult<String> {
-        match self._is_expired() {
-            true => match self.state {
-                Status::Complete => Ok(format!(
-                    "Job( command: {}, status: completed, result: {} )",
-                    self.command,
-                    self.result.clone().unwrap_or("None".to_owned())
-                )),
-                Status::Error => Ok(format!(
-                    "Job( command: {}, status: error, message: {} )",
-                    self.command,
-                    self.result.clone().unwrap_or("None".to_owned())
-                )),
-                _ => Ok(format!(
-                    "Job( command: {}, status: error, message: Job has expired )",
-                    self.command
-                )),
-            },
-            false => match self.state {
-                Status::Complete => Ok(format!(
-                    "Job( command: {}, status: completed, result: {} )",
-                    self.command,
-                    self.result.clone().unwrap_or("None".to_owned())
-                )),
-                Status::Error => Ok(format!(
-                    "Job( command: {}, status: error, message: {} )",
-                    self.command,
-                    self.result.clone().unwrap_or("None".to_owned())
-                )),
-                _ => Ok(format!(
-                    "Job( command: {}, status: {:?}, message: {} )",
-                    self.command,
-                    self.state,
-                    self.result.clone().unwrap_or("None".to_owned())
-                )),
-            },
+    #[getter]
+    fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if !self.is_finished()? {
+            return Err(PyErr::new::<PyOSError, _>("Job is not finished"));
         }
+
+        if self.0.is_error() {
+            return Err(PyErr::new::<PyOSError, _>(self.error_message()?));
+        }
+
+        let result_type = match self.0.result_type() {
+            Ok(result_type) => result_type,
+            Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        };
+
+        match result_type.as_str() {
+            "String" => {
+                let result = match self.0.result::<String>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(PyString::new(py, &result).into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "None" => Ok(PyNone::get(py).as_ref().clone()),
+            "UserIdentifier" => {
+                let result = match self.0.result::<grammar::UserIdentifier>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(UserIdentifier::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "ProjectIdentifier" => {
+                let result = match self.0.result::<grammar::ProjectIdentifier>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectIdentifier::from(result)
+                        .into_pyobject(py)?
+                        .into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "UserMapping" => {
+                let result = match self.0.result::<grammar::UserMapping>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(UserMapping::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "ProjectMapping" => {
+                let result = match self.0.result::<grammar::ProjectMapping>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectMapping::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            _ => Err(PyErr::new::<PyOSError, _>(format!(
+                "Unknown result type: {}",
+                result_type
+            ))),
+        }
+    }
+}
+
+///
+/// Wrappers for the publicly exposed data types
+///
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Destination(destination::Destination);
+
+#[pymethods]
+impl Destination {
+    #[getter]
+    fn agents(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.agents().clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
     }
 
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
+    }
+}
+
+impl From<destination::Destination> for Destination {
+    fn from(destination: destination::Destination) -> Self {
+        Destination(destination)
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Instruction(grammar::Instruction);
+
+#[pymethods]
+impl Instruction {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<grammar::Instruction> for Instruction {
+    fn from(instruction: grammar::Instruction) -> Self {
+        Instruction(instruction)
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Uuid(uuid::Uuid);
+
+#[pymethods]
+impl Uuid {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<uuid::Uuid> for Uuid {
+    fn from(uuid: uuid::Uuid) -> Self {
+        Uuid(uuid)
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Status(job::Status);
+
+#[pymethods]
+impl Status {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<job::Status> for Status {
+    fn from(status: job::Status) -> Self {
+        Status(status)
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserIdentifier(grammar::UserIdentifier);
+
+#[pymethods]
+impl UserIdentifier {
+    #[getter]
+    fn username(&self) -> PyResult<String> {
+        Ok(self.0.username().clone())
+    }
+
+    #[getter]
+    fn project(&self) -> PyResult<String> {
+        Ok(self.0.project().clone())
+    }
+
+    #[getter]
+    fn portal(&self) -> PyResult<String> {
+        Ok(self.0.portal().clone())
+    }
+
+    #[getter]
+    fn project_identifier(&self) -> PyResult<ProjectIdentifier> {
+        Ok(self.0.project_identifier().clone().into())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<grammar::UserIdentifier> for UserIdentifier {
+    fn from(user_identifier: grammar::UserIdentifier) -> Self {
+        UserIdentifier(user_identifier)
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectIdentifier(grammar::ProjectIdentifier);
+
+#[pymethods]
+impl ProjectIdentifier {
+    #[getter]
+    fn project(&self) -> PyResult<String> {
+        Ok(self.0.project().clone())
+    }
+
+    #[getter]
+    fn portal(&self) -> PyResult<String> {
+        Ok(self.0.portal().clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
+    fn from(project_identifier: grammar::ProjectIdentifier) -> Self {
+        ProjectIdentifier(project_identifier)
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserMapping(grammar::UserMapping);
+
+#[pymethods]
+impl UserMapping {
+    #[getter]
+    fn user(&self) -> PyResult<UserIdentifier> {
+        Ok(self.0.user().clone().into())
+    }
+
+    #[getter]
+    fn local_user(&self) -> PyResult<String> {
+        Ok(self.0.local_user().to_string())
+    }
+
+    #[getter]
+    fn local_project(&self) -> PyResult<String> {
+        Ok(self.0.local_project().to_string())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<grammar::UserMapping> for UserMapping {
+    fn from(user_mapping: grammar::UserMapping) -> Self {
+        UserMapping(user_mapping)
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectMapping(grammar::ProjectMapping);
+
+#[pymethods]
+impl ProjectMapping {
+    #[getter]
+    fn project(&self) -> PyResult<ProjectIdentifier> {
+        Ok(self.0.project().clone().into())
+    }
+
+    #[getter]
+    fn local_project(&self) -> PyResult<String> {
+        Ok(self.0.local_project().to_string())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<grammar::ProjectMapping> for ProjectMapping {
+    fn from(project_mapping: grammar::ProjectMapping) -> Self {
+        ProjectMapping(project_mapping)
     }
 }
 
@@ -488,8 +690,8 @@ impl Job {
 ///
 #[pyfunction]
 fn run(command: String) -> PyResult<Job> {
-    match call_post::<Job>("run", serde_json::json!({"command": command})) {
-        Ok(response) => Ok(response),
+    match call_post::<job::Job>("run", serde_json::json!({"command": command})) {
+        Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }
@@ -500,8 +702,8 @@ fn run(command: String) -> PyResult<Job> {
 ///
 #[pyfunction]
 fn status(job: Job) -> PyResult<Job> {
-    match call_post::<Job>("status", serde_json::json!({"job": job.id})) {
-        Ok(response) => Ok(response),
+    match call_post::<job::Job>("status", serde_json::json!({"job": job.0.id().to_string()})) {
+        Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }
@@ -512,8 +714,8 @@ fn status(job: Job) -> PyResult<Job> {
 ///
 #[pyfunction]
 fn get(job_id: &str) -> PyResult<Job> {
-    match call_post::<Job>("status", serde_json::json!({"job": job_id.to_string()})) {
-        Ok(response) => Ok(response),
+    match call_post::<job::Job>("status", serde_json::json!({"job": job_id.to_string()})) {
+        Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }

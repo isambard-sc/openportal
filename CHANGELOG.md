@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.2.1] - 2024-12-17
+### Added
+- Adding copy and deepcopy methods to Python (python-only release)
+
 ## [0.2.0] - 2024-12-17
 ### Added
 - Added some extra functions to the Python layer to make it easier to

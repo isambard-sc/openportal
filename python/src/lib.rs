@@ -205,7 +205,7 @@ fn initialize_tracing() -> PyResult<()> {
 ///
 /// Return type for the health function
 ///
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
     pub status: String,
@@ -224,6 +224,14 @@ impl Health {
 
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Health> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Health> {
+        Ok(self.clone())
     }
 
     fn is_healthy(&self) -> PyResult<bool> {
@@ -248,7 +256,7 @@ fn health() -> PyResult<Health> {
 /// run, and provides functions that let you query the status and
 /// get the results
 ///
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Job(job::Job);
 
@@ -266,6 +274,14 @@ impl Job {
 
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Job> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Job> {
+        Ok(self.clone())
     }
 
     #[getter]
@@ -471,7 +487,7 @@ impl Job {
 /// Wrappers for the publicly exposed data types
 ///
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Destination(destination::Destination);
 
@@ -489,6 +505,14 @@ impl Destination {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    fn __copy__(&self) -> PyResult<Destination> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Destination> {
+        Ok(self.clone())
+    }
 }
 
 impl From<destination::Destination> for Destination {
@@ -497,7 +521,7 @@ impl From<destination::Destination> for Destination {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Instruction(grammar::Instruction);
 
@@ -510,6 +534,14 @@ impl Instruction {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    fn __copy__(&self) -> PyResult<Instruction> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Instruction> {
+        Ok(self.clone())
+    }
 }
 
 impl From<grammar::Instruction> for Instruction {
@@ -518,7 +550,7 @@ impl From<grammar::Instruction> for Instruction {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Uuid(uuid::Uuid);
 
@@ -530,6 +562,14 @@ impl Uuid {
 
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Uuid> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Uuid> {
+        Ok(self.clone())
     }
 
     #[staticmethod]
@@ -554,7 +594,7 @@ impl From<uuid::Uuid> for Uuid {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Status(job::Status);
 
@@ -567,6 +607,14 @@ impl Status {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    fn __copy__(&self) -> PyResult<Status> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Status> {
+        Ok(self.clone())
+    }
 }
 
 impl From<job::Status> for Status {
@@ -575,12 +623,20 @@ impl From<job::Status> for Status {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserIdentifier(grammar::UserIdentifier);
 
 #[pymethods]
 impl UserIdentifier {
+    fn __copy__(&self) -> PyResult<UserIdentifier> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<UserIdentifier> {
+        Ok(self.clone())
+    }
+
     #[getter]
     fn username(&self) -> PyResult<String> {
         Ok(self.0.username().clone())
@@ -616,7 +672,7 @@ impl From<grammar::UserIdentifier> for UserIdentifier {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectIdentifier(grammar::ProjectIdentifier);
 
@@ -639,6 +695,14 @@ impl ProjectIdentifier {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    fn __copy__(&self) -> PyResult<ProjectIdentifier> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectIdentifier> {
+        Ok(self.clone())
+    }
 }
 
 impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
@@ -647,7 +711,7 @@ impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserMapping(grammar::UserMapping);
 
@@ -675,6 +739,14 @@ impl UserMapping {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    fn __copy__(&self) -> PyResult<UserMapping> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<UserMapping> {
+        Ok(self.clone())
+    }
 }
 
 impl From<grammar::UserMapping> for UserMapping {
@@ -683,7 +755,7 @@ impl From<grammar::UserMapping> for UserMapping {
     }
 }
 
-#[pyclass]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectMapping(grammar::ProjectMapping);
 
@@ -705,6 +777,14 @@ impl ProjectMapping {
 
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectMapping> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectMapping> {
+        Ok(self.clone())
     }
 }
 
@@ -789,5 +869,17 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
     m.add_function(wrap_pyfunction!(get, m)?)?;
+
+    m.add_class::<Health>()?;
+    m.add_class::<Job>()?;
+    m.add_class::<UserIdentifier>()?;
+    m.add_class::<ProjectIdentifier>()?;
+    m.add_class::<UserMapping>()?;
+    m.add_class::<ProjectMapping>()?;
+    m.add_class::<Uuid>()?;
+    m.add_class::<Destination>()?;
+    m.add_class::<Instruction>()?;
+    m.add_class::<Status>()?;
+
     Ok(())
 }

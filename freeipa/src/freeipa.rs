@@ -275,6 +275,7 @@ pub struct IPAUser {
     userclass: String,
     primary_group: String,
     memberof: Vec<String>,
+    enabled: bool,
 }
 
 // implement display for IPAUser
@@ -282,7 +283,7 @@ impl std::fmt::Display for IPAUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: local_name={}, givenname={}, userclass={}, primary_group={}, memberof={}, home={}",
+            "{}: local_name={}, givenname={}, userclass={}, primary_group={}, memberof={}, home={}, enabled={}",
             self.identifier(),
             self.userid(),
             self.givenname(),
@@ -290,6 +291,7 @@ impl std::fmt::Display for IPAUser {
             self.primary_group(),
             self.memberof().join(","),
             self.home(),
+            self.is_enabled()
         )
     }
 }
@@ -306,16 +308,25 @@ impl IPAUser {
 
         for user in result {
             // uid is a list of strings - just get the first one
-            let cn = match UserIdentifier::parse(
-                user.get("cn")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.first())
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-            ) {
+            let cn: &str = match user
+                .get("cn")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+            {
+                Some(cn) => cn,
+                None => {
+                    tracing::error!("Could not parse user identifier (CN) from: {}", user);
+                    continue;
+                }
+            };
+
+            let cn = match UserIdentifier::parse(cn) {
                 Ok(cn) => cn,
-                Err(e) => {
-                    tracing::error!("Could not parse user identifier: {}. Error: {}", user, e);
+                Err(_) => {
+                    tracing::error!(
+                        "Could not parse user identifier from CN: {cn} :Skipping user."
+                    );
                     continue;
                 }
             };
@@ -365,6 +376,7 @@ impl IPAUser {
 
             // try to find the primary group for this user
             let primary_group = get_primary_group(&cn)?.groupid().to_string();
+
             let primary_group = match memberof.contains(&primary_group) {
                 true => primary_group,
                 false => {
@@ -377,6 +389,13 @@ impl IPAUser {
                 }
             };
 
+            // try to see if this user is enabled - the nsaccountlock
+            // attribute is changed to "True" when the account is disabled
+            let disabled = user
+                .get("nsaccountlock")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
             users.push(IPAUser {
                 userid,
                 cn,
@@ -385,6 +404,7 @@ impl IPAUser {
                 homedirectory,
                 primary_group,
                 memberof,
+                enabled: !disabled,
             });
         }
 
@@ -449,7 +469,24 @@ impl IPAUser {
     /// FreeIPA (local user account plus primary project) user
     ///
     pub fn mapping(&self) -> Result<UserMapping, Error> {
-        UserMapping::new(&self.cn, self.userid(), self.primary_group())
+        if self.primary_group.is_empty() {
+            // this is a user that doesn't have a primary group - likely because
+            // they were disabled. We can guess the primary group, which
+            // we will do here, printing out a warning if the user isn't disabled
+            let guessed_primary_group = get_primary_group(&self.cn)?.groupid().to_string();
+
+            if self.is_enabled() {
+                tracing::warn!(
+                    "User {} does not have a primary group. Guessing: {}",
+                    self.identifier(),
+                    guessed_primary_group
+                );
+            }
+
+            UserMapping::new(&self.cn, self.userid(), &guessed_primary_group)
+        } else {
+            UserMapping::new(&self.cn, self.userid(), self.primary_group())
+        }
     }
 
     ///
@@ -478,6 +515,34 @@ impl IPAUser {
         };
 
         self.in_group(&managed_group) && self.userclass() == managed_group
+    }
+
+    ///
+    /// Return whether or not this user is enabled in FreeIPA
+    ///
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    ///
+    /// Return whether or not this user is disabled in FreeIPA
+    ///
+    pub fn is_disabled(&self) -> bool {
+        !self.is_enabled()
+    }
+
+    ///
+    /// Set this user as enabled in FreeIPA
+    ///
+    pub fn set_enabled(&mut self) {
+        self.enabled = true;
+    }
+
+    ///
+    /// Set this user as disabled in FreeIPA
+    ///
+    pub fn set_disabled(&mut self) {
+        self.enabled = false;
     }
 }
 
@@ -809,7 +874,13 @@ async fn force_get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Erro
 
     let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
 
-    result.users()
+    // filter out users who are not managed and who are disabled
+    Ok(result
+        .users()?
+        .iter()
+        .filter(|u| u.is_managed() & u.is_enabled())
+        .cloned()
+        .collect())
 }
 
 ///
@@ -925,6 +996,31 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
             Ok(None)
         }
     }
+}
+
+///
+/// Return all of the groups that the user is a member of
+///
+async fn get_groups_for_user(user: &IPAUser) -> Result<Vec<IPAGroup>, Error> {
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("user".to_string(), user.userid().to_string());
+        kwargs.insert("all".to_string(), "true".to_string());
+        kwargs.insert("sizelimit".to_string(), "2048".to_string());
+        kwargs
+    };
+
+    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+
+    let groups = result.groups()?;
+
+    tracing::info!(
+        "User {} is in groups: {:?}",
+        user.identifier(),
+        groups.iter().map(|g| g.groupid()).collect::<Vec<&str>>()
+    );
+
+    Ok(groups)
 }
 
 ///
@@ -1253,7 +1349,33 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
 ///
 pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
     // return the user if they already exist
-    if let Some(user) = get_user(user).await? {
+    if let Some(mut user) = get_user(user).await? {
+        // make sure that they are enabled if they are disabled
+        if user.is_disabled() {
+            let kwargs = {
+                let mut kwargs = HashMap::new();
+                kwargs.insert("uid".to_string(), user.userid().to_string());
+                kwargs
+            };
+
+            match call_post::<IPAResponse>("user_enable", None, Some(kwargs)).await {
+                Ok(_) => {
+                    user.set_enabled();
+                    tracing::info!("Successfully re-enabled user: {}", user);
+                }
+                Err(e) => {
+                    tracing::error!("Could not enable user: {}. Error: {}", user, e);
+                    return Err(Error::Call(format!(
+                        "Could not enable user: {}. Error: {}",
+                        user, e
+                    )));
+                }
+            }
+
+            // re-add the user to the cache
+            cache::add_existing_user(&user).await?;
+        }
+
         // make sure that the groups are correct
         match sync_groups(&user, instance).await {
             Ok(user) => {
@@ -1354,7 +1476,7 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
                 kwargs
             };
 
-            match call_post::<IPAResponse>("user_del", None, Some(kwargs)).await {
+            match call_post::<IPAResponse>("user_disable", None, Some(kwargs)).await {
                 Ok(_) => {
                     tracing::info!(
                         "Successfully removed user {} after failed group add",
@@ -1406,7 +1528,7 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
 /// OpenPortal, or an error will be returned
 ///
 pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
-    let user = match get_user(user).await {
+    let mut user = match get_user(user).await {
         Ok(Some(user)) => user,
         Ok(None) => {
             tracing::warn!(
@@ -1427,14 +1549,70 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         }
     };
 
+    if user.is_disabled() {
+        // nothing to do
+        tracing::info!("User {} is already disabled. No changes needed.", user);
+        return Ok(user);
+    }
+
+    // get all of the groups that this user is in
+    let groups = match get_groups_for_user(&user).await {
+        Ok(groups) => groups,
+        Err(e) => {
+            tracing::error!("Could not get groups for user {}. Error: {}", user, e);
+            vec![]
+        }
+    };
+
+    // remove the user from all groups EXCEPT the managed group
+    // This is necessary to make sure that we don't accidentally
+    // add the user back to groups they don't have permission to be
+    // in if they are re-enabled
+    let managed_group = get_managed_group()?;
+
+    for group in groups {
+        if group.identifier() == managed_group.identifier() {
+            continue;
+        }
+
+        let kwargs = {
+            let mut kwargs = HashMap::new();
+            kwargs.insert("cn".to_string(), group.groupid().to_string());
+            kwargs.insert("user".to_string(), user.userid().to_string());
+            kwargs
+        };
+
+        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs)).await {
+            Ok(_) => {
+                tracing::info!(
+                    "Successfully removed user {} from group {}",
+                    user.identifier(),
+                    group.groupid()
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Could not remove user {} from group {}. Error: {}",
+                    user.identifier(),
+                    group.groupid(),
+                    e
+                );
+            }
+        }
+    }
+
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("uid".to_string(), user.userid().to_string());
         kwargs
     };
 
-    match call_post::<IPAResponse>("user_del", None, Some(kwargs)).await {
+    // we don't actually remove users - instead we disable them so that
+    // they can't log in. This way, if the user is re-added, then they
+    // will get the same UID and other details
+    match call_post::<IPAResponse>("user_disable", None, Some(kwargs)).await {
         Ok(_) => {
+            user.set_disabled();
             tracing::info!("Successfully removed user: {}", user);
         }
         Err(e) => {

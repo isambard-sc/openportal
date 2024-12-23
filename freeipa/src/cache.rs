@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use templemeads::agent::Peer;
 use templemeads::grammar::{ProjectIdentifier, UserIdentifier};
 use templemeads::Error;
@@ -19,6 +19,7 @@ struct Database {
     groups: HashMap<ProjectIdentifier, IPAGroup>,
     system_groups: Vec<IPAGroup>,
     instance_groups: HashMap<Peer, Vec<IPAGroup>>,
+    users_in_group: HashMap<ProjectIdentifier, HashSet<UserIdentifier>>,
 }
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
@@ -30,6 +31,170 @@ static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::defaul
 pub async fn get_user(identifier: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
     let cache = CACHE.read().await;
     Ok(cache.users.get(identifier).cloned())
+}
+
+///
+/// Remember that the passed user is associated with the passed group
+/// Currently unused, but want to keep it around for future use
+///
+#[allow(dead_code)]
+pub async fn add_user_to_group(user: &IPAUser, group: &IPAGroup) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+
+    let user = match cache.users.get(user.identifier()) {
+        Some(user) => user.clone(),
+        None => {
+            cache.users.insert(user.identifier().clone(), user.clone());
+            user.clone()
+        }
+    };
+
+    let group = match cache.groups.get(group.identifier()) {
+        Some(group) => group.clone(),
+        None => {
+            cache
+                .groups
+                .insert(group.identifier().clone(), group.clone());
+            group.clone()
+        }
+    };
+
+    cache
+        .users_in_group
+        .entry(group.identifier().clone())
+        .or_insert_with(HashSet::new)
+        .insert(user.identifier().clone());
+    Ok(())
+}
+
+///
+/// Remember that the passed user is associated with the passed groups
+///
+pub async fn add_user_to_groups(user: &IPAUser, groups: &[IPAGroup]) -> Result<(), Error> {
+    if groups.is_empty() {
+        return Ok(());
+    }
+
+    let mut cache = CACHE.write().await;
+
+    let user = match cache.users.get(user.identifier()) {
+        Some(user) => user.clone(),
+        None => {
+            cache.users.insert(user.identifier().clone(), user.clone());
+            user.clone()
+        }
+    };
+
+    groups.iter().for_each(|group| {
+        let group = match cache.groups.get(group.identifier()) {
+            Some(group) => group.clone(),
+            None => {
+                cache
+                    .groups
+                    .insert(group.identifier().clone(), group.clone());
+                group.clone()
+            }
+        };
+
+        cache
+            .users_in_group
+            .entry(group.identifier().clone())
+            .or_insert_with(HashSet::new)
+            .insert(user.identifier().clone());
+    });
+
+    Ok(())
+}
+
+///
+/// Set that the passed project has the passed users associated with it
+///
+pub async fn set_users_in_group(group: &IPAGroup, users: &[IPAUser]) -> Result<(), Error> {
+    if users.is_empty() {
+        return Ok(());
+    }
+
+    let mut cache = CACHE.write().await;
+
+    // make sure we have cached the group and users
+    let group = match cache.groups.get(group.identifier()) {
+        Some(group) => group.clone(),
+        None => {
+            cache
+                .groups
+                .insert(group.identifier().clone(), group.clone());
+            group.clone()
+        }
+    };
+
+    let users: Vec<IPAUser> = users
+        .iter()
+        .map(|u| {
+            cache
+                .users
+                .entry(u.identifier().clone())
+                .or_insert_with(|| u.clone())
+                .clone()
+        })
+        .collect();
+
+    cache.users_in_group.insert(
+        group.identifier().clone(),
+        users.iter().map(|u| u.identifier().clone()).collect(),
+    );
+
+    Ok(())
+}
+
+///
+/// Remove the passed user from the passed group
+/// Currently unused, but want to keep it around for future use
+///
+#[allow(dead_code)]
+pub async fn remove_user_from_group(group: &IPAGroup, user: &IPAUser) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+
+    let group = match cache.groups.get(group.identifier()) {
+        Some(group) => group.clone(),
+        None => {
+            cache
+                .groups
+                .insert(group.identifier().clone(), group.clone());
+            group.clone()
+        }
+    };
+
+    let user = match cache.users.get(user.identifier()) {
+        Some(user) => user.clone(),
+        None => {
+            cache.users.insert(user.identifier().clone(), user.clone());
+            user.clone()
+        }
+    };
+
+    if let Some(users) = cache.users_in_group.get_mut(group.identifier()) {
+        users.retain(|u| u != user.identifier());
+    }
+
+    Ok(())
+}
+
+///
+/// Return all users we know are associated with the passed group
+///
+pub async fn get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Error> {
+    let cache = CACHE.read().await;
+    Ok(cache
+        .users_in_group
+        .get(group.identifier())
+        .map(|users| {
+            users
+                .iter()
+                .filter_map(|u| cache.users.get(u))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 ///
@@ -82,20 +247,40 @@ pub async fn get_instance_groups(instance: &Peer) -> Result<Vec<IPAGroup>, Error
 /// Add a user that exits in FreeIPA that we are managing to the database
 ///
 pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
-    match user.identifier().is_valid() {
-        true => {
-            let mut cache = CACHE.write().await;
-            cache.users.insert(user.identifier().clone(), user.clone());
-            Ok(())
-        }
-        false => {
-            tracing::error!(
-                "Unable to register {:?} as their UserIdentifier is not valid",
-                user
-            );
-            Ok(())
-        }
-    }
+    let mut cache = CACHE.write().await;
+    cache.users.insert(user.identifier().clone(), user.clone());
+    Ok(())
+}
+
+///
+/// Add a number of existing users to the database.
+/// Currently unused, but want to keep it around for future use
+///
+#[allow(dead_code)]
+pub async fn add_existing_users(users: &[IPAUser]) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    users.iter().for_each(|u| {
+        // only insert if they don't already exist
+        cache
+            .users
+            .entry(u.identifier().clone())
+            .or_insert_with(|| u.clone());
+    });
+    Ok(())
+}
+
+///
+/// Remove a user from the database
+///
+pub async fn remove_existing_user(user: &IPAUser) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    cache.users.remove(user.identifier());
+
+    cache.users_in_group.values_mut().for_each(|users| {
+        users.retain(|u| u != user.identifier());
+    });
+
+    Ok(())
 }
 
 ///
@@ -111,20 +296,35 @@ pub async fn get_group(group: &ProjectIdentifier) -> Result<Option<IPAGroup>, Er
 /// Add an existing group to the database
 ///
 pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
-    match group.identifier().is_valid() {
-        true => {
-            let mut cache = CACHE.write().await;
-            cache
-                .groups
-                .insert(group.identifier().clone(), group.clone());
-        }
-        false => {
-            tracing::error!(
-                "Unable to register {:?} as the group identifier is not valid",
-                group
-            );
-        }
-    }
+    let mut cache = CACHE.write().await;
+    cache
+        .groups
+        .insert(group.identifier().clone(), group.clone());
+
+    Ok(())
+}
+
+///
+/// Add a number of existing groups to the database
+///
+pub async fn add_existing_groups(groups: &[IPAGroup]) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    groups.iter().for_each(|g| {
+        cache
+            .groups
+            .entry(g.identifier().clone())
+            .or_insert_with(|| g.clone());
+    });
+    Ok(())
+}
+
+///
+/// Remove a group from the database
+///
+pub async fn remove_existing_group(group: &IPAGroup) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+    cache.groups.remove(group.identifier());
+    cache.users_in_group.remove(group.identifier());
 
     Ok(())
 }
@@ -137,5 +337,6 @@ pub async fn clear() -> Result<(), Error> {
     let mut cache = CACHE.write().await;
     cache.users.clear();
     cache.groups.clear();
+    cache.users_in_group.clear();
     Ok(())
 }

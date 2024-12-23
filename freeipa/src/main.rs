@@ -104,24 +104,24 @@ async fn main() -> Result<()> {
             let sender = envelope.sender();
 
             match job.instruction() {
-                GetProjects() => {
-                    let projects = freeipa::get_projects().await?;
-                    let job = job.completed(projects)?;
+                GetProjects(portal) => {
+                    let groups = freeipa::get_groups(&portal).await?;
+                    let job = job.completed(groups.iter().map(|g| g.mapping()).collect::<Result<Vec<_>, _>>()?)?;
                     Ok(job)
                 },
                 AddProject(project) => {
                     let project = freeipa::add_project(&project).await?;
-                    let job = job.completed(project.mapping()?)?;
+                    job.completed(project.mapping()?)?;
                     Ok(job)
                 },
                 RemoveProject(project) => {
-                    Err(Error::IncompleteCode(
-                        format!("RemoveProject instruction not implemented yet - cannot remove {}", project),
-                    ))
+                    let project = freeipa::remove_project(&project).await?;
+                    let job = job.completed(project.mapping()?)?;
+                    Ok(job)
                 },
                 GetUsers(project) => {
                     let users = freeipa::get_users(&project).await?;
-                    let job = job.completed(users)?;
+                    let job = job.completed(users.iter().map(|u| u.mapping()).collect::<Result<Vec<_>, _>>()?)?;
                     Ok(job)
                 },
                 AddUser(user) => {
@@ -130,9 +130,9 @@ async fn main() -> Result<()> {
                     Ok(job)
                 },
                 RemoveUser(user) => {
-                    Err(Error::IncompleteCode(
-                        format!("RemoveUser instruction not implemented yet - cannot remove {}", user),
-                    ))
+                    let user = freeipa::remove_user(&user).await?;
+                    let job = job.completed(user.mapping()?)?;
+                    Ok(job)
                 },
                 UpdateHomeDir(user, homedir) => {
                     let _ = freeipa::update_homedir(&user, &homedir).await?;

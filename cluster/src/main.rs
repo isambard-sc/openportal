@@ -10,7 +10,9 @@ use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, GetProjects, GetUsers, RemoveProject, RemoveUser,
 };
-use templemeads::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
+use templemeads::grammar::{
+    PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
+};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -66,18 +68,14 @@ async fn main() -> Result<()> {
             tracing::info!("Using the cluster runner");
 
             let me = envelope.recipient();
-            let sender = envelope.sender();
             let mut job = envelope.job();
 
             match job.instruction() {
-                GetProjects() => {
+                GetProjects(portal) => {
                     // get the list of projects from the cluster
-                    tracing::info!("Getting list of projects");
+                    tracing::info!("Getting list of projects for portal {}", portal);
 
-                    let projects = get_projects(me.name()).await?;
-
-                    job = job.running(Some("Step 1/1: Projects being retrieved".to_string()))?;
-                    job = job.update(&sender).await?;
+                    let projects = get_projects(me.name(), &portal).await?;
 
                     job = job.completed(projects)?;
                 },
@@ -87,61 +85,57 @@ async fn main() -> Result<()> {
 
                     let users = get_accounts(me.name(), &project).await?;
 
-                    job = job.running(Some("Step 1/1: Users being retrieved".to_string()))?;
-                    job = job.update(&sender).await?;
-
                     job = job.completed(users)?;
                 },
                 AddProject(project) => {
                     // add the project to the cluster
-                    tracing::info!("Adding project to cluster: {}", project);
-                    let mapping = create_project(me.name(), &project).await?;
+                    let mapping = match add_project_to_cluster(me.name(), &project).await {
+                        Ok(mapping) => mapping,
+                        Err(e) => {
+                            // we cannot leave a dangling project group,
+                            // so we need to remove the project from FreeIPA
+                            tracing::error!("Error adding project {} to cluster: {:?}", project, e);
 
-                    job = job.running(Some("Step 1/3: Project created".to_string()))?;
-                    job = job.update(&sender).await?;
+                            match remove_project_from_cluster(me.name(), &project).await {
+                                Ok(_) => tracing::info!("Removed partially added project {}", project),
+                                Err(e) => tracing::error!("Failed to remove partially added project {}: {:?}", project, e)
+                            }
 
-                    // now create the project directories
-                    create_project_directories(me.name(), &mapping).await?;
-
-                    job = job.running(Some("Step 2/3: Directories created".to_string()))?;
-                    job = job.update(&sender).await?;
-
-                    // and finally add the project to the job scheduler
-                    add_project_to_scheduler(me.name(), &project, &mapping).await?;
+                            return Err(e);
+                        }
+                    };
 
                     job = job.completed(mapping)?;
                 },
                 RemoveProject(project) => {
                     // remove the project from the cluster
-                    tracing::info!("Removing project from cluster: {}", project);
-                    job = job.completed("Project removed".to_string())?;
+                    let mapping = remove_project_from_cluster(me.name(), &project).await?;
+                    job = job.completed(mapping)?;
                 },
                 AddUser(user) => {
                     // add the user to the cluster
-                    tracing::info!("Adding user to cluster: {}", user);
-                    let mapping = create_account(me.name(), &user).await?;
+                    let mapping = match add_user_to_cluster(me.name(), &user).await {
+                        Ok(mapping) => mapping,
+                        Err(e) => {
+                            // we cannot leave a dangling user account,
+                            // so we need to remove the user from FreeIPA
+                            tracing::error!("Error adding user {} to cluster: {:?}", user, e);
 
-                    job = job.running(Some("Step 1/3: Account created".to_string()))?;
-                    job = job.update(&sender).await?;
+                            match remove_user_from_cluster(me.name(), &user).await {
+                                Ok(_) => tracing::info!("Removed partially added user {}", user),
+                                Err(e) => tracing::error!("Failed to remove partially added user {}: {:?}", user, e)
+                            }
 
-                    // now create their home directories
-                    let homedir = create_user_directories(me.name(), &mapping).await?;
-
-                    job = job.running(Some("Step 2/3: Directories created".to_string()))?;
-                    job = job.update(&sender).await?;
-
-                    // update the home directory in the account
-                    update_homedir(me.name(), &user, &homedir).await?;
-
-                    // and finally add the user to the job scheduler
-                    add_user_to_scheduler(me.name(), &user, &mapping).await?;
+                            return Err(e);
+                        }
+                    };
 
                     job = job.completed(mapping)?;
                 }
                 RemoveUser(user) => {
                     // remove the user from the cluster
-                    tracing::info!("Removing user from cluster: {}", user);
-                    job = job.completed("User removed".to_string())?;
+                    let mapping = remove_user_from_cluster(me.name(), &user).await?;
+                    job = job.completed(mapping)?;
                 }
                 _ => {
                     tracing::error!("Unknown instruction: {:?}", job.instruction());
@@ -161,14 +155,108 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn get_projects(me: &str) -> Result<Vec<ProjectMapping>, Error> {
+async fn add_project_to_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectMapping, Error> {
+    tracing::info!("Adding project to cluster: {}", project);
+    let mapping = create_project(me, project).await?;
+
+    // now create the project directories
+    create_project_directories(me, &mapping).await?;
+
+    // and finally add the project to the job scheduler
+    add_project_to_scheduler(me, project, &mapping).await?;
+
+    Ok(mapping)
+}
+
+async fn remove_project_from_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectMapping, Error> {
+    tracing::info!("Removing project from cluster: {}", project);
+
+    let mapping = remove_project(me, project).await?;
+
+    match delete_project_directories(me, &mapping).await {
+        Ok(_) => {
+            tracing::info!("Project directories removed: {:?}", mapping);
+        }
+        Err(e) => {
+            tracing::error!(
+                "Error removing directories for project {}: {:?}",
+                mapping,
+                e
+            );
+        }
+    }
+
+    match remove_project_from_scheduler(me, project, &mapping).await {
+        Ok(_) => {
+            tracing::info!("Project removed from scheduler: {:?}", mapping);
+        }
+        Err(e) => {
+            tracing::error!("Error removing project from scheduler {}: {:?}", mapping, e);
+        }
+    }
+
+    Ok(mapping)
+}
+
+async fn add_user_to_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    tracing::info!("Adding user to cluster: {}", user);
+    let mapping = create_account(me, user).await?;
+
+    // now create their home directories
+    let homedir = create_user_directories(me, &mapping).await?;
+
+    // update the home directory in the account
+    update_homedir(me, user, &homedir).await?;
+
+    // and finally add the user to the job scheduler
+    add_user_to_scheduler(me, user, &mapping).await?;
+
+    Ok(mapping)
+}
+
+async fn remove_user_from_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    tracing::info!("Removing user from cluster: {}", user);
+
+    let mapping = remove_account(me, user).await?;
+
+    match delete_user_directories(me, &mapping).await {
+        Ok(_) => {
+            tracing::info!("User directories removed: {:?}", mapping);
+        }
+        Err(e) => {
+            tracing::error!("Error removing directories for user {}: {:?}", mapping, e);
+        }
+    }
+
+    match remove_user_from_scheduler(me, user, &mapping).await {
+        Ok(_) => {
+            tracing::info!("User removed from scheduler: {:?}", mapping);
+        }
+        Err(e) => {
+            tracing::error!("Error removing user from scheduler {}: {:?}", mapping, e);
+        }
+    }
+
+    Ok(mapping)
+}
+
+async fn get_projects(me: &str, portal: &PortalIdentifier) -> Result<Vec<ProjectMapping>, Error> {
     // find the Account agent
     match agent::account(30).await {
         Some(account) => {
             // send the add_job to the account agent
-            let job = Job::parse(&format!("{}.{} get_projects", me, account.name()), false)?
-                .put(&account)
-                .await?;
+            let job = Job::parse(
+                &format!("{}.{} get_projects {}", me, account.name(), portal),
+                false,
+            )?
+            .put(&account)
+            .await?;
 
             // Wait for the add_job to complete
             let result = job.wait().await?.result::<Vec<ProjectMapping>>()?;
@@ -217,6 +305,43 @@ async fn create_project(me: &str, project: &ProjectIdentifier) -> Result<Project
                     tracing::error!("Error creating the project group: {:?}", job);
                     Err(Error::Call(
                         format!("Error creating the project group: {:?}", job).to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn remove_project(me: &str, project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
+    // find the Account agent
+    match agent::account(30).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} remove_project {}", me, account.name(), project),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<ProjectMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!("Project removed from account agent: {:?}", mapping);
+                    Ok(mapping)
+                }
+                None => {
+                    tracing::error!("Error removing the project group: {:?}", job);
+                    Err(Error::Call(
+                        format!("Error removing the project group: {:?}", job).to_string(),
                     ))
                 }
             }
@@ -302,6 +427,43 @@ async fn create_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, 
     }
 }
 
+async fn remove_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    // find the Account agent
+    match agent::account(30).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} remove_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<UserMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!("User removed from account agent: {:?}", mapping);
+                    Ok(mapping)
+                }
+                None => {
+                    tracing::error!("Error removing the user's account: {:?}", job);
+                    Err(Error::Call(
+                        format!("Error removing the user's account: {:?}", job).to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
 async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Result<String, Error> {
     // find the Filesystem agent
     match agent::filesystem(30).await {
@@ -339,6 +501,48 @@ async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
     }
 }
 
+async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Result<(), Error> {
+    // find the Filesystem agent
+    match agent::filesystem(30).await {
+        Some(filesystem) => {
+            // send the add_job to the filesystem agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} remove_local_project {}",
+                    me,
+                    filesystem.name(),
+                    mapping
+                ),
+                false,
+            )?
+            .put(&filesystem)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<String>()?;
+
+            match result {
+                Some(_) => {
+                    tracing::info!("Directories removed for project: {:?}", mapping);
+                    Ok(())
+                }
+                None => {
+                    tracing::error!("Error removing the project directories: {:?}", job);
+                    Err(Error::Call(
+                        format!("Error removing the project directories: {:?}", job).to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No filesystem agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ))
+        }
+    }
+}
+
 async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<String, Error> {
     // find the Filesystem agent
     match agent::filesystem(30).await {
@@ -363,6 +567,43 @@ async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<Stri
                     tracing::error!("Error creating the user's directories: {:?}", job);
                     Err(Error::Call(
                         format!("Error creating the user's directories: {:?}", job).to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No filesystem agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn delete_user_directories(me: &str, mapping: &UserMapping) -> Result<(), Error> {
+    // find the Filesystem agent
+    match agent::filesystem(30).await {
+        Some(filesystem) => {
+            // send the add_job to the filesystem agent
+            let job = Job::parse(
+                &format!("{}.{} remove_local_user {}", me, filesystem.name(), mapping),
+                false,
+            )?
+            .put(&filesystem)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<String>()?;
+
+            match result {
+                Some(_) => {
+                    tracing::info!("Directories removed for user: {:?}", mapping);
+                    Ok(())
+                }
+                None => {
+                    tracing::error!("Error removing the user's directories: {:?}", job);
+                    Err(Error::Call(
+                        format!("Error removing the user's directories: {:?}", job).to_string(),
                     ))
                 }
             }
@@ -461,6 +702,59 @@ async fn add_project_to_scheduler(
     }
 }
 
+async fn remove_project_from_scheduler(
+    me: &str,
+    project: &ProjectIdentifier,
+    mapping: &ProjectMapping,
+) -> Result<(), Error> {
+    // find the Scheduler agent
+    match agent::scheduler(30).await {
+        Some(scheduler) => {
+            // send the add_job to the scheduler agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} remove_local_project {}",
+                    me,
+                    scheduler.name(),
+                    mapping
+                ),
+                false,
+            )?
+            .put(&scheduler)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<String>()?;
+
+            match result {
+                Some(_) => {
+                    tracing::info!("Project {} removed from scheduler", project);
+                    Ok(())
+                }
+                None => {
+                    tracing::error!(
+                        "Error removing the project from the scheduler: {:?}",
+                        project
+                    );
+                    Err(Error::Call(
+                        format!(
+                            "Error removing the project from the scheduler: {:?}",
+                            project
+                        )
+                        .to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No scheduler agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ))
+        }
+    }
+}
+
 async fn add_user_to_scheduler(
     me: &str,
     user: &UserIdentifier,
@@ -489,6 +783,48 @@ async fn add_user_to_scheduler(
                     tracing::error!("Error adding the user to the scheduler: {:?}", job);
                     Err(Error::Call(
                         format!("Error adding the user to the scheduler: {:?}", job).to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No scheduler agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn remove_user_from_scheduler(
+    me: &str,
+    user: &UserIdentifier,
+    mapping: &UserMapping,
+) -> Result<(), Error> {
+    // find the Scheduler agent
+    match agent::scheduler(30).await {
+        Some(scheduler) => {
+            // send the add_job to the scheduler agent
+            let job = Job::parse(
+                &format!("{}.{} remove_local_user {}", me, scheduler.name(), mapping),
+                false,
+            )?
+            .put(&scheduler)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<String>()?;
+
+            match result {
+                Some(_) => {
+                    tracing::info!("User {} removed from scheduler", user);
+                    Ok(())
+                }
+                None => {
+                    tracing::error!("Error removing the user from the scheduler: {:?}", job);
+                    Err(Error::Call(
+                        format!("Error removing the user from the scheduler: {:?}", job)
+                            .to_string(),
                     ))
                 }
             }

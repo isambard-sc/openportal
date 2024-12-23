@@ -10,7 +10,9 @@ use secrecy::Secret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use templemeads::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
+use templemeads::grammar::{
+    PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
+};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -264,7 +266,7 @@ async fn auth<'mg>() -> Result<MutexGuard<'mg, FreeAuth>, Error> {
 /// Public API
 ///
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IPAUser {
     userid: String,
     cn: UserIdentifier,
@@ -479,7 +481,7 @@ impl IPAUser {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IPAGroup {
     groupid: String,
     identifier: ProjectIdentifier,
@@ -557,7 +559,7 @@ impl IPAGroup {
                     Ok(identifier) => identifier,
                     Err(e) => {
                         tracing::warn!("Could not parse identifier: {}. Error: {}", identifier, e);
-                        ProjectIdentifier::default()
+                        continue;
                     }
                 },
                 None => {
@@ -565,7 +567,7 @@ impl IPAGroup {
                         "Could not parse identifier from description: {}",
                         description
                     );
-                    ProjectIdentifier::default()
+                    continue;
                 }
             };
 
@@ -696,6 +698,18 @@ impl IPAGroup {
     pub fn description(&self) -> &str {
         &self.description
     }
+
+    pub fn is_system_group(&self) -> bool {
+        self.identifier.portal() == "system"
+    }
+
+    pub fn is_instance_group(&self) -> bool {
+        self.identifier.portal() == "instance"
+    }
+
+    pub fn is_project_group(&self) -> bool {
+        !(self.is_system_group() || self.is_instance_group())
+    }
 }
 
 pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Result<(), Error> {
@@ -739,6 +753,14 @@ pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Res
 }
 
 ///
+/// Return whether this is an internal reserved portal name, i.e.
+/// "openportal", "system", or "instance"
+///
+fn is_internal_portal(portal: &str) -> bool {
+    matches!(portal, "openportal" | "system" | "instance")
+}
+
+///
 /// Return the Unix project name associated with the passed ProjectIdentifier.
 ///
 /// Eventually we will need to deal with federation, and work
@@ -769,10 +791,32 @@ fn identifier_to_projectid(project: &ProjectIdentifier) -> Result<String, Error>
 }
 
 ///
+/// Return all of the users who are part of the specified group
+///
+async fn force_get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Error> {
+    if !group.is_project_group() {
+        // we only list users in project groups
+        return Ok(Vec::new());
+    }
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("in_group".to_string(), group.groupid().to_string());
+        kwargs.insert("all".to_string(), "true".to_string());
+        kwargs.insert("sizelimit".to_string(), "2048".to_string());
+        kwargs
+    };
+
+    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
+
+    result.users()
+}
+
+///
 /// Return the specified group from FreeIPA, or None if it does
 /// not exist
 ///
-pub async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Error> {
+async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Error> {
     match cache::get_group(project).await? {
         Some(group) => Ok(Some(group)),
         None => {
@@ -786,21 +830,31 @@ pub async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, 
 
             match result.groups()?.first() {
                 Some(group) => {
-                    if group.identifier() != project {
-                        tracing::warn!(
-                            "Disagreement of identifier of found group: {} versus {}",
-                            group.identifier(),
-                            project
-                        );
+                    let group = match group.identifier() != project {
+                        true => {
+                            tracing::warn!(
+                                "Disagreement of identifier of found group: {} versus {}",
+                                group.identifier(),
+                                project
+                            );
 
-                        let group = IPAGroup::new(group.groupid(), project, group.description())?;
+                            IPAGroup::new(group.groupid(), project, group.description())?
+                        }
+                        false => group.clone(),
+                    };
 
-                        cache::add_existing_group(&group).await?;
-                        Ok(Some(group))
-                    } else {
-                        cache::add_existing_group(group).await?;
-                        Ok(Some(group.clone()))
+                    // add this group to the cache - also force get all
+                    // of the users currently in this group
+                    cache::add_existing_group(&group).await?;
+
+                    // if this is a project group, then get and cache all users
+                    // in this group
+                    if group.is_project_group() {
+                        let users = force_get_users_in_group(&group).await?;
+                        cache::set_users_in_group(&group, &users).await?;
                     }
+
+                    Ok(Some(group))
                 }
                 None => Ok(None),
             }
@@ -825,6 +879,11 @@ async fn identifier_to_userid(user: &UserIdentifier) -> Result<String, Error> {
 /// Force get the user - this will refresh the data from FreeIPA
 ///
 async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
+    // only get users whose portals are not in the internal set
+    if is_internal_portal(&user.portal()) {
+        return Ok(None);
+    }
+
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("all".to_string(), "true".to_string());
@@ -873,7 +932,7 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 /// this will only return users who are managed (part of the
 /// "openportal" group)
 ///
-pub async fn get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
+async fn get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
     match cache::get_user(user).await? {
         Some(user) => Ok(Some(user.clone())),
         None => Ok(force_get_user(user).await?),
@@ -1053,6 +1112,14 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
         }
     }
 
+    // and also cache that this user is a member of the project groups
+    let project_groups: Vec<IPAGroup> = groups
+        .into_iter()
+        .filter(|g| g.is_project_group())
+        .collect();
+
+    cache::add_user_to_groups(&user, &project_groups).await?;
+
     // finally - re-fetch the user from FreeIPA to make sure that we have
     // the correct information
     match force_get_user(user.identifier()).await? {
@@ -1073,6 +1140,14 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
     }
 }
 
+///
+/// Functions in the freeipa public API
+///
+
+///
+/// Add the project to FreeIPA - this will create the group for the project
+/// if it doesn't already exist. This returns the group
+///
 pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error> {
     let project_group = get_group_create_if_not_exists(&IPAGroup::new(
         &identifier_to_projectid(project)?,
@@ -1084,6 +1159,98 @@ pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error>
     Ok(project_group)
 }
 
+///
+/// Remove the project from FreeIPA - this will remove the group for the project
+/// if it exists, returning the removed group if successful,
+/// or it will return an error if it doesn't exist, or something else
+/// goes wrong
+///
+pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error> {
+    let project_group = match get_group(project).await {
+        Ok(Some(group)) => group,
+        Ok(None) => {
+            tracing::warn!(
+                "Could not find group for project {}. Assuming it has already been removed.",
+                project
+            );
+            return Err(Error::NotFound(format!(
+                "Could not find group for project {}. Assuming it has already been removed.",
+                project
+            )));
+        }
+        Err(e) => {
+            tracing::error!("Could not find group for project {}. Error: {}", project, e);
+            return Err(Error::Call(format!(
+                "Could not find group for project {}. Error: {}",
+                project, e
+            )));
+        }
+    };
+
+    if !project_group.is_project_group() {
+        return Err(Error::InvalidState(format!(
+            "Cannot remove the group {} associated with project {} because it is not a project group?",
+            project_group, project)));
+    }
+
+    // now get all of the users in this project and remove them as well!
+    let users = force_get_users_in_group(&project_group).await?;
+
+    tracing::info!(
+        "Removing group {} for project {}",
+        project_group.groupid(),
+        project
+    );
+
+    for user in users {
+        match remove_user(user.identifier()).await {
+            Ok(user) => {
+                tracing::info!("Successfully removed group user: {}", user);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Could not remove user {} who is a member of project group {}. Error: {}",
+                    user.userid(),
+                    project_group.groupid(),
+                    e
+                );
+            }
+        };
+    }
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), project_group.groupid().to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_del", None, Some(kwargs)).await {
+        Ok(_) => {
+            tracing::info!("Successfully removed group: {}", project_group);
+        }
+        Err(e) => {
+            tracing::error!("Could not remove group: {}. Error: {}", project_group, e);
+            return Err(Error::Call(format!(
+                "Could not remove group: {}. Error: {}",
+                project_group, e
+            )));
+        }
+    }
+
+    cache::remove_existing_group(&project_group).await?;
+
+    Ok(project_group)
+}
+
+///
+/// Add the passed user to FreeIPA, added from the passed peer instance.
+/// This will return the added user if successful, or will return an
+/// error if something goes wrong. This returns the existing user if
+/// they are already in FreeIPA. Note that this will only work for
+/// users that are managed by OpenPortal, i.e. there will be an error
+/// if there is an exising user with the same name, but which is not
+/// managed by OpenPortal
+///
 pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(user) = get_user(user).await? {
@@ -1232,6 +1399,64 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
     }
 }
 
+///
+/// Remove the user from FreeIPA - this will return the removed user if
+/// successful, or will return an error if the user doesn't exist, or
+/// something else goes wrong. Note that the user must be managed by
+/// OpenPortal, or an error will be returned
+///
+pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
+    let user = match get_user(user).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            tracing::warn!(
+                "Could not find user {}. Assuming they have already been removed.",
+                user
+            );
+            return Err(Error::NotFound(format!(
+                "Could not find user {}. Assuming they have already been removed.",
+                user
+            )));
+        }
+        Err(e) => {
+            tracing::error!("Could not find user {}. Error: {}", user, e);
+            return Err(Error::Call(format!(
+                "Could not find user {}. Error: {}",
+                user, e
+            )));
+        }
+    };
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("uid".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("user_del", None, Some(kwargs)).await {
+        Ok(_) => {
+            tracing::info!("Successfully removed user: {}", user);
+        }
+        Err(e) => {
+            tracing::error!("Could not remove user: {}. Error: {}", user, e);
+            return Err(Error::Call(format!(
+                "Could not remove user: {}. Error: {}",
+                user, e
+            )));
+        }
+    }
+
+    cache::remove_existing_user(&user).await?;
+
+    Ok(user)
+}
+
+///
+/// Update the homedir for the user - this will return the updated homedir
+/// if successful, or will return an error if the user doesn't exist, or
+/// something else goes wrong. Note that the user must be managed by
+/// OpenPortal, or an error will be returned
+///
 pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<String, Error> {
     let homedir = homedir.trim();
 
@@ -1300,14 +1525,86 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
     Ok(user.home().to_string())
 }
 
-pub async fn get_projects() -> Result<Vec<ProjectMapping>, Error> {
-    tracing::info!("Getting projects");
+///
+/// Return all of the groups that are managed by OpenPortal for the
+/// passed portal
+///
+pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Error> {
+    tracing::info!("Getting managed groups for portal: {}", portal);
+    if is_internal_portal(&portal.portal()) {
+        // return an empty set of groups for internal portals
+        return Ok(Vec::new());
+    }
 
-    Ok(vec![])
+    // calling group_find with no arguments should list all groups
+    // I don't like setting a high size limit, but I am unsure how to
+    // get all groups otherwise, as freeipa doesn't look like it has
+    // a paging option? This could in theory be reduced by searching
+    // for groups using a glob pattern, e.g. "portal.*"
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("sizelimit".to_string(), "2048".to_string());
+        kwargs
+    };
+
+    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+
+    tracing::info!("Got groups: {:?}", result);
+
+    let groups = result.groups()?;
+
+    cache::add_existing_groups(&groups).await?;
+
+    Ok(groups
+        .iter()
+        .filter(|group| group.identifier().portal() == portal.portal())
+        .cloned()
+        .collect())
 }
 
-pub async fn get_users(project: &ProjectIdentifier) -> Result<Vec<UserMapping>, Error> {
+///
+/// Return all of the users that are managed by OpenPortal for the
+/// passed project. Note that this will only return users who are
+/// managed by OpenPortal
+///
+pub async fn get_users(project: &ProjectIdentifier) -> Result<Vec<IPAUser>, Error> {
     tracing::info!("Getting users for project: {}", project);
 
-    Ok(vec![])
+    // don't get the users for project identifiers that use internal portal names
+    // as they aren't public
+    if is_internal_portal(&project.portal()) {
+        return Ok(Vec::new());
+    }
+
+    let project_group = match get_group(project).await {
+        Ok(Some(group)) => group,
+        Ok(None) => {
+            tracing::warn!(
+                "Could not find group for project {}. Assuming it has already been removed.",
+                project
+            );
+            return Ok(vec![]);
+        }
+        Err(e) => {
+            tracing::error!("Could not find group for project {}. Error: {}", project, e);
+            return Err(Error::Call(format!(
+                "Could not find group for project {}. Error: {}",
+                project, e
+            )));
+        }
+    };
+
+    let cached_users = cache::get_users_in_group(&project_group).await?;
+
+    if !cached_users.is_empty() {
+        return Ok(cached_users);
+    }
+
+    // there are no users, meaning that we have not checked yet, or there
+    // really are no users in this project...
+    let users = force_get_users_in_group(&project_group).await?;
+
+    cache::set_users_in_group(&project_group, &users).await?;
+
+    Ok(users)
 }

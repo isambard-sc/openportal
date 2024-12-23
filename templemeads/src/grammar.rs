@@ -25,9 +25,95 @@ impl NamedType for Vec<String> {
 }
 
 ///
+/// A portal identifier - this is just a string with no spaces or periods
+///
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PortalIdentifier {
+    portal: String,
+}
+
+impl NamedType for PortalIdentifier {
+    fn type_name() -> &'static str {
+        "PortalIdentifier"
+    }
+}
+
+impl NamedType for Vec<PortalIdentifier> {
+    fn type_name() -> &'static str {
+        "Vec<PortalIdentifier>"
+    }
+}
+
+impl PortalIdentifier {
+    pub fn parse(identifier: &str) -> Result<Self, Error> {
+        let portal = identifier.trim();
+
+        if portal.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid PortalIdentifier - portal cannot be empty '{}'",
+                identifier
+            )));
+        };
+
+        if portal.contains(' ') || portal.contains('.') {
+            return Err(Error::Parse(format!(
+                "Invalid PortalIdentifier - portal cannot contain spaces or periods '{}'",
+                identifier
+            )));
+        };
+
+        Ok(Self {
+            portal: portal.to_string(),
+        })
+    }
+
+    pub fn portal(&self) -> String {
+        self.portal.clone()
+    }
+}
+
+impl std::fmt::Display for PortalIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.portal)
+    }
+}
+
+/// Serialize and Deserialize via the string representation
+impl Serialize for PortalIdentifier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PortalIdentifier {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<ProjectIdentifier> for PortalIdentifier {
+    fn from(project: ProjectIdentifier) -> Self {
+        project.portal_identifier()
+    }
+}
+
+impl From<UserIdentifier> for PortalIdentifier {
+    fn from(user: UserIdentifier) -> Self {
+        user.portal_identifier()
+    }
+}
+
+///
 /// A project identifier - this is a double of project.portal
 ///
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProjectIdentifier {
     project: String,
     portal: String,
@@ -87,8 +173,10 @@ impl ProjectIdentifier {
         self.portal.clone()
     }
 
-    pub fn is_valid(&self) -> bool {
-        !self.project.is_empty() && !self.portal.is_empty()
+    pub fn portal_identifier(&self) -> PortalIdentifier {
+        PortalIdentifier {
+            portal: self.portal.clone(),
+        }
     }
 }
 
@@ -131,7 +219,7 @@ impl<'de> Deserialize<'de> for ProjectIdentifier {
 ///
 /// A user identifier - this is a triple of username.project.portal
 ///
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserIdentifier {
     username: String,
     project: String,
@@ -212,8 +300,10 @@ impl UserIdentifier {
         }
     }
 
-    pub fn is_valid(&self) -> bool {
-        !self.username.is_empty() && !self.project.is_empty() && !self.portal.is_empty()
+    pub fn portal_identifier(&self) -> PortalIdentifier {
+        PortalIdentifier {
+            portal: self.portal.clone(),
+        }
     }
 }
 
@@ -248,7 +338,7 @@ impl<'de> Deserialize<'de> for UserIdentifier {
 /// Struct that holds the mapping of a ProjectIdentifier to a local
 /// project on a system
 ///
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectMapping {
     project: ProjectIdentifier,
     local_group: String,
@@ -359,7 +449,7 @@ impl<'de> Deserialize<'de> for ProjectMapping {
 /// Struct that holds the mapping of a UserIdentifier to a local
 /// username on a system
 ///
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserMapping {
     user: UserIdentifier,
     local_user: String,
@@ -488,8 +578,8 @@ pub enum Instruction {
     /// An instruction to submit a job to the portal
     Submit(Destination, Arc<Instruction>),
 
-    /// An instruction to get all projects
-    GetProjects(),
+    /// An instruction to get all projects managed by a portal
+    GetProjects(PortalIdentifier),
 
     /// An instruction to add a project
     AddProject(ProjectIdentifier),
@@ -560,7 +650,16 @@ impl Instruction {
                     )))
                 }
             },
-            "get_projects" => Ok(Instruction::GetProjects()),
+            "get_projects" => match PortalIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(portal) => Ok(Instruction::GetProjects(portal)),
+                Err(_) => {
+                    tracing::error!("get_projects failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_projects failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
             "add_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
                 Ok(project) => Ok(Instruction::AddProject(project)),
                 Err(_) => {
@@ -707,7 +806,7 @@ impl std::fmt::Display for Instruction {
             Instruction::Submit(destination, command) => {
                 write!(f, "submit {} {}", destination, command)
             }
-            Instruction::GetProjects() => write!(f, "get_projects"),
+            Instruction::GetProjects(portal) => write!(f, "get_projects {}", portal),
             Instruction::AddProject(project) => write!(f, "add_project {}", project),
             Instruction::RemoveProject(project) => write!(f, "remove_project {}", project),
             Instruction::GetUsers(project) => write!(f, "get_users {}", project),
@@ -756,7 +855,8 @@ mod tests {
 
     #[test]
     fn test_user_identifier() {
-        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
         assert_eq!(user.username(), "user");
         assert_eq!(user.project(), "project");
         assert_eq!(user.portal(), "portal");
@@ -765,8 +865,10 @@ mod tests {
 
     #[test]
     fn test_user_mapping() {
-        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap();
         assert_eq!(mapping.user(), &user);
         assert_eq!(mapping.local_user(), "local_user");
         assert_eq!(mapping.local_group(), "local_group");
@@ -778,8 +880,10 @@ mod tests {
 
     #[test]
     fn test_instruction() {
-        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap();
 
         #[allow(clippy::unwrap_used)]
         let instruction = Instruction::parse("add_user user.project.portal").unwrap();
@@ -812,31 +916,34 @@ mod tests {
 
     #[test]
     fn assert_serialize_user() {
-        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
         let serialized = serde_json::to_string(&user).unwrap_or_default();
         assert_eq!(serialized, "\"user.project.portal\"");
     }
 
     #[test]
     fn assert_deserialize_user() {
-        let user: UserIdentifier =
-            serde_json::from_str("\"user.project.portal\"").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user: UserIdentifier = serde_json::from_str("\"user.project.portal\"").unwrap();
         assert_eq!(user.to_string(), "user.project.portal");
     }
 
     #[test]
     fn assert_serialize_mapping() {
-        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap();
         let serialized = serde_json::to_string(&mapping).unwrap_or_default();
         assert_eq!(serialized, "\"user.project.portal:local_user:local_group\"");
     }
 
     #[test]
     fn assert_deserialize_mapping() {
+        #[allow(clippy::unwrap_used)]
         let mapping: UserMapping =
-            serde_json::from_str("\"user.project.portal:local_user:local_group\"")
-                .unwrap_or_default();
+            serde_json::from_str("\"user.project.portal:local_user:local_group\"").unwrap();
         assert_eq!(
             mapping.to_string(),
             "user.project.portal:local_user:local_group"
@@ -845,8 +952,10 @@ mod tests {
 
     #[test]
     fn assert_serialize_instruction() {
-        let user = UserIdentifier::parse("user.project.portal").unwrap_or_default();
-        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap_or_default();
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap();
 
         let instruction = Instruction::AddUser(user.clone());
         let serialized = serde_json::to_string(&instruction).unwrap_or_default();

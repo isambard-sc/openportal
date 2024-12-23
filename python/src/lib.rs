@@ -453,6 +453,19 @@ impl Job {
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }
+            "PortalIdentifier" => {
+                let result = match self.0.result::<grammar::PortalIdentifier>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        Ok(PortalIdentifier::from(result).into_pyobject(py)?.into_any())
+                    }
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
             "UserMapping" => {
                 let result = match self.0.result::<grammar::UserMapping>() {
                     Ok(result) => result,
@@ -554,6 +567,23 @@ impl Job {
                         let list = PyList::empty(py);
                         for item in result {
                             list.append(ProjectMapping::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Vec<PortalIdentifier>" => {
+                let result = match self.0.result::<Vec<grammar::PortalIdentifier>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(PortalIdentifier::from(item).into_pyobject(py)?)?;
                         }
                         Ok(list.into_any())
                     }
@@ -742,6 +772,11 @@ impl UserIdentifier {
         Ok(self.0.project_identifier().clone().into())
     }
 
+    #[getter]
+    fn portal_identifier(&self) -> PyResult<PortalIdentifier> {
+        Ok(self.0.portal_identifier().clone().into())
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -773,6 +808,11 @@ impl ProjectIdentifier {
         Ok(self.0.portal().clone())
     }
 
+    #[getter]
+    fn portal_identifier(&self) -> PyResult<PortalIdentifier> {
+        Ok(self.0.portal_identifier().clone().into())
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -793,6 +833,40 @@ impl ProjectIdentifier {
 impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
     fn from(project_identifier: grammar::ProjectIdentifier) -> Self {
         ProjectIdentifier(project_identifier)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PortalIdentifier(grammar::PortalIdentifier);
+
+#[pymethods]
+impl PortalIdentifier {
+    #[getter]
+    fn portal(&self) -> PyResult<String> {
+        Ok(self.0.portal().clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<PortalIdentifier> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<PortalIdentifier> {
+        Ok(self.clone())
+    }
+}
+
+impl From<grammar::PortalIdentifier> for PortalIdentifier {
+    fn from(portal_identifier: grammar::PortalIdentifier) -> Self {
+        PortalIdentifier(portal_identifier)
     }
 }
 

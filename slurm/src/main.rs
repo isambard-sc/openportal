@@ -91,23 +91,26 @@ async fn main() -> Result<()> {
                 match job.instruction() {
                     AddLocalProject(project) => {
                         sacctmgr::add_project(&project).await?;
-                        let job = job.completed("Success!".to_string())?;
-                        Ok(job)
+                        job.completed_none()
                     },
                     RemoveLocalProject(project) => {
-                        Err(Error::IncompleteCode(
-                            format!("RemoveLocalProject instruction not implemented yet - cannot remove {}", project),
-                        ))
+                        // we won't remove the project for now, as we want to
+                        // make sure that the statistics are preserved. Will eventually
+                        // disable the project instead.
+                        tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", project);
+                        job.completed_none()
                     },
                     AddLocalUser(user) => {
                         sacctmgr::add_user(&user).await?;
-                        let job = job.completed("Success!".to_string())?;
-                        Ok(job)
+                        job.completed_none()
                     },
                     RemoveLocalUser(mapping) => {
-                        Err(Error::IncompleteCode(
-                            format!("RemoveLocalUser instruction not implemented yet - cannot remove {}", mapping),
-                        ))
+                        // we won't remove the user for now, as we want to
+                        // make sure that the statistics are preserved. Will eventually
+                        // disable the user instead. Note that they are already
+                        // disabled in FreeIPA, so cannot submit jobs to this account
+                        tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                        job.completed_none()
                     },
                     _ => {
                         Err(Error::InvalidInstruction(
@@ -169,23 +172,26 @@ async fn main() -> Result<()> {
                 match job.instruction() {
                     AddLocalProject(project) => {
                         slurm::add_project(&project).await?;
-                        let job = job.completed("Success!".to_string())?;
-                        Ok(job)
+                        job.completed_none()
                     },
                     RemoveLocalProject(project) => {
-                        Err(Error::IncompleteCode(
-                            format!("RemoveLocalProject instruction not implemented yet - cannot remove {}", project),
-                        ))
+                        // we won't remove the project for now, as we want to
+                        // make sure that the statistics are preserved. Will eventually
+                        // disable the project instead.
+                        tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", project);
+                        job.completed_none()
                     },
                     AddLocalUser(user) => {
                         slurm::add_user(&user).await?;
-                        let job = job.completed("Success!".to_string())?;
-                        Ok(job)
+                        job.completed_none()
                     },
                     RemoveLocalUser(mapping) => {
-                        Err(Error::IncompleteCode(
-                            format!("RemoveLocalUser instruction not implemented yet - cannot remove {}", mapping),
-                        ))
+                        // we won't remove the user for now, as we want to
+                        // make sure that the statistics are preserved. Will eventually
+                        // disable the user instead. Note that they are already
+                        // disabled in FreeIPA, so cannot submit jobs to this account
+                        tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                        job.completed_none()
                     },
                     _ => {
                         Err(Error::InvalidInstruction(

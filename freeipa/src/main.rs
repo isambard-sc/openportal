@@ -106,38 +106,31 @@ async fn main() -> Result<()> {
             match job.instruction() {
                 GetProjects(portal) => {
                     let groups = freeipa::get_groups(&portal).await?;
-                    let job = job.completed(groups.iter().map(|g| g.mapping()).collect::<Result<Vec<_>, _>>()?)?;
-                    Ok(job)
+                    job.completed(groups.iter().map(|g| g.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddProject(project) => {
                     let project = freeipa::add_project(&project).await?;
-                    job.completed(project.mapping()?)?;
-                    Ok(job)
+                    job.completed(project.mapping()?)
                 },
                 RemoveProject(project) => {
                     let project = freeipa::remove_project(&project).await?;
-                    let job = job.completed(project.mapping()?)?;
-                    Ok(job)
+                    job.completed(project.mapping()?)
                 },
                 GetUsers(project) => {
                     let users = freeipa::get_users(&project).await?;
-                    let job = job.completed(users.iter().map(|u| u.mapping()).collect::<Result<Vec<_>, _>>()?)?;
-                    Ok(job)
+                    job.completed(users.iter().map(|u| u.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddUser(user) => {
                     let user = freeipa::add_user(&user, &sender).await?;
-                    let job = job.completed(user.mapping()?)?;
-                    Ok(job)
+                    job.completed(user.mapping()?)
                 },
                 RemoveUser(user) => {
                     let user = freeipa::remove_user(&user).await?;
-                    let job = job.completed(user.mapping()?)?;
-                    Ok(job)
+                    job.completed(user.mapping()?)
                 },
                 UpdateHomeDir(user, homedir) => {
                     let _ = freeipa::update_homedir(&user, &homedir).await?;
-                    let job = job.completed(homedir)?;
-                    Ok(job)
+                    job.completed(homedir)
                 },
                 _ => {
                     Err(Error::InvalidInstruction(

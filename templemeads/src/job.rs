@@ -424,6 +424,26 @@ impl Job {
         }
     }
 
+    pub fn completed_none(&self) -> Result<Job, Error> {
+        match self.state {
+            Status::Pending | Status::Running => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                expires: self.expires,
+                version: self.version + 1000, // make sure this is the newest version
+                command: self.command.clone(),
+                state: Status::Complete,
+                result: None,
+                result_type: Some("None".to_string()),
+                board: self.board.clone(),
+            }),
+            _ => Err(Error::InvalidState(
+                format!("Cannot set complete on job in state: {:?}", self.state).to_owned(),
+            )),
+        }
+    }
+
     pub fn completed<T>(&self, result: T) -> Result<Job, Error>
     where
         T: serde::Serialize,

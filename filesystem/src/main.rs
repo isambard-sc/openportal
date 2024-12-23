@@ -101,16 +101,11 @@ async fn main() -> Result<()> {
             match job.instruction() {
                 AddLocalProject(mapping) => {
                     let home_root = create_project_dirs_and_links(&mapping).await?;
-
-                    // update the job with the main project home directory root
-                    let job = job.completed(home_root)?;
-
-                    Ok(job)
+                    job.completed(home_root)
                 },
                 RemoveLocalProject(mapping) => {
-                    Err(Error::IncompleteCode(
-                        format!("RemoveLocalProject instruction not implemented yet - cannot remove {}", mapping),
-                    ))
+                    tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", mapping);
+                    job.completed_none()
                 },
                 AddLocalUser(mapping) => {
                     // make sure all project dirs are created, and get back the
@@ -126,14 +121,11 @@ async fn main() -> Result<()> {
                                                 &home_permissions).await?;
 
                     // update the job with the user's home directory
-                    let job = job.completed(home_dir)?;
-
-                    Ok(job)
+                    job.completed(home_dir)
                 },
                 RemoveLocalUser(mapping) => {
-                    Err(Error::IncompleteCode(
-                        format!("RemoveLocalUser instruction not implemented yet - cannot remove {}", mapping),
-                    ))
+                    tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                    job.completed_none()
                 },
                 _ => {
                     Err(Error::InvalidInstruction(

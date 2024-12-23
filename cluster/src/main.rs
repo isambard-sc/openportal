@@ -519,19 +519,16 @@ async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?;
 
-            match result {
-                Some(_) => {
-                    tracing::info!("Directories removed for project: {:?}", mapping);
-                    Ok(())
-                }
-                None => {
-                    tracing::error!("Error removing the project directories: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error removing the project directories: {:?}", job).to_string(),
-                    ))
-                }
+            if job.is_error() {
+                tracing::error!("Error removing the project directories: {:?}", job);
+                Err(Error::Call(
+                    format!("Error removing the project directories: {:?}", job).to_string(),
+                ))
+            } else {
+                tracing::info!("Directories removed for project: {:?}", mapping);
+                Ok(())
             }
         }
         None => {
@@ -593,19 +590,16 @@ async fn delete_user_directories(me: &str, mapping: &UserMapping) -> Result<(), 
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?;
 
-            match result {
-                Some(_) => {
-                    tracing::info!("Directories removed for user: {:?}", mapping);
-                    Ok(())
-                }
-                None => {
-                    tracing::error!("Error removing the user's directories: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error removing the user's directories: {:?}", job).to_string(),
-                    ))
-                }
+            if job.is_error() {
+                tracing::error!("Error removing the user's directories: {:?}", job);
+                Err(Error::Call(
+                    format!("Error removing the user's directories: {:?}", job).to_string(),
+                ))
+            } else {
+                tracing::info!("Directories removed for user: {:?}", mapping);
+                Ok(())
             }
         }
         None => {
@@ -677,20 +671,16 @@ async fn add_project_to_scheduler(
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?;
 
-            match result {
-                Some(_) => {
-                    tracing::info!("Project {} added to scheduler", project);
-                    Ok(())
-                }
-                None => {
-                    tracing::error!("Error adding the project to the scheduler: {:?}", project);
-                    Err(Error::Call(
-                        format!("Error adding the project to the scheduler: {:?}", project)
-                            .to_string(),
-                    ))
-                }
+            if job.is_error() {
+                tracing::error!("Error adding the project to the scheduler: {:?}", job);
+                Err(Error::Call(
+                    format!("Error adding the project to the scheduler: {:?}", job).to_string(),
+                ))
+            } else {
+                tracing::info!("Project {} added to scheduler", project);
+                Ok(())
             }
         }
         None => {
@@ -724,26 +714,16 @@ async fn remove_project_from_scheduler(
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?;
 
-            match result {
-                Some(_) => {
-                    tracing::info!("Project {} removed from scheduler", project);
-                    Ok(())
-                }
-                None => {
-                    tracing::error!(
-                        "Error removing the project from the scheduler: {:?}",
-                        project
-                    );
-                    Err(Error::Call(
-                        format!(
-                            "Error removing the project from the scheduler: {:?}",
-                            project
-                        )
-                        .to_string(),
-                    ))
-                }
+            if job.is_error() {
+                tracing::error!("Error removing the project from the scheduler: {:?}", job);
+                Err(Error::Call(
+                    format!("Error removing the project from the scheduler: {:?}", job).to_string(),
+                ))
+            } else {
+                tracing::info!("Project {} removed from scheduler", project);
+                Ok(())
             }
         }
         None => {
@@ -772,19 +752,16 @@ async fn add_user_to_scheduler(
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?;
 
-            match result {
-                Some(_) => {
-                    tracing::info!("User {} added to scheduler", user);
-                    Ok(())
-                }
-                None => {
-                    tracing::error!("Error adding the user to the scheduler: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error adding the user to the scheduler: {:?}", job).to_string(),
-                    ))
-                }
+            if job.is_error() {
+                tracing::error!("Error adding the user to the scheduler: {:?}", job);
+                Err(Error::Call(
+                    format!("Error adding the user to the scheduler: {:?}", job).to_string(),
+                ))
+            } else {
+                tracing::info!("User {} added to scheduler", user);
+                Ok(())
             }
         }
         None => {
@@ -813,20 +790,16 @@ async fn remove_user_from_scheduler(
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?;
 
-            match result {
-                Some(_) => {
-                    tracing::info!("User {} removed from scheduler", user);
-                    Ok(())
-                }
-                None => {
-                    tracing::error!("Error removing the user from the scheduler: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error removing the user from the scheduler: {:?}", job)
-                            .to_string(),
-                    ))
-                }
+            if job.is_error() {
+                tracing::error!("Error removing the user from the scheduler: {:?}", job);
+                Err(Error::Call(
+                    format!("Error removing the user from the scheduler: {:?}", job).to_string(),
+                ))
+            } else {
+                tracing::info!("User {} removed from scheduler", user);
+                Ok(())
             }
         }
         None => {

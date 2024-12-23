@@ -18,6 +18,12 @@ impl NamedType for String {
     }
 }
 
+impl NamedType for Vec<String> {
+    fn type_name() -> &'static str {
+        "Vec<String>"
+    }
+}
+
 ///
 /// A project identifier - this is a double of project.portal
 ///
@@ -30,6 +36,12 @@ pub struct ProjectIdentifier {
 impl NamedType for ProjectIdentifier {
     fn type_name() -> &'static str {
         "ProjectIdentifier"
+    }
+}
+
+impl NamedType for Vec<ProjectIdentifier> {
+    fn type_name() -> &'static str {
+        "Vec<ProjectIdentifier>"
     }
 }
 
@@ -129,6 +141,12 @@ pub struct UserIdentifier {
 impl NamedType for UserIdentifier {
     fn type_name() -> &'static str {
         "UserIdentifier"
+    }
+}
+
+impl NamedType for Vec<UserIdentifier> {
+    fn type_name() -> &'static str {
+        "Vec<UserIdentifier>"
     }
 }
 
@@ -242,6 +260,12 @@ impl NamedType for ProjectMapping {
     }
 }
 
+impl NamedType for Vec<ProjectMapping> {
+    fn type_name() -> &'static str {
+        "Vec<ProjectMapping>"
+    }
+}
+
 impl ProjectMapping {
     pub fn new(project: &ProjectIdentifier, local_group: &str) -> Result<Self, Error> {
         let local_group = local_group.trim();
@@ -345,6 +369,12 @@ pub struct UserMapping {
 impl NamedType for UserMapping {
     fn type_name() -> &'static str {
         "UserMapping"
+    }
+}
+
+impl NamedType for Vec<UserMapping> {
+    fn type_name() -> &'static str {
+        "Vec<UserMapping>"
     }
 }
 

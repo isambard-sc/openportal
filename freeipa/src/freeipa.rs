@@ -1299,3 +1299,15 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
 
     Ok(user.home().to_string())
 }
+
+pub async fn get_projects() -> Result<Vec<ProjectMapping>, Error> {
+    tracing::info!("Getting projects");
+
+    Ok(vec![])
+}
+
+pub async fn get_users(project: &ProjectIdentifier) -> Result<Vec<UserMapping>, Error> {
+    tracing::info!("Getting users for project: {}", project);
+
+    Ok(vec![])
+}

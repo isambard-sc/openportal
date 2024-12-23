@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use paddington::SecretKey;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateTime, PyNone, PyString};
+use pyo3::types::{PyDateTime, PyList, PyNone, PyString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path;
 use std::sync::RwLock;
@@ -472,6 +472,91 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(ProjectMapping::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Vec<String>" => {
+                let result = match self.0.result::<Vec<String>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(PyString::new(py, &item))?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Vec<UserIdentifier>" => {
+                let result = match self.0.result::<Vec<grammar::UserIdentifier>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(UserIdentifier::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Vec<UserMapping>" => {
+                let result = match self.0.result::<Vec<grammar::UserMapping>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(UserMapping::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Vec<ProjectIdentifier>" => {
+                let result = match self.0.result::<Vec<grammar::ProjectIdentifier>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(ProjectIdentifier::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Vec<ProjectMapping>" => {
+                let result = match self.0.result::<Vec<grammar::ProjectMapping>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(ProjectMapping::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }

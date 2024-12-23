@@ -14,7 +14,7 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, RemoveProject, RemoveUser, UpdateHomeDir,
+    AddProject, AddUser, GetProjects, GetUsers, RemoveProject, RemoveUser, UpdateHomeDir,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
@@ -104,6 +104,11 @@ async fn main() -> Result<()> {
             let sender = envelope.sender();
 
             match job.instruction() {
+                GetProjects() => {
+                    let projects = freeipa::get_projects().await?;
+                    let job = job.completed(projects)?;
+                    Ok(job)
+                },
                 AddProject(project) => {
                     let project = freeipa::add_project(&project).await?;
                     let job = job.completed(project.mapping()?)?;
@@ -113,6 +118,11 @@ async fn main() -> Result<()> {
                     Err(Error::IncompleteCode(
                         format!("RemoveProject instruction not implemented yet - cannot remove {}", project),
                     ))
+                },
+                GetUsers(project) => {
+                    let users = freeipa::get_users(&project).await?;
+                    let job = job.completed(users)?;
+                    Ok(job)
                 },
                 AddUser(user) => {
                     let user = freeipa::add_user(&user, &sender).await?;

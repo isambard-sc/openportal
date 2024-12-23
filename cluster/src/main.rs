@@ -73,12 +73,24 @@ async fn main() -> Result<()> {
                 GetProjects() => {
                     // get the list of projects from the cluster
                     tracing::info!("Getting list of projects");
-                    job = job.completed(Vec::new::<ProjectIdentifier>())?;
+
+                    let projects = get_projects(me.name()).await?;
+
+                    job = job.running(Some("Step 1/1: Projects being retrieved".to_string()))?;
+                    job = job.update(&sender).await?;
+
+                    job = job.completed(projects)?;
                 },
                 GetUsers(project) => {
                     // get the list of users from the cluster
                     tracing::info!("Getting list of users in project {}", project);
-                    job = job.completed(Vec::new::<UserIdentifer>())?;
+
+                    let users = get_accounts(me.name(), &project).await?;
+
+                    job = job.running(Some("Step 1/1: Users being retrieved".to_string()))?;
+                    job = job.update(&sender).await?;
+
+                    job = job.completed(users)?;
                 },
                 AddProject(project) => {
                     // add the project to the cluster
@@ -149,6 +161,38 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn get_projects(me: &str) -> Result<Vec<ProjectMapping>, Error> {
+    // find the Account agent
+    match agent::account(30).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(&format!("{}.{} get_projects", me, account.name()), false)?
+                .put(&account)
+                .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<Vec<ProjectMapping>>()?;
+
+            match result {
+                Some(projects) => {
+                    tracing::info!("Projects retrieved from account agent: {:?}", projects);
+                    Ok(projects)
+                }
+                None => {
+                    tracing::warn!("No projects found?");
+                    Ok(vec![])
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
 async fn create_project(me: &str, project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
     // find the Account agent
     match agent::account(30).await {
@@ -174,6 +218,41 @@ async fn create_project(me: &str, project: &ProjectIdentifier) -> Result<Project
                     Err(Error::Call(
                         format!("Error creating the project group: {:?}", job).to_string(),
                     ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_accounts(me: &str, project: &ProjectIdentifier) -> Result<Vec<UserMapping>, Error> {
+    // find the Account agent
+    match agent::account(30).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} get_users {}", me, account.name(), project),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<Vec<UserMapping>>()?;
+
+            match result {
+                Some(users) => {
+                    tracing::info!("Users retrieved from account agent: {:?}", users);
+                    Ok(users)
+                }
+                None => {
+                    tracing::warn!("No users found?");
+                    Ok(vec![])
                 }
             }
         }

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added a `PortalIdentifier` so that we are clean in how we identify
+  the three parts; User, Project and Portal
+
+- Added parse pattern for all identifiers - they can now only
+  be parsed, and will always be valid if created.
+
+- Added functions to list projects and users, so that we can now
+  fully integrate with Waldur. These cache the results from FreeIPA,
+  so shouldn't hit the server too hard.
+
+- Added functions to remove users and projects, which are fully
+  functional for FreeIPA and stubbed for slurm and filesystem.
+  Removed users are disabled in FreeIPA, and are re-enabled
+  if they are re-added. This ensures that their stats plus their
+  UIDs etc are preserved. Removing a project will remove all
+  of the users in the project.
+
+- Added new Python return types, namely Vector/List versions of all
+  of the base types (`String`, `UserIdentifier`, `ProjectIdentifier`, etc),
+  plus the new `PortalIdentifier` and `Vec<PortalIdentifier>`.
+  This triggered the bumped minor version as the API has changed.
 
 ## [0.2.1] - 2024-12-17
 ### Added

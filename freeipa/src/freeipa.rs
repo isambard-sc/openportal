@@ -1727,8 +1727,6 @@ pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Erro
 
     let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
 
-    tracing::info!("Got groups: {:?}", result);
-
     let groups = result.groups()?;
 
     cache::add_existing_groups(&groups).await?;

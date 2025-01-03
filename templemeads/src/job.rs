@@ -68,6 +68,21 @@ impl Display for Status {
     }
 }
 
+impl std::str::FromStr for Status {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "created" => Ok(Status::Created),
+            "pending" => Ok(Status::Pending),
+            "running" => Ok(Status::Running),
+            "complete" => Ok(Status::Complete),
+            "error" => Ok(Status::Error),
+            _ => Err(Error::Parse(format!("Unknown status: {}", s))),
+        }
+    }
+}
+
 ///
 /// This is the internal representation of the parsed command. We don't
 /// make this publicly visible as we don't want to confuse users with too

@@ -608,6 +608,14 @@ struct Destination(destination::Destination);
 
 #[pymethods]
 impl Destination {
+    #[new]
+    fn new(destination: &str) -> PyResult<Self> {
+        match destination::Destination::parse(destination) {
+            Ok(destination) => Ok(Self(destination)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     #[getter]
     fn agents(&self) -> PyResult<Vec<String>> {
         Ok(self.0.agents().clone())
@@ -642,6 +650,14 @@ struct Instruction(grammar::Instruction);
 
 #[pymethods]
 impl Instruction {
+    #[new]
+    fn new(instruction: &str) -> PyResult<Self> {
+        match grammar::Instruction::parse(instruction) {
+            Ok(instruction) => Ok(Self(instruction)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -671,6 +687,14 @@ struct Uuid(uuid::Uuid);
 
 #[pymethods]
 impl Uuid {
+    #[new]
+    fn new(uuid: &str) -> PyResult<Self> {
+        match uuid::Uuid::parse_str(uuid) {
+            Ok(uuid) => Ok(Self(uuid)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -715,6 +739,14 @@ struct Status(job::Status);
 
 #[pymethods]
 impl Status {
+    #[new]
+    fn new(status: &str) -> PyResult<Self> {
+        match status.parse::<job::Status>() {
+            Ok(status) => Ok(Self(status)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -744,6 +776,14 @@ struct UserIdentifier(grammar::UserIdentifier);
 
 #[pymethods]
 impl UserIdentifier {
+    #[new]
+    fn new(identifier: &str) -> PyResult<Self> {
+        match grammar::UserIdentifier::parse(identifier) {
+            Ok(user_identifier) => Ok(Self(user_identifier)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __copy__(&self) -> PyResult<UserIdentifier> {
         Ok(self.clone())
     }
@@ -798,6 +838,14 @@ struct ProjectIdentifier(grammar::ProjectIdentifier);
 
 #[pymethods]
 impl ProjectIdentifier {
+    #[new]
+    fn new(identifier: &str) -> PyResult<Self> {
+        match grammar::ProjectIdentifier::parse(identifier) {
+            Ok(project_identifier) => Ok(Self(project_identifier)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     #[getter]
     fn project(&self) -> PyResult<String> {
         Ok(self.0.project().clone())
@@ -842,6 +890,14 @@ struct PortalIdentifier(grammar::PortalIdentifier);
 
 #[pymethods]
 impl PortalIdentifier {
+    #[new]
+    fn new(identifier: &str) -> PyResult<Self> {
+        match grammar::PortalIdentifier::parse(identifier) {
+            Ok(portal_identifier) => Ok(Self(portal_identifier)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     #[getter]
     fn portal(&self) -> PyResult<String> {
         Ok(self.0.portal().clone())
@@ -876,6 +932,14 @@ struct UserMapping(grammar::UserMapping);
 
 #[pymethods]
 impl UserMapping {
+    #[new]
+    fn new(identifier: &str) -> PyResult<Self> {
+        match grammar::UserMapping::parse(identifier) {
+            Ok(user_mapping) => Ok(Self(user_mapping)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     #[getter]
     fn user(&self) -> PyResult<UserIdentifier> {
         Ok(self.0.user().clone().into())
@@ -920,6 +984,14 @@ struct ProjectMapping(grammar::ProjectMapping);
 
 #[pymethods]
 impl ProjectMapping {
+    #[new]
+    fn new(identifier: &str) -> PyResult<Self> {
+        match grammar::ProjectMapping::parse(identifier) {
+            Ok(project_mapping) => Ok(Self(project_mapping)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     #[getter]
     fn project(&self) -> PyResult<ProjectIdentifier> {
         Ok(self.0.project().clone().into())

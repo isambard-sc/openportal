@@ -62,6 +62,7 @@ where
 
     let client = Client::builder()
         .cookie_provider(Arc::clone(&auth.jar))
+        .danger_accept_invalid_certs(should_allow_invalid_certs())
         .build()
         .context("Could not build client")?;
 
@@ -97,6 +98,7 @@ where
                 // create a new client with the new cookies
                 let client = Client::builder()
                     .cookie_provider(Arc::clone(&auth.jar))
+                    .danger_accept_invalid_certs(should_allow_invalid_certs())
                     .build()
                     .context("Could not build client")?;
 
@@ -217,6 +219,13 @@ impl FreeAuth {
 
 static FREEIPA_AUTH: Lazy<Mutex<FreeAuth>> = Lazy::new(|| Mutex::new(FreeAuth::default()));
 
+fn should_allow_invalid_certs() -> bool {
+    match std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS") {
+        Ok(value) => value.to_lowercase() == "true",
+        Err(_) => false,
+    }
+}
+
 ///
 /// Login to the FreeIPA server using the passed username and password.
 /// This returns a cookie jar that will contain the resulting authorisation
@@ -227,6 +236,7 @@ async fn login(server: &str, user: &str, password: &Secret<String>) -> Result<Ar
 
     let client = Client::builder()
         .cookie_provider(Arc::clone(&jar))
+        .danger_accept_invalid_certs(should_allow_invalid_certs())
         .build()
         .context("Could not build client")?;
 

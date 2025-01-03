@@ -51,4 +51,7 @@ pub enum Error {
 
     #[error("{0}")]
     UnnamedConnection(String),
+
+    #[error("{0}")]
+    Incompatible(String),
 }

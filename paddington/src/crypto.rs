@@ -11,6 +11,8 @@ use std::{fmt, str, vec};
 
 use crate::error::Error;
 
+const KEY_SIZE: usize = 32;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signature {
     sig: orion::auth::Tag,
@@ -52,6 +54,48 @@ impl Signature {
             sig: orion::auth::Tag::from_slice(&bytes)
                 .with_context(|| "Failed to create signature.")?,
         })
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Salt {
+    #[serde_as(as = "serde_with::hex::Hex")]
+    data: vec::Vec<u8>,
+}
+
+impl Display for Salt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", hex::encode(&self.data))
+    }
+}
+
+impl Salt {
+    pub fn generate() -> Result<Salt, Error> {
+        let mut data: Vec<u8> = [0u8; KEY_SIZE].to_vec();
+        orion::util::secure_rand_bytes(&mut data).context("Failed to generate a salt.")?;
+
+        Ok(Salt { data })
+    }
+
+    pub fn xor(self: &Salt, key: &Key) -> Salt {
+        let data: Vec<u8> = self
+            .data
+            .iter()
+            .zip(key.data.iter())
+            .map(|(&x1, &x2)| x1 ^ x2)
+            .collect();
+
+        Salt { data }
+    }
+}
+
+impl std::str::FromStr for Salt {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = hex::decode(s).with_context(|| "Failed to decode the salt.")?;
+        Ok(Salt { data: bytes })
     }
 }
 
@@ -138,7 +182,7 @@ impl Key {
                 &salt,
                 3,
                 8,
-                32,
+                KEY_SIZE as u32,
             )
             .context("Failed to derive key from password.")?
             .unprotected_as_bytes()
@@ -151,7 +195,10 @@ impl Key {
     /// Create and return a null key - this should not be used
     ///
     pub fn null() -> SecretKey {
-        Key { data: vec![0; 32] }.into()
+        Key {
+            data: vec![0; KEY_SIZE],
+        }
+        .into()
     }
 
     ///
@@ -340,7 +387,7 @@ mod tests {
     #[test]
     fn test_key_generate() {
         let key = Key::generate();
-        assert_eq!(key.expose_secret().data.len(), 32);
+        assert_eq!(key.expose_secret().data.len(), KEY_SIZE);
     }
 
     #[test]
@@ -349,7 +396,7 @@ mod tests {
             unreachable!("Failed to create key from password: {}", err);
         });
 
-        assert_eq!(key.expose_secret().data.len(), 32);
+        assert_eq!(key.expose_secret().data.len(), KEY_SIZE);
 
         let key2: SecretKey = Key::from_password("password").unwrap_or_else(|err| {
             unreachable!("Failed to create key from password: {}", err);

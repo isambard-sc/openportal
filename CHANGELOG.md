@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Added per-message encryption keys, using a per-connection pair of
+  random salts and randomly generated additional infos per message.
+  This is a breaking change in the communication format, so agents
+  older that this release will not be able to communicate with
+  newer agents.
+
+- Added the ability to construct most of the python-exposed objects
+  in Python by mapping the parse functions to Python constructors.
+  This will make it easier to save objects to strings, and then
+  reconstruct as needed.
+
+- Added the ability to ignore invalid SSL certificates when connecting
+  to a FreeIPA server, if the environment variable
+  `OPENPORTAL_ALLOW_INVALID_SSL_CERTS` is equal to `true`. The default
+  is `false`, so that invalid certificates are not allowed.
+  This should only be used in development or debugging, as use
+  in production is a security risk.
+
+- Added a check so we can't query projects from the wrong portal.
+
 ## [0.3.0] - 2024-12-23
 ### Added
 - Added a `PortalIdentifier` so that we are clean in how we identify

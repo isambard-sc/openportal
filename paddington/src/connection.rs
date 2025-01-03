@@ -24,7 +24,7 @@ use tungstenite::handshake::server::{
 
 use crate::command::Command;
 use crate::config::{ClientConfig, PeerConfig, ServiceConfig};
-use crate::crypto::{Key, Salt, SecretKey};
+use crate::crypto::{random_bytes, Key, Salt, SecretKey, KEY_SIZE};
 use crate::error::Error;
 use crate::exchange;
 use crate::message::Message;
@@ -96,16 +96,24 @@ fn envelope_message<T>(
 where
     T: Serialize,
 {
-    tracing::info!(
-        "Enveloping message with salts: {} {}",
-        inner_key_salt,
-        outer_key_salt
-    );
+    // we will now generate per-message keys, using a
+    // random additional info and the salts for this connection
+    let inner_info = random_bytes(KEY_SIZE)?;
+    let outer_info = random_bytes(KEY_SIZE)?;
+
+    let inner_key = inner_key
+        .expose_secret()
+        .derive(inner_key_salt, Some(&inner_info))?;
+    let outer_key = outer_key
+        .expose_secret()
+        .derive(outer_key_salt, Some(&outer_info))?;
 
     Ok(TokioMessage::text(
-        outer_key
-            .expose_secret()
-            .encrypt(inner_key.expose_secret().encrypt(message)?)?,
+        hex::encode(&inner_info)
+            + &hex::encode(&outer_info)
+            + &outer_key
+                .expose_secret()
+                .encrypt(inner_key.expose_secret().encrypt(message)?)?,
     ))
 }
 
@@ -119,16 +127,29 @@ fn deenvelope_message<T>(
 where
     T: DeserializeOwned,
 {
-    tracing::info!(
-        "De-enveloping message with salts: {} {}",
-        inner_key_salt,
-        outer_key_salt
-    );
+    let message = message.to_text()?;
+
+    if message.len() < 4 * KEY_SIZE + 2 {
+        tracing::warn!("Message too short to de-envelop: {}", message.len());
+        return Err(Error::Incompatible("Message too short to de-envelop".to_string()).into());
+    }
+
+    // the hex-encoded string is 2 times the number of bytes
+    let inner_info = hex::decode(&message[0..(2 * KEY_SIZE)])?;
+    let outer_info = hex::decode(&message[(2 * KEY_SIZE)..(4 * KEY_SIZE)])?;
+
+    let inner_key = inner_key
+        .expose_secret()
+        .derive(inner_key_salt, Some(&inner_info))?;
+
+    let outer_key = outer_key
+        .expose_secret()
+        .derive(outer_key_salt, Some(&outer_info))?;
 
     Ok(inner_key.expose_secret().decrypt::<T>(
         &outer_key
             .expose_secret()
-            .decrypt::<String>(message.to_text()?)?,
+            .decrypt::<String>(&message[(4 * KEY_SIZE)..])?,
     )?)
 }
 

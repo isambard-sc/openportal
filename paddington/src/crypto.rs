@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Context;
-use orion::{aead, auth, kdf};
+use orion::{aead, auth, hazardous::kdf::hkdf, kdf};
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
@@ -11,7 +11,8 @@ use std::{fmt, str, vec};
 
 use crate::error::Error;
 
-const KEY_SIZE: usize = 32;
+pub const KEY_SIZE: usize = 32;
+pub const SALT_SIZE: usize = KEY_SIZE;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signature {
@@ -57,6 +58,12 @@ impl Signature {
     }
 }
 
+pub fn random_bytes(size: usize) -> Result<Vec<u8>, Error> {
+    let mut data: Vec<u8> = vec![0; size];
+    orion::util::secure_rand_bytes(&mut data).context("Failed to generate random bytes.")?;
+    Ok(data)
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Salt {
@@ -72,7 +79,7 @@ impl Display for Salt {
 
 impl Salt {
     pub fn generate() -> Result<Salt, Error> {
-        let mut data: Vec<u8> = [0u8; KEY_SIZE].to_vec();
+        let mut data: Vec<u8> = [0u8; SALT_SIZE].to_vec();
         orion::util::secure_rand_bytes(&mut data).context("Failed to generate a salt.")?;
 
         Ok(Salt { data })
@@ -140,6 +147,23 @@ impl Key {
             data: aead::SecretKey::default().unprotected_as_bytes().to_vec(),
         }
         .into()
+    }
+
+    ///
+    /// Derive a new secret key from this key, the passed salt, and
+    /// the (optional) additional information
+    ///
+    pub fn derive(
+        self: &Key,
+        salt: &Salt,
+        additional_info: Option<&[u8]>,
+    ) -> Result<SecretKey, Error> {
+        let mut new_key = self.data.clone();
+
+        hkdf::sha512::derive_key(&salt.data, &self.data, additional_info, &mut new_key)
+            .context("Failed to derive key.")?;
+
+        Ok(Key { data: new_key }.into())
     }
 
     ///

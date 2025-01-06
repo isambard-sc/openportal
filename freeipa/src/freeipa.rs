@@ -142,10 +142,23 @@ where
 
         // if there is an error, return it
         if !result.error.is_null() {
-            return Err(Error::Call(format!(
-                "Error in response: {:?}",
-                result.error
-            )));
+            let error_name: &str = result
+                .error
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+
+            if error_name == "NotFound" {
+                return Err(Error::NotFound(format!(
+                    "Error in response: {:?}",
+                    result.error
+                )));
+            } else {
+                return Err(Error::Call(format!(
+                    "Error in response: {:?}",
+                    result.error
+                )));
+            }
         }
 
         // return the result, encoded to the type T
@@ -1333,6 +1346,17 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
     match call_post::<IPAResponse>("group_del", None, Some(kwargs)).await {
         Ok(_) => {
             tracing::info!("Successfully removed group: {}", project_group);
+            cache::remove_existing_group(&project_group).await?;
+        }
+        // match a Error::NotFound here
+        Err(Error::NotFound(_)) => {
+            tracing::info!(
+                "Group {} not found in FreeIPA. Assuming it has already been removed.",
+                project_group
+            );
+
+            // invalidate the cache, as FreeIPA has been changed behind our back
+            cache::clear().await?;
         }
         Err(e) => {
             tracing::error!("Could not remove group: {}. Error: {}", project_group, e);
@@ -1342,8 +1366,6 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
             )));
         }
     }
-
-    cache::remove_existing_group(&project_group).await?;
 
     Ok(project_group)
 }
@@ -1372,36 +1394,68 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
                 Ok(_) => {
                     user.set_enabled();
                     tracing::info!("Successfully re-enabled user: {}", user);
+                    // re-add the user to the cache
+                    cache::add_existing_user(&user).await?;
+
+                    // make sure that the groups are correct
+                    match sync_groups(&user, instance).await {
+                        Ok(user) => {
+                            tracing::info!("Added user [cached] {}", user);
+                            return Ok(user);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to sync groups for user {} after adding. Error: {}",
+                                user.identifier(),
+                                e
+                            );
+                            tracing::info!(
+                                "Will try to add user {} again, as the groups are not correct.",
+                                user.identifier()
+                            );
+                        }
+                    }
+                }
+                Err(Error::NotFound(_)) => {
+                    tracing::info!(
+                        "User {} not found in FreeIPA. They have been removed behind our back and cannot be enabled.",
+                        user
+                    );
+
+                    tracing::info!("We will try to add this user again...");
+
+                    // invalidate the cache, as FreeIPA has been changed behind our back
+                    cache::clear().await?;
                 }
                 Err(e) => {
                     tracing::error!("Could not enable user: {}. Error: {}", user, e);
-                    return Err(Error::Call(format!(
-                        "Could not enable user: {}. Error: {}",
-                        user, e
-                    )));
+                    tracing::info!(
+                        "We will try to add user {} again, as FreeIPA is clearly broken for this user.",
+                        user.identifier()
+                    );
+
+                    // invalidate the cache, as FreeIPA has been changed behind our back
+                    cache::clear().await?;
                 }
             }
-
-            // re-add the user to the cache
-            cache::add_existing_user(&user).await?;
-        }
-
-        // make sure that the groups are correct
-        match sync_groups(&user, instance).await {
-            Ok(user) => {
-                tracing::info!("Added user [cached] {}", user);
-                return Ok(user);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to sync groups for user {} after adding. Error: {}",
-                    user.identifier(),
-                    e
-                );
-                tracing::info!(
-                    "Will try to add user {} again, as the groups are not correct.",
-                    user.identifier()
-                );
+        } else {
+            // make sure that the groups are correct for the existing user
+            match sync_groups(&user, instance).await {
+                Ok(user) => {
+                    tracing::info!("Added user [cached] {}", user);
+                    return Ok(user);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to sync groups for user {} after adding. Error: {}",
+                        user.identifier(),
+                        e
+                    );
+                    tracing::info!(
+                        "Will try to add user {} again, as the groups are not correct.",
+                        user.identifier()
+                    );
+                }
             }
         }
 
@@ -1600,6 +1654,14 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
                     group.groupid()
                 );
             }
+            Err(Error::NotFound(_)) => {
+                tracing::info!(
+                    "Group {} not found in FreeIPA. Assuming it has already been removed.",
+                    group
+                );
+
+                cache::clear().await?;
+            }
             Err(e) => {
                 tracing::error!(
                     "Could not remove user {} from group {}. Error: {}",
@@ -1624,6 +1686,16 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         Ok(_) => {
             user.set_disabled();
             tracing::info!("Successfully removed user: {}", user);
+            cache::remove_existing_user(&user).await?;
+        }
+        Err(Error::NotFound(_)) => {
+            tracing::info!(
+                "User {} not found in FreeIPA. Assuming it has already been removed.",
+                user
+            );
+
+            // clear the cache as FreeIPA has been changed behind our back
+            cache::clear().await?;
         }
         Err(e) => {
             tracing::error!("Could not remove user: {}. Error: {}", user, e);
@@ -1633,8 +1705,6 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
             )));
         }
     }
-
-    cache::remove_existing_user(&user).await?;
 
     Ok(user)
 }
@@ -1682,6 +1752,15 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
                 "Successfully updated homedir for user: {}",
                 user.identifier()
             );
+        }
+        Err(Error::NotFound(_)) => {
+            tracing::info!(
+                "User {} not found in FreeIPA. Assuming it has been removed behind our back.",
+                user
+            );
+
+            // clear the cache as FreeIPA has been changed behind our back
+            cache::clear().await?;
         }
         Err(e) => {
             tracing::error!(

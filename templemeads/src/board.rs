@@ -284,8 +284,6 @@ impl Board {
             .filter_map(|(id, job)| {
                 if job.is_expired() {
                     // remove any listeners for this job
-                    tracing::info!("Removing expired job {}", job);
-
                     if let Some(listeners) = self.waiters.remove(id) {
                         for listener in listeners {
                             listener.notify(job.clone());

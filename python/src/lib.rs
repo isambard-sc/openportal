@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use paddington::SecretKey;
+use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDateTime, PyList, PyNone, PyString};
@@ -282,6 +283,14 @@ impl Job {
 
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Job> {
         Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Job, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
     }
 
     #[getter]
@@ -636,6 +645,14 @@ impl Destination {
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Destination> {
         Ok(self.clone())
     }
+
+    fn __richcmp__(&self, other: &Destination, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
 }
 
 impl From<destination::Destination> for Destination {
@@ -673,6 +690,14 @@ impl Instruction {
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Instruction> {
         Ok(self.clone())
     }
+
+    fn __richcmp__(&self, other: &Instruction, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
 }
 
 impl From<grammar::Instruction> for Instruction {
@@ -709,6 +734,14 @@ impl Uuid {
 
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Uuid> {
         Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Uuid, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
     }
 
     #[staticmethod]
@@ -762,6 +795,14 @@ impl Status {
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Status> {
         Ok(self.clone())
     }
+
+    fn __richcmp__(&self, other: &Status, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
 }
 
 impl From<job::Status> for Status {
@@ -790,6 +831,14 @@ impl UserIdentifier {
 
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<UserIdentifier> {
         Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &UserIdentifier, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
     }
 
     #[getter]
@@ -876,6 +925,14 @@ impl ProjectIdentifier {
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectIdentifier> {
         Ok(self.clone())
     }
+
+    fn __richcmp__(&self, other: &ProjectIdentifier, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
 }
 
 impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
@@ -917,6 +974,14 @@ impl PortalIdentifier {
 
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<PortalIdentifier> {
         Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &PortalIdentifier, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
     }
 }
 
@@ -970,6 +1035,14 @@ impl UserMapping {
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<UserMapping> {
         Ok(self.clone())
     }
+
+    fn __richcmp__(&self, other: &UserMapping, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
 }
 
 impl From<grammar::UserMapping> for UserMapping {
@@ -1016,6 +1089,14 @@ impl ProjectMapping {
 
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectMapping> {
         Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &ProjectMapping, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
     }
 }
 
@@ -1105,6 +1186,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Job>()?;
     m.add_class::<UserIdentifier>()?;
     m.add_class::<ProjectIdentifier>()?;
+    m.add_class::<PortalIdentifier>()?;
     m.add_class::<UserMapping>()?;
     m.add_class::<ProjectMapping>()?;
     m.add_class::<Uuid>()?;

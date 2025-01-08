@@ -148,16 +148,25 @@ where
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
 
-            if error_name == "NotFound" {
-                return Err(Error::NotFound(format!(
-                    "Error in response: {:?}",
-                    result.error
-                )));
-            } else {
-                return Err(Error::Call(format!(
-                    "Error in response: {:?}",
-                    result.error
-                )));
+            match error_name {
+                "NotFound" => {
+                    return Err(Error::NotFound(format!(
+                        "Error in response: {:?}",
+                        result.error
+                    )));
+                }
+                "DuplicateEntry" => {
+                    return Err(Error::Duplicate(format!(
+                        "Error in response: {:?}",
+                        result.error
+                    )));
+                }
+                _ => {
+                    return Err(Error::Call(format!(
+                        "Error in response: {:?}",
+                        result.error
+                    )));
+                }
             }
         }
 
@@ -1182,6 +1191,19 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
             user
         )))?;
 
+    // We cannot do anything to a user who isn't enabled
+    if user.is_disabled() {
+        tracing::error!(
+            "Cannot sync groups for user {} as they are disabled in FreeIPA.",
+            user.userid()
+        );
+
+        return Err(Error::UnmanagedUser(format!(
+            "Cannot sync groups for user {} as they are disabled in FreeIPA.",
+            user.userid()
+        )));
+    }
+
     // We cannot do anything to a user who isn't managed
     if !user.is_managed() {
         tracing::error!(
@@ -1370,6 +1392,51 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
     Ok(project_group)
 }
 
+async fn reenable_user(user: &IPAUser) -> Result<IPAUser, Error> {
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("uid".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("user_enable", None, Some(kwargs)).await {
+        Ok(_) => {
+            let mut user = user.clone();
+            user.set_enabled();
+            tracing::info!("Successfully re-enabled user: {}", user);
+            // re-add the user to the cache
+            cache::add_existing_user(&user).await?;
+            Ok(user)
+        }
+        Err(Error::NotFound(_)) => {
+            tracing::warn!(
+                "User {} not found in FreeIPA. They have been removed behind our back and cannot be enabled.",
+                user
+            );
+
+            // invalidate the cache, as FreeIPA has been changed behind our back
+            cache::clear().await?;
+
+            Err(Error::NotFound(format!(
+                "User {} not found in FreeIPA. They have been removed behind our back and \
+                 cannot be enabled.",
+                user
+            )))
+        }
+        Err(e) => {
+            tracing::error!("Could not enable user: {}. Error: {}", user, e);
+
+            // invalidate the cache, as FreeIPA has been changed behind our back
+            cache::clear().await?;
+
+            Err(Error::Call(format!(
+                "Could not enable user: {}. Error: {}",
+                user, e
+            )))
+        }
+    }
+}
+
 ///
 /// Add the passed user to FreeIPA, added from the passed peer instance.
 /// This will return the added user if successful, or will return an
@@ -1382,63 +1449,24 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
 pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(mut user) = get_user(user).await? {
-        // make sure that they are enabled if they are disabled
+        // make sure to re-enable if needed
         if user.is_disabled() {
-            let kwargs = {
-                let mut kwargs = HashMap::new();
-                kwargs.insert("uid".to_string(), user.userid().to_string());
-                kwargs
-            };
-
-            match call_post::<IPAResponse>("user_enable", None, Some(kwargs)).await {
-                Ok(_) => {
-                    user.set_enabled();
-                    tracing::info!("Successfully re-enabled user: {}", user);
-                    // re-add the user to the cache
-                    cache::add_existing_user(&user).await?;
-
-                    // make sure that the groups are correct
-                    match sync_groups(&user, instance).await {
-                        Ok(user) => {
-                            tracing::info!("Added user [cached] {}", user);
-                            return Ok(user);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to sync groups for user {} after adding. Error: {}",
-                                user.identifier(),
-                                e
-                            );
-                            tracing::info!(
-                                "Will try to add user {} again, as the groups are not correct.",
-                                user.identifier()
-                            );
-                        }
-                    }
-                }
-                Err(Error::NotFound(_)) => {
-                    tracing::info!(
-                        "User {} not found in FreeIPA. They have been removed behind our back and cannot be enabled.",
-                        user
-                    );
-
-                    tracing::info!("We will try to add this user again...");
-
-                    // invalidate the cache, as FreeIPA has been changed behind our back
-                    cache::clear().await?;
-                }
+            user = match reenable_user(&user).await {
+                Ok(user) => user,
                 Err(e) => {
-                    tracing::error!("Could not enable user: {}. Error: {}", user, e);
-                    tracing::info!(
-                        "We will try to add user {} again, as FreeIPA is clearly broken for this user.",
-                        user.identifier()
+                    tracing::error!(
+                        "Could not re-enable user {} after adding. Error: {}",
+                        user.identifier(),
+                        e
                     );
 
-                    // invalidate the cache, as FreeIPA has been changed behind our back
-                    cache::clear().await?;
+                    // return the original user that is not enabled
+                    user
                 }
             }
-        } else {
+        }
+
+        if user.is_managed() && user.is_enabled() {
             // make sure that the groups are correct for the existing user
             match sync_groups(&user, instance).await {
                 Ok(user) => {
@@ -1459,13 +1487,15 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
             }
         }
 
-        // we get here if the user has been removed from FreeIPA behind
-        // our back - if this was the case, then the cache has been cleared
+        // we get here if either the user isn't in FreeIPA, or there was
+        // some problem re-enabling them. This means we will fall through
+        // and will try to add the user from scratch
     }
 
+    // Get the group that all managed users need to belong to
     let managed_group = get_managed_group()?;
 
-    // They don't exist, so try to add
+    // The user doesn't exist, so try to add
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("uid".to_string(), identifier_to_userid(user).await?);
@@ -1477,14 +1507,58 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
         kwargs
     };
 
-    // try to add the user...
     let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs)).await {
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
-            result.users()?.first().cloned().ok_or(Error::Call(format!(
-                "User {} could not be found after adding - this could be because they already exist, but aren't managed?",
+            result.users()?.first().cloned().ok_or(Error::UnmanagedUser(format!(
+                "User {} could not be found after adding - this could be because they already exist, but aren't managed? \
+                 Look for the user in FreeIPA and either add them to the managed group or removed them from FreeIPA.",
                 user
             )))?
+        }
+        Err(Error::Duplicate(_)) => {
+            // failed to add because the user already exists
+            tracing::warn!(
+                "Cannot add user {} as FreeIPA thinks they already exist",
+                user
+            );
+            cache::clear().await?;
+
+            match get_user(user).await? {
+                Some(mut user) => {
+                    if user.is_disabled() {
+                        if user.is_managed() {
+                            // the user should be enabled...
+                            user = reenable_user(&user).await?;
+                        } else {
+                            tracing::warn!(
+                                "User {} already exists in FreeIPA, but is not managed. \
+                                Either add this user to the managed group, or remove them from FreeIPA.",
+                                user
+                            );
+
+                            Err(Error::UnmanagedUser(
+                                format!("User {} already exists in FreeIPA, but is not managed by OpenPortal. \
+                                Either add this user to the managed group, or remove them from FreeIPA.", user)
+                            ))?
+                        }
+                    }
+
+                    user
+                }
+                None => {
+                    tracing::warn!(
+                        "Unable to fetch the user, despite them existing in FreeIPA. \
+                            This is because the existing user is not managed. Either add \
+                            this user to the managed group, or remove them from FreeIPA."
+                    );
+
+                    Err(Error::UnmanagedUser(
+                        format!("User {} already exists in FreeIPA, but is not managed by OpenPortal. \
+                                 Either add this user to the managed group, or remove them from FreeIPA.", user)
+                    ))?
+                }
+            }
         }
         Err(e) => {
             // failed to add - maybe they already exist?

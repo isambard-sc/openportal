@@ -52,6 +52,9 @@ pub enum Error {
     InvalidState(String),
 
     #[error("{0}")]
+    Duplicate(String),
+
+    #[error("{0}")]
     Expired(String),
 
     #[error("{0}")]

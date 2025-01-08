@@ -1482,7 +1482,7 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
             result.users()?.first().cloned().ok_or(Error::Call(format!(
-                "User {} could not be found after adding?",
+                "User {} could not be found after adding - this could be because they already exist, but aren't managed?",
                 user
             )))?
         }
@@ -1507,22 +1507,40 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
     // add this user to the managed group so that it can be managed
     let userid = user.userid().to_string();
 
-    // make sure that this group exists
-    let managed_group = get_group_create_if_not_exists(&managed_group).await?;
+    match loop {
+        // make sure that this group exists
+        let managed_group = get_group_create_if_not_exists(&managed_group).await?;
 
-    let kwargs = {
-        let mut kwargs = HashMap::new();
-        kwargs.insert("cn".to_string(), managed_group.groupid().to_string());
-        kwargs.insert("user".to_string(), userid.clone());
-        kwargs
-    };
+        let kwargs = {
+            let mut kwargs = HashMap::new();
+            kwargs.insert("cn".to_string(), managed_group.groupid().to_string());
+            kwargs.insert("user".to_string(), userid.clone());
+            kwargs
+        };
 
-    match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
-        Ok(_) => tracing::info!(
-            "Successfully added user {} to group {}",
-            userid,
-            managed_group
-        ),
+        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
+            Ok(_) => {
+                break Ok(());
+            }
+            Err(Error::NotFound(_)) => {
+                tracing::warn!(
+                    "Group {} not found in FreeIPA. Assuming it has been removed - clearing cache and re-adding.",
+                    managed_group
+                );
+                cache::clear().await?;
+            }
+            Err(e) => {
+                break Err(e);
+            }
+        }
+    } {
+        Ok(_) => {
+            tracing::info!(
+                "Successfully added user {} to group {}",
+                userid,
+                managed_group
+            );
+        }
         Err(e) => {
             tracing::error!(
                 "Could not add user {} to group {}. Error: {}",
@@ -1565,23 +1583,46 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
 
     // now synchronise the groups - this won't do anything if another
     // thread has already beaten us to creating the user
-    match sync_groups(&user, instance).await {
-        Ok(user) => {
-            tracing::info!("Added user: {}", user);
-            Ok(user)
+    let mut attempts = 0;
+
+    match loop {
+        attempts += 1;
+
+        if attempts > 3 {
+            break Err(Error::Call(format!(
+                "Failed to synchronise groups for user {} after 3 attempts",
+                user.identifier()
+            )));
         }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to synchronise groups for user {}: {}",
-                user.identifier(),
-                e
+
+        match sync_groups(&user, instance).await {
+            Ok(user) => {
+                tracing::info!("Added user: {}", user);
+                break Ok(user);
+            }
+            Err(Error::NotFound(e)) => {
+                tracing::warn!(
+                "User {} or groups not found in FreeIPA. They have been removed? Clearing cache and re-adding. Error: {}",
+                user, e
             );
-            Err(Error::Call(format!(
-                "Failed to synchronise groups for user {}: {}",
-                user.identifier(),
-                e
-            )))
+                cache::clear().await?;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to synchronise groups for user {}: {}",
+                    user.identifier(),
+                    e
+                );
+                break Err(Error::Call(format!(
+                    "Failed to synchronise groups for user {}: {}",
+                    user.identifier(),
+                    e
+                )));
+            }
         }
+    } {
+        Ok(user) => Ok(user),
+        Err(e) => Err(e),
     }
 }
 

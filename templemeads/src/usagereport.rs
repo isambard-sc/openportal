@@ -4,8 +4,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::error::Error;
+
 use crate::grammar::{
-    Date, DateRange, NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier,
+    Date, NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping,
 };
 
 impl NamedType for Usage {
@@ -32,6 +34,18 @@ impl NamedType for Vec<UserUsageReport> {
     }
 }
 
+impl NamedType for DailyProjectUsageReport {
+    fn type_name() -> &'static str {
+        "DailyProjectUsageReport"
+    }
+}
+
+impl NamedType for Vec<DailyProjectUsageReport> {
+    fn type_name() -> &'static str {
+        "Vec<DailyProjectUsageReport>"
+    }
+}
+
 impl NamedType for ProjectUsageReport {
     fn type_name() -> &'static str {
         "ProjectUsageReport"
@@ -41,18 +55,6 @@ impl NamedType for ProjectUsageReport {
 impl NamedType for Vec<ProjectUsageReport> {
     fn type_name() -> &'static str {
         "Vec<ProjectUsageReport>"
-    }
-}
-
-impl NamedType for DailyUsageReport {
-    fn type_name() -> &'static str {
-        "DailyUsageReport"
-    }
-}
-
-impl NamedType for Vec<DailyUsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<DailyUsageReport>"
     }
 }
 
@@ -71,6 +73,14 @@ impl NamedType for Vec<UsageReport> {
 #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Usage {
     node_seconds: u64,
+}
+
+impl std::iter::Sum for Usage {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |a, b| Self {
+            node_seconds: a.node_seconds + b.node_seconds,
+        })
+    }
 }
 
 impl std::fmt::Display for Usage {
@@ -107,122 +117,306 @@ impl std::ops::Add for Usage {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserUsageReport {
+    user: UserIdentifier,
     usage: Usage,
 }
 
 impl std::fmt::Display for UserUsageReport {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.usage)
+        write!(f, "{}: {}", self.user, self.usage)
     }
 }
 
 impl UserUsageReport {
-    pub fn new(usage: Usage) -> Self {
-        Self { usage }
+    pub fn new(user: &UserIdentifier, usage: Usage) -> Self {
+        Self {
+            user: user.clone(),
+            usage,
+        }
     }
 
-    pub fn usage(&self) -> Usage {
-        self.usage
+    pub fn user(&self) -> &UserIdentifier {
+        &self.user
     }
 
-    pub fn total_usage(&self) -> Usage {
-        self.usage
+    pub fn usage(&self) -> &Usage {
+        &self.usage
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct ProjectUsageReport {
-    users: HashMap<UserIdentifier, UserUsageReport>,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DailyProjectUsageReport {
+    reports: HashMap<String, Usage>,
 }
 
-impl std::fmt::Display for ProjectUsageReport {
+impl std::ops::AddAssign for DailyProjectUsageReport {
+    fn add_assign(&mut self, other: Self) {
+        for (user, usage) in other.reports {
+            *self.reports.entry(user).or_default() += usage;
+        }
+    }
+}
+
+impl std::fmt::Display for DailyProjectUsageReport {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let mut users = self.users.keys().collect::<Vec<_>>();
+        let mut users = self.reports.keys().collect::<Vec<_>>();
 
-        users.sort_by_cached_key(|a| a.to_string());
+        users.sort();
 
         for user in users {
-            writeln!(f, "{}: {}", user, self.users[user])?;
+            writeln!(f, "{}: {}", user, self.reports[user])?;
         }
 
         writeln!(f, "Total: {}", self.total_usage())
     }
 }
 
+impl DailyProjectUsageReport {
+    pub fn usage(&self, local_user: &str) -> Usage {
+        self.reports.get(local_user).cloned().unwrap_or_default()
+    }
+
+    pub fn local_users(&self) -> Vec<String> {
+        self.reports.keys().cloned().collect()
+    }
+
+    pub fn total_usage(&self) -> Usage {
+        self.reports.values().cloned().sum()
+    }
+
+    pub fn add_usage(&mut self, local_user: &str, usage: Usage) {
+        *self.reports.entry(local_user.to_string()).or_default() += usage;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectUsageReport {
+    project: ProjectIdentifier,
+    reports: HashMap<Date, DailyProjectUsageReport>,
+    users: HashMap<String, UserIdentifier>,
+
+    #[serde(skip)]
+    inv_users: HashMap<UserIdentifier, String>,
+}
+
+// add the += operator for ProjectUsageReport
+impl std::ops::AddAssign for ProjectUsageReport {
+    fn add_assign(&mut self, other: Self) {
+        for (date, report) in other.reports {
+            if let Some(existing) = self.reports.get_mut(&date) {
+                *existing += report;
+            } else {
+                self.reports.insert(date, report);
+            }
+        }
+
+        for (local_user, user) in other.users {
+            self.users.insert(local_user.clone(), user.clone());
+            self.inv_users.insert(user, local_user);
+        }
+    }
+}
+
+// add the + operator for ProjectUsageReport
+impl std::ops::Add for ProjectUsageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        let mut new_report = self.clone();
+        new_report += other;
+        new_report
+    }
+}
+
+impl std::fmt::Display for ProjectUsageReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        writeln!(f, "{}", self.project())?;
+
+        let mut dates = self.reports.keys().collect::<Vec<_>>();
+
+        dates.sort();
+
+        for date in dates {
+            writeln!(f, "{}", date)?;
+
+            let report = self.reports.get(date).cloned().unwrap_or_default();
+
+            for user in report.local_users() {
+                if let Some(userid) = self.users.get(&user) {
+                    writeln!(f, "{}: {}", userid, report.usage(&user))?;
+                } else {
+                    writeln!(f, "{} - unknown: {}", user, report.usage(&user))?;
+                }
+            }
+
+            writeln!(f, "Daily total: {}", report.total_usage())?;
+        }
+
+        writeln!(f, "Total: {}", self.total_usage())
+    }
+}
+
+pub enum UserType {
+    UserMapping(UserMapping),
+    UserIdentifier(UserIdentifier),
+    LocalUser(String),
+}
+
+impl From<UserMapping> for UserType {
+    fn from(mapping: UserMapping) -> Self {
+        UserType::UserMapping(mapping)
+    }
+}
+
+impl From<UserIdentifier> for UserType {
+    fn from(user: UserIdentifier) -> Self {
+        UserType::UserIdentifier(user)
+    }
+}
+
+impl From<String> for UserType {
+    fn from(user: String) -> Self {
+        UserType::LocalUser(user)
+    }
+}
+
 impl ProjectUsageReport {
-    pub fn usage(&self, user: &UserIdentifier) -> UserUsageReport {
-        self.users.get(user).cloned().unwrap_or_default()
+    pub fn usage(&self, date: &Date) -> ProjectUsageReport {
+        let mut reports = HashMap::new();
+        reports.insert(
+            date.clone(),
+            self.reports.get(date).cloned().unwrap_or_default(),
+        );
+
+        ProjectUsageReport {
+            project: self.project.clone(),
+            reports,
+            users: self.users.clone(),
+            inv_users: self.inv_users.clone(),
+        }
+    }
+
+    pub fn dates(&self) -> Vec<Date> {
+        self.reports.keys().cloned().collect()
+    }
+
+    pub fn project(&self) -> ProjectIdentifier {
+        self.project.clone()
+    }
+
+    pub fn portal(&self) -> PortalIdentifier {
+        self.project().portal_identifier()
     }
 
     pub fn users(&self) -> Vec<UserIdentifier> {
-        self.users.keys().cloned().collect()
+        self.users.values().cloned().collect()
+    }
+
+    pub fn unmapped_users(&self) -> Vec<String> {
+        let unmapped_users: std::collections::HashSet<String> = self
+            .reports
+            .values()
+            .flat_map(|r| r.local_users())
+            .filter(|u| !self.users.contains_key(u))
+            .collect();
+
+        unmapped_users.into_iter().collect()
     }
 
     pub fn total_usage(&self) -> Usage {
-        let mut total = Usage::default();
-        for user in self.users.values() {
-            total += user.usage();
-        }
-        total
-    }
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct DailyUsageReport {
-    projects: HashMap<ProjectIdentifier, ProjectUsageReport>,
-}
-
-impl std::fmt::Display for DailyUsageReport {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let mut projects = self.projects.keys().collect::<Vec<_>>();
-        projects.sort_by_cached_key(|a| a.to_string());
-
-        for project in projects {
-            writeln!(f, "{}", project)?;
-            writeln!(f, "{}", self.projects[project])?;
-        }
-
-        for (project, usage) in &self.projects {
-            writeln!(f, "{}: {}", project, usage)?;
-        }
-
-        writeln!(f, "Daily total: {}", self.total_usage())
-    }
-}
-
-impl DailyUsageReport {
-    pub fn usage(&self, project: &ProjectIdentifier) -> ProjectUsageReport {
-        self.projects.get(project).cloned().unwrap_or_default()
+        self.reports
+            .values()
+            .cloned()
+            .map(|r| r.total_usage())
+            .sum()
     }
 
-    pub fn projects(&self) -> Vec<ProjectIdentifier> {
-        self.projects.keys().cloned().collect()
+    pub fn add_mapping(&mut self, mapping: &UserMapping) -> Result<String, Error> {
+        if mapping.user().project_identifier() != self.project() {
+            return Err(Error::InvalidState(format!(
+                "Mapping for wrong project: {}. This report is for {}",
+                mapping,
+                self.project()
+            )));
+        }
+
+        // check that the mapping hasn't changed
+        if let Some(user) = self.users.get(mapping.local_user()) {
+            if user != mapping.user() {
+                tracing::warn!(
+                    "Mapping for {} already exists: {}. Ignoring {}",
+                    mapping.local_user(),
+                    user,
+                    mapping.user(),
+                );
+
+                return Ok(mapping.local_user().to_string());
+            }
+        }
+
+        if let Some(local_user) = self.inv_users.get(mapping.user()) {
+            if local_user != mapping.local_user() {
+                tracing::warn!(
+                    "Mapping for {} already exists: {}. Ignoring {}",
+                    mapping.user(),
+                    local_user,
+                    mapping.local_user(),
+                );
+
+                return Ok(local_user.to_string());
+            }
+        }
+
+        self.users
+            .insert(mapping.local_user().to_string(), mapping.user().clone());
+
+        self.inv_users
+            .insert(mapping.user().clone(), mapping.local_user().to_string());
+
+        Ok(mapping.local_user().to_string())
     }
 
-    pub fn total_usage(&self) -> Usage {
-        let mut total = Usage::default();
-        for project in self.projects.values() {
-            total += project.total_usage();
+    pub fn add_usage(&mut self, user: &UserType, date: &Date, usage: Usage) -> Result<(), Error> {
+        let local_user = match user {
+            UserType::UserMapping(mapping) => self.add_mapping(mapping)?,
+            UserType::UserIdentifier(user) => match self.inv_users.get(user) {
+                Some(local_user) => local_user.clone(),
+                None => {
+                    tracing::warn!("Unknown user {}. Cannot record usage!", user);
+                    return Err(Error::UnmanagedUser(format!(
+                        "Unknown user {} - no mapping known",
+                        user
+                    )));
+                }
+            },
+            UserType::LocalUser(local_user) => local_user.clone(),
+        };
+
+        if let Some(report) = self.reports.get_mut(date) {
+            report.add_usage(&local_user, usage);
+        } else {
+            let mut report = DailyProjectUsageReport::default();
+            report.add_usage(&local_user, usage);
+            self.reports.insert(date.clone(), report);
         }
-        total
+
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageReport {
     portal: PortalIdentifier,
-    date_range: DateRange,
-    daily_reports: HashMap<Date, DailyUsageReport>,
+    reports: HashMap<ProjectIdentifier, ProjectUsageReport>,
 }
 
 impl UsageReport {
-    pub fn new(portal: &PortalIdentifier, date_range: &DateRange) -> Self {
+    pub fn new(portal: &PortalIdentifier) -> Self {
         Self {
             portal: portal.clone(),
-            date_range: date_range.clone(),
-            daily_reports: HashMap::new(),
+            reports: HashMap::new(),
         }
     }
 
@@ -230,19 +424,36 @@ impl UsageReport {
         &self.portal
     }
 
-    pub fn date_range(&self) -> &DateRange {
-        &self.date_range
+    pub fn projects(&self) -> Vec<ProjectIdentifier> {
+        self.reports.keys().cloned().collect()
     }
 
-    pub fn usage(&self, date: &Date) -> DailyUsageReport {
-        self.daily_reports.get(date).cloned().unwrap_or_default()
+    pub fn get_report(&self, project: &ProjectIdentifier) -> ProjectUsageReport {
+        self.reports
+            .get(project)
+            .cloned()
+            .unwrap_or(ProjectUsageReport {
+                project: project.clone(),
+                reports: HashMap::new(),
+                users: HashMap::new(),
+                inv_users: HashMap::new(),
+            })
+    }
+
+    pub fn add(&mut self, report: &ProjectUsageReport) {
+        if let Some(existing) = self.reports.get_mut(&report.project()) {
+            *existing += report.clone();
+        } else {
+            self.reports
+                .insert(report.project().clone(), report.clone());
+        }
     }
 
     pub fn total_usage(&self) -> Usage {
-        let mut total = Usage::default();
-        for daily_report in self.daily_reports.values() {
-            total += daily_report.total_usage();
-        }
-        total
+        self.reports
+            .values()
+            .cloned()
+            .map(|r| r.total_usage())
+            .sum()
     }
 }

@@ -25,6 +25,9 @@ pub enum Error {
     UrlParse(#[from] url::ParseError),
 
     #[error("{0}")]
+    Bug(String),
+
+    #[error("{0}")]
     Call(String),
 
     #[error("{0}")]
@@ -71,6 +74,9 @@ pub enum Error {
 
     #[error("{0}")]
     NoPortal(String),
+
+    #[error("{0}")]
+    InvalidPortal(String),
 
     #[error("{0}")]
     NotFound(String),

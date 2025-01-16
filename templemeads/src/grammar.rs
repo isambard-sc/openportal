@@ -576,7 +576,7 @@ impl<'de> Deserialize<'de> for UserMapping {
 ///
 /// Struct used to represent a single date
 ///
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Date {
     date: chrono::NaiveDate,
 }
@@ -669,6 +669,10 @@ impl Date {
     pub fn date(&self) -> &chrono::NaiveDate {
         &self.date
     }
+
+    pub fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.date.partial_cmp(&other.date)
+    }
 }
 
 impl std::fmt::Display for Date {
@@ -710,7 +714,6 @@ impl From<Date> for chrono::NaiveDate {
 
 ///
 /// Struct used to parse a date range (from start to end inclusive)
-///
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DateRange {
     start_date: Date,

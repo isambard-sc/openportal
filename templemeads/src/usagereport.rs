@@ -191,14 +191,58 @@ impl DailyProjectUsageReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProjectUsageReport {
     project: ProjectIdentifier,
     reports: HashMap<Date, DailyProjectUsageReport>,
     users: HashMap<String, UserIdentifier>,
 
-    #[serde(skip)]
     inv_users: HashMap<UserIdentifier, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProjectUsageReportHelper {
+    project: ProjectIdentifier,
+    reports: HashMap<Date, DailyProjectUsageReport>,
+    users: HashMap<String, UserIdentifier>,
+}
+
+impl serde::Serialize for ProjectUsageReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ProjectUsageReportHelper {
+            project: self.project.clone(),
+            reports: self.reports.clone(),
+            users: self.users.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+// add the serde deserialization function, which will also rebuild the
+// inv_users map
+impl<'de> serde::Deserialize<'de> for ProjectUsageReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let helper = ProjectUsageReportHelper::deserialize(deserializer)?;
+
+        let inv_users = helper
+            .users
+            .iter()
+            .map(|(k, v)| (v.clone(), k.clone()))
+            .collect();
+
+        Ok(ProjectUsageReport {
+            project: helper.project,
+            reports: helper.reports,
+            users: helper.users,
+            inv_users,
+        })
+    }
 }
 
 // add the += operator for ProjectUsageReport
@@ -283,6 +327,15 @@ impl From<String> for UserType {
 }
 
 impl ProjectUsageReport {
+    pub fn new(project: &ProjectIdentifier) -> Self {
+        Self {
+            project: project.clone(),
+            reports: HashMap::new(),
+            users: HashMap::new(),
+            inv_users: HashMap::new(),
+        }
+    }
+
     pub fn usage(&self, date: &Date) -> ProjectUsageReport {
         let mut reports = HashMap::new();
         reports.insert(
@@ -331,6 +384,19 @@ impl ProjectUsageReport {
             .cloned()
             .map(|r| r.total_usage())
             .sum()
+    }
+
+    pub fn add_mappings(&mut self, mappings: &[UserMapping]) -> Result<(), Error> {
+        for mapping in mappings {
+            match self.add_mapping(mapping) {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::warn!("Failed to add mapping: {}", e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn add_mapping(&mut self, mapping: &UserMapping) -> Result<String, Error> {
@@ -440,13 +506,23 @@ impl UsageReport {
             })
     }
 
-    pub fn add(&mut self, report: &ProjectUsageReport) {
+    pub fn add(&mut self, report: &ProjectUsageReport) -> Result<(), Error> {
+        if report.portal() != *self.portal() {
+            return Err(Error::InvalidState(format!(
+                "Report for wrong portal: {}. This report is for {}",
+                report.portal(),
+                self.portal()
+            )));
+        }
+
         if let Some(existing) = self.reports.get_mut(&report.project()) {
             *existing += report.clone();
         } else {
             self.reports
                 .insert(report.project().clone(), report.clone());
         }
+
+        Ok(())
     }
 
     pub fn total_usage(&self) -> Usage {

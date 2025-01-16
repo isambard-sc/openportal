@@ -4,7 +4,8 @@
 use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
-use templemeads::grammar::{ProjectMapping, UserMapping};
+use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
+use templemeads::usagereport::ProjectUsageReport;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -703,4 +704,11 @@ pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
     tracing::info!("Added user: {}", user);
 
     Ok(())
+}
+
+pub async fn get_usage_report(
+    project: &ProjectMapping,
+    dates: &DateRange,
+) -> Result<ProjectUsageReport, Error> {
+    Ok(ProjectUsageReport::new(project.project()))
 }

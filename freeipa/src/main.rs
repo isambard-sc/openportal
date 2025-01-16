@@ -14,7 +14,8 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetProjects, GetUsers, RemoveProject, RemoveUser, UpdateHomeDir,
+    AddProject, AddUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers, RemoveProject,
+    RemoveUser, UpdateHomeDir,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
@@ -131,6 +132,14 @@ async fn main() -> Result<()> {
                 UpdateHomeDir(user, homedir) => {
                     let _ = freeipa::update_homedir(&user, &homedir).await?;
                     job.completed(homedir)
+                },
+                GetProjectMapping(project) => {
+                    let mapping = freeipa::get_project_mapping(&project).await?;
+                    job.completed(mapping)
+                },
+                GetUserMapping(user) => {
+                    let mapping = freeipa::get_user_mapping(&user).await?;
+                    job.completed(mapping)
                 },
                 _ => {
                     Err(Error::InvalidInstruction(

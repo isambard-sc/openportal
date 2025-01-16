@@ -9,7 +9,8 @@ use secrecy::{ExposeSecret, Secret};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Display;
-use templemeads::grammar::{ProjectMapping, UserMapping};
+use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
+use templemeads::usagereport::ProjectUsageReport;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -1723,4 +1724,11 @@ pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
     tracing::info!("Added account: {}", account);
 
     Ok(())
+}
+
+pub async fn get_usage_report(
+    project: &ProjectMapping,
+    dates: &DateRange,
+) -> Result<ProjectUsageReport, Error> {
+    Ok(ProjectUsageReport::new(project.project()))
 }

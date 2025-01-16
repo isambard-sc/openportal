@@ -123,6 +123,7 @@ impl Command {
             let user = match instruction.clone() {
                 Instruction::AddUser(user) => Some(user),
                 Instruction::RemoveUser(user) => Some(user),
+                Instruction::GetUserMapping(user) => Some(user),
                 _ => None,
             };
 
@@ -144,6 +145,7 @@ impl Command {
                 Instruction::GetUsers(project) => Some(project),
                 Instruction::RemoveProject(project) => Some(project),
                 Instruction::GetUsageReport(project, _) => Some(project),
+                Instruction::GetProjectMapping(project) => Some(project),
                 _ => None,
             };
 

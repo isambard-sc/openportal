@@ -1988,3 +1988,23 @@ pub async fn get_users(project: &ProjectIdentifier) -> Result<Vec<IPAUser>, Erro
 
     Ok(users)
 }
+
+pub async fn get_project_mapping(project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
+    match get_group(project).await? {
+        Some(group) => group.mapping(),
+        None => Err(Error::MissingProject(format!(
+            "Project {} does not exist in FreeIPA",
+            project
+        ))),
+    }
+}
+
+pub async fn get_user_mapping(user: &UserIdentifier) -> Result<UserMapping, Error> {
+    match get_user(user).await? {
+        Some(user) => user.mapping(),
+        None => Err(Error::MissingUser(format!(
+            "User {} does not exist in FreeIPA",
+            user
+        ))),
+    }
+}

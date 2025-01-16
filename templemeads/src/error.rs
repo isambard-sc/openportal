@@ -73,6 +73,12 @@ pub enum Error {
     MissingAgent(String),
 
     #[error("{0}")]
+    MissingProject(String),
+
+    #[error("{0}")]
+    MissingUser(String),
+
+    #[error("{0}")]
     NoPortal(String),
 
     #[error("{0}")]

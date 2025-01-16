@@ -825,6 +825,12 @@ pub enum Instruction {
     /// An instruction to remove a user
     RemoveUser(UserIdentifier),
 
+    /// An instruction to look up the mapping for a user
+    GetUserMapping(UserIdentifier),
+
+    /// An instruction to look up the mapping for a project
+    GetProjectMapping(ProjectIdentifier),
+
     /// An instruction to add a local user
     AddLocalUser(UserMapping),
 
@@ -836,6 +842,9 @@ pub enum Instruction {
 
     /// An instruction to remove a local project
     RemoveLocalProject(ProjectMapping),
+
+    /// An instruction to get a local project report
+    GetLocalUsageReport(ProjectMapping, DateRange),
 
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
@@ -974,6 +983,32 @@ impl Instruction {
                     )))
                 }
             },
+            "get_project_mapping" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::GetProjectMapping(project)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_project_mapping failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_project_mapping failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_user_mapping" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::GetUserMapping(user)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_user_mapping failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_user_mapping failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
             "add_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
                 Ok(mapping) => Ok(Instruction::AddLocalUser(mapping)),
                 Err(_) => {
@@ -1026,6 +1061,48 @@ impl Instruction {
                         Err(Error::Parse(format!(
                             "update_homedir failed to parse: {}",
                             &parts[1..].join(" ")
+                        )))
+                    }
+                }
+            }
+            "get_local_usage_report" => {
+                if parts.len() < 3 {
+                    tracing::error!(
+                        "get_local_usage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "get_local_usage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => match DateRange::parse(parts[2]) {
+                        Ok(date_range) => Ok(Instruction::GetLocalUsageReport(mapping, date_range)),
+                        Err(e) => {
+                            tracing::error!(
+                                "get_local_usage_report failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "get_local_usage_report failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "get_local_usage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_usage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
                         )))
                     }
                 }
@@ -1142,6 +1219,11 @@ impl std::fmt::Display for Instruction {
             Instruction::RemoveLocalUser(mapping) => write!(f, "remove_local_user {}", mapping),
             Instruction::UpdateHomeDir(user, homedir) => {
                 write!(f, "update_homedir {} {}", user, homedir)
+            }
+            Instruction::GetUserMapping(user) => write!(f, "get_user_mapping {}", user),
+            Instruction::GetProjectMapping(project) => write!(f, "get_project_mapping {}", project),
+            Instruction::GetLocalUsageReport(mapping, date_range) => {
+                write!(f, "get_local_usage_report {} {}", mapping, date_range)
             }
             Instruction::GetUsageReport(project, date_range) => {
                 write!(f, "get_usage_report {} {}", project, date_range)

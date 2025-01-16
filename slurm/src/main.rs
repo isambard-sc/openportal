@@ -7,7 +7,7 @@ use templemeads::agent::scheduler::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, RemoveLocalProject, RemoveLocalUser,
+    AddLocalProject, AddLocalUser, GetLocalUsageReport, RemoveLocalProject, RemoveLocalUser,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
@@ -112,6 +112,10 @@ async fn main() -> Result<()> {
                         tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
                         job.completed_none()
                     },
+                    GetLocalUsageReport(mapping, dates) => {
+                        let report = sacctmgr::get_usage_report(&mapping, &dates).await?;
+                        job.completed(report)
+                    }
                     _ => {
                         Err(Error::InvalidInstruction(
                             format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
@@ -193,6 +197,10 @@ async fn main() -> Result<()> {
                         tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
                         job.completed_none()
                     },
+                    GetLocalUsageReport(mapping, dates) => {
+                        let report = slurm::get_usage_report(&mapping, &dates).await?;
+                        job.completed(report)
+                    }
                     _ => {
                         Err(Error::InvalidInstruction(
                             format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),

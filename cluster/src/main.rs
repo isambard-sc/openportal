@@ -8,12 +8,14 @@ use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetProjects, GetUsers, RemoveProject, RemoveUser,
+    AddProject, AddUser, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
+    GetUserMapping, GetUsers, RemoveProject, RemoveUser,
 };
 use templemeads::grammar::{
-    PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
+    DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
+use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
 
 ///
@@ -68,7 +70,7 @@ async fn main() -> Result<()> {
             tracing::info!("Using the cluster runner");
 
             let me = envelope.recipient();
-            let mut job = envelope.job();
+            let job = envelope.job();
 
             match job.instruction() {
                 GetProjects(portal) => {
@@ -77,7 +79,7 @@ async fn main() -> Result<()> {
 
                     let projects = get_projects(me.name(), &portal).await?;
 
-                    job = job.completed(projects)?;
+                    job.completed(projects)
                 },
                 GetUsers(project) => {
                     // get the list of users from the cluster
@@ -85,7 +87,7 @@ async fn main() -> Result<()> {
 
                     let users = get_accounts(me.name(), &project).await?;
 
-                    job = job.completed(users)?;
+                    job.completed(users)
                 },
                 AddProject(project) => {
                     // add the project to the cluster
@@ -105,12 +107,12 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    job = job.completed(mapping)?;
+                    job.completed(mapping)
                 },
                 RemoveProject(project) => {
                     // remove the project from the cluster
                     let mapping = remove_project_from_cluster(me.name(), &project).await?;
-                    job = job.completed(mapping)?;
+                    job.completed(mapping)
                 },
                 AddUser(user) => {
                     // add the user to the cluster
@@ -130,22 +132,37 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    job = job.completed(mapping)?;
+                    job.completed(mapping)
                 }
                 RemoveUser(user) => {
                     // remove the user from the cluster
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
-                    job = job.completed(mapping)?;
+                    job.completed(mapping)
+                }
+                GetProjectMapping(project) => {
+                    let mapping = get_project_mapping(me.name(), &project).await?;
+                    job.completed(mapping)
+                }
+                GetUserMapping(user) => {
+                    let mapping = get_user_mapping(me.name(), &user).await?;
+                    job.completed(mapping)
+                }
+                GetUsageReport(project, dates) => {
+                    let mapping = get_project_mapping(me.name(), &project).await?;
+                    let report = get_usage_report(me.name(), &mapping, &dates).await?;
+                    job.completed(report)
+                }
+                GetUsageReports(portal, dates) => {
+                    let report = get_usage_reports(me.name(), &portal, &dates).await?;
+                    job.completed(report)
                 }
                 _ => {
                     tracing::error!("Unknown instruction: {:?}", job.instruction());
-                    return Err(Error::UnknownInstruction(
+                    Err(Error::UnknownInstruction(
                         format!("Unknown instruction: {:?}", job.instruction()).to_string(),
-                    ));
+                    ))
                 }
             }
-
-            Ok(job)
         }
     }
 
@@ -452,6 +469,88 @@ async fn remove_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, 
                     Err(Error::Call(
                         format!("Error removing the user's account: {:?}", job).to_string(),
                     ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_project_mapping(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectMapping, Error> {
+    // find the Account agent
+    match agent::account(30).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} get_project_mapping {}", me, account.name(), project),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<ProjectMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!(
+                        "Project mapping retrieved from account agent: {:?}",
+                        mapping
+                    );
+                    Ok(mapping)
+                }
+                None => {
+                    tracing::error!("No project mapping found?");
+                    Err(Error::MissingProject(format!(
+                        "Could not find a mapping for project {}",
+                        project
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_user_mapping(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    // find the Account agent
+    match agent::account(30).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} get_user_mapping {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<UserMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!("User mapping retrieved from account agent: {:?}", mapping);
+                    Ok(mapping)
+                }
+                None => {
+                    tracing::error!("No user mapping found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find a mapping for user {}",
+                        user
+                    )))
                 }
             }
         }
@@ -809,4 +908,64 @@ async fn remove_user_from_scheduler(
             ))
         }
     }
+}
+
+async fn get_usage_report(
+    me: &str,
+    project: &ProjectMapping,
+    dates: &DateRange,
+) -> Result<ProjectUsageReport, Error> {
+    // get the schedule agent
+    let scheduler = match agent::scheduler(30).await {
+        Some(scheduler) => scheduler,
+        None => {
+            tracing::error!("No scheduler agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the scheduler for the usage report of this project
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_usage_report {} {}",
+            me,
+            scheduler.name(),
+            project,
+            dates
+        ),
+        false,
+    )?
+    .put(&scheduler)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting ProjectUsageReport
+    let mut report = match job.wait().await?.result::<ProjectUsageReport>()? {
+        Some(report) => report,
+        None => ProjectUsageReport::new(project.project()),
+    };
+
+    // now add in all of the mappings that we know about
+    report.add_mappings(&get_accounts(me, project.project()).await?)?;
+
+    Ok(report)
+}
+
+async fn get_usage_reports(
+    me: &str,
+    portal: &PortalIdentifier,
+    dates: &DateRange,
+) -> Result<UsageReport, Error> {
+    // get the list of all projects associated with this portal
+    let projects = get_projects(me, portal).await?;
+
+    let mut report = UsageReport::new(portal);
+
+    for project in projects {
+        let project_report = get_usage_report(me, &project, dates).await?;
+        report.add(&project_report)?;
+    }
+
+    Ok(report)
 }

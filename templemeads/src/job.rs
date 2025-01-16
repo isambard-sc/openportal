@@ -143,6 +143,7 @@ impl Command {
                 Instruction::AddProject(project) => Some(project),
                 Instruction::GetUsers(project) => Some(project),
                 Instruction::RemoveProject(project) => Some(project),
+                Instruction::GetUsageReport(project, _) => Some(project),
                 _ => None,
             };
 
@@ -161,6 +162,7 @@ impl Command {
 
             let portal = match instruction.clone() {
                 Instruction::GetProjects(portal) => Some(portal),
+                Instruction::GetUsageReports(portal, _) => Some(portal),
                 _ => None,
             };
 
@@ -269,7 +271,7 @@ impl std::fmt::Display for Job {
 
 impl Job {
     pub fn parse(command: &str, check_portal: bool) -> Result<Self, Error> {
-        tracing::info!("Parsing command: {:?}", command);
+        tracing::debug!("Parsing command: {:?}", command);
 
         let now = Utc::now();
 
@@ -588,7 +590,7 @@ impl Job {
 
         match self.state() {
             Status::Pending => {
-                tracing::info!("Running job.execute() for job: {:?}", self);
+                tracing::debug!("Running job.execute() for job: {:?}", self);
                 self.errored(format!("No default runner for job: {:?}", self).as_str())
             }
             _ => Err(Error::InvalidState(
@@ -958,12 +960,12 @@ pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
 /// peer
 ///
 pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> Result<(), Error> {
-    tracing::info!("Syncing state from peer {}", peer);
+    tracing::debug!("Syncing state from peer {}", peer);
 
     let jobs = sync.jobs();
 
     if jobs.is_empty() {
-        tracing::info!("No jobs to sync from peer {}", peer);
+        tracing::debug!("No jobs to sync from peer {}", peer);
         return Ok(());
     }
 
@@ -1020,7 +1022,7 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
                     },
                 }
             } else {
-                tracing::info!("Already have job: {} on the board", job);
+                tracing::debug!("Already have job: {} on the board", job);
             }
         }
     }
@@ -1029,7 +1031,7 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
     // updates first, then the puts
     for job in update_jobs {
         if !job.is_expired() {
-            tracing::info!("Updating job: {}", job);
+            tracing::debug!("Updating job: {}", job);
             num_synced += 1;
 
             match ControlCommand::update(job).received_from(peer) {
@@ -1044,7 +1046,7 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
 
     for job in put_jobs {
         if !job.is_expired() {
-            tracing::info!("Putting job: {}", job);
+            tracing::debug!("Putting job: {}", job);
             num_synced += 1;
 
             match ControlCommand::put(job).received_from(peer) {
@@ -1096,7 +1098,7 @@ pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
     // now send all of the queued jobs - if anything goes wrong,
     // the job will automatically put itself back on the queue
     for command in queued {
-        tracing::info!("Running queued command: {:?}", command);
+        tracing::debug!("Running queued command: {:?}", command);
 
         match command {
             ControlCommand::Put { job } => {

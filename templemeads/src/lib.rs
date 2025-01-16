@@ -28,6 +28,7 @@ pub mod grammar;
 pub mod job;
 pub mod runnable;
 pub mod state;
+pub mod usagereport;
 
 pub mod server {
     pub use crate::bridge_server::sign_api_call;

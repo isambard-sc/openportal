@@ -41,7 +41,7 @@ pub type AsyncRunnable = fn(
 async_runnable! {
     pub async fn default_runner(envelope: Envelope) -> Result<Job, Error>
     {
-        tracing::info!("Using the default runner for job from {} to {}", envelope.sender(), envelope.recipient());
+        tracing::debug!("Using the default runner for job from {} to {}", envelope.sender(), envelope.recipient());
         let result = envelope.job().execute().await?;
 
         Ok(result)

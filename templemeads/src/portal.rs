@@ -44,11 +44,11 @@ crate::async_runnable! {
                 // This is a job that should have been received from
                 // the bridge, and which is to be interpreted and passed
                 // south-bound to the agents for processing
-                tracing::info!("Received instruction: {:?}", instruction);
-                tracing::info!("This is for destination: {:?}", destination);
-                tracing::info!("This was from {:?}", envelope);
+                tracing::info!("{} : {}", destination, instruction);
+                tracing::debug!("This was from {:?}", envelope);
 
                 if destination.agents().len() < 2 {
+                    tracing::error!("Invalid instruction: {}. Destination must have at least two agents", job.instruction());
                     return Err(Error::InvalidInstruction(
                         format!("Invalid instruction: {}. Destination must have at least two agents", job.instruction()),
                     ));
@@ -58,6 +58,7 @@ crate::async_runnable! {
                 let first_agent = destination.agents()[0].clone();
 
                 if first_agent != envelope.recipient().name() {
+                    tracing::error!("Invalid instruction: {}. First agent in destination should be this portal ({})", job.instruction(), envelope.recipient().name());
                     return Err(Error::InvalidInstruction(
                         format!("Invalid instruction: {}. First agent in destination should be this portal ({})",
                                     job.instruction(),
@@ -67,6 +68,7 @@ crate::async_runnable! {
 
                 // who is next in line to receive this job? - find it, and its zone
                 let next_agent = agent::find(&destination.agents()[1], 30).await.ok_or_else(|| {
+                    tracing::error!("Invalid instruction: {}. Cannot find next agent in destination {}", job.instruction(), destination);
                     Error::InvalidInstruction(
                         format!("Invalid instruction: {}. Cannot find next agent in destination {}",
                                 job.instruction(), destination),

@@ -90,7 +90,7 @@ async fn process_command(
         Command::Update { job } => {
             let peer = Peer::new(sender, zone);
 
-            tracing::info!("Update job: {} to {} from {}", job, recipient, peer,);
+            tracing::debug!("Update job: {} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -116,7 +116,7 @@ async fn process_command(
                     }
                 }
                 Position::Destination => {
-                    tracing::info!("Updated job has arrived at its destination: {}", job);
+                    tracing::debug!("Updated job has arrived at its destination: {}", job);
                 }
                 Position::Error => {
                     tracing::error!("Job has got into an errored position: {}", job);
@@ -126,7 +126,7 @@ async fn process_command(
         Command::Put { job } => {
             let peer = Peer::new(sender, zone);
 
-            tracing::info!("Put job: {} to {} from {}", job, recipient, peer,);
+            tracing::debug!("Put job: {} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
@@ -160,12 +160,14 @@ async fn process_command(
                     // we are the destination, so we need to take action
                     match job.state() {
                         Status::Complete => {
-                            tracing::info!("Not rerunning job that has already completed: {}", job);
+                            tracing::warn!("Not rerunning job that has already completed: {}", job);
                         }
                         Status::Error => {
-                            tracing::error!("Not rerunning job that has already errored: {}", job);
+                            tracing::warn!("Not rerunning job that has already errored: {}", job);
                         }
                         _ => {
+                            tracing::info!("{} : {}", job.destination(), job.instruction());
+
                             job = match runner(Envelope::new(recipient, sender, zone, &job)).await {
                                 Ok(job) => job,
                                 Err(e) => {
@@ -186,7 +188,7 @@ async fn process_command(
                 }
             }
 
-            tracing::info!("Job has finished: {}", job);
+            tracing::debug!("Job has finished: {}", job);
 
             // now the job has finished, update the sender's board
             let peer = Peer::new(sender, zone);
@@ -197,7 +199,7 @@ async fn process_command(
         Command::Delete { job } => {
             let peer = Peer::new(sender, zone);
 
-            tracing::info!("Delete job: {} to {} from {}", job, recipient, peer,);
+            tracing::warn!("Delete job: {} to {} from {}", job, recipient, peer,);
 
             // record that the sender has deleted the job
             let job = job.deleted(&peer).await?;

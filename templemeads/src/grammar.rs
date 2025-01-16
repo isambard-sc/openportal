@@ -3,6 +3,9 @@
 
 use crate::destination::Destination;
 use crate::error::Error;
+
+use anyhow::Context;
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -571,6 +574,229 @@ impl<'de> Deserialize<'de> for UserMapping {
 }
 
 ///
+/// Struct used to represent a single date
+///
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Date {
+    date: chrono::NaiveDate,
+}
+
+impl NamedType for Date {
+    fn type_name() -> &'static str {
+        "Date"
+    }
+}
+
+impl NamedType for Vec<Date> {
+    fn type_name() -> &'static str {
+        "Vec<Date>"
+    }
+}
+
+impl Date {
+    pub fn parse(date: &str) -> Result<Self, Error> {
+        let date = date.trim();
+
+        if date.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid Date - cannot be empty '{}'",
+                date
+            )));
+        };
+
+        let date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .with_context(|| format!("Invalid Date - date cannot be parsed from '{}'", date))?;
+
+        Ok(Self { date })
+    }
+
+    pub fn today() -> Self {
+        Self {
+            date: chrono::Local::now().naive_local().into(),
+        }
+    }
+
+    pub fn day(self: &Date) -> DateRange {
+        DateRange {
+            start_date: Date { date: self.date },
+            end_date: Date { date: self.date },
+        }
+    }
+
+    pub fn month(self: &Date) -> DateRange {
+        // note that all the unwraps are safe, as we are always working with
+        // valid dates.
+
+        let start_date = self.date.with_day(1).unwrap_or(self.date);
+
+        let end_date =
+            chrono::NaiveDate::from_ymd_opt(start_date.year(), start_date.month() + 1, 1)
+                .unwrap_or(
+                    chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+                        .unwrap_or(start_date),
+                )
+                .pred_opt()
+                .unwrap_or(start_date);
+
+        DateRange {
+            start_date: Date { date: start_date },
+            end_date: Date { date: end_date },
+        }
+    }
+
+    pub fn year(self: &Date) -> DateRange {
+        // note that all the unwraps are safe, as we are always working with
+        // valid dates.
+
+        let start_date = self
+            .date
+            .with_month(1)
+            .unwrap_or(self.date)
+            .with_day(1)
+            .unwrap_or(self.date);
+
+        let end_date = chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+            .unwrap_or(start_date)
+            .pred_opt()
+            .unwrap_or(start_date);
+
+        DateRange {
+            start_date: Date { date: start_date },
+            end_date: Date { date: end_date },
+        }
+    }
+
+    pub fn date(&self) -> &chrono::NaiveDate {
+        &self.date
+    }
+}
+
+impl std::fmt::Display for Date {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.date.format("%Y-%m-%d"))
+    }
+}
+
+impl Serialize for Date {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Date {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<chrono::NaiveDate> for Date {
+    fn from(date: chrono::NaiveDate) -> Self {
+        Self { date }
+    }
+}
+
+impl From<Date> for chrono::NaiveDate {
+    fn from(date: Date) -> Self {
+        date.date
+    }
+}
+
+///
+/// Struct used to parse a date range (from start to end inclusive)
+///
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DateRange {
+    start_date: Date,
+    end_date: Date,
+}
+
+impl NamedType for DateRange {
+    fn type_name() -> &'static str {
+        "DateRange"
+    }
+}
+
+impl NamedType for Vec<DateRange> {
+    fn type_name() -> &'static str {
+        "Vec<DateRange>"
+    }
+}
+
+impl DateRange {
+    pub fn parse(date_range: &str) -> Result<Self, Error> {
+        let date_range = date_range.trim();
+
+        if date_range.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid DateRange - cannot be empty '{}'",
+                date_range
+            )));
+        };
+
+        let mut parts: Vec<&str> = date_range.split(':').collect();
+
+        parts = match parts.len() {
+            // start and end date are the same
+            1 => vec![parts[0], parts[0]],
+            2 => parts,
+            _ => {
+                return Err(Error::Parse(format!(
+                    "Invalid DateRange - must contain two dates, separated by a colon '{}'",
+                    date_range
+                )));
+            }
+        };
+
+        Ok(Self {
+            start_date: Date::parse(parts[0])?,
+            end_date: Date::parse(parts[1])?,
+        })
+    }
+
+    pub fn start_date(&self) -> &Date {
+        &self.start_date
+    }
+
+    pub fn end_date(&self) -> &Date {
+        &self.end_date
+    }
+}
+
+impl std::fmt::Display for DateRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.start_date, self.end_date)
+    }
+}
+
+/// Serialize and Deserialize via the string representation
+/// of the Day
+impl Serialize for DateRange {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DateRange {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
 /// Enum of all of the instructions that can be sent to agents
 ///
 #[derive(Debug, Clone, PartialEq)]
@@ -610,6 +836,15 @@ pub enum Instruction {
 
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
+
+    /// An instruction to get the usage report for a single
+    /// project in the specified date range
+    GetUsageReport(ProjectIdentifier, DateRange),
+
+    /// An instruction to get the usage report for all active
+    /// projects associated with a portal in the specified
+    /// date range
+    GetUsageReports(PortalIdentifier, DateRange),
 }
 
 impl Instruction {
@@ -792,6 +1027,90 @@ impl Instruction {
                     }
                 }
             }
+            "get_usage_report" => {
+                if parts.len() < 3 {
+                    tracing::error!(
+                        "get_usage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "get_usage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => match DateRange::parse(parts[2]) {
+                        Ok(date_range) => Ok(Instruction::GetUsageReport(project, date_range)),
+                        Err(e) => {
+                            tracing::error!(
+                                "get_usage_report failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "get_usage_report failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "get_usage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_usage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_usage_reports" => {
+                if parts.len() < 3 {
+                    tracing::error!(
+                        "get_usage_reports failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "get_usage_reports failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match PortalIdentifier::parse(parts[1]) {
+                    Ok(portal) => match DateRange::parse(parts[2]) {
+                        Ok(date_range) => Ok(Instruction::GetUsageReports(portal, date_range)),
+                        Err(e) => {
+                            tracing::error!(
+                                "get_usage_reports failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "get_usage_reports failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "get_usage_reports failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_usage_reports failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
             _ => {
                 tracing::error!("Invalid instruction: {}", s);
                 Err(Error::Parse(format!("Invalid instruction: {}", s)))
@@ -820,6 +1139,12 @@ impl std::fmt::Display for Instruction {
             Instruction::RemoveLocalUser(mapping) => write!(f, "remove_local_user {}", mapping),
             Instruction::UpdateHomeDir(user, homedir) => {
                 write!(f, "update_homedir {} {}", user, homedir)
+            }
+            Instruction::GetUsageReport(project, date_range) => {
+                write!(f, "get_usage_report {} {}", project, date_range)
+            }
+            Instruction::GetUsageReports(portal, date_range) => {
+                write!(f, "get_usage_reports {} {}", portal, date_range)
             }
         }
     }

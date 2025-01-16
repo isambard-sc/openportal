@@ -85,16 +85,20 @@ crate::async_runnable! {
                 let southbound_job = southbound_job.wait().await?;
 
                 if southbound_job.is_expired() {
+                    tracing::error!("{} : {} : Error - job expired!", destination, instruction);
                     job = job.errored("ExpirationError{{}}")?;
                  } else if (southbound_job.is_error()) {
                     if let Some(message) = southbound_job.error_message() {
+                        tracing::error!("{} : {} : Error - {}", destination, instruction, message);
                         job = job.errored(&format!("RuntimeError{{{}}}", message))?;
                     }
                     else {
+                        tracing::error!("{} : {} : Error - unknown error", destination, instruction);
                         job = job.errored("UnknownError{{}}")?;
                     }
                  }
                  else {
+                    tracing::info!("{} : {} : Success", destination, instruction);
                     job = job.copy_result_from(&southbound_job)?;
                 }
 

@@ -623,6 +623,25 @@ impl Date {
         }
     }
 
+    pub fn week(self: &Date) -> DateRange {
+        let start_date = match self.date.weekday() {
+            chrono::Weekday::Mon => self.date,
+            chrono::Weekday::Tue => self.date - chrono::Duration::days(1),
+            chrono::Weekday::Wed => self.date - chrono::Duration::days(2),
+            chrono::Weekday::Thu => self.date - chrono::Duration::days(3),
+            chrono::Weekday::Fri => self.date - chrono::Duration::days(4),
+            chrono::Weekday::Sat => self.date - chrono::Duration::days(5),
+            chrono::Weekday::Sun => self.date - chrono::Duration::days(6),
+        };
+
+        let end_date = start_date + chrono::Duration::days(6);
+
+        DateRange {
+            start_date: Date { date: start_date },
+            end_date: Date { date: end_date },
+        }
+    }
+
     pub fn month(self: &Date) -> DateRange {
         // note that all the unwraps are safe, as we are always working with
         // valid dates.
@@ -734,7 +753,7 @@ impl NamedType for Vec<DateRange> {
 
 impl DateRange {
     pub fn parse(date_range: &str) -> Result<Self, Error> {
-        let date_range = date_range.trim();
+        let date_range = date_range.trim().to_lowercase();
 
         if date_range.is_empty() {
             return Err(Error::Parse(format!(
@@ -742,6 +761,26 @@ impl DateRange {
                 date_range
             )));
         };
+
+        // some special cases
+        match date_range.as_str() {
+            "today" => {
+                return Ok(Date::today().day());
+            }
+            "this_day" => {
+                return Ok(Date::today().day());
+            }
+            "this_week" => {
+                return Ok(Date::today().week());
+            }
+            "this_month" => {
+                return Ok(Date::today().month());
+            }
+            "this_year" => {
+                return Ok(Date::today().year());
+            }
+            _ => {}
+        }
 
         let mut parts: Vec<&str> = date_range.split(':').collect();
 
@@ -1066,7 +1105,7 @@ impl Instruction {
                 }
             }
             "get_local_usage_report" => {
-                if parts.len() < 3 {
+                if parts.len() < 2 {
                     tracing::error!(
                         "get_local_usage_report failed to parse: {}",
                         &parts[1..].join(" ")
@@ -1078,21 +1117,25 @@ impl Instruction {
                 }
 
                 match ProjectMapping::parse(parts[1]) {
-                    Ok(mapping) => match DateRange::parse(parts[2]) {
-                        Ok(date_range) => Ok(Instruction::GetLocalUsageReport(mapping, date_range)),
-                        Err(e) => {
-                            tracing::error!(
-                                "get_local_usage_report failed to parse '{}': {}",
-                                &parts[1..].join(" "),
-                                e
-                            );
-                            Err(Error::Parse(format!(
-                                "get_local_usage_report failed to parse '{}': {}",
-                                &parts[1..].join(" "),
-                                e
-                            )))
+                    Ok(mapping) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("this_week")) {
+                            Ok(date_range) => {
+                                Ok(Instruction::GetLocalUsageReport(mapping, date_range))
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_local_usage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_local_usage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
                         }
-                    },
+                    }
                     Err(e) => {
                         tracing::error!(
                             "get_local_usage_report failed to parse '{}': {}",
@@ -1108,7 +1151,7 @@ impl Instruction {
                 }
             }
             "get_usage_report" => {
-                if parts.len() < 3 {
+                if parts.len() < 2 {
                     tracing::error!(
                         "get_usage_report failed to parse: {}",
                         &parts[1..].join(" ")
@@ -1120,21 +1163,23 @@ impl Instruction {
                 }
 
                 match ProjectIdentifier::parse(parts[1]) {
-                    Ok(project) => match DateRange::parse(parts[2]) {
-                        Ok(date_range) => Ok(Instruction::GetUsageReport(project, date_range)),
-                        Err(e) => {
-                            tracing::error!(
-                                "get_usage_report failed to parse '{}': {}",
-                                &parts[1..].join(" "),
-                                e
-                            );
-                            Err(Error::Parse(format!(
-                                "get_usage_report failed to parse '{}': {}",
-                                &parts[1..].join(" "),
-                                e
-                            )))
+                    Ok(project) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("this_week")) {
+                            Ok(date_range) => Ok(Instruction::GetUsageReport(project, date_range)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_usage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_usage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
                         }
-                    },
+                    }
                     Err(e) => {
                         tracing::error!(
                             "get_usage_report failed to parse '{}': {}",
@@ -1150,7 +1195,7 @@ impl Instruction {
                 }
             }
             "get_usage_reports" => {
-                if parts.len() < 3 {
+                if parts.len() < 2 {
                     tracing::error!(
                         "get_usage_reports failed to parse: {}",
                         &parts[1..].join(" ")
@@ -1162,21 +1207,23 @@ impl Instruction {
                 }
 
                 match PortalIdentifier::parse(parts[1]) {
-                    Ok(portal) => match DateRange::parse(parts[2]) {
-                        Ok(date_range) => Ok(Instruction::GetUsageReports(portal, date_range)),
-                        Err(e) => {
-                            tracing::error!(
-                                "get_usage_reports failed to parse '{}': {}",
-                                &parts[1..].join(" "),
-                                e
-                            );
-                            Err(Error::Parse(format!(
-                                "get_usage_reports failed to parse '{}': {}",
-                                &parts[1..].join(" "),
-                                e
-                            )))
+                    Ok(portal) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("this_week")) {
+                            Ok(date_range) => Ok(Instruction::GetUsageReports(portal, date_range)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_usage_reports failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_usage_reports failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
                         }
-                    },
+                    }
                     Err(e) => {
                         tracing::error!(
                             "get_usage_reports failed to parse '{}': {}",

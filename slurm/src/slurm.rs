@@ -2002,7 +2002,7 @@ impl SlurmJob {
         })
     }
 
-    fn construct_all(value: &serde_json::Value) -> Result<Vec<SlurmJob>, Error> {
+    fn construct_all(value: &serde_json::Value, active_only: bool) -> Result<Vec<SlurmJob>, Error> {
         let jobs = match value.get("jobs") {
             Some(jobs) => match jobs.as_array() {
                 Some(jobs) => {
@@ -2010,7 +2010,14 @@ impl SlurmJob {
 
                     for job in jobs {
                         match SlurmJob::construct(job) {
-                            Ok(job) => slurm_jobs.push(job),
+                            Ok(job) => {
+                                if active_only && job.duration == 0 {
+                                    // skip jobs that haven't consumed anything
+                                    continue;
+                                }
+
+                                slurm_jobs.push(job)
+                            }
                             Err(e) => {
                                 tracing::warn!("Could not construct job from {}: {}", job, e);
                             }
@@ -2187,7 +2194,7 @@ pub async fn get_usage_report(
     let response: serde_json::Value =
         serde_json::from_str(&response).context("Could not parse example data as JSON")?;
 
-    let jobs = SlurmJob::construct_all(&response)?;
+    let jobs = SlurmJob::construct_all(&response, true)?;
 
     for job in jobs {
         tracing::info!("Job: {}", job);

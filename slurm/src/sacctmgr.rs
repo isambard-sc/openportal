@@ -16,6 +16,7 @@ use crate::slurm::{
 
 #[derive(Debug, Clone)]
 struct SlurmRunner {
+    sacct: String,
     sacctmgr: String,
     scontrol: String,
 }
@@ -23,6 +24,7 @@ struct SlurmRunner {
 impl Default for SlurmRunner {
     fn default() -> Self {
         SlurmRunner {
+            sacct: "sacct".to_string(),
             sacctmgr: "sacctmgr".to_string(),
             scontrol: "scontrol".to_string(),
         }
@@ -30,6 +32,10 @@ impl Default for SlurmRunner {
 }
 
 impl SlurmRunner {
+    pub fn sacct(&self) -> &str {
+        &self.sacct
+    }
+
     pub fn sacctmgr(&self) -> &str {
         &self.sacctmgr
     }
@@ -44,20 +50,22 @@ impl SlurmRunner {
         // and then split into a vector using shlex
 
         // the command should start with SACCTMGR or SCONTROL
-        if !cmd.starts_with("SACCTMGR") && !cmd.starts_with("SCONTROL") {
+        if !cmd.starts_with("SACCTMGR") && !cmd.starts_with("SCONTROL") && !cmd.starts_with("SACCT")
+        {
             tracing::error!(
-                "Slurm command '{}' does not start with SACCTMGR or SCONTROL",
+                "Slurm command '{}' does not start with SACCT, SACCTMGR or SCONTROL",
                 cmd
             );
             return Err(Error::Call(format!(
-                "Command does not start with SACCTMGR or SCONTROL: {}",
+                "Command does not start with SACCT, SACCTMGR or SCONTROL: {}",
                 cmd
             )));
         }
 
         match shlex::split(
             &cmd.replace("SACCTMGR", self.sacctmgr())
-                .replace("SCONTROL", self.scontrol()),
+                .replace("SCONTROL", self.scontrol())
+                .replace("SACCT", self.sacct()),
         ) {
             Some(cmd) => Ok(cmd),
             None => {
@@ -127,7 +135,9 @@ impl SlurmRunner {
 /// A mutex to ensure that only one command is run at a time
 static SLURM_RUNNER: Lazy<Mutex<SlurmRunner>> = Lazy::new(|| Mutex::new(SlurmRunner::default()));
 
-// function to return the runner protected by a MutexGuard
+// function to return the runner protected by a MutexGuard - this ensures
+// that we can only run a single slurm command at a time, thereby not
+// overloading the server
 async fn runner<'mg>() -> Result<MutexGuard<'mg, SlurmRunner>, Error> {
     Ok(SLURM_RUNNER.lock().await)
 }
@@ -635,7 +645,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 /// Public API
 ///
 
-pub async fn set_commands(sacctmgr: &str, scontrol: &str) {
+pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str) {
     tracing::info!(
         "Using command line slurmd commands: sacctmgr: {}, scontrol: {}",
         sacctmgr,
@@ -643,6 +653,7 @@ pub async fn set_commands(sacctmgr: &str, scontrol: &str) {
     );
 
     let mut runner = SLURM_RUNNER.lock().await;
+    runner.sacct = sacct.to_string();
     runner.sacctmgr = sacctmgr.to_string();
     runner.scontrol = scontrol.to_string();
 }

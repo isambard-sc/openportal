@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use chrono::TimeZone;
 use once_cell::sync::Lazy;
 use reqwest::{Client, Url};
 use secrecy::{ExposeSecret, Secret};
@@ -776,7 +777,9 @@ async fn login(
     })
 }
 
-// function to return the client protected by a MutexGuard
+// function to return the client protected by a MutexGuard - this ensures
+// that only a single slurm command can be run at a time, thereby
+// preventing overloading the server.
 async fn auth<'mg>() -> Result<MutexGuard<'mg, SlurmAuth>, Error> {
     Ok(SLURM_AUTH.lock().await)
 }
@@ -1650,6 +1653,444 @@ impl SlurmUser {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlurmJob {
+    id: u64,
+    user: String,
+    account: String,
+    cluster: String,
+    start_time: chrono::DateTime<chrono::Utc>,
+    end_time: chrono::DateTime<chrono::Utc>,
+    duration: u64,
+    state: String,
+    qos: String,
+    nodes: u64,
+    cpus: u64,
+    gpus: u64,
+    memory: u64,
+    energy: u64,
+    billing: u64,
+}
+
+impl Display for SlurmJob {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, start: {}, end: {}, duration: {}s, state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, energy: {}, billing: {} }}",
+            self.id(),
+            self.user(),
+            self.account(),
+            self.cluster(),
+            self.start_time(),
+            self.end_time(),
+            self.duration().num_seconds(),
+            self.state(),
+            self.qos(),
+            self.nodes(),
+            self.cpus(),
+            self.gpus(),
+            self.memory(),
+            self.energy(),
+            self.billing()
+        )
+    }
+}
+
+impl SlurmJob {
+    pub fn construct(value: &serde_json::Value) -> Result<Self, Error> {
+        let id = match value.get("job_id") {
+            Some(id) => match id.as_u64() {
+                Some(id) => id,
+                None => {
+                    tracing::warn!("Could not get id as u64 from job: {:?}", id);
+                    return Err(Error::Call("Could not get id as u64 from job".to_string()));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get id from job: {:?}", value);
+                return Err(Error::Call("Could not get id from job".to_string()));
+            }
+        };
+
+        let user = match value.get("user") {
+            Some(user) => match user.as_str() {
+                Some(user) => user.to_string(),
+                None => {
+                    tracing::warn!("Could not get user as string from job: {:?}", user);
+                    return Err(Error::Call(
+                        "Could not get user as string from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get user from job: {:?}", value);
+                return Err(Error::Call("Could not get user from job".to_string()));
+            }
+        };
+
+        let account = match value.get("account") {
+            Some(account) => match account.as_str() {
+                Some(account) => account.to_string(),
+                None => {
+                    tracing::warn!("Could not get account as string from job: {:?}", account);
+                    return Err(Error::Call(
+                        "Could not get account as string from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get account from job: {:?}", value);
+                return Err(Error::Call("Could not get account from job".to_string()));
+            }
+        };
+
+        let cluster = match value.get("cluster") {
+            Some(cluster) => match cluster.as_str() {
+                Some(cluster) => cluster.to_string(),
+                None => {
+                    tracing::warn!("Could not get cluster as string from job: {:?}", cluster);
+                    return Err(Error::Call(
+                        "Could not get cluster as string from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get cluster from job: {:?}", value);
+                return Err(Error::Call("Could not get cluster from job".to_string()));
+            }
+        };
+
+        let time = match value.get("time") {
+            Some(time) => time,
+            None => {
+                tracing::warn!("Could not get time from job: {:?}", value);
+                return Err(Error::Call("Could not get time from job".to_string()));
+            }
+        };
+
+        let start_time = match time.get("start") {
+            Some(start_time) => match start_time.as_i64() {
+                Some(start_time) => match chrono::Utc.timestamp_opt(start_time, 0).single() {
+                    Some(start_time) => start_time,
+                    None => {
+                        // Slurm can return nonsense times for jobs that haven't run - this could confused chrono
+                        tracing::warn!("Could not get start_time as DateTime from job");
+                        chrono::Utc::now()
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get start_time as i64 from job: {:?}", start_time);
+                    return Err(Error::Call(
+                        "Could not get start_time as i64 from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get start_time from job: {:?}", value);
+                return Err(Error::Call("Could not get start_time from job".to_string()));
+            }
+        };
+
+        let end_time = match time.get("end") {
+            Some(end_time) => match end_time.as_i64() {
+                Some(end_time) => match chrono::Utc.timestamp_opt(end_time, 0).single() {
+                    Some(end_time) => end_time,
+                    None => {
+                        // Slurm can return nonsense times for jobs that haven't run - this could confused chrono
+                        tracing::warn!("Could not get end_time as DateTime from job");
+                        chrono::Utc::now()
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get end_time as i64 from job: {:?}", end_time);
+                    return Err(Error::Call(
+                        "Could not get end_time as i64 from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get end_time from job: {:?}", value);
+                return Err(Error::Call("Could not get end_time from job".to_string()));
+            }
+        };
+
+        let duration: chrono::Duration = match time.get("elapsed") {
+            Some(duration) => match duration.as_i64() {
+                Some(duration) => chrono::Duration::seconds(duration as i64),
+                None => {
+                    tracing::warn!("Could not get duration as u64 from job: {:?}", duration);
+                    return Err(Error::Call(
+                        "Could not get duration as u64 from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get duration from job: {:?}", value);
+                return Err(Error::Call("Could not get duration from job".to_string()));
+            }
+        };
+
+        // cannot have negative durations
+        let duration = match duration.num_seconds() >= 0 {
+            true => duration,
+            false => {
+                tracing::warn!("Negative duration for job: {:?}", value);
+                chrono::Duration::seconds(0)
+            }
+        };
+
+        let duration = duration.num_seconds() as u64;
+
+        let state = match value.get("state") {
+            Some(state) => match state.get("current") {
+                Some(state) => match state.as_str() {
+                    Some(state) => state.to_string(),
+                    None => {
+                        tracing::warn!("Could not get state as string from job: {:?}", state);
+                        return Err(Error::Call(
+                            "Could not get state as string from job".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get state from job: {:?}", state);
+                    return Err(Error::Call("Could not get state from job".to_string()));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get state from job: {:?}", value);
+                return Err(Error::Call("Could not get state from job".to_string()));
+            }
+        };
+
+        let qos = match value.get("qos") {
+            Some(qos) => match qos.as_str() {
+                Some(qos) => qos.to_string(),
+                None => {
+                    tracing::warn!("Could not get qos as string from job: {:?}", qos);
+                    return Err(Error::Call(
+                        "Could not get qos as string from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get qos from job: {:?}", value);
+                return Err(Error::Call("Could not get qos from job".to_string()));
+            }
+        };
+
+        let tres = match value.get("tres") {
+            Some(tres) => tres,
+            None => {
+                tracing::warn!("Could not get tres from job: {:?}", value);
+                return Err(Error::Call("Could not get tres from job".to_string()));
+            }
+        };
+
+        let allocated = match tres.get("allocated") {
+            Some(allocated) => match allocated.as_array() {
+                Some(allocated) => allocated,
+                None => {
+                    tracing::warn!(
+                        "Could not get allocated as object from job: {:?}",
+                        allocated
+                    );
+                    return Err(Error::Call(
+                        "Could not get allocated as object from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get allocated from job: {:?}", tres);
+                return Err(Error::Call("Could not get allocated from job".to_string()));
+            }
+        };
+
+        let mut nodes = 0;
+        let mut cpus = 0;
+        let mut memory = 0;
+        let mut gpus = 0;
+        let mut energy: u64 = 0;
+        let mut billing: u64 = 0;
+
+        for tres in allocated {
+            let tres_type = match tres.get("type") {
+                Some(tres_type) => match tres_type.as_str() {
+                    Some(tres_type) => tres_type,
+                    None => {
+                        tracing::warn!("Could not get type as string from tres: {:?}", tres);
+                        return Err(Error::Call(
+                            "Could not get type as string from tres".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get type from tres: {:?}", tres);
+                    return Err(Error::Call("Could not get type from tres".to_string()));
+                }
+            };
+
+            let name = match tres.get("name") {
+                Some(name) => match name.as_str() {
+                    Some(name) => name,
+                    None => {
+                        tracing::warn!("Could not get name as string from tres: {:?}", tres);
+                        return Err(Error::Call(
+                            "Could not get name as string from tres".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get name from tres: {:?}", tres);
+                    return Err(Error::Call("Could not get name from tres".to_string()));
+                }
+            };
+
+            let count: u64 = match tres.get("count") {
+                Some(count) => match count.as_i64() {
+                    Some(count) => match count >= 0 {
+                        true => count as u64,
+                        false => 0, // slurm uses negative numbers to signify not available
+                    },
+                    None => {
+                        tracing::warn!("Could not get count as u64 from tres: {:?}", tres);
+                        return Err(Error::Call(
+                            "Could not get count as u64 from tres".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get count from tres: {:?}", tres);
+                    return Err(Error::Call("Could not get count from tres".to_string()));
+                }
+            };
+
+            match tres_type {
+                "cpu" => cpus += count,
+                "mem" => memory += count,
+                "gres" => match name {
+                    "gpu" => gpus += count,
+                    _ => {
+                        tracing::warn!("Unknown gres name: {}", name);
+                    }
+                },
+                "node" => nodes += count,
+                "energy" => energy += count,
+                "billing" => billing += count,
+                _ => {
+                    tracing::warn!("Unknown tres type: {}", tres_type);
+                }
+            }
+        }
+
+        Ok(SlurmJob {
+            id,
+            user,
+            account,
+            cluster,
+            start_time,
+            end_time,
+            duration,
+            state,
+            qos,
+            nodes,
+            cpus,
+            gpus,
+            memory,
+            energy,
+            billing,
+        })
+    }
+
+    fn construct_all(value: &serde_json::Value) -> Result<Vec<SlurmJob>, Error> {
+        let jobs = match value.get("jobs") {
+            Some(jobs) => match jobs.as_array() {
+                Some(jobs) => {
+                    let mut slurm_jobs: Vec<SlurmJob> = Vec::new();
+
+                    for job in jobs {
+                        match SlurmJob::construct(job) {
+                            Ok(job) => slurm_jobs.push(job),
+                            Err(e) => {
+                                tracing::warn!("Could not construct job from {}: {}", job, e);
+                            }
+                        }
+                    }
+
+                    slurm_jobs
+                }
+                None => {
+                    tracing::warn!("Jobs is not an array: {:?}", jobs);
+                    return Err(Error::Call("Jobs is not an array".to_string()));
+                }
+            },
+            None => Vec::new(),
+        };
+
+        Ok(jobs)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    pub fn cluster(&self) -> &str {
+        &self.cluster
+    }
+
+    pub fn start_time(&self) -> &chrono::DateTime<chrono::Utc> {
+        &self.start_time
+    }
+
+    pub fn end_time(&self) -> &chrono::DateTime<chrono::Utc> {
+        &self.end_time
+    }
+
+    pub fn duration(&self) -> chrono::Duration {
+        chrono::Duration::seconds(self.duration as i64)
+    }
+
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    pub fn qos(&self) -> &str {
+        &self.qos
+    }
+
+    pub fn nodes(&self) -> u64 {
+        self.nodes
+    }
+
+    pub fn cpus(&self) -> u64 {
+        self.cpus
+    }
+
+    pub fn gpus(&self) -> u64 {
+        self.gpus
+    }
+
+    pub fn memory(&self) -> u64 {
+        self.memory
+    }
+
+    pub fn energy(&self) -> u64 {
+        self.energy
+    }
+
+    pub fn billing(&self) -> u64 {
+        self.billing
+    }
+}
+
 pub async fn connect(
     server: &str,
     user: &str,
@@ -1730,5 +2171,27 @@ pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
 ) -> Result<ProjectUsageReport, Error> {
+    // let response = match call_get("slurmdb", "jobs", &Vec::new()).await {
+    //     Ok(response) => response,
+    //     Err(e) => {
+    //         tracing::warn!("Could not get jobs: {}", e);
+    //         return Ok(ProjectUsageReport::new(project.project()));
+    //     }
+    // };
+
+    // for now, we will load the example json file from
+    // slurm_example_data.json
+    let response = std::fs::read_to_string("slurm_example_data.json")
+        .context("Could not read example data")?;
+
+    let response: serde_json::Value =
+        serde_json::from_str(&response).context("Could not parse example data as JSON")?;
+
+    let jobs = SlurmJob::construct_all(&response)?;
+
+    for job in jobs {
+        tracing::info!("Job: {}", job);
+    }
+
     Ok(ProjectUsageReport::new(project.project()))
 }

@@ -72,11 +72,12 @@ async fn main() -> Result<()> {
         // we are using sacctmgr and the commandline to interact
         // with slurm, because slurmrestd is not available
 
-        // get the sacctmgr and scontrol commands
+        // get the sacct, sacctmgr and scontrol commands
+        let sacct_command = config.option("sacct", "sacct");
         let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
         let scontrol_command = config.option("scontrol", "scontrol");
 
-        sacctmgr::set_commands(&sacctmgr_command, &scontrol_command).await;
+        sacctmgr::set_commands(&sacct_command, &sacctmgr_command, &scontrol_command).await;
         sacctmgr::find_cluster().await?;
 
         async_runnable! {

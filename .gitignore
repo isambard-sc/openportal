@@ -9,3 +9,4 @@ invite*.toml
 *_config.toml
 *-config.toml
 example*.toml
+slurm_example_data*

@@ -8,6 +8,7 @@ use once_cell::sync::Lazy;
 use reqwest::{Client, Url};
 use secrecy::{ExposeSecret, Secret};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
@@ -1676,7 +1677,7 @@ impl Display for SlurmJob {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, start: {}, end: {}, duration: {}s, state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, energy: {}, billing: {} }}",
+            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, energy: {}, billing: {} }}",
             self.id(),
             self.user(),
             self.account(),
@@ -1684,6 +1685,7 @@ impl Display for SlurmJob {
             self.start_time(),
             self.end_time(),
             self.duration().num_seconds(),
+            self.total_duration().num_seconds(),
             self.state(),
             self.qos(),
             self.nodes(),
@@ -1816,7 +1818,7 @@ impl SlurmJob {
 
         let duration: chrono::Duration = match time.get("elapsed") {
             Some(duration) => match duration.as_i64() {
-                Some(duration) => chrono::Duration::seconds(duration as i64),
+                Some(duration) => chrono::Duration::seconds(duration),
                 None => {
                     tracing::warn!("Could not get duration as u64 from job: {:?}", duration);
                     return Err(Error::Call(
@@ -2002,7 +2004,24 @@ impl SlurmJob {
         })
     }
 
-    fn construct_all(value: &serde_json::Value, active_only: bool) -> Result<Vec<SlurmJob>, Error> {
+    ///
+    /// Construct a list of SlurmJobs from a JSON value
+    /// Note this skips jobs that have not consumed any resource
+    /// (i.e. have a duration of 0). If you want these jobs, you
+    /// should contruct each job individually
+    ///
+    fn get_consumers(
+        value: &serde_json::Value,
+        start_time: &chrono::DateTime<chrono::Utc>,
+        end_time: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<SlurmJob>, Error> {
+        if start_time > end_time {
+            return Err(Error::Call(format!(
+                "Start time '{}' is after end time '{}'",
+                start_time, end_time
+            )));
+        }
+
         let jobs = match value.get("jobs") {
             Some(jobs) => match jobs.as_array() {
                 Some(jobs) => {
@@ -2010,13 +2029,21 @@ impl SlurmJob {
 
                     for job in jobs {
                         match SlurmJob::construct(job) {
-                            Ok(job) => {
-                                if active_only && job.duration == 0 {
-                                    // skip jobs that haven't consumed anything
-                                    continue;
+                            Ok(mut job) => {
+                                if job.start_time < *start_time {
+                                    job.start_time = *start_time;
+                                } else if job.start_time > *end_time {
+                                    // job was likely cancelled
+                                    job.start_time = *end_time;
                                 }
 
-                                slurm_jobs.push(job)
+                                if job.end_time > *end_time || job.end_time < *start_time {
+                                    job.end_time = *end_time;
+                                }
+
+                                if job.duration().num_seconds() > 0 {
+                                    slurm_jobs.push(job)
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Could not construct job from {}: {}", job, e);
@@ -2062,6 +2089,17 @@ impl SlurmJob {
     }
 
     pub fn duration(&self) -> chrono::Duration {
+        match self.duration > 0 {
+            false => chrono::Duration::seconds(0),
+            // use the actual difference between start and end times
+            // as these are trimmed to the query that generated the job
+            true => self.end_time.signed_duration_since(self.start_time),
+        }
+    }
+
+    pub fn total_duration(&self) -> chrono::Duration {
+        // return the total duration of the job, including
+        // consumption outside the query used to generate the job
         chrono::Duration::seconds(self.duration as i64)
     }
 
@@ -2186,6 +2224,119 @@ pub async fn get_usage_report(
     //     }
     // };
 
+    // as a test, check this output from sacct - parse it into a list
+    let expected =
+        std::fs::read_to_string("slurm_example_data.txt").context("Could not read example data")?;
+
+    // split by lines, and then also by "|" character
+    let expected: Vec<Vec<&str>> = expected
+        .lines()
+        .map(|line| line.split("|").collect())
+        .collect();
+
+    // now make into a dictionary, indexed by the integer of the first item
+    let mut expected_jobs = HashMap::new();
+
+    for job in expected {
+        let id = match job.first() {
+            Some(id) => match id.parse::<u64>() {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!("Could not parse id as u64: {}", e);
+                    continue;
+                }
+            },
+            None => {
+                tracing::warn!("Could not get id from job: {:?}", job);
+                continue;
+            }
+        };
+
+        // split the third column by commas
+        let data: Vec<&str> = job[2].split(",").collect();
+
+        let mut tres: HashMap<String, u64> = HashMap::new();
+
+        for item in data {
+            let item: Vec<&str> = item.split("=").collect();
+
+            if item.len() != 2 {
+                continue;
+            }
+
+            match item[0] {
+                "billing" => {
+                    let billing = match item[1].parse::<u64>() {
+                        Ok(billing) => billing,
+                        Err(e) => {
+                            tracing::warn!("Could not parse billing as u64: {}", e);
+                            continue;
+                        }
+                    };
+
+                    tres.insert("billing".to_string(), billing);
+                }
+                "cpu" => {
+                    let cpus = match item[1].parse::<u64>() {
+                        Ok(cpus) => cpus,
+                        Err(e) => {
+                            tracing::warn!("Could not parse cpus as u64: {}", e);
+                            continue;
+                        }
+                    };
+
+                    tres.insert("cpu".to_string(), cpus);
+                }
+                "gres/gpu" => {
+                    let gpus = match item[1].parse::<u64>() {
+                        Ok(gpus) => gpus,
+                        Err(e) => {
+                            tracing::warn!("Could not parse gpus as u64: {}", e);
+                            continue;
+                        }
+                    };
+
+                    tres.insert("gpu".to_string(), gpus);
+                }
+                "mem" => {
+                    let memory = item[1].split("M").collect::<Vec<&str>>()[0];
+
+                    let memory = match memory.parse::<u64>() {
+                        Ok(memory) => memory,
+                        Err(e) => {
+                            tracing::warn!("Could not parse memory '{}' as u64: {}", memory, e);
+                            continue;
+                        }
+                    };
+
+                    tres.insert("mem".to_string(), memory);
+                }
+                "node" => {
+                    let nodes = match item[1].parse::<u64>() {
+                        Ok(nodes) => nodes,
+                        Err(e) => {
+                            tracing::warn!("Could not parse nodes as u64: {}", e);
+                            continue;
+                        }
+                    };
+
+                    tres.insert("node".to_string(), nodes);
+                }
+                _ => {
+                    tracing::warn!("Unknown tres type: {}", item[0]);
+                }
+            }
+        }
+
+        let mut info = HashMap::new();
+
+        info.insert("account".to_string(), job[1].to_string());
+        info.insert("duration".to_string(), job[3].to_string());
+        info.insert("user".to_string(), job[4].to_string());
+
+        expected_jobs.insert(id, (info, tres));
+    }
+
     // for now, we will load the example json file from
     // slurm_example_data.json
     let response = std::fs::read_to_string("slurm_example_data.json")
@@ -2194,11 +2345,192 @@ pub async fn get_usage_report(
     let response: serde_json::Value =
         serde_json::from_str(&response).context("Could not parse example data as JSON")?;
 
-    let jobs = SlurmJob::construct_all(&response, true)?;
+    let start_time = dates.start_time().and_utc();
+    let end_time = chrono::DateTime::parse_from_rfc3339("2025-01-20T05:47:30Z")
+        .context("Cannot make datetime")?
+        .with_timezone(&chrono::Utc);
 
-    for job in jobs {
-        tracing::info!("Job: {}", job);
+    let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time)?;
+
+    tracing::warn!("Got {} jobs - expected {}", jobs.len(), expected_jobs.len());
+
+    let mut num_not_ok = 0;
+
+    for job in jobs.clone() {
+        let expected_job = match expected_jobs.get(&job.id()) {
+            Some(expected_job) => expected_job,
+            None => {
+                tracing::warn!("Could not find job with id {}", job.id());
+                continue;
+            }
+        };
+
+        let (info, tres) = expected_job;
+
+        let account = match info.get("account") {
+            Some(account) => account,
+            None => {
+                tracing::warn!("Could not get account from job: {:?}", info);
+                continue;
+            }
+        };
+
+        let user = match info.get("user") {
+            Some(user) => user,
+            None => {
+                tracing::warn!("Could not get user from job: {:?}", info);
+                continue;
+            }
+        };
+
+        let duration = match info.get("duration") {
+            Some(duration) => {
+                let parts = duration.split(":").collect::<Vec<&str>>();
+
+                if parts.len() != 3 {
+                    tracing::warn!("Could not split duration into 3 parts: {:?}", duration);
+                    continue;
+                }
+
+                let hours_parts: Vec<&str> = parts[0].split("-").collect();
+
+                let (days, hours) = match hours_parts.len() {
+                    1 => (0, hours_parts[0]),
+                    2 => match hours_parts[0].parse::<u64>() {
+                        Ok(days) => (days, hours_parts[1]),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Could not parse days '{}' as u64: {}",
+                                hours_parts[0],
+                                e
+                            );
+                            continue;
+                        }
+                    },
+                    _ => {
+                        tracing::warn!(
+                            "Could not split hours into 1 or 2 parts: {:?}",
+                            hours_parts
+                        );
+                        continue;
+                    }
+                };
+
+                let hours = match hours.parse::<u64>() {
+                    Ok(hours) => hours,
+                    Err(e) => {
+                        tracing::warn!("Could not parse hours '{}' as u64: {}", hours, e);
+                        continue;
+                    }
+                };
+
+                let minutes = match parts[1].parse::<u64>() {
+                    Ok(minutes) => minutes,
+                    Err(e) => {
+                        tracing::warn!("Could not parse minutes '{}' as u64: {}", parts[1], e);
+                        continue;
+                    }
+                };
+
+                let seconds = match parts[2].parse::<u64>() {
+                    Ok(seconds) => seconds,
+                    Err(e) => {
+                        tracing::warn!("Could not parse seconds '{}' as u64: {}", parts[2], e);
+                        continue;
+                    }
+                };
+
+                days * 3600 * 24 + hours * 3600 + minutes * 60 + seconds
+            }
+            None => {
+                tracing::warn!("Could not get duration from job: {:?}", info);
+                continue;
+            }
+        };
+
+        let mut ok = true;
+
+        if user != job.user() {
+            tracing::warn!("User mismatch: {} != {}", user, job.user());
+            ok = false;
+        }
+
+        if account != job.account() && format!("brics.{}", account) != job.account() {
+            tracing::warn!("Account mismatch: {} != {}", account, job.account());
+            ok = false;
+        }
+
+        if duration.abs_diff(job.duration().num_seconds() as u64) > 350 {
+            tracing::warn!(
+                "Duration mismatch: {} != {}",
+                duration,
+                job.duration().num_seconds()
+            );
+            ok = false;
+        }
+
+        if duration.abs_diff(job.total_duration().num_seconds() as u64) > 350
+            && job.state() != "CANCELLED"
+        {
+            tracing::warn!(
+                "Total duration mismatch: {} != {}",
+                duration,
+                job.total_duration().num_seconds()
+            );
+            ok = false;
+        }
+
+        if job.cpus() != *tres.get("cpu").unwrap_or(&0) {
+            tracing::warn!(
+                "CPU mismatch: {} != {}",
+                job.cpus(),
+                tres.get("cpu").unwrap_or(&0)
+            );
+            ok = false;
+        }
+
+        if job.gpus() != *tres.get("gpu").unwrap_or(&0) {
+            tracing::warn!(
+                "GPU mismatch: {} != {}",
+                job.gpus(),
+                tres.get("gpu").unwrap_or(&0)
+            );
+            ok = false;
+        }
+
+        if job.memory() != *tres.get("mem").unwrap_or(&0) {
+            tracing::warn!(
+                "Memory mismatch: {} != {}",
+                job.memory(),
+                tres.get("mem").unwrap_or(&0)
+            );
+            ok = false;
+        }
+
+        if job.nodes() != *tres.get("node").unwrap_or(&0) {
+            tracing::warn!(
+                "Node mismatch: {} != {}",
+                job.nodes(),
+                tres.get("node").unwrap_or(&0)
+            );
+            ok = false;
+        }
+
+        if !ok {
+            tracing::error!("Job does not match expected:");
+            tracing::warn!("Expected: {:?} | {:?}", info, tres);
+            tracing::warn!("Actual: {}", job);
+            num_not_ok += 1;
+        }
     }
+
+    tracing::warn!(
+        "{} jobs did not match expected from {}",
+        num_not_ok,
+        jobs.len()
+    );
+
+    // next step - calculate node hours and compare - they should mostly agree
 
     Ok(ProjectUsageReport::new(project.project()))
 }

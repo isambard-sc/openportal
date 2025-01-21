@@ -809,6 +809,32 @@ impl DateRange {
     pub fn end_date(&self) -> &Date {
         &self.end_date
     }
+
+    pub fn start_time(&self) -> chrono::NaiveDateTime {
+        self.start_date
+            .date
+            .and_hms_opt(0, 0, 0)
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    "Invalid start date '{}' - cannot convert to a start_time",
+                    self.start_date
+                );
+                chrono::NaiveDateTime::default()
+            })
+    }
+
+    pub fn end_time(&self) -> chrono::NaiveDateTime {
+        self.end_date
+            .date
+            .and_hms_opt(23, 59, 59)
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    "Invalid end date '{}' - cannot convert to a end_time",
+                    self.end_date
+                );
+                chrono::NaiveDateTime::default()
+            })
+    }
 }
 
 impl std::fmt::Display for DateRange {

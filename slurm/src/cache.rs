@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use templemeads::Error;
 use tokio::sync::RwLock;
 
-use crate::slurm::{SlurmAccount, SlurmUser};
+use crate::slurm::{SlurmAccount, SlurmNode, SlurmNodes, SlurmUser};
 
 /// This file manages the directory of all users added to the system
 
@@ -16,6 +16,7 @@ struct Database {
     cluster: Option<String>,
     accounts: HashMap<String, SlurmAccount>,
     users: HashMap<String, SlurmUser>,
+    nodes: Option<SlurmNodes>,
 }
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
@@ -62,6 +63,44 @@ pub async fn add_user(user: &SlurmUser) -> Result<(), Error> {
 pub async fn get_user(name: &str) -> Result<Option<SlurmUser>, Error> {
     let cache = CACHE.read().await;
     Ok(cache.users.get(name).cloned())
+}
+
+pub async fn set_default_node(node: &SlurmNode) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+
+    match cache.nodes {
+        Some(ref mut nodes) => nodes.set_default(node),
+        None => cache.nodes = Some(SlurmNodes::new(node)),
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn set_node(name: &str, node: &SlurmNode) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+
+    match cache.nodes {
+        Some(ref mut nodes) => nodes.set(name, node),
+        None => {
+            let mut nodes = SlurmNodes::new(node);
+            nodes.set(name, node);
+            cache.nodes = Some(nodes);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn get_nodes() -> Result<SlurmNodes, Error> {
+    let cache = CACHE.read().await;
+
+    match cache.nodes {
+        Some(ref nodes) => Ok(nodes.clone()),
+        None => Err(Error::Bug(
+            "No nodes have been set in the cache".to_string(),
+        )),
+    }
 }
 
 ///

@@ -60,6 +60,27 @@ async fn main() -> Result<()> {
     };
 
     // get the extra options needed for the slurm scheduler
+    let slurm_default_node = config.option("slurm-default-node", "");
+
+    if slurm_default_node.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No default node provided. This should be a JSON representation of the default node type. Set this in the slurm-default-node option."
+                .to_owned(),
+        ));
+    }
+
+    // parse slurm_default_node as json...
+    let slurm_default_node = match serde_json::from_str(&slurm_default_node) {
+        Ok(node) => node,
+        Err(e) => {
+            return Err(anyhow::anyhow!(format!(
+                "Invalid default node provided. This should be a JSON object representing the default node type that jobs will be submitted to. Set this in the slurm-default-node option: {}",
+                 e)));
+        }
+    };
+
+    cache::set_default_node(&slurm::SlurmNode::construct(&slurm_default_node)?).await?;
+
     let slurm_cluster = config.option("slurm-cluster", "");
 
     if !slurm_cluster.is_empty() {
@@ -68,16 +89,17 @@ async fn main() -> Result<()> {
 
     let slurm_server = config.option("slurm-server", "");
 
+    // get the sacct, sacctmgr and scontrol commands - we may need these even if
+    // we are using the REST API
+    let sacct_command = config.option("sacct", "sacct");
+    let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
+    let scontrol_command = config.option("scontrol", "scontrol");
+
+    sacctmgr::set_commands(&sacct_command, &sacctmgr_command, &scontrol_command).await;
+
     if slurm_server.is_empty() {
         // we are using sacctmgr and the commandline to interact
         // with slurm, because slurmrestd is not available
-
-        // get the sacct, sacctmgr and scontrol commands
-        let sacct_command = config.option("sacct", "sacct");
-        let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
-        let scontrol_command = config.option("scontrol", "scontrol");
-
-        sacctmgr::set_commands(&sacct_command, &sacctmgr_command, &scontrol_command).await;
         sacctmgr::find_cluster().await?;
 
         async_runnable! {
@@ -199,7 +221,8 @@ async fn main() -> Result<()> {
                         job.completed_none()
                     },
                     GetLocalUsageReport(mapping, dates) => {
-                        let report = slurm::get_usage_report(&mapping, &dates).await?;
+                        // use sacctmgr for now, as we need to validate the API response
+                        let report = sacctmgr::get_usage_report(&mapping, &dates).await?;
                         job.completed(report)
                     }
                     _ => {

@@ -10,6 +10,7 @@ use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::cache;
+use crate::slurm::SlurmJob;
 use crate::slurm::{
     clean_account_name, clean_user_name, get_managed_organization, SlurmAccount, SlurmUser,
 };
@@ -721,5 +722,41 @@ pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
 ) -> Result<ProjectUsageReport, Error> {
+    let account = SlurmAccount::from_mapping(project)?;
+
+    let account = match get_account(account.name()).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            tracing::warn!("Could not get account {}", account.name());
+            return Ok(ProjectUsageReport::new(project.project()));
+        }
+        Err(e) => {
+            tracing::warn!("Could not get account {}: {}", account.name(), e);
+            return Ok(ProjectUsageReport::new(project.project()));
+        }
+    };
+
+    let response = runner()
+        .await?
+        .run_json(&format!(
+            "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --json",
+            dates.start_date(),
+            dates.end_date()
+        ))
+        .await?;
+
+    let slurm_nodes = cache::get_nodes().await?;
+
+    let jobs = SlurmJob::get_consumers(
+        &response,
+        &dates.start_time().and_utc(),
+        &chrono::Utc::now(),
+        &slurm_nodes,
+    )?;
+
+    for job in jobs {
+        tracing::info!("Job: {} - {}", job, job.billed_node_seconds());
+    }
+
     Ok(ProjectUsageReport::new(project.project()))
 }

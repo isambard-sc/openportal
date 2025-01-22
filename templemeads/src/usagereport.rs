@@ -149,6 +149,7 @@ impl UserUsageReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyProjectUsageReport {
     reports: HashMap<String, Usage>,
+    is_complete: bool,
 }
 
 impl std::ops::AddAssign for DailyProjectUsageReport {
@@ -169,7 +170,10 @@ impl std::fmt::Display for DailyProjectUsageReport {
             writeln!(f, "{}: {}", user, self.reports[user])?;
         }
 
-        writeln!(f, "Total: {}", self.total_usage())
+        match self.is_complete() {
+            true => writeln!(f, "Total: {}", self.total_usage()),
+            false => writeln!(f, "Total: {} - incomplete", self.total_usage()),
+        }
     }
 }
 
@@ -186,8 +190,20 @@ impl DailyProjectUsageReport {
         self.reports.values().cloned().sum()
     }
 
+    pub fn set_usage(&mut self, local_user: &str, usage: Usage) {
+        self.reports.insert(local_user.to_string(), usage);
+    }
+
     pub fn add_usage(&mut self, local_user: &str, usage: Usage) {
         *self.reports.entry(local_user.to_string()).or_default() += usage;
+    }
+
+    pub fn set_complete(&mut self) {
+        self.is_complete = true;
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.is_complete
     }
 }
 
@@ -444,6 +460,33 @@ impl ProjectUsageReport {
         Ok(mapping.local_user().to_string())
     }
 
+    pub fn set_usage(&mut self, user: &UserType, date: &Date, usage: Usage) -> Result<(), Error> {
+        let local_user = match user {
+            UserType::UserMapping(mapping) => self.add_mapping(mapping)?,
+            UserType::UserIdentifier(user) => match self.inv_users.get(user) {
+                Some(local_user) => local_user.clone(),
+                None => {
+                    tracing::warn!("Unknown user {}. Cannot record usage!", user);
+                    return Err(Error::UnmanagedUser(format!(
+                        "Unknown user {} - no mapping known",
+                        user
+                    )));
+                }
+            },
+            UserType::LocalUser(local_user) => local_user.clone(),
+        };
+
+        if let Some(report) = self.reports.get_mut(date) {
+            report.set_usage(&local_user, usage);
+        } else {
+            let mut report = DailyProjectUsageReport::default();
+            report.set_usage(&local_user, usage);
+            self.reports.insert(date.clone(), report);
+        }
+
+        Ok(())
+    }
+
     pub fn add_usage(&mut self, user: &UserType, date: &Date, usage: Usage) -> Result<(), Error> {
         let local_user = match user {
             UserType::UserMapping(mapping) => self.add_mapping(mapping)?,
@@ -469,6 +512,12 @@ impl ProjectUsageReport {
         }
 
         Ok(())
+    }
+
+    pub fn set_completed(&mut self, date: &Date) {
+        if let Some(report) = self.reports.get_mut(date) {
+            report.set_complete();
+        }
     }
 }
 

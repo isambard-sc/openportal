@@ -835,6 +835,18 @@ impl DateRange {
                 chrono::NaiveDateTime::default()
             })
     }
+
+    pub fn days(&self) -> Vec<Date> {
+        let mut days = Vec::new();
+
+        let mut current = self.start_date.date;
+        while current <= self.end_date.date {
+            days.push(Date { date: current });
+            current += chrono::Duration::days(1);
+        }
+
+        days
+    }
 }
 
 impl std::fmt::Display for DateRange {

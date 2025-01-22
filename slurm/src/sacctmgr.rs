@@ -5,7 +5,7 @@ use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
-use templemeads::usagereport::ProjectUsageReport;
+use templemeads::usagereport::{ProjectUsageReport, Usage, UserType};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -736,27 +736,45 @@ pub async fn get_usage_report(
         }
     };
 
-    let response = runner()
-        .await?
-        .run_json(&format!(
-            "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --json",
-            dates.start_date(),
-            dates.end_date()
-        ))
-        .await?;
-
+    let mut report = ProjectUsageReport::new(project.project());
     let slurm_nodes = cache::get_nodes().await?;
+    let now = chrono::Utc::now();
 
-    let jobs = SlurmJob::get_consumers(
-        &response,
-        &dates.start_time().and_utc(),
-        &chrono::Utc::now(),
-        &slurm_nodes,
-    )?;
+    // we now request the data day by day
+    for day in dates.days() {
+        if day.day().start_time().and_utc() > now {
+            // we can't get the usage for this day yet as it is in the future
+            continue;
+        }
 
-    for job in jobs {
-        tracing::info!("Job: {} - {}", job, job.billed_node_seconds());
+        let response = runner()
+            .await?
+            .run_json(&format!(
+                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --json",
+                day,
+                day,
+                account.name()
+            ))
+            .await?;
+
+        let jobs =
+            SlurmJob::get_consumers(&response, &dates.start_time().and_utc(), &now, &slurm_nodes)?;
+
+        for job in jobs {
+            report.set_usage(
+                &UserType::LocalUser(job.user().to_string()),
+                &day,
+                Usage::new(job.billed_node_seconds()),
+            )?;
+        }
+
+        // we can set this day as completed if it is in the past
+        if day.day().end_time().and_utc() < now {
+            report.set_completed(&day);
+        }
     }
 
-    Ok(ProjectUsageReport::new(project.project()))
+    tracing::info!("Report: {}", report);
+
+    Ok(report)
 }

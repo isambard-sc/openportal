@@ -1669,15 +1669,20 @@ pub struct SlurmJob {
     cpus: u64,
     gpus: u64,
     memory: u64,
+    requested_nodes: u64,
+    requested_cpus: u64,
+    requested_gpus: u64,
+    requested_memory: u64,
     energy: u64,
     billing: u64,
+    requested_billing: u64,
 }
 
 impl Display for SlurmJob {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, energy: {}, billing: {} }}",
+            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, requested_nodes: {}, requested_cpus: {}, requested_gpus: {}, requested_memory: {}, energy: {}, billing: {}, requested_billing: {} }}",
             self.id(),
             self.user(),
             self.account(),
@@ -1692,8 +1697,13 @@ impl Display for SlurmJob {
             self.cpus(),
             self.gpus(),
             self.memory(),
+            self.requested_nodes(),
+            self.requested_cpus(),
+            self.requested_gpus(),
+            self.requested_memory(),
             self.energy(),
-            self.billing()
+            self.billing(),
+            self.requested_billing()
         )
     }
 }
@@ -1985,6 +1995,100 @@ impl SlurmJob {
             }
         }
 
+        let requested = match tres.get("requested") {
+            Some(requested) => match requested.as_array() {
+                Some(requested) => requested,
+                None => {
+                    tracing::warn!(
+                        "Could not get requested as object from job: {:?}",
+                        allocated
+                    );
+                    return Err(Error::Call(
+                        "Could not get requested as object from job".to_string(),
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!("Could not get requested from job: {:?}", tres);
+                return Err(Error::Call("Could not get requested from job".to_string()));
+            }
+        };
+
+        let mut requested_nodes = 0;
+        let mut requested_cpus = 0;
+        let mut requested_memory = 0;
+        let mut requested_gpus = 0;
+        let mut requested_billing: u64 = 0;
+
+        for tres in requested {
+            let tres_type = match tres.get("type") {
+                Some(tres_type) => match tres_type.as_str() {
+                    Some(tres_type) => tres_type,
+                    None => {
+                        tracing::warn!("Could not get type as string from tres: {:?}", tres);
+                        return Err(Error::Call(
+                            "Could not get type as string from tres".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get type from tres: {:?}", tres);
+                    return Err(Error::Call("Could not get type from tres".to_string()));
+                }
+            };
+
+            let count: u64 = match tres.get("count") {
+                Some(count) => match count.as_i64() {
+                    Some(count) => match count >= 0 {
+                        true => count as u64,
+                        false => 0, // slurm uses negative numbers to signify not available
+                    },
+                    None => {
+                        tracing::warn!("Could not get count as u64 from tres: {:?}", tres);
+                        return Err(Error::Call(
+                            "Could not get count as u64 from tres".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get count from tres: {:?}", tres);
+                    return Err(Error::Call("Could not get count from tres".to_string()));
+                }
+            };
+
+            let name = match tres.get("name") {
+                Some(name) => match name.as_str() {
+                    Some(name) => name,
+                    None => {
+                        tracing::warn!("Could not get name as string from tres: {:?}", tres);
+                        return Err(Error::Call(
+                            "Could not get name as string from tres".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    tracing::warn!("Could not get name from tres: {:?}", tres);
+                    return Err(Error::Call("Could not get name from tres".to_string()));
+                }
+            };
+
+            match tres_type {
+                "cpu" => requested_cpus += count,
+                "mem" => requested_memory += count,
+                "gres" => match name {
+                    "gpu" => requested_gpus += count,
+                    _ => {
+                        tracing::warn!("Unknown gres name: {}", name);
+                    }
+                },
+                "node" => requested_nodes += count,
+                "billing" => requested_billing += count,
+                _ => {
+                    tracing::warn!("Unknown tres type: {}", tres_type);
+                }
+            }
+        }
+
         Ok(SlurmJob {
             id,
             user,
@@ -1999,8 +2103,13 @@ impl SlurmJob {
             cpus,
             gpus,
             memory,
+            requested_nodes,
+            requested_cpus,
+            requested_gpus,
+            requested_memory,
             energy,
             billing,
+            requested_billing,
         })
     }
 
@@ -2127,12 +2236,91 @@ impl SlurmJob {
         self.memory
     }
 
+    pub fn requested_nodes(&self) -> u64 {
+        self.requested_nodes
+    }
+
+    pub fn requested_cpus(&self) -> u64 {
+        self.requested_cpus
+    }
+
+    pub fn requested_gpus(&self) -> u64 {
+        self.requested_gpus
+    }
+
+    pub fn requested_memory(&self) -> u64 {
+        self.requested_memory
+    }
+
     pub fn energy(&self) -> u64 {
         self.energy
     }
 
     pub fn billing(&self) -> u64 {
         self.billing
+    }
+
+    pub fn requested_billing(&self) -> u64 {
+        self.requested_billing
+    }
+
+    pub fn requested_node_fraction(&self) -> f64 {
+        // hard code for now the node sizes...
+        const NUM_CORES: u64 = 288;
+        const NUM_GPUS: u64 = 4;
+        const NUM_MEMORY: u64 = 4 * (96 + 120) * 1024;
+
+        // find the maximum fraction of the node that was used
+        let cpu_fraction = self.requested_cpus as f64 / NUM_CORES as f64;
+        let gpu_fraction = self.requested_gpus as f64 / NUM_GPUS as f64;
+        let memory_fraction = self.requested_memory as f64 / NUM_MEMORY as f64;
+
+        cpu_fraction.max(gpu_fraction).max(memory_fraction)
+    }
+
+    pub fn node_fraction(&self) -> f64 {
+        // hard code for now the node sizes...
+        const NUM_CORES: u64 = 288;
+        const NUM_GPUS: u64 = 4;
+        const NUM_MEMORY: u64 = 4 * (96 + 120) * 1024;
+
+        // find the maximum fraction of the node that was used
+        let cpu_fraction = self.cpus as f64 / NUM_CORES as f64;
+        let gpu_fraction = self.gpus as f64 / NUM_GPUS as f64;
+        let memory_fraction = self.memory as f64 / NUM_MEMORY as f64;
+
+        cpu_fraction.max(gpu_fraction).max(memory_fraction)
+    }
+
+    pub fn requested_node_seconds(&self) -> u64 {
+        (self.duration().num_seconds() as f64 * self.requested_node_fraction()) as u64
+    }
+
+    pub fn node_seconds(&self) -> u64 {
+        (self.duration().num_seconds() as f64 * self.node_fraction()) as u64
+    }
+
+    pub fn billed_node_fraction(&self) -> f64 {
+        let actual_node_fraction = self.node_fraction();
+        let requested_node_fraction = self.requested_node_fraction();
+
+        // write a warning to the log if the actual node fraction is greater than the requested
+        // node fraction. This indicates that slurm accepted a job that requested too few resources,
+        // and then had to uprate it to the actual amount
+        if requested_node_fraction < actual_node_fraction {
+            tracing::warn!(
+                "Job used more resources than requested: {} > {}: {}",
+                actual_node_fraction,
+                requested_node_fraction,
+                self
+            );
+        }
+
+        actual_node_fraction
+    }
+
+    pub fn billed_node_seconds(&self) -> u64 {
+        (self.duration().num_seconds() as f64 * self.billed_node_fraction()) as u64
     }
 }
 
@@ -2471,6 +2659,7 @@ pub async fn get_usage_report(
 
         if duration.abs_diff(job.total_duration().num_seconds() as u64) > 350
             && job.state() != "CANCELLED"
+            && job.state() != "TIMEOUT"
         {
             tracing::warn!(
                 "Total duration mismatch: {} != {}",
@@ -2480,41 +2669,7 @@ pub async fn get_usage_report(
             ok = false;
         }
 
-        if job.cpus() != *tres.get("cpu").unwrap_or(&0) {
-            tracing::warn!(
-                "CPU mismatch: {} != {}",
-                job.cpus(),
-                tres.get("cpu").unwrap_or(&0)
-            );
-            ok = false;
-        }
-
-        if job.gpus() != *tres.get("gpu").unwrap_or(&0) {
-            tracing::warn!(
-                "GPU mismatch: {} != {}",
-                job.gpus(),
-                tres.get("gpu").unwrap_or(&0)
-            );
-            ok = false;
-        }
-
-        if job.memory() != *tres.get("mem").unwrap_or(&0) {
-            tracing::warn!(
-                "Memory mismatch: {} != {}",
-                job.memory(),
-                tres.get("mem").unwrap_or(&0)
-            );
-            ok = false;
-        }
-
-        if job.nodes() != *tres.get("node").unwrap_or(&0) {
-            tracing::warn!(
-                "Node mismatch: {} != {}",
-                job.nodes(),
-                tres.get("node").unwrap_or(&0)
-            );
-            ok = false;
-        }
+        tracing::info!("Job: {}", job.billed_node_seconds());
 
         if !ok {
             tracing::error!("Job does not match expected:");
@@ -2529,8 +2684,6 @@ pub async fn get_usage_report(
         num_not_ok,
         jobs.len()
     );
-
-    // next step - calculate node hours and compare - they should mostly agree
 
     Ok(ProjectUsageReport::new(project.project()))
 }

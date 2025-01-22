@@ -623,6 +623,12 @@ impl Date {
         }
     }
 
+    pub fn tomorrow(self: &Date) -> Date {
+        Date {
+            date: self.date + chrono::Duration::days(1),
+        }
+    }
+
     pub fn week(self: &Date) -> DateRange {
         let start_date = match self.date.weekday() {
             chrono::Weekday::Mon => self.date,

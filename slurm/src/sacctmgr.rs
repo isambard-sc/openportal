@@ -752,7 +752,7 @@ pub async fn get_usage_report(
             .run_json(&format!(
                 "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --json",
                 day,
-                day,
+                day.tomorrow(),
                 account.name()
             ))
             .await?;
@@ -761,6 +761,7 @@ pub async fn get_usage_report(
             SlurmJob::get_consumers(&response, &dates.start_time().and_utc(), &now, &slurm_nodes)?;
 
         for job in jobs {
+            tracing::info!("Job: {}", job);
             report.set_usage(
                 &UserType::LocalUser(job.user().to_string()),
                 &day,

@@ -190,16 +190,13 @@ impl DailyProjectUsageReport {
         self.reports.values().cloned().sum()
     }
 
-    pub fn set_usage(&mut self, local_user: &str, usage: Usage) {
-        self.reports.insert(local_user.to_string(), usage);
-    }
-
     pub fn add_usage(&mut self, local_user: &str, usage: Usage) {
         *self.reports.entry(local_user.to_string()).or_default() += usage;
     }
 
     pub fn set_complete(&mut self) {
         self.is_complete = true;
+        tracing::info!("Marking report as complete: {}", self);
     }
 
     pub fn is_complete(&self) -> bool {
@@ -460,64 +457,15 @@ impl ProjectUsageReport {
         Ok(mapping.local_user().to_string())
     }
 
-    pub fn set_usage(&mut self, user: &UserType, date: &Date, usage: Usage) -> Result<(), Error> {
-        let local_user = match user {
-            UserType::UserMapping(mapping) => self.add_mapping(mapping)?,
-            UserType::UserIdentifier(user) => match self.inv_users.get(user) {
-                Some(local_user) => local_user.clone(),
-                None => {
-                    tracing::warn!("Unknown user {}. Cannot record usage!", user);
-                    return Err(Error::UnmanagedUser(format!(
-                        "Unknown user {} - no mapping known",
-                        user
-                    )));
-                }
-            },
-            UserType::LocalUser(local_user) => local_user.clone(),
-        };
-
-        if let Some(report) = self.reports.get_mut(date) {
-            report.set_usage(&local_user, usage);
-        } else {
-            let mut report = DailyProjectUsageReport::default();
-            report.set_usage(&local_user, usage);
-            self.reports.insert(date.clone(), report);
-        }
-
-        Ok(())
+    pub fn set_report(&mut self, date: &Date, report: &DailyProjectUsageReport) {
+        self.reports.insert(date.clone(), report.clone());
     }
 
-    pub fn add_usage(&mut self, user: &UserType, date: &Date, usage: Usage) -> Result<(), Error> {
-        let local_user = match user {
-            UserType::UserMapping(mapping) => self.add_mapping(mapping)?,
-            UserType::UserIdentifier(user) => match self.inv_users.get(user) {
-                Some(local_user) => local_user.clone(),
-                None => {
-                    tracing::warn!("Unknown user {}. Cannot record usage!", user);
-                    return Err(Error::UnmanagedUser(format!(
-                        "Unknown user {} - no mapping known",
-                        user
-                    )));
-                }
-            },
-            UserType::LocalUser(local_user) => local_user.clone(),
-        };
-
-        if let Some(report) = self.reports.get_mut(date) {
-            report.add_usage(&local_user, usage);
-        } else {
-            let mut report = DailyProjectUsageReport::default();
-            report.add_usage(&local_user, usage);
-            self.reports.insert(date.clone(), report);
-        }
-
-        Ok(())
-    }
-
-    pub fn set_completed(&mut self, date: &Date) {
-        if let Some(report) = self.reports.get_mut(date) {
-            report.set_complete();
-        }
+    pub fn get_report(&self, date: &Date) -> DailyProjectUsageReport {
+        self.reports
+            .get(date)
+            .cloned()
+            .unwrap_or(DailyProjectUsageReport::default())
     }
 }
 

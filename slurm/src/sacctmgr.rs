@@ -5,7 +5,7 @@ use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
-use templemeads::usagereport::{ProjectUsageReport, Usage, UserType};
+use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -747,6 +747,13 @@ pub async fn get_usage_report(
             continue;
         }
 
+        // have we got this report in the cache?
+        if let Some(daily_report) = cache::get_report(project.project(), &day).await? {
+            report.set_report(&day, &daily_report);
+            continue;
+        }
+
+        // it is not cached, so get from slurm
         let response = runner()
             .await?
             .run_json(&format!(
@@ -760,19 +767,38 @@ pub async fn get_usage_report(
         let jobs =
             SlurmJob::get_consumers(&response, &dates.start_time().and_utc(), &now, &slurm_nodes)?;
 
+        let mut daily_report = DailyProjectUsageReport::default();
+
+        let mut total_usage: u64 = 0;
+
         for job in jobs {
-            tracing::info!("Job: {}", job);
-            report.set_usage(
-                &UserType::LocalUser(job.user().to_string()),
-                &day,
-                Usage::new(job.billed_node_seconds()),
-            )?;
+            total_usage += job.billed_node_seconds();
+            daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
         }
 
-        // we can set this day as completed if it is in the past
-        if day.day().end_time().and_utc() < now {
-            report.set_completed(&day);
+        // check that the total usage in the daily report matches the total usage calculated manually
+        if daily_report.total_usage().node_seconds() != total_usage {
+            // it doesn't - we don't want to mark this as complete or cache it, because
+            // this points to some error when generating the values...
+            tracing::error!(
+                "Total usage in daily report does not match total usage calculated manually: {} != {}",
+                daily_report.total_usage().node_seconds(),
+                total_usage
+            );
+        } else if day.day().end_time().and_utc() < now {
+            // we can set this day as completed if it is in the past
+            daily_report.set_complete();
+
+            match cache::set_report(project.project(), &day, &daily_report).await {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Could not cache report for {}: {}", day, e);
+                }
+            }
         }
+
+        // now save this to the overall report
+        report.set_report(&day, &daily_report);
     }
 
     tracing::info!("Report: {}", report);

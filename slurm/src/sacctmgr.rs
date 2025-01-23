@@ -801,7 +801,5 @@ pub async fn get_usage_report(
         report.set_report(&day, &daily_report);
     }
 
-    tracing::info!("Report: {}", report);
-
     Ok(report)
 }

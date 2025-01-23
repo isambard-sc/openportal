@@ -152,14 +152,6 @@ pub struct DailyProjectUsageReport {
     is_complete: bool,
 }
 
-impl std::ops::AddAssign for DailyProjectUsageReport {
-    fn add_assign(&mut self, other: Self) {
-        for (user, usage) in other.reports {
-            *self.reports.entry(user).or_default() += usage;
-        }
-    }
-}
-
 impl std::fmt::Display for DailyProjectUsageReport {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let mut users = self.reports.keys().collect::<Vec<_>>();
@@ -196,7 +188,6 @@ impl DailyProjectUsageReport {
 
     pub fn set_complete(&mut self) {
         self.is_complete = true;
-        tracing::info!("Marking report as complete: {}", self);
     }
 
     pub fn is_complete(&self) -> bool {
@@ -204,87 +195,11 @@ impl DailyProjectUsageReport {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUsageReport {
     project: ProjectIdentifier,
     reports: HashMap<Date, DailyProjectUsageReport>,
-    users: HashMap<String, UserIdentifier>,
-
-    inv_users: HashMap<UserIdentifier, String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ProjectUsageReportHelper {
-    project: ProjectIdentifier,
-    reports: HashMap<Date, DailyProjectUsageReport>,
-    users: HashMap<String, UserIdentifier>,
-}
-
-impl serde::Serialize for ProjectUsageReport {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        ProjectUsageReportHelper {
-            project: self.project.clone(),
-            reports: self.reports.clone(),
-            users: self.users.clone(),
-        }
-        .serialize(serializer)
-    }
-}
-
-// add the serde deserialization function, which will also rebuild the
-// inv_users map
-impl<'de> serde::Deserialize<'de> for ProjectUsageReport {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let helper = ProjectUsageReportHelper::deserialize(deserializer)?;
-
-        let inv_users = helper
-            .users
-            .iter()
-            .map(|(k, v)| (v.clone(), k.clone()))
-            .collect();
-
-        Ok(ProjectUsageReport {
-            project: helper.project,
-            reports: helper.reports,
-            users: helper.users,
-            inv_users,
-        })
-    }
-}
-
-// add the += operator for ProjectUsageReport
-impl std::ops::AddAssign for ProjectUsageReport {
-    fn add_assign(&mut self, other: Self) {
-        for (date, report) in other.reports {
-            if let Some(existing) = self.reports.get_mut(&date) {
-                *existing += report;
-            } else {
-                self.reports.insert(date, report);
-            }
-        }
-
-        for (local_user, user) in other.users {
-            self.users.insert(local_user.clone(), user.clone());
-            self.inv_users.insert(user, local_user);
-        }
-    }
-}
-
-// add the + operator for ProjectUsageReport
-impl std::ops::Add for ProjectUsageReport {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        let mut new_report = self.clone();
-        new_report += other;
-        new_report
-    }
+    users: HashMap<UserIdentifier, String>,
 }
 
 impl std::fmt::Display for ProjectUsageReport {
@@ -295,13 +210,19 @@ impl std::fmt::Display for ProjectUsageReport {
 
         dates.sort();
 
+        let mut users = HashMap::new();
+
+        for (user, local_user) in &self.users {
+            users.insert(local_user, user);
+        }
+
         for date in dates {
             writeln!(f, "{}", date)?;
 
             let report = self.reports.get(date).cloned().unwrap_or_default();
 
             for user in report.local_users() {
-                if let Some(userid) = self.users.get(&user) {
+                if let Some(userid) = users.get(&user) {
                     writeln!(f, "{}: {}", userid, report.usage(&user))?;
                 } else {
                     writeln!(f, "{} - unknown: {}", user, report.usage(&user))?;
@@ -315,52 +236,12 @@ impl std::fmt::Display for ProjectUsageReport {
     }
 }
 
-pub enum UserType {
-    UserMapping(UserMapping),
-    UserIdentifier(UserIdentifier),
-    LocalUser(String),
-}
-
-impl From<UserMapping> for UserType {
-    fn from(mapping: UserMapping) -> Self {
-        UserType::UserMapping(mapping)
-    }
-}
-
-impl From<UserIdentifier> for UserType {
-    fn from(user: UserIdentifier) -> Self {
-        UserType::UserIdentifier(user)
-    }
-}
-
-impl From<String> for UserType {
-    fn from(user: String) -> Self {
-        UserType::LocalUser(user)
-    }
-}
-
 impl ProjectUsageReport {
     pub fn new(project: &ProjectIdentifier) -> Self {
         Self {
             project: project.clone(),
             reports: HashMap::new(),
             users: HashMap::new(),
-            inv_users: HashMap::new(),
-        }
-    }
-
-    pub fn usage(&self, date: &Date) -> ProjectUsageReport {
-        let mut reports = HashMap::new();
-        reports.insert(
-            date.clone(),
-            self.reports.get(date).cloned().unwrap_or_default(),
-        );
-
-        ProjectUsageReport {
-            project: self.project.clone(),
-            reports,
-            users: self.users.clone(),
-            inv_users: self.inv_users.clone(),
         }
     }
 
@@ -377,15 +258,18 @@ impl ProjectUsageReport {
     }
 
     pub fn users(&self) -> Vec<UserIdentifier> {
-        self.users.values().cloned().collect()
+        self.users.keys().cloned().collect()
     }
 
     pub fn unmapped_users(&self) -> Vec<String> {
+        let mapped_users: std::collections::HashSet<String> =
+            self.users.values().cloned().collect();
+
         let unmapped_users: std::collections::HashSet<String> = self
             .reports
             .values()
             .flat_map(|r| r.local_users())
-            .filter(|u| !self.users.contains_key(u))
+            .filter(|u| !mapped_users.contains(u))
             .collect();
 
         unmapped_users.into_iter().collect()
@@ -397,6 +281,36 @@ impl ProjectUsageReport {
             .cloned()
             .map(|r| r.total_usage())
             .sum()
+    }
+
+    pub fn unmapped_usage(&self) -> Usage {
+        let unmapped_users = self.unmapped_users();
+
+        if unmapped_users.is_empty() {
+            return Usage::default();
+        }
+
+        self.reports
+            .values()
+            .cloned()
+            .map(|r| {
+                r.local_users()
+                    .into_iter()
+                    .filter(|u| unmapped_users.contains(u))
+                    .map(|u| r.usage(&u))
+                    .sum()
+            })
+            .sum()
+    }
+
+    pub fn usage(&self, user: &UserIdentifier) -> Usage {
+        // get the local username
+        match self.users.get(user) {
+            Some(local_user) => {
+                return self.reports.values().map(|r| r.usage(local_user)).sum();
+            }
+            None => Usage::default(),
+        }
     }
 
     pub fn add_mappings(&mut self, mappings: &[UserMapping]) -> Result<(), Error> {
@@ -412,7 +326,7 @@ impl ProjectUsageReport {
         Ok(())
     }
 
-    pub fn add_mapping(&mut self, mapping: &UserMapping) -> Result<String, Error> {
+    pub fn add_mapping(&mut self, mapping: &UserMapping) -> Result<(), Error> {
         if mapping.user().project_identifier() != self.project() {
             return Err(Error::InvalidState(format!(
                 "Mapping for wrong project: {}. This report is for {}",
@@ -421,51 +335,34 @@ impl ProjectUsageReport {
             )));
         }
 
-        // check that the mapping hasn't changed
-        if let Some(user) = self.users.get(mapping.local_user()) {
-            if user != mapping.user() {
-                tracing::warn!(
-                    "Mapping for {} already exists: {}. Ignoring {}",
-                    mapping.local_user(),
-                    user,
-                    mapping.user(),
-                );
-
-                return Ok(mapping.local_user().to_string());
-            }
-        }
-
-        if let Some(local_user) = self.inv_users.get(mapping.user()) {
-            if local_user != mapping.local_user() {
-                tracing::warn!(
-                    "Mapping for {} already exists: {}. Ignoring {}",
-                    mapping.user(),
-                    local_user,
-                    mapping.local_user(),
-                );
-
-                return Ok(local_user.to_string());
-            }
-        }
-
         self.users
-            .insert(mapping.local_user().to_string(), mapping.user().clone());
-
-        self.inv_users
             .insert(mapping.user().clone(), mapping.local_user().to_string());
 
-        Ok(mapping.local_user().to_string())
+        Ok(())
     }
 
     pub fn set_report(&mut self, date: &Date, report: &DailyProjectUsageReport) {
         self.reports.insert(date.clone(), report.clone());
     }
 
-    pub fn get_report(&self, date: &Date) -> DailyProjectUsageReport {
-        self.reports
-            .get(date)
-            .cloned()
-            .unwrap_or(DailyProjectUsageReport::default())
+    pub fn get_report(&self, date: &Date) -> ProjectUsageReport {
+        match self.reports.get(date) {
+            Some(report) => {
+                let mut reports = HashMap::new();
+                reports.insert(date.clone(), report.clone());
+
+                ProjectUsageReport {
+                    project: self.project.clone(),
+                    reports,
+                    users: self.users.clone(),
+                }
+            }
+            None => ProjectUsageReport {
+                project: self.project.clone(),
+                reports: HashMap::new(),
+                users: self.users.clone(),
+            },
+        }
     }
 }
 
@@ -499,27 +396,21 @@ impl UsageReport {
                 project: project.clone(),
                 reports: HashMap::new(),
                 users: HashMap::new(),
-                inv_users: HashMap::new(),
             })
     }
 
-    pub fn add(&mut self, report: &ProjectUsageReport) -> Result<(), Error> {
-        if report.portal() != *self.portal() {
-            return Err(Error::InvalidState(format!(
+    pub fn set_report(&mut self, report: ProjectUsageReport) -> Result<(), Error> {
+        match report.portal() == *self.portal() {
+            true => {
+                self.reports.insert(report.project(), report);
+                Ok(())
+            }
+            false => Err(Error::InvalidState(format!(
                 "Report for wrong portal: {}. This report is for {}",
                 report.portal(),
-                self.portal()
-            )));
+                self.portal
+            ))),
         }
-
-        if let Some(existing) = self.reports.get_mut(&report.project()) {
-            *existing += report.clone();
-        } else {
-            self.reports
-                .insert(report.project().clone(), report.clone());
-        }
-
-        Ok(())
     }
 
     pub fn total_usage(&self) -> Usage {

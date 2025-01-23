@@ -964,7 +964,7 @@ async fn get_usage_reports(
 
     for project in projects {
         let project_report = get_usage_report(me, &project, dates).await?;
-        report.add(&project_report)?;
+        report.set_report(project_report)?;
     }
 
     Ok(report)

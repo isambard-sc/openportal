@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Added full accounting support. Can now get accounting data from slurm
+  and return this as `UsageReport` and `ProjectUsageReport` objects
+  that are also accessible from Python.
+- Cleaned up the logging so the output is cleaner and easier to follow
+- Made the FreeIPA interface even more robust, handling even more errors
+  and edge cases.
+
 ## [0.4.0] - 2025-01-03
 ### Added
 - Added per-message encryption keys, using a per-connection pair of

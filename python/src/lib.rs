@@ -16,6 +16,7 @@ use templemeads::destination;
 use templemeads::grammar;
 use templemeads::job;
 use templemeads::server::sign_api_call;
+use templemeads::usagereport;
 use templemeads::Error;
 use url::Url;
 
@@ -497,6 +498,63 @@ impl Job {
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }
+            "UsageReport" => {
+                let result = match self.0.result::<usagereport::UsageReport>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(UsageReport::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "ProjectUsageReport" => {
+                let result = match self.0.result::<usagereport::ProjectUsageReport>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectUsageReport::from(result)
+                        .into_pyobject(py)?
+                        .into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Usage" => {
+                let result = match self.0.result::<usagereport::Usage>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(Usage::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "Date" => {
+                let result = match self.0.result::<grammar::Date>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(Date::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "DateRange" => {
+                let result = match self.0.result::<grammar::DateRange>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(DateRange::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
             "Vec<String>" => {
                 let result = match self.0.result::<Vec<String>>() {
                     Ok(result) => result,
@@ -610,6 +668,310 @@ impl Job {
 ///
 /// Wrappers for the publicly exposed data types
 ///
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DateRange(grammar::DateRange);
+
+#[pymethods]
+impl DateRange {
+    #[new]
+    fn new(date_range: &str) -> PyResult<Self> {
+        match grammar::DateRange::parse(date_range) {
+            Ok(date_range) => Ok(Self(date_range)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[getter]
+    fn start_date(&self) -> PyResult<Date> {
+        Ok(self.0.start_date().clone().into())
+    }
+
+    #[getter]
+    fn end_date(&self) -> PyResult<Date> {
+        Ok(self.0.end_date().clone().into())
+    }
+
+    #[getter]
+    fn days(&self) -> PyResult<Vec<Date>> {
+        Ok(self.0.days().iter().map(|d| d.clone().into()).collect())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<DateRange> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<DateRange> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &DateRange, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+}
+
+impl From<grammar::DateRange> for DateRange {
+    fn from(date_range: grammar::DateRange) -> Self {
+        DateRange(date_range)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Date(grammar::Date);
+
+#[pymethods]
+impl Date {
+    #[new]
+    fn new(date: &str) -> PyResult<Self> {
+        match grammar::Date::parse(date) {
+            Ok(date) => Ok(Self(date)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[getter]
+    fn year(&self) -> PyResult<DateRange> {
+        Ok(self.0.year().into())
+    }
+
+    #[getter]
+    fn month(&self) -> PyResult<DateRange> {
+        Ok(self.0.month().into())
+    }
+
+    #[getter]
+    fn day(&self) -> PyResult<DateRange> {
+        Ok(self.0.day().into())
+    }
+
+    #[getter]
+    fn week(&self) -> PyResult<DateRange> {
+        Ok(self.0.week().into())
+    }
+
+    #[staticmethod]
+    fn today() -> PyResult<Date> {
+        Ok(grammar::Date::today().into())
+    }
+
+    #[getter]
+    fn tomorrow(&self) -> PyResult<Date> {
+        Ok(self.0.tomorrow().into())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Date> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Date> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Date, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+}
+
+impl From<grammar::Date> for Date {
+    fn from(date: grammar::Date) -> Self {
+        Date(date)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Usage(usagereport::Usage);
+
+#[pymethods]
+impl Usage {
+    #[new]
+    fn new(usage: u64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::new(usage)))
+    }
+
+    #[getter]
+    fn node_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.node_seconds())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Usage> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Usage> {
+        Ok(self.clone())
+    }
+}
+
+impl From<usagereport::Usage> for Usage {
+    fn from(usage: usagereport::Usage) -> Self {
+        Usage(usage)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageReport(usagereport::UsageReport);
+
+#[pymethods]
+impl UsageReport {
+    #[new]
+    fn new(portal: &PortalIdentifier) -> PyResult<Self> {
+        Ok(Self(usagereport::UsageReport::new(&portal.0)))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<UsageReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<UsageReport> {
+        Ok(self.clone())
+    }
+
+    #[getter]
+    fn portal(&self) -> PyResult<PortalIdentifier> {
+        Ok(self.0.portal().clone().into())
+    }
+
+    #[getter]
+    fn projects(&self) -> PyResult<Vec<ProjectIdentifier>> {
+        Ok(self.0.projects().iter().map(|p| p.clone().into()).collect())
+    }
+
+    fn get_report(&self, project: &ProjectIdentifier) -> PyResult<ProjectUsageReport> {
+        Ok(self.0.get_report(&project.0).into())
+    }
+
+    #[getter]
+    fn total_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_usage().into())
+    }
+}
+
+impl From<usagereport::UsageReport> for UsageReport {
+    fn from(usage_report: usagereport::UsageReport) -> Self {
+        UsageReport(usage_report)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectUsageReport(usagereport::ProjectUsageReport);
+
+#[pymethods]
+impl ProjectUsageReport {
+    #[new]
+    fn new(project: &ProjectIdentifier) -> PyResult<Self> {
+        Ok(Self(usagereport::ProjectUsageReport::new(&project.0)))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectUsageReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectUsageReport> {
+        Ok(self.clone())
+    }
+
+    #[getter]
+    fn dates(&self) -> PyResult<Vec<Date>> {
+        Ok(self.0.dates().iter().map(|d| d.clone().into()).collect())
+    }
+
+    #[getter]
+    fn project(&self) -> PyResult<ProjectIdentifier> {
+        Ok(self.0.project().clone().into())
+    }
+
+    #[getter]
+    fn portal(&self) -> PyResult<PortalIdentifier> {
+        Ok(self.0.portal().clone().into())
+    }
+
+    #[getter]
+    fn users(&self) -> PyResult<Vec<UserIdentifier>> {
+        Ok(self.0.users().iter().map(|u| u.clone().into()).collect())
+    }
+
+    #[getter]
+    fn unmapped_users(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.unmapped_users())
+    }
+
+    #[getter]
+    fn total_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_usage().into())
+    }
+
+    #[getter]
+    fn unmapped_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.unmapped_usage().into())
+    }
+
+    fn usage(&self, user: &UserIdentifier) -> PyResult<Usage> {
+        Ok(self.0.usage(&user.0).into())
+    }
+
+    fn get_report(&self, date: &Date) -> PyResult<ProjectUsageReport> {
+        Ok(self.0.get_report(&date.0).into())
+    }
+}
+
+impl From<usagereport::ProjectUsageReport> for ProjectUsageReport {
+    fn from(project_usage_report: usagereport::ProjectUsageReport) -> Self {
+        ProjectUsageReport(project_usage_report)
+    }
+}
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]

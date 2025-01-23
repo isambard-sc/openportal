@@ -372,6 +372,22 @@ pub struct UsageReport {
     reports: HashMap<ProjectIdentifier, ProjectUsageReport>,
 }
 
+impl std::fmt::Display for UsageReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        writeln!(f, "{}", self.portal())?;
+
+        let mut projects = self.reports.keys().collect::<Vec<_>>();
+
+        projects.sort_by_cached_key(|p| p.to_string());
+
+        for project in projects {
+            writeln!(f, "{}", self.get_report(project))?;
+        }
+
+        writeln!(f, "Total: {}", self.total_usage())
+    }
+}
+
 impl UsageReport {
     pub fn new(portal: &PortalIdentifier) -> Self {
         Self {

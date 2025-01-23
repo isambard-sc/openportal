@@ -8,7 +8,8 @@ use paddington::SecretKey;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateTime, PyList, PyNone, PyString};
+use pyo3::types::{PyDate, PyDateTime, PyList, PyNone, PyString};
+use pyo3::{IntoPyObject, PyResult, Python};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path;
 use std::sync::RwLock;
@@ -533,17 +534,6 @@ impl Job {
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }
-            "Date" => {
-                let result = match self.0.result::<grammar::Date>() {
-                    Ok(result) => result,
-                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
-                };
-
-                match result {
-                    Some(result) => Ok(Date::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
-                }
-            }
             "DateRange" => {
                 let result = match self.0.result::<grammar::DateRange>() {
                     Ok(result) => result,
@@ -676,26 +666,64 @@ struct DateRange(grammar::DateRange);
 #[pymethods]
 impl DateRange {
     #[new]
-    fn new(date_range: &str) -> PyResult<Self> {
-        match grammar::DateRange::parse(date_range) {
-            Ok(date_range) => Ok(Self(date_range)),
-            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    fn new(start_date: chrono::NaiveDate, end_date: chrono::NaiveDate) -> PyResult<Self> {
+        Ok(grammar::DateRange::from_chrono(&start_date, &end_date).into())
+    }
+
+    #[staticmethod]
+    fn today() -> PyResult<Self> {
+        Ok(grammar::Date::today().day().into())
+    }
+
+    #[staticmethod]
+    fn tomorrow() -> PyResult<Self> {
+        Ok(grammar::Date::tomorrow().day().into())
+    }
+
+    #[staticmethod]
+    fn this_month() -> PyResult<Self> {
+        Ok(grammar::Date::today().month().into())
+    }
+
+    #[staticmethod]
+    fn this_week() -> PyResult<Self> {
+        Ok(grammar::Date::today().week().into())
+    }
+
+    #[staticmethod]
+    fn this_year() -> PyResult<Self> {
+        Ok(grammar::Date::today().year().into())
+    }
+
+    #[getter]
+    fn start_date<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDate>> {
+        self.0.start_date().to_chrono().into_pyobject(py)
+    }
+
+    #[getter]
+    fn end_date<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDate>> {
+        self.0.end_date().to_chrono().into_pyobject(py)
+    }
+
+    #[getter]
+    fn start_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        self.0.start_time().into_pyobject(py)
+    }
+
+    #[getter]
+    fn end_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        self.0.end_time().into_pyobject(py)
+    }
+
+    #[getter]
+    fn days<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDate>>> {
+        let mut days = Vec::new();
+
+        for day in self.0.days() {
+            days.push(PyDate::from_timestamp(py, day.timestamp())?);
         }
-    }
 
-    #[getter]
-    fn start_date(&self) -> PyResult<Date> {
-        Ok(self.0.start_date().clone().into())
-    }
-
-    #[getter]
-    fn end_date(&self) -> PyResult<Date> {
-        Ok(self.0.end_date().clone().into())
-    }
-
-    #[getter]
-    fn days(&self) -> PyResult<Vec<Date>> {
-        Ok(self.0.days().iter().map(|d| d.clone().into()).collect())
+        Ok(days)
     }
 
     fn __str__(&self) -> PyResult<String> {
@@ -726,86 +754,6 @@ impl DateRange {
 impl From<grammar::DateRange> for DateRange {
     fn from(date_range: grammar::DateRange) -> Self {
         DateRange(date_range)
-    }
-}
-
-#[pyclass(module = "openportal")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Date(grammar::Date);
-
-#[pymethods]
-impl Date {
-    #[new]
-    fn new(date: &str) -> PyResult<Self> {
-        match grammar::Date::parse(date) {
-            Ok(date) => Ok(Self(date)),
-            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
-        }
-    }
-
-    #[getter]
-    fn year(&self) -> PyResult<DateRange> {
-        Ok(self.0.year().into())
-    }
-
-    #[getter]
-    fn month(&self) -> PyResult<DateRange> {
-        Ok(self.0.month().into())
-    }
-
-    #[getter]
-    fn day(&self) -> PyResult<DateRange> {
-        Ok(self.0.day().into())
-    }
-
-    #[getter]
-    fn next(&self) -> PyResult<Date> {
-        Ok(self.0.next().into())
-    }
-
-    #[getter]
-    fn week(&self) -> PyResult<DateRange> {
-        Ok(self.0.week().into())
-    }
-
-    #[staticmethod]
-    fn today() -> PyResult<Date> {
-        Ok(grammar::Date::today().into())
-    }
-
-    #[staticmethod]
-    fn tomorrow() -> PyResult<Date> {
-        Ok(grammar::Date::tomorrow().into())
-    }
-
-    fn __str__(&self) -> PyResult<String> {
-        Ok(self.0.to_string())
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        self.__str__()
-    }
-
-    fn __copy__(&self) -> PyResult<Date> {
-        Ok(self.clone())
-    }
-
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Date> {
-        Ok(self.clone())
-    }
-
-    fn __richcmp__(&self, other: &Date, op: CompareOp) -> PyResult<bool> {
-        match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
-            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
-        }
-    }
-}
-
-impl From<grammar::Date> for Date {
-    fn from(date: grammar::Date) -> Self {
-        Date(date)
     }
 }
 
@@ -929,8 +877,14 @@ impl ProjectUsageReport {
     }
 
     #[getter]
-    fn dates(&self) -> PyResult<Vec<Date>> {
-        Ok(self.0.dates().iter().map(|d| d.clone().into()).collect())
+    fn dates<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDate>>> {
+        let mut dates = Vec::new();
+
+        for date in self.0.dates() {
+            dates.push(PyDate::from_timestamp(py, date.timestamp())?);
+        }
+
+        Ok(dates)
     }
 
     #[getter]
@@ -963,12 +917,17 @@ impl ProjectUsageReport {
         Ok(self.0.unmapped_usage().into())
     }
 
+    #[getter]
+    fn is_complete(&self) -> PyResult<bool> {
+        Ok(self.0.is_complete())
+    }
+
     fn usage(&self, user: &UserIdentifier) -> PyResult<Usage> {
         Ok(self.0.usage(&user.0).into())
     }
 
-    fn get_report(&self, date: &Date) -> PyResult<ProjectUsageReport> {
-        Ok(self.0.get_report(&date.0).into())
+    fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectUsageReport> {
+        Ok(self.0.get_report(&grammar::Date::from_chrono(&date)).into())
     }
 }
 
@@ -1560,6 +1519,10 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Destination>()?;
     m.add_class::<Instruction>()?;
     m.add_class::<Status>()?;
+    m.add_class::<DateRange>()?;
+    m.add_class::<Usage>()?;
+    m.add_class::<UsageReport>()?;
+    m.add_class::<ProjectUsageReport>()?;
 
     Ok(())
 }

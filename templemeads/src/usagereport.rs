@@ -246,7 +246,11 @@ impl ProjectUsageReport {
     }
 
     pub fn dates(&self) -> Vec<Date> {
-        self.reports.keys().cloned().collect()
+        let mut dates: Vec<Date> = self.reports.keys().cloned().collect();
+
+        dates.sort();
+
+        dates
     }
 
     pub fn project(&self) -> ProjectIdentifier {
@@ -258,7 +262,11 @@ impl ProjectUsageReport {
     }
 
     pub fn users(&self) -> Vec<UserIdentifier> {
-        self.users.keys().cloned().collect()
+        let mut users: Vec<UserIdentifier> = self.users.keys().cloned().collect();
+
+        users.sort_by_cached_key(|u| u.to_string());
+
+        users
     }
 
     pub fn unmapped_users(&self) -> Vec<String> {
@@ -272,7 +280,11 @@ impl ProjectUsageReport {
             .filter(|u| !mapped_users.contains(u))
             .collect();
 
-        unmapped_users.into_iter().collect()
+        let mut unmapped_users: Vec<String> = unmapped_users.into_iter().collect();
+
+        unmapped_users.sort();
+
+        unmapped_users
     }
 
     pub fn total_usage(&self) -> Usage {
@@ -364,6 +376,10 @@ impl ProjectUsageReport {
             },
         }
     }
+
+    pub fn is_complete(&self) -> bool {
+        self.reports.values().all(|r| r.is_complete())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,7 +417,11 @@ impl UsageReport {
     }
 
     pub fn projects(&self) -> Vec<ProjectIdentifier> {
-        self.reports.keys().cloned().collect()
+        let mut projects: Vec<ProjectIdentifier> = self.reports.keys().cloned().collect();
+
+        projects.sort_by_cached_key(|p| p.to_string());
+
+        projects
     }
 
     pub fn get_report(&self, project: &ProjectIdentifier) -> ProjectUsageReport {

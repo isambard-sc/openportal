@@ -594,6 +594,22 @@ impl NamedType for Vec<Date> {
 }
 
 impl Date {
+    pub fn to_chrono(&self) -> chrono::NaiveDate {
+        self.date
+    }
+
+    pub fn from_chrono(date: &chrono::NaiveDate) -> Self {
+        Self { date: *date }
+    }
+
+    pub fn from_timestamp(timestamp: i64) -> Self {
+        Self {
+            date: chrono::DateTime::from_timestamp(timestamp, 0)
+                .unwrap_or_default()
+                .date_naive(),
+        }
+    }
+
     pub fn parse(date: &str) -> Result<Self, Error> {
         let date = date.trim();
 
@@ -608,6 +624,20 @@ impl Date {
             .with_context(|| format!("Invalid Date - date cannot be parsed from '{}'", date))?;
 
         Ok(Self { date })
+    }
+
+    pub fn timestamp(&self) -> i64 {
+        self.date
+            .and_hms_opt(0, 0, 0)
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    "Invalid date '{}' - cannot convert to a timestamp",
+                    self.date
+                );
+                chrono::NaiveDateTime::default()
+            })
+            .and_utc()
+            .timestamp()
     }
 
     pub fn today() -> Self {
@@ -764,6 +794,19 @@ impl NamedType for Vec<DateRange> {
 }
 
 impl DateRange {
+    pub fn from_chrono(start_date: &chrono::NaiveDate, end_date: &chrono::NaiveDate) -> Self {
+        match start_date < end_date {
+            true => Self {
+                start_date: Date { date: *start_date },
+                end_date: Date { date: *end_date },
+            },
+            false => Self {
+                start_date: Date { date: *end_date },
+                end_date: Date { date: *start_date },
+            },
+        }
+    }
+
     pub fn parse(date_range: &str) -> Result<Self, Error> {
         let date_range = date_range.trim().to_lowercase();
 

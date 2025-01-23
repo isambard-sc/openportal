@@ -759,6 +759,11 @@ impl Date {
     }
 
     #[getter]
+    fn next(&self) -> PyResult<Date> {
+        Ok(self.0.next().into())
+    }
+
+    #[getter]
     fn week(&self) -> PyResult<DateRange> {
         Ok(self.0.week().into())
     }
@@ -768,9 +773,9 @@ impl Date {
         Ok(grammar::Date::today().into())
     }
 
-    #[getter]
-    fn tomorrow(&self) -> PyResult<Date> {
-        Ok(self.0.tomorrow().into())
+    #[staticmethod]
+    fn tomorrow() -> PyResult<Date> {
+        Ok(grammar::Date::tomorrow().into())
     }
 
     fn __str__(&self) -> PyResult<String> {

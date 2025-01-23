@@ -759,7 +759,7 @@ pub async fn get_usage_report(
             .run_json(&format!(
                 "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --json",
                 day,
-                day.tomorrow(),
+                day.next(),
                 account.name()
             ))
             .await?;

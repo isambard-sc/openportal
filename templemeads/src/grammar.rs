@@ -616,6 +616,12 @@ impl Date {
         }
     }
 
+    pub fn tomorrow() -> Self {
+        Self {
+            date: Date::today().next().date,
+        }
+    }
+
     pub fn day(self: &Date) -> DateRange {
         DateRange {
             start_date: Date { date: self.date },
@@ -623,7 +629,7 @@ impl Date {
         }
     }
 
-    pub fn tomorrow(self: &Date) -> Date {
+    pub fn next(self: &Date) -> Date {
         Date {
             date: self.date + chrono::Duration::days(1),
         }

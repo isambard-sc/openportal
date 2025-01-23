@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
                     },
                     GetLocalUsageReport(mapping, dates) => {
                         // use sacctmgr for now, as we need to validate the API response
-                        let report = sacctmgr::get_usage_report(&mapping, &dates).await?;
+                        let report = slurm::get_usage_report(&mapping, &dates).await?;
                         job.completed(report)
                     }
                     _ => {

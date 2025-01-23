@@ -16,7 +16,7 @@ use crate::slurm::{
 };
 
 #[derive(Debug, Clone)]
-struct SlurmRunner {
+pub struct SlurmRunner {
     sacct: String,
     sacctmgr: String,
     scontrol: String,
@@ -139,7 +139,7 @@ static SLURM_RUNNER: Lazy<Mutex<SlurmRunner>> = Lazy::new(|| Mutex::new(SlurmRun
 // function to return the runner protected by a MutexGuard - this ensures
 // that we can only run a single slurm command at a time, thereby not
 // overloading the server
-async fn runner<'mg>() -> Result<MutexGuard<'mg, SlurmRunner>, Error> {
+pub async fn runner<'mg>() -> Result<MutexGuard<'mg, SlurmRunner>, Error> {
     Ok(SLURM_RUNNER.lock().await)
 }
 

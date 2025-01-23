@@ -85,7 +85,15 @@ impl std::iter::Sum for Usage {
 
 impl std::fmt::Display for Usage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{} node-hours", self.node_seconds as f64 / 3600.0)
+        let node_hours = self.node_seconds as f64 / 3600.0;
+
+        match node_hours < 0.1 {
+            true => write!(f, "{} node-seconds", self.node_seconds),
+            false => match node_hours < 100.0 {
+                true => write!(f, "{:.2} node-hours", node_hours),
+                false => write!(f, "{:.1} node-hours", node_hours),
+            },
+        }
     }
 }
 
@@ -223,15 +231,17 @@ impl std::fmt::Display for ProjectUsageReport {
 
             for user in report.local_users() {
                 if let Some(userid) = users.get(&user) {
-                    writeln!(f, "{}: {}", userid, report.usage(&user))?;
+                    writeln!(f, "  {}: {}", userid, report.usage(&user))?;
                 } else {
-                    writeln!(f, "{} - unknown: {}", user, report.usage(&user))?;
+                    writeln!(f, "  {} - unknown: {}", user, report.usage(&user))?;
                 }
             }
 
             writeln!(f, "Daily total: {}", report.total_usage())?;
+            writeln!(f, "----------------------------------------")?;
         }
 
+        writeln!(f, "========================================")?;
         writeln!(f, "Total: {}", self.total_usage())
     }
 }
@@ -398,6 +408,7 @@ impl std::fmt::Display for UsageReport {
 
         for project in projects {
             writeln!(f, "{}", self.get_report(project))?;
+            writeln!(f, "----------------------------------------")?;
         }
 
         writeln!(f, "Total: {}", self.total_usage())

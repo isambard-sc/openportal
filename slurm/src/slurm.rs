@@ -11,11 +11,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
-use templemeads::grammar::{ProjectMapping, UserMapping};
+use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
+use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::cache;
+use crate::sacctmgr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FreeResponse {
@@ -2553,44 +2555,88 @@ pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
     Ok(())
 }
 
-// pub async fn get_usage_report(
-//     project: &ProjectMapping,
-//     dates: &DateRange,
-// ) -> Result<ProjectUsageReport, Error> {
-//     let start_timestamp = dates.start_date().to_string();
-//     let end_timestamp = dates.end_date().to_string();
+pub async fn get_usage_report(
+    project: &ProjectMapping,
+    dates: &DateRange,
+) -> Result<ProjectUsageReport, Error> {
+    let account = SlurmAccount::from_mapping(project)?;
 
-//     let account = SlurmAccount::from_mapping(project)?;
+    let account = match get_account(account.name()).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            tracing::warn!("Could not get account {}", account.name());
+            return Ok(ProjectUsageReport::new(project.project()));
+        }
+        Err(e) => {
+            tracing::warn!("Could not get account {}: {}", account.name(), e);
+            return Ok(ProjectUsageReport::new(project.project()));
+        }
+    };
 
-//     let account = match get_account(account.name()).await {
-//         Ok(Some(account)) => account,
-//         Ok(None) => {
-//             tracing::warn!("Could not get account {}", account.name());
-//             return Ok(ProjectUsageReport::new(project.project()));
-//         }
-//         Err(e) => {
-//             tracing::warn!("Could not get account {}: {}", account.name(), e);
-//             return Ok(ProjectUsageReport::new(project.project()));
-//         }
-//     };
+    let mut report = ProjectUsageReport::new(project.project());
+    let slurm_nodes = cache::get_nodes().await?;
+    let now = chrono::Utc::now();
 
-//     let query_params: Vec<(&str, &str)> = vec![
-//         ("start_time", &start_timestamp),
-//         ("end_time", &end_timestamp),
-//         ("skip_steps", "true"),
-//         ("disable_truncate_usage_time", "false"),
-//         ("show_duplicates", "false"),
-//         ("account", account.name()),
-//     ];
+    // we now request the data day by day
+    for day in dates.days() {
+        if day.day().start_time().and_utc() > now {
+            // we can't get the usage for this day yet as it is in the future
+            continue;
+        }
 
-//     let response = match call_get("slurmdb", "jobs", &query_params).await {
-//         Ok(response) => response,
-//         Err(e) => {
-//             tracing::warn!("Could not get jobs: {}", e);
-//             return Ok(ProjectUsageReport::new(project.project()));
-//         }
-//     };
+        // have we got this report in the cache?
+        if let Some(daily_report) = cache::get_report(project.project(), &day).await? {
+            report.set_report(&day, &daily_report);
+            continue;
+        }
 
-//     // the SlurmJob can be constructed from the API output :-)
-//     Ok(ProjectUsageReport::new(project.project()))
-// }
+        // it is not cached, so get from slurm
+        let response = sacctmgr::runner()
+            .await?
+            .run_json(&format!(
+                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --json",
+                day,
+                day.next(),
+                account.name()
+            ))
+            .await?;
+
+        let jobs =
+            SlurmJob::get_consumers(&response, &dates.start_time().and_utc(), &now, &slurm_nodes)?;
+
+        let mut daily_report = DailyProjectUsageReport::default();
+
+        let mut total_usage: u64 = 0;
+
+        for job in jobs {
+            total_usage += job.billed_node_seconds();
+            daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+        }
+
+        // check that the total usage in the daily report matches the total usage calculated manually
+        if daily_report.total_usage().node_seconds() != total_usage {
+            // it doesn't - we don't want to mark this as complete or cache it, because
+            // this points to some error when generating the values...
+            tracing::error!(
+                "Total usage in daily report does not match total usage calculated manually: {} != {}",
+                daily_report.total_usage().node_seconds(),
+                total_usage
+            );
+        } else if day.day().end_time().and_utc() < now {
+            // we can set this day as completed if it is in the past
+            daily_report.set_complete();
+
+            match cache::set_report(project.project(), &day, &daily_report).await {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Could not cache report for {}: {}", day, e);
+                }
+            }
+        }
+
+        // now save this to the overall report
+        report.set_report(&day, &daily_report);
+    }
+
+    Ok(report)
+}

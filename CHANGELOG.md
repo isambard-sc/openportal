@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.5.0] - 2025-01-23
 ### Added
 - Added full accounting support. Can now get accounting data from slurm
   and return this as `UsageReport` and `ProjectUsageReport` objects
@@ -254,6 +255,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.5.0]: https://github.com/isambard-sc/openportal/releases/tag/0.5.0
 [0.4.0]: https://github.com/isambard-sc/openportal/releases/tag/0.4.0
 [0.3.0]: https://github.com/isambard-sc/openportal/releases/tag/0.3.0
 [0.2.0]: https://github.com/isambard-sc/openportal/releases/tag/0.2.0

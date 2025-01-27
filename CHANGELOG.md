@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Added commands to get and set usage limits. These are recorded, but
+  not yet translated into slurm (that will be for a future release - currently
+  they are just used to link with Waldur).
+
+- Added lots of convenience functions and converters for date ranges,
+  to make requesting of older reports easer.
+
+- Added lots of converters for usage quantities, plus converters for
+  constructors. Prettier print output too.
+
 ## [0.5.0] - 2025-01-23
 ### Added
 - Added full accounting support. Can now get accounting data from slurm

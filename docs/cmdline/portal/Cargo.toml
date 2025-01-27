@@ -3,7 +3,7 @@
 
 [package]
 name = "example-portal"
-version = "0.5.0"
+version = "0.6.0"
 description = "templemeads command line example - portal agent"
 edition = "2021"
 license = "MIT"

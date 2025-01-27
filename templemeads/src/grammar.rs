@@ -3,6 +3,7 @@
 
 use crate::destination::Destination;
 use crate::error::Error;
+use crate::usagereport::Usage;
 
 use anyhow::Context;
 use chrono::Datelike;
@@ -902,6 +903,88 @@ impl DateRange {
 
         days
     }
+
+    pub fn weeks(&self) -> Vec<DateRange> {
+        let mut weeks = Vec::new();
+
+        let mut current = self.start_date.date;
+        while current <= self.end_date.date {
+            let start_date = match current.weekday() {
+                chrono::Weekday::Mon => current,
+                chrono::Weekday::Tue => current - chrono::Duration::days(1),
+                chrono::Weekday::Wed => current - chrono::Duration::days(2),
+                chrono::Weekday::Thu => current - chrono::Duration::days(3),
+                chrono::Weekday::Fri => current - chrono::Duration::days(4),
+                chrono::Weekday::Sat => current - chrono::Duration::days(5),
+                chrono::Weekday::Sun => current - chrono::Duration::days(6),
+            };
+
+            let end_date = start_date + chrono::Duration::days(6);
+
+            weeks.push(DateRange {
+                start_date: Date { date: start_date },
+                end_date: Date { date: end_date },
+            });
+
+            current = end_date + chrono::Duration::days(1);
+        }
+
+        weeks
+    }
+
+    pub fn months(&self) -> Vec<DateRange> {
+        let mut months = Vec::new();
+
+        let mut current = self.start_date.date;
+        while current <= self.end_date.date {
+            let start_date = current.with_day(1).unwrap_or(current);
+
+            let end_date =
+                chrono::NaiveDate::from_ymd_opt(start_date.year(), start_date.month() + 1, 1)
+                    .unwrap_or(
+                        chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+                            .unwrap_or(start_date),
+                    )
+                    .pred_opt()
+                    .unwrap_or(start_date);
+
+            months.push(DateRange {
+                start_date: Date { date: start_date },
+                end_date: Date { date: end_date },
+            });
+
+            current = end_date + chrono::Duration::days(1);
+        }
+
+        months
+    }
+
+    pub fn years(&self) -> Vec<DateRange> {
+        let mut years = Vec::new();
+
+        let mut current = self.start_date.date;
+        while current <= self.end_date.date {
+            let start_date = current
+                .with_month(1)
+                .unwrap_or(current)
+                .with_day(1)
+                .unwrap_or(current);
+
+            let end_date = chrono::NaiveDate::from_ymd_opt(start_date.year() + 1, 1, 1)
+                .unwrap_or(start_date)
+                .pred_opt()
+                .unwrap_or(start_date);
+
+            years.push(DateRange {
+                start_date: Date { date: start_date },
+                end_date: Date { date: end_date },
+            });
+
+            current = end_date + chrono::Duration::days(1);
+        }
+
+        years
+    }
 }
 
 impl std::fmt::Display for DateRange {
@@ -978,6 +1061,12 @@ pub enum Instruction {
     /// An instruction to get a local project report
     GetLocalUsageReport(ProjectMapping, DateRange),
 
+    /// An instruction to get the limit of a local project
+    GetLocalLimit(ProjectMapping),
+
+    /// An instruction to set the limit of a local project
+    SetLocalLimit(ProjectMapping, Usage),
+
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
 
@@ -989,6 +1078,12 @@ pub enum Instruction {
     /// projects associated with a portal in the specified
     /// date range
     GetUsageReports(PortalIdentifier, DateRange),
+
+    /// An instruction to set the usage limit for a project
+    SetLimit(ProjectIdentifier, Usage),
+
+    /// An instruction to get the usage limit for a project
+    GetLimit(ProjectIdentifier),
 }
 
 impl Instruction {
@@ -1331,6 +1426,134 @@ impl Instruction {
                     }
                 }
             }
+            "set_local_limit" => {
+                if parts.len() < 3 {
+                    tracing::error!("set_local_limit failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "set_local_limit failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => match Usage::parse(parts[2]) {
+                        Ok(usage) => Ok(Instruction::SetLocalLimit(mapping, usage)),
+                        Err(e) => {
+                            tracing::error!(
+                                "set_local_limit failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "set_local_limit failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "set_local_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "set_local_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_local_limit" => {
+                if parts.len() < 2 {
+                    tracing::error!("get_local_limit failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_local_limit failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => Ok(Instruction::GetLocalLimit(mapping)),
+                    Err(e) => {
+                        tracing::error!(
+                            "get_local_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "set_limit" => {
+                if parts.len() < 3 {
+                    tracing::error!("set_limit failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "set_limit failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => match Usage::parse(parts[2]) {
+                        Ok(usage) => Ok(Instruction::SetLimit(project, usage)),
+                        Err(e) => {
+                            tracing::error!(
+                                "set_limit failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "set_limit failed to parse '{}': {}",
+                                &parts[1..].join(" "),
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "set_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "set_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_limit" => {
+                if parts.len() < 2 {
+                    tracing::error!("get_limit failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_limit failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => Ok(Instruction::GetLimit(project)),
+                    Err(e) => {
+                        tracing::error!(
+                            "get_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_limit failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
             _ => {
                 tracing::error!("Invalid instruction: {}", s);
                 Err(Error::Parse(format!("Invalid instruction: {}", s)))
@@ -1371,6 +1594,14 @@ impl std::fmt::Display for Instruction {
             Instruction::GetUsageReports(portal, date_range) => {
                 write!(f, "get_usage_reports {} {}", portal, date_range)
             }
+            Instruction::GetLocalLimit(mapping) => write!(f, "get_local_limit {}", mapping),
+            Instruction::SetLocalLimit(mapping, usage) => {
+                write!(f, "set_local_limit {} {}", mapping, usage.seconds())
+            }
+            Instruction::SetLimit(project, usage) => {
+                write!(f, "set_limit {} {}", project, usage.seconds())
+            }
+            Instruction::GetLimit(project) => write!(f, "get_limit {}", project),
         }
     }
 }

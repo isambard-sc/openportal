@@ -695,6 +695,21 @@ impl DateRange {
         Ok(grammar::Date::today().year().into())
     }
 
+    #[staticmethod]
+    fn week(date: chrono::NaiveDate) -> PyResult<Self> {
+        Ok(grammar::Date::from_chrono(&date).week().into())
+    }
+
+    #[staticmethod]
+    fn month(date: chrono::NaiveDate) -> PyResult<Self> {
+        Ok(grammar::Date::from_chrono(&date).month().into())
+    }
+
+    #[staticmethod]
+    fn year(date: chrono::NaiveDate) -> PyResult<Self> {
+        Ok(grammar::Date::from_chrono(&date).year().into())
+    }
+
     #[getter]
     fn start_date<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDate>> {
         self.0.start_date().to_chrono().into_pyobject(py)
@@ -724,6 +739,39 @@ impl DateRange {
         }
 
         Ok(days)
+    }
+
+    #[getter]
+    fn months(&self) -> PyResult<Vec<DateRange>> {
+        let mut months = Vec::new();
+
+        for month in self.0.months() {
+            months.push(month.into());
+        }
+
+        Ok(months)
+    }
+
+    #[getter]
+    fn weeks(&self) -> PyResult<Vec<DateRange>> {
+        let mut weeks = Vec::new();
+
+        for week in self.0.weeks() {
+            weeks.push(week.into());
+        }
+
+        Ok(weeks)
+    }
+
+    #[getter]
+    fn years(&self) -> PyResult<Vec<DateRange>> {
+        let mut years = Vec::new();
+
+        for year in self.0.years() {
+            years.push(year.into());
+        }
+
+        Ok(years)
     }
 
     fn __str__(&self) -> PyResult<String> {
@@ -768,9 +816,74 @@ impl Usage {
         Ok(Self(usagereport::Usage::new(usage)))
     }
 
+    #[staticmethod]
+    fn from_seconds(seconds: u64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_seconds(seconds)))
+    }
+
+    #[staticmethod]
+    fn from_minutes(minutes: f64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_minutes(minutes)))
+    }
+
+    #[staticmethod]
+    fn from_hours(hours: f64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_hours(hours)))
+    }
+
+    #[staticmethod]
+    fn from_days(days: f64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_days(days)))
+    }
+
+    #[staticmethod]
+    fn from_weeks(weeks: f64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_weeks(weeks)))
+    }
+
+    #[staticmethod]
+    fn from_months(months: f64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_months(months)))
+    }
+
+    #[staticmethod]
+    fn from_years(years: f64) -> PyResult<Self> {
+        Ok(Self(usagereport::Usage::from_years(years)))
+    }
+
     #[getter]
-    fn node_seconds(&self) -> PyResult<u64> {
-        Ok(self.0.node_seconds())
+    fn seconds(&self) -> PyResult<u64> {
+        Ok(self.0.seconds())
+    }
+
+    #[getter]
+    fn minutes(&self) -> PyResult<f64> {
+        Ok(self.0.minutes())
+    }
+
+    #[getter]
+    fn hours(&self) -> PyResult<f64> {
+        Ok(self.0.hours())
+    }
+
+    #[getter]
+    fn days(&self) -> PyResult<f64> {
+        Ok(self.0.days())
+    }
+
+    #[getter]
+    fn weeks(&self) -> PyResult<f64> {
+        Ok(self.0.weeks())
+    }
+
+    #[getter]
+    fn months(&self) -> PyResult<f64> {
+        Ok(self.0.months())
+    }
+
+    #[getter]
+    fn years(&self) -> PyResult<f64> {
+        Ok(self.0.years())
     }
 
     fn __str__(&self) -> PyResult<String> {

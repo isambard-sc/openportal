@@ -7,7 +7,8 @@ use templemeads::agent::scheduler::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, GetLocalUsageReport, RemoveLocalProject, RemoveLocalUser,
+    AddLocalProject, AddLocalUser, GetLocalLimit, GetLocalUsageReport, RemoveLocalProject,
+    RemoveLocalUser, SetLocalLimit,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
@@ -139,6 +140,14 @@ async fn main() -> Result<()> {
                         let report = sacctmgr::get_usage_report(&mapping, &dates).await?;
                         job.completed(report)
                     }
+                    GetLocalLimit(mapping) => {
+                        let limit = sacctmgr::get_limit(&mapping).await?;
+                        job.completed(limit)
+                    }
+                    SetLocalLimit(mapping, limit) => {
+                        let limit = sacctmgr::set_limit(&mapping, &limit).await?;
+                        job.completed(limit)
+                    }
                     _ => {
                         Err(Error::InvalidInstruction(
                             format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
@@ -224,6 +233,14 @@ async fn main() -> Result<()> {
                         // use sacctmgr for now, as we need to validate the API response
                         let report = slurm::get_usage_report(&mapping, &dates).await?;
                         job.completed(report)
+                    }
+                    GetLocalLimit(mapping) => {
+                        let limit = slurm::get_limit(&mapping).await?;
+                        job.completed(limit)
+                    }
+                    SetLocalLimit(mapping, limit) => {
+                        let limit = slurm::set_limit(&mapping, &limit).await?;
+                        job.completed(limit)
                     }
                     _ => {
                         Err(Error::InvalidInstruction(

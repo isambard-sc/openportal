@@ -8,14 +8,14 @@ use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
-    GetUserMapping, GetUsers, RemoveProject, RemoveUser,
+    AddProject, AddUser, GetLimit, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
+    GetUserMapping, GetUsers, RemoveProject, RemoveUser, SetLimit,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
-use templemeads::usagereport::{ProjectUsageReport, UsageReport};
+use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
 
 ///
@@ -155,6 +155,14 @@ async fn main() -> Result<()> {
                 GetUsageReports(portal, dates) => {
                     let report = get_usage_reports(me.name(), &portal, &dates).await?;
                     job.completed(report)
+                }
+                GetLimit(project) => {
+                    let limit = get_project_limit(me.name(), &project).await?;
+                    job.completed(limit)
+                }
+                SetLimit(project, limit) => {
+                    let limit = set_project_limit(me.name(), &project, limit).await?;
+                    job.completed(limit)
                 }
                 _ => {
                     tracing::error!("Unknown instruction: {:?}", job.instruction());
@@ -968,4 +976,78 @@ async fn get_usage_reports(
     }
 
     Ok(report)
+}
+
+async fn get_project_limit(me: &str, project: &ProjectIdentifier) -> Result<Usage, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the scheduler agent
+    let scheduler = match agent::scheduler(30).await {
+        Some(scheduler) => scheduler,
+        None => {
+            tracing::error!("No scheduler agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the scheduler for the project limit
+    let job = Job::parse(
+        &format!("{}.{} get_local_limit {}", me, scheduler.name(), mapping),
+        false,
+    )?;
+
+    let job = job.put(&scheduler).await?;
+
+    // Wait for the job to complete... - get the resulting Usage
+    let limit = match job.wait().await?.result::<Usage>()? {
+        Some(usage) => usage,
+        None => Usage::new(0),
+    };
+
+    Ok(limit)
+}
+
+pub async fn set_project_limit(
+    me: &str,
+    project: &ProjectIdentifier,
+    limit: Usage,
+) -> Result<Usage, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the scheduler agent
+    let scheduler = match agent::scheduler(30).await {
+        Some(scheduler) => scheduler,
+        None => {
+            tracing::error!("No scheduler agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the scheduler to set the project limit
+    let job = Job::parse(
+        &format!(
+            "{}.{} set_local_limit {} {}",
+            me,
+            scheduler.name(),
+            mapping,
+            limit.seconds()
+        ),
+        false,
+    )?;
+
+    let job = job.put(&scheduler).await?;
+
+    // Wait for the job to complete... - get the resulting Usage
+    let limit = match job.wait().await?.result::<Usage>()? {
+        Some(usage) => usage,
+        None => Usage::new(0),
+    };
+
+    Ok(limit)
 }

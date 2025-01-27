@@ -123,6 +123,9 @@ impl Command {
             let user = match instruction.clone() {
                 Instruction::AddUser(user) => Some(user),
                 Instruction::RemoveUser(user) => Some(user),
+                Instruction::AddLocalUser(user) => Some(user.user().clone()),
+                Instruction::RemoveLocalUser(user) => Some(user.user().clone()),
+                Instruction::UpdateHomeDir(user, _) => Some(user),
                 Instruction::GetUserMapping(user) => Some(user),
                 _ => None,
             };
@@ -142,10 +145,17 @@ impl Command {
 
             let project = match instruction.clone() {
                 Instruction::AddProject(project) => Some(project),
+                Instruction::AddLocalProject(project) => Some(project.project().clone()),
+                Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
                 Instruction::GetUsers(project) => Some(project),
                 Instruction::RemoveProject(project) => Some(project),
                 Instruction::GetUsageReport(project, _) => Some(project),
+                Instruction::GetLocalUsageReport(project, _) => Some(project.project().clone()),
                 Instruction::GetProjectMapping(project) => Some(project),
+                Instruction::GetLocalLimit(project) => Some(project.project().clone()),
+                Instruction::SetLocalLimit(project, _) => Some(project.project().clone()),
+                Instruction::GetLimit(project) => Some(project),
+                Instruction::SetLimit(project, _) => Some(project),
                 _ => None,
             };
 

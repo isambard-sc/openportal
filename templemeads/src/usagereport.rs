@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -70,47 +71,147 @@ impl NamedType for Vec<UsageReport> {
     }
 }
 
-#[derive(Copy, Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    node_seconds: u64,
+    seconds: u64,
 }
 
 impl std::iter::Sum for Usage {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::default(), |a, b| Self {
-            node_seconds: a.node_seconds + b.node_seconds,
+            seconds: a.seconds + b.seconds,
         })
     }
 }
 
 impl std::fmt::Display for Usage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let node_hours = self.node_seconds as f64 / 3600.0;
-
-        match node_hours < 0.1 {
-            true => write!(f, "{} node-seconds", self.node_seconds),
-            false => match node_hours < 100.0 {
-                true => write!(f, "{:.2} node-hours", node_hours),
-                false => write!(f, "{:.1} node-hours", node_hours),
+        match self.seconds() >= 60 {
+            true => match self.minutes() >= 60.0 {
+                true => match self.hours() >= 24.0 {
+                    true => match self.days() >= 7.0 {
+                        true => match self.weeks() >= 4.5 {
+                            true => match self.months() >= 12.0 {
+                                true => write!(f, "{:.2} years", self.years()),
+                                false => write!(f, "{:.2} months", self.months()),
+                            },
+                            false => write!(f, "{:.2} weeks", self.weeks()),
+                        },
+                        false => write!(f, "{:.2} days", self.days()),
+                    },
+                    false => write!(f, "{:.2} hours", self.hours()),
+                },
+                false => write!(f, "{} minutes", self.minutes()),
             },
+            false => write!(f, "{} seconds", self.seconds()),
         }
     }
 }
 
 impl Usage {
-    pub fn new(node_seconds: u64) -> Self {
-        Self { node_seconds }
+    pub fn parse(seconds: &str) -> Result<Self, Error> {
+        let seconds = seconds
+            .parse::<u64>()
+            .with_context(|| format!("Failed to parse seconds from '{}'", seconds))?;
+
+        Ok(Self { seconds })
     }
 
-    pub fn node_seconds(&self) -> u64 {
-        self.node_seconds
+    pub fn new(seconds: u64) -> Self {
+        Self { seconds }
+    }
+
+    pub fn from_seconds(seconds: u64) -> Self {
+        Self { seconds }
+    }
+
+    pub fn from_minutes(minutes: f64) -> Self {
+        match minutes < 0.0 {
+            true => Self::default(),
+            false => Self {
+                seconds: (minutes * 60.0) as u64,
+            },
+        }
+    }
+
+    pub fn from_hours(hours: f64) -> Self {
+        match hours < 0.0 {
+            true => Self::default(),
+            false => Self {
+                seconds: (hours * 3600.0) as u64,
+            },
+        }
+    }
+
+    pub fn from_days(days: f64) -> Self {
+        match days < 0.0 {
+            true => Self::default(),
+            false => Self {
+                seconds: (days * 86400.0) as u64,
+            },
+        }
+    }
+
+    pub fn from_weeks(weeks: f64) -> Self {
+        match weeks < 0.0 {
+            true => Self::default(),
+            false => Self {
+                seconds: (weeks * 604800.0) as u64,
+            },
+        }
+    }
+
+    pub fn from_months(months: f64) -> Self {
+        match months < 0.0 {
+            true => Self::default(),
+            false => Self {
+                seconds: (months * 2628000.0) as u64,
+            },
+        }
+    }
+
+    pub fn from_years(years: f64) -> Self {
+        match years < 0.0 {
+            true => Self::default(),
+            false => Self {
+                seconds: (years * 31536000.0) as u64,
+            },
+        }
+    }
+
+    pub fn seconds(&self) -> u64 {
+        self.seconds
+    }
+
+    pub fn minutes(&self) -> f64 {
+        self.seconds as f64 / 60.0
+    }
+
+    pub fn hours(&self) -> f64 {
+        self.seconds as f64 / 3600.0
+    }
+
+    pub fn days(&self) -> f64 {
+        self.seconds as f64 / 86400.0
+    }
+
+    pub fn weeks(&self) -> f64 {
+        self.seconds as f64 / 604800.0
+    }
+
+    pub fn months(&self) -> f64 {
+        self.seconds as f64 / 2628000.0
+    }
+
+    pub fn years(&self) -> f64 {
+        self.seconds as f64 / 31536000.0
     }
 }
 
 // add the += operator for Usage
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
-        self.node_seconds += other.node_seconds;
+        self.seconds += other.seconds;
     }
 }
 
@@ -120,7 +221,7 @@ impl std::ops::Add for Usage {
 
     fn add(self, other: Self) -> Self {
         Self {
-            node_seconds: self.node_seconds + other.node_seconds,
+            seconds: self.seconds + other.seconds,
         }
     }
 }

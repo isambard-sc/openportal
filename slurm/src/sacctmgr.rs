@@ -777,12 +777,12 @@ pub async fn get_usage_report(
         }
 
         // check that the total usage in the daily report matches the total usage calculated manually
-        if daily_report.total_usage().node_seconds() != total_usage {
+        if daily_report.total_usage().seconds() != total_usage {
             // it doesn't - we don't want to mark this as complete or cache it, because
             // this points to some error when generating the values...
             tracing::error!(
                 "Total usage in daily report does not match total usage calculated manually: {} != {}",
-                daily_report.total_usage().node_seconds(),
+                daily_report.total_usage().seconds(),
                 total_usage
             );
         } else if day.day().end_time().and_utc() < now {
@@ -802,4 +802,25 @@ pub async fn get_usage_report(
     }
 
     Ok(report)
+}
+
+pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
+    // this is a null function for now... just return the cached value
+    let account = SlurmAccount::from_mapping(project)?;
+
+    match get_account(account.name()).await? {
+        Some(account) => Ok(*account.limit()),
+        None => Ok(Usage::default()),
+    }
+}
+
+pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage, Error> {
+    // this is a null function for now... it just sets and returns a cached value
+    let mut account = SlurmAccount::from_mapping(project)?;
+
+    account.set_limit(limit);
+
+    cache::add_account(&account).await?;
+
+    Ok(*account.limit())
 }

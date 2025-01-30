@@ -18,7 +18,6 @@ jobs:
   build-release:
     name: "Build release (${{ matrix.target }})"
     runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux2014_x86_64
     permissions:
       contents: read
       packages: write

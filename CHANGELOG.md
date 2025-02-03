@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Added support for legacy BriCS accounts and projects
+
 ## [0.6.0] - 2025-01-27
 ### Added
 - Added commands to get and set usage limits. These are recorded, but

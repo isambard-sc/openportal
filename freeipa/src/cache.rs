@@ -198,6 +198,27 @@ pub async fn get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Error>
 }
 
 ///
+/// Return the names and identifiers for all of the internal groups
+/// (including for all peers)
+///
+pub async fn get_internal_group_ids() -> Result<HashMap<String, ProjectIdentifier>, Error> {
+    let cache = CACHE.read().await;
+    let mut internal_groups = HashMap::new();
+
+    for group in cache.system_groups.clone() {
+        internal_groups.insert(group.groupid().to_string(), group.identifier().clone());
+    }
+
+    for groups in cache.instance_groups.values() {
+        for group in groups {
+            internal_groups.insert(group.groupid().to_string(), group.identifier().clone());
+        }
+    }
+
+    Ok(internal_groups)
+}
+
+///
 /// Return all of the default system groups that should be used
 /// for all users managed by OpenPortal on this system
 ///

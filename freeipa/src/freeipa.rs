@@ -217,6 +217,13 @@ impl IPAResponse {
         IPAGroup::construct(&self.result.clone().unwrap_or_default())
     }
 
+    fn internal_groups(
+        &self,
+        internal_groups: &HashMap<String, ProjectIdentifier>,
+    ) -> Result<Vec<IPAGroup>, Error> {
+        IPAGroup::construct_internal(&self.result.clone().unwrap_or_default(), internal_groups)
+    }
+
     fn legacy_groups(&self, portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Error> {
         IPAGroup::construct_legacy(&self.result.clone().unwrap_or_default(), portal)
     }
@@ -445,12 +452,19 @@ impl IPAUser {
             let primary_group = match memberof.contains(&primary_group) {
                 true => primary_group,
                 false => {
-                    tracing::warn!(
-                        "Could not find primary group {} for user: {}",
-                        primary_group,
-                        cn
-                    );
-                    "".to_string()
+                    // are they a member of a legacy primary group?
+                    let legacy_primary_group = format!("group.{}", project.project());
+
+                    if memberof.contains(&legacy_primary_group) {
+                        legacy_primary_group
+                    } else {
+                        tracing::warn!(
+                            "Could not find primary group {} for user: {}",
+                            primary_group,
+                            cn
+                        );
+                        "".to_string()
+                    }
                 }
             };
 
@@ -654,6 +668,54 @@ impl IPAGroup {
             identifier: identifier.clone(),
             description: description.to_string(),
         })
+    }
+
+    fn construct_internal(
+        result: &serde_json::Value,
+        internal_groups: &HashMap<String, ProjectIdentifier>,
+    ) -> Result<Vec<IPAGroup>, Error> {
+        let mut groups = Vec::new();
+
+        // convert result into an array if it isn't already
+        let result = match result.as_array() {
+            Some(result) => result.clone(),
+            None => vec![result.clone()],
+        };
+
+        for group in result {
+            // uid is a list of strings - just get the first one
+            let groupid = group
+                .get("cn")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let project = match internal_groups.get(&groupid) {
+                Some(project) => project.clone(),
+                None => {
+                    tracing::warn!("Could not find internal project for group: {}", groupid);
+                    continue;
+                }
+            };
+
+            let description = group
+                .get("description")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            groups.push(IPAGroup {
+                groupid,
+                identifier: project,
+                description,
+            });
+        }
+
+        Ok(groups)
     }
 
     fn construct_legacy(
@@ -1023,11 +1085,12 @@ async fn force_get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Erro
 
     let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
 
-    // filter out users who are not managed and who are disabled
+    // filter out users who are not enabled - we do list unmanaged users,
+    // so that OpenPortal isn't repeatedly told to add users who already exist
     Ok(result
         .users(group.identifier())?
         .iter()
-        .filter(|u| u.is_managed() & u.is_enabled())
+        .filter(|u| u.is_enabled())
         .cloned()
         .collect())
 }
@@ -1048,73 +1111,106 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
 
             let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
 
-            match result.groups()?.first() {
-                Some(group) => {
-                    let group = match group.identifier() != project {
-                        true => {
-                            tracing::warn!(
-                                "Disagreement of identifier of found group: {} versus {}",
-                                group.identifier(),
-                                project
-                            );
+            if is_internal_portal(&project.portal()) {
+                let internal_groups = cache::get_internal_group_ids().await?;
 
-                            IPAGroup::new(group.groupid(), project, group.description())?
-                        }
-                        false => group.clone(),
-                    };
+                match result.internal_groups(&internal_groups)?.first() {
+                    Some(group) => {
+                        let group = match group.identifier() != project {
+                            true => {
+                                tracing::warn!(
+                                    "Disagreement of identifier of found group: {} versus {}",
+                                    group.identifier(),
+                                    project
+                                );
 
-                    // add this group to the cache - also force get all
-                    // of the users currently in this group
-                    cache::add_existing_group(&group).await?;
+                                IPAGroup::new(group.groupid(), project, group.description())?
+                            }
+                            false => group.clone(),
+                        };
 
-                    // if this is a project group, then get and cache all users
-                    // in this group
-                    if group.is_project_group() {
-                        let users = force_get_users_in_group(&group).await?;
-                        cache::set_users_in_group(&group, &users).await?;
+                        // add this group to the cache
+                        cache::add_existing_group(&group).await?;
+
+                        Ok(Some(group))
                     }
-
-                    Ok(Some(group))
+                    None => Ok(None),
                 }
-                None => {
-                    // try to find the legacy group - this is for porting tech/prep projects
-                    let kwargs = {
-                        let mut kwargs = HashMap::new();
-                        kwargs.insert("cn".to_string(), identifier_to_projectid(project, true)?);
-                        kwargs
-                    };
+            } else {
+                match result.groups()?.first() {
+                    Some(group) => {
+                        let group = match group.identifier() != project {
+                            true => {
+                                tracing::warn!(
+                                    "Disagreement of identifier of found group: {} versus {}",
+                                    group.identifier(),
+                                    project
+                                );
 
-                    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+                                IPAGroup::new(group.groupid(), project, group.description())?
+                            }
+                            false => group.clone(),
+                        };
 
-                    match result.legacy_groups(&project.portal_identifier())?.first() {
-                        Some(group) => {
-                            let group = match group.identifier() != project {
-                                true => {
-                                    tracing::warn!(
+                        // add this group to the cache - also force get all
+                        // of the users currently in this group
+                        cache::add_existing_group(&group).await?;
+
+                        // if this is a project group, then get and cache all users
+                        // in this group
+                        if group.is_project_group() {
+                            let users = force_get_users_in_group(&group).await?;
+                            cache::set_users_in_group(&group, &users).await?;
+                        }
+
+                        Ok(Some(group))
+                    }
+                    None => {
+                        // try to find the legacy group - this is for porting tech/prep projects
+                        let kwargs = {
+                            let mut kwargs = HashMap::new();
+                            kwargs
+                                .insert("cn".to_string(), identifier_to_projectid(project, true)?);
+                            kwargs
+                        };
+
+                        let result =
+                            call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+
+                        match result.legacy_groups(&project.portal_identifier())?.first() {
+                            Some(group) => {
+                                let group = match group.identifier() != project {
+                                    true => {
+                                        tracing::warn!(
                                         "Disagreement of identifier of found group: {} versus {}",
                                         group.identifier(),
                                         project
                                     );
 
-                                    IPAGroup::new(group.groupid(), project, group.description())?
+                                        IPAGroup::new(
+                                            group.groupid(),
+                                            project,
+                                            group.description(),
+                                        )?
+                                    }
+                                    false => group.clone(),
+                                };
+
+                                // add this group to the cache - also force get all
+                                // of the users currently in this group
+                                cache::add_existing_group(&group).await?;
+
+                                // if this is a project group, then get and cache all users
+                                // in this group
+                                if group.is_project_group() {
+                                    let users = force_get_users_in_group(&group).await?;
+                                    cache::set_users_in_group(&group, &users).await?;
                                 }
-                                false => group.clone(),
-                            };
 
-                            // add this group to the cache - also force get all
-                            // of the users currently in this group
-                            cache::add_existing_group(&group).await?;
-
-                            // if this is a project group, then get and cache all users
-                            // in this group
-                            if group.is_project_group() {
-                                let users = force_get_users_in_group(&group).await?;
-                                cache::set_users_in_group(&group, &users).await?;
+                                Ok(Some(group))
                             }
-
-                            Ok(Some(group))
+                            None => Ok(None),
                         }
-                        None => Ok(None),
                     }
                 }
             }
@@ -1154,36 +1250,12 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 
     let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
 
-    // this isn't one line because we need to specify the
-    // type of 'users'
-    let all_users = result.users(&user.project_identifier())?;
-
-    let users: Vec<IPAUser> = all_users
-        .clone()
-        .into_iter()
-        .filter(|user| user.is_managed())
-        .collect();
-
-    match users.first() {
+    match result.users(&user.project_identifier())?.first() {
         Some(user) => {
             cache::add_existing_user(user).await?;
             Ok(Some(user.clone()))
         }
-        None => {
-            if !all_users.is_empty() {
-                tracing::warn!(
-                    "User {} not found in FreeIPA, but found {} user(s) that matched who were not managed.",
-                    user,
-                    all_users.len()
-                );
-
-                for user in all_users {
-                    tracing::warn!("User: {}, is_managed={}", user, user.is_managed());
-                }
-            }
-
-            Ok(None)
-        }
+        None => Ok(None),
     }
 }
 
@@ -1606,6 +1678,18 @@ async fn reenable_user(user: &IPAUser) -> Result<IPAUser, Error> {
 pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(mut user) = get_user(user).await? {
+        if !user.is_managed() {
+            tracing::warn!(
+                "Ignoring request for {} as they are not managed by OpenPortal",
+                user
+            );
+            return Err(Error::UnmanagedUser(format!(
+                "User {} already exists in FreeIPA, but is not managed by OpenPortal. \
+                 Either add this user to the managed group, or remove them from FreeIPA.",
+                user
+            )));
+        }
+
         // make sure to re-enable if needed
         if user.is_disabled() {
             user = match reenable_user(&user).await {
@@ -1885,6 +1969,17 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
         }
     };
 
+    if !user.is_managed() {
+        tracing::warn!(
+            "Ignoring request to remove {} as they are not managed by OpenPortal",
+            user
+        );
+        return Err(Error::UnmanagedUser(format!(
+            "User {} is not managed by OpenPortal. Either add this user to the managed group, or remove them from FreeIPA.",
+            user
+        )));
+    }
+
     if user.is_disabled() {
         // nothing to do
         tracing::info!("User {} is already disabled. No changes needed.", user);
@@ -1999,6 +2094,17 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
         "User {} does not exist in FreeIPA?",
         user
     )))?;
+
+    if !user.is_managed() {
+        tracing::warn!(
+            "Ignoring request to update homedir for {} as they are not managed by OpenPortal",
+            user
+        );
+        return Err(Error::UnmanagedUser(format!(
+            "User {} is not managed by OpenPortal. Either add this user to the managed group, or remove them from FreeIPA.",
+            user
+        )));
+    }
 
     if user.home() == homedir {
         // nothing to do

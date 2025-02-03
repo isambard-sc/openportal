@@ -1255,7 +1255,6 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("all".to_string(), "true".to_string());
-        kwargs.insert("cn".to_string(), user.to_string());
         kwargs.insert("uid".to_string(), identifier_to_userid(user).await?);
         kwargs
     };

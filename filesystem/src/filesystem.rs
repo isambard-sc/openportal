@@ -164,34 +164,28 @@ async fn create_dir(
         // check the ownership
         if Uid::from_raw(metadata.uid()) != uid {
             // ownership is wrong
-            return Err(Error::State(
-                format!(
-                    "Directory '{}' already exists, but has the wrong ownership. Expected '{}', got '{}'",
+            tracing::error!(
+                "Directory '{}' already exists, but has the wrong ownership. Expected '{}', got '{}'",
                     dir, uid, Uid::from_raw(metadata.uid())
-                )
-            ));
+                );
         }
 
         if Gid::from_raw(metadata.gid()) != gid {
             // ownership is wrong
-            return Err(Error::State(
-                format!(
-                    "Directory '{}' already exists, but has the wrong group ownership. Expected '{}', got '{}'",
+            tracing::error!(
+                "Directory '{}' already exists, but has the wrong group ownership. Expected '{}', got '{}'",
                     dir, gid, Gid::from_raw(metadata.gid())
-                )
-            ));
+                );
         }
 
         // check the permissions - we should ignore the sticky bit
         if metadata.permissions().mode() & 0o7777 != permissions {
             // permissions are wrong
-            return Err(Error::State(
-                format!(
-                    "Directory '{}' already exists, but has the wrong permissions. Expected '{}', got '{}'",
+            tracing::error!(
+                "Directory '{}' already exists, but has the wrong permissions. Expected '{}', got '{}'",
                     dir, unix_mode::to_string(permissions),
                     unix_mode::to_string(metadata.permissions().mode())
-                )
-            ));
+                );
         }
 
         // otherwise the directory is already present and correct
@@ -272,12 +266,10 @@ pub async fn create_project_link(dir: &str, link: &str, project: &str) -> Result
             let target = path.read_link()?.canonicalize()?;
 
             if target != Path::new(&dir) {
-                return Err(Error::State(
-                    format!(
-                        "Link '{}' already exists, but points to the wrong directory. Expected '{}', got '{}'",
+                tracing::error!(
+                    "Link '{}' already exists, but points to the wrong directory. Expected '{}', got '{}'",
                         link, dir, target.to_string_lossy()
-                    )
-                ));
+                );
             }
 
             // otherwise the link is already present and correct
@@ -286,10 +278,7 @@ pub async fn create_project_link(dir: &str, link: &str, project: &str) -> Result
             // us to creating the link
             return Ok(());
         } else {
-            return Err(Error::State(format!(
-                "Link '{}' already exists, but is not a symlink",
-                link
-            )));
+            tracing::error!("Link '{}' already exists, but is not a symlink", link);
         }
     }
 

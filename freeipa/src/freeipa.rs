@@ -1419,7 +1419,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
             )));
         }
 
-        group_cns.push(group.groupid().to_string());
+        group_cns.push(added_group.groupid().to_string());
     }
 
     // return the user in the system - check that the groups match

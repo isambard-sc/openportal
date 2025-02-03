@@ -359,18 +359,21 @@ impl IPAUser {
                 continue;
             }
 
-            let cn: &str = match user
+            let cn: &str = user
                 .get("cn")
                 .and_then(|v| v.as_array())
                 .and_then(|v| v.first())
                 .and_then(|v| v.as_str())
-            {
-                Some(cn) => cn,
-                None => "",
-            };
+                .unwrap_or_default();
 
             let cn = match UserIdentifier::parse(cn) {
-                Ok(cn) => cn,
+                Ok(cn) => match cn.project_identifier() == *project {
+                    true => cn,
+                    false => {
+                        tracing::warn!("Skipping {} as they are not in project {}", cn, project);
+                        continue;
+                    }
+                },
                 Err(_) => {
                     // try to guess the user identifier from the username - support legacy
                     match UserIdentifier::parse(&format!(
@@ -382,7 +385,7 @@ impl IPAUser {
                             true => cn,
                             false => {
                                 tracing::warn!(
-                                    "Disagreement of identifier of found user: {} versus {}",
+                                    "Skipping {} as they are not in project {}",
                                     cn,
                                     project
                                 );
@@ -1153,7 +1156,7 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 
     // this isn't one line because we need to specify the
     // type of 'users'
-    let all_users = result.users(user.project_identifier())?;
+    let all_users = result.users(&user.project_identifier())?;
 
     let users: Vec<IPAUser> = all_users
         .clone()
@@ -1664,7 +1667,7 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
     let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs)).await {
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
-            result.users(user.project_identifier())?.first().cloned().ok_or(Error::UnmanagedUser(format!(
+            result.users(&user.project_identifier())?.first().cloned().ok_or(Error::UnmanagedUser(format!(
                 "User {} could not be found after adding - this could be because they already exist, but aren't managed? \
                  Look for the user in FreeIPA and either add them to the managed group or removed them from FreeIPA.",
                 user

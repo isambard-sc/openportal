@@ -216,6 +216,10 @@ impl IPAResponse {
     fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
         IPAGroup::construct(&self.result.clone().unwrap_or_default())
     }
+
+    fn legacy_groups(&self, portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Error> {
+        IPAGroup::construct_legacy(&self.result.clone().unwrap_or_default(), portal)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -623,6 +627,80 @@ impl IPAGroup {
         })
     }
 
+    fn construct_legacy(
+        result: &serde_json::Value,
+        portal: &PortalIdentifier,
+    ) -> Result<Vec<IPAGroup>, Error> {
+        let mut groups = Vec::new();
+
+        // convert result into an array if it isn't already
+        let result = match result.as_array() {
+            Some(result) => result.clone(),
+            None => vec![result.clone()],
+        };
+
+        for group in result {
+            // uid is a list of strings - just get the first one
+            let groupid = group
+                .get("cn")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            // this is a legacy group if the group name is "group.project"
+            let parts: Vec<&str> = groupid.split('.').collect();
+
+            if parts.len() != 2 {
+                continue;
+            }
+
+            if parts[0] != "group" {
+                continue;
+            }
+
+            let project = match ProjectIdentifier::parse(&format!("{}.{}", portal, parts[1])) {
+                Ok(project) => project,
+                Err(e) => {
+                    tracing::warn!("Could not parse project: {}. Error: {}", parts[1], e);
+                    continue;
+                }
+            };
+
+            let mut description = group
+                .get("description")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            // get the identifier from the description (if possible)
+            let identifier = match description.split("|").next() {
+                Some(identifier) => match ProjectIdentifier::parse(identifier.trim()) {
+                    Ok(identifier) => identifier,
+                    Err(e) => {
+                        tracing::warn!("Could not parse identifier: {}. Error: {}", identifier, e);
+                        continue;
+                    }
+                },
+                None => {
+                    description = format!("{} | {}", project, description);
+                    project.clone()
+                }
+            };
+
+            groups.push(IPAGroup {
+                groupid,
+                identifier,
+                description,
+            });
+        }
+
+        Ok(groups)
+    }
+
     fn construct(result: &serde_json::Value) -> Result<Vec<IPAGroup>, Error> {
         let mut groups = Vec::new();
 
@@ -871,7 +949,7 @@ fn is_internal_portal(portal: &str) -> bool {
 /// instance.group. These two names should be reserved and not
 /// used for any portals
 ///
-fn identifier_to_projectid(project: &ProjectIdentifier) -> Result<String, Error> {
+fn identifier_to_projectid(project: &ProjectIdentifier, legacy: bool) -> Result<String, Error> {
     // if the project.portal() is in ["openportal", "system", "instance"]
     // then we just return the project.project()
     let system_portals: Vec<String> = vec![
@@ -882,6 +960,9 @@ fn identifier_to_projectid(project: &ProjectIdentifier) -> Result<String, Error>
 
     if system_portals.contains(&project.portal()) {
         Ok(project.project().to_string())
+    } else if legacy {
+        // this is the legacy naming, `group.{project_name}`
+        Ok(format!("group.{}", project.project()))
     } else {
         Ok(format!("{}.{}", project.portal(), project.project()))
     }
@@ -925,7 +1006,7 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
         None => {
             let kwargs = {
                 let mut kwargs = HashMap::new();
-                kwargs.insert("cn".to_string(), identifier_to_projectid(project)?);
+                kwargs.insert("cn".to_string(), identifier_to_projectid(project, false)?);
                 kwargs
             };
 
@@ -959,7 +1040,47 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
 
                     Ok(Some(group))
                 }
-                None => Ok(None),
+                None => {
+                    // try to find the legacy group - this is for porting tech/prep projects
+                    let kwargs = {
+                        let mut kwargs = HashMap::new();
+                        kwargs.insert("cn".to_string(), identifier_to_projectid(project, true)?);
+                        kwargs
+                    };
+
+                    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+
+                    match result.legacy_groups(&project.portal_identifier())?.first() {
+                        Some(group) => {
+                            let group = match group.identifier() != project {
+                                true => {
+                                    tracing::warn!(
+                                        "Disagreement of identifier of found group: {} versus {}",
+                                        group.identifier(),
+                                        project
+                                    );
+
+                                    IPAGroup::new(group.groupid(), project, group.description())?
+                                }
+                                false => group.clone(),
+                            };
+
+                            // add this group to the cache - also force get all
+                            // of the users currently in this group
+                            cache::add_existing_group(&group).await?;
+
+                            // if this is a project group, then get and cache all users
+                            // in this group
+                            if group.is_project_group() {
+                                let users = force_get_users_in_group(&group).await?;
+                                cache::set_users_in_group(&group, &users).await?;
+                            }
+
+                            Ok(Some(group))
+                        }
+                        None => Ok(None),
+                    }
+                }
             }
         }
     }
@@ -1131,7 +1252,7 @@ fn get_primary_group(user: &UserIdentifier) -> Result<IPAGroup, Error> {
     let project = user.project_identifier();
 
     IPAGroup::new(
-        &identifier_to_projectid(&project)?,
+        &identifier_to_projectid(&project, false)?,
         &project,
         &format!(
             "Primary group for all users in the {} project",
@@ -1291,7 +1412,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
 ///
 pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error> {
     let project_group = get_group_create_if_not_exists(&IPAGroup::new(
-        &identifier_to_projectid(project)?,
+        &identifier_to_projectid(project, false)?,
         project,
         "OpenPortal-managed group",
     )?)
@@ -1931,7 +2052,12 @@ pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Erro
 
     let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
 
-    let groups = result.groups()?;
+    // construct groups as the combination of both result.groups() and result.legacy_groups()
+    let groups = result
+        .groups()?
+        .into_iter()
+        .chain(result.legacy_groups(portal)?.into_iter())
+        .collect::<Vec<IPAGroup>>();
 
     cache::add_existing_groups(&groups).await?;
 

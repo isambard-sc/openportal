@@ -302,15 +302,11 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
     let existing_account = get_account(account.name()).await?;
 
     if let Some(existing_account) = existing_account {
-        if account.organization() != get_managed_organization() {
+        if !account.is_managed() {
             tracing::warn!(
-                "Account {} is not managed by the openportal organization - we cannot manage it.",
+                "Account {} is not managed by the openportal organization.",
                 account
             );
-            return Err(Error::UnmanagedGroup(format!(
-                "Cannot add Slurm account as {} is not managed by openportal",
-                account
-            )));
         }
 
         if existing_account != *account {
@@ -481,15 +477,11 @@ async fn add_user_association(
     account: &SlurmAccount,
     make_default: bool,
 ) -> Result<SlurmUser, Error> {
-    if account.organization() != get_managed_organization() {
-        tracing::warn!(
-            "Account {} is not managed by the openportal organization - we cannot manage it.",
+    if !account.is_managed() {
+        tracing::error!(
+            "Account {} is not managed by the openportal organization!",
             account
         );
-        return Err(Error::UnmanagedGroup(format!(
-            "Cannot add Slurm account as {} is not managed by openportal",
-            account
-        )));
     }
 
     let mut user = user.clone();

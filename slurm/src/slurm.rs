@@ -1476,6 +1476,10 @@ impl SlurmAccount {
     pub fn set_limit(&mut self, limit: &Usage) {
         self.limit = *limit;
     }
+
+    pub fn is_managed(&self) -> bool {
+        self.organization == get_managed_organization()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

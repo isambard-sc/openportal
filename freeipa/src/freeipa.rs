@@ -8,7 +8,7 @@ use reqwest::{cookie::Jar, Client};
 use secrecy::ExposeSecret;
 use secrecy::Secret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use templemeads::grammar::{
     PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
@@ -1293,6 +1293,14 @@ async fn get_groups_for_user(user: &IPAUser) -> Result<Vec<IPAGroup>, Error> {
                 .legacy_groups(&user.identifier().portal_identifier())?
                 .into_iter(),
         )
+        .collect::<Vec<IPAGroup>>();
+
+    // remove duplicates from this list
+    let mut seen = HashSet::new();
+
+    let groups = groups
+        .into_iter()
+        .filter(|g| seen.insert(g.groupid().to_string()))
         .collect::<Vec<IPAGroup>>();
 
     tracing::info!(

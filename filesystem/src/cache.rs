@@ -47,8 +47,11 @@ pub async fn get_home_root() -> Result<String, Error> {
 /// Set the root for all home directories
 ///
 pub async fn set_home_root(root: &str) -> Result<(), Error> {
-    let root = filesystem::clean_and_check_path(root, true).await?;
-    tracing::info!("Setting home root to {}", root);
+    let check_root = filesystem::clean_and_check_path(root, true).await?;
+
+    if check_root != root {
+        tracing::info!("Home {} was checked, and maps to {}", root, check_root);
+    }
 
     let mut cache = CACHE.write().await;
     cache.home_root = root.to_owned();
@@ -72,9 +75,14 @@ pub async fn set_project_roots(roots: &Vec<String>) -> Result<(), Error> {
     cache.project_roots.clear();
 
     for root in roots {
-        let root = filesystem::clean_and_check_path(root, true).await?;
+        let check_root = filesystem::clean_and_check_path(root, true).await?;
+
+        if check_root != *root {
+            tracing::info!("Project {} was checked, and maps to {}", root, check_root);
+        }
+
         tracing::info!("Adding project root {}", root);
-        cache.project_roots.push(root);
+        cache.project_roots.push(root.clone());
     }
 
     Ok(())

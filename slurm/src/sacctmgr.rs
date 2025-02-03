@@ -174,14 +174,10 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
 
 async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
-    let cluster = cache::get_cluster().await?;
 
     let response = match runner()
         .await?
-        .run_json(&format!(
-            "SACCTMGR --json list accounts name={} cluster={}",
-            account, cluster
-        ))
+        .run_json(&format!("SACCTMGR --json list accounts name={}", account))
         .await
     {
         Ok(response) => response,

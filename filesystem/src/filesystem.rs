@@ -269,7 +269,7 @@ pub async fn create_project_link(dir: &str, link: &str, project: &str) -> Result
 
         if metadata.file_type().is_symlink() {
             // check the link points to the correct directory
-            let target = path.read_link()?;
+            let target = path.read_link()?.canonicalize()?;
 
             if target != Path::new(&dir) {
                 return Err(Error::State(

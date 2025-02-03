@@ -699,13 +699,7 @@ impl IPAGroup {
 
                     match groupid == managed_group.groupid() {
                         true => managed_group.identifier().clone(),
-                        false => {
-                            tracing::warn!(
-                                "Could not find internal project for group: {}",
-                                groupid
-                            );
-                            continue;
-                        }
+                        false => continue,
                     }
                 }
             };

@@ -681,7 +681,13 @@ impl IPAGroup {
                 Some(identifier) => match ProjectIdentifier::parse(identifier.trim()) {
                     Ok(identifier) => identifier,
                     Err(e) => {
-                        tracing::warn!("Could not parse identifier: {}. Error: {}", identifier, e);
+                        tracing::warn!(
+                            "Could not parse identifier: {} for {} / {}. Error: {}",
+                            identifier,
+                            groupid,
+                            project,
+                            e
+                        );
                         continue;
                     }
                 },
@@ -733,7 +739,12 @@ impl IPAGroup {
                 Some(identifier) => match ProjectIdentifier::parse(identifier.trim()) {
                     Ok(identifier) => identifier,
                     Err(e) => {
-                        tracing::warn!("Could not parse identifier: {}. Error: {}", identifier, e);
+                        tracing::warn!(
+                            "Could not parse identifier: {} for {}. Error: {}",
+                            identifier,
+                            group,
+                            e
+                        );
                         continue;
                     }
                 },

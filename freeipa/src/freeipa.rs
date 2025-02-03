@@ -209,8 +209,8 @@ struct IPAResponse {
 }
 
 impl IPAResponse {
-    fn users(&self) -> Result<Vec<IPAUser>, Error> {
-        IPAUser::construct(&self.result.clone().unwrap_or_default())
+    fn users(&self, project: &ProjectIdentifier) -> Result<Vec<IPAUser>, Error> {
+        IPAUser::construct(&self.result.clone().unwrap_or_default(), project)
     }
 
     fn groups(&self) -> Result<Vec<IPAGroup>, Error> {
@@ -333,7 +333,10 @@ impl std::fmt::Display for IPAUser {
 }
 
 impl IPAUser {
-    fn construct(result: &serde_json::Value) -> Result<Vec<IPAUser>, Error> {
+    fn construct(
+        result: &serde_json::Value,
+        project: &ProjectIdentifier,
+    ) -> Result<Vec<IPAUser>, Error> {
         let mut users = Vec::new();
 
         // convert result into an array if it isn't already
@@ -343,30 +346,6 @@ impl IPAUser {
         };
 
         for user in result {
-            // uid is a list of strings - just get the first one
-            let cn: &str = match user
-                .get("cn")
-                .and_then(|v| v.as_array())
-                .and_then(|v| v.first())
-                .and_then(|v| v.as_str())
-            {
-                Some(cn) => cn,
-                None => {
-                    tracing::error!("Could not parse user identifier (CN) from: {}", user);
-                    continue;
-                }
-            };
-
-            let cn = match UserIdentifier::parse(cn) {
-                Ok(cn) => cn,
-                Err(_) => {
-                    tracing::error!(
-                        "Could not parse user identifier from CN: {cn} :Skipping user."
-                    );
-                    continue;
-                }
-            };
-
             let userid = user
                 .get("uid")
                 .and_then(|v| v.as_array())
@@ -374,6 +353,53 @@ impl IPAUser {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
+
+            if userid.is_empty() {
+                tracing::error!("Could not find user id: Skipping user.",);
+                continue;
+            }
+
+            let cn: &str = match user
+                .get("cn")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+            {
+                Some(cn) => cn,
+                None => "",
+            };
+
+            let cn = match UserIdentifier::parse(cn) {
+                Ok(cn) => cn,
+                Err(_) => {
+                    // try to guess the user identifier from the username - support legacy
+                    match UserIdentifier::parse(&format!(
+                        "{}.{}",
+                        userid,
+                        project.portal_identifier()
+                    )) {
+                        Ok(cn) => match cn.project_identifier() == *project {
+                            true => cn,
+                            false => {
+                                tracing::warn!(
+                                    "Disagreement of identifier of found user: {} versus {}",
+                                    cn,
+                                    project
+                                );
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                "Could not parse user identifier: {}. Error: {}",
+                                cn,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
 
             let givenname = user
                 .get("givenname")
@@ -996,7 +1022,7 @@ async fn force_get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Erro
 
     // filter out users who are not managed and who are disabled
     Ok(result
-        .users()?
+        .users(group.identifier())?
         .iter()
         .filter(|u| u.is_managed() & u.is_enabled())
         .cloned()
@@ -1127,7 +1153,7 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 
     // this isn't one line because we need to specify the
     // type of 'users'
-    let all_users = result.users()?;
+    let all_users = result.users(user.project_identifier())?;
 
     let users: Vec<IPAUser> = all_users
         .clone()
@@ -1638,7 +1664,7 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
     let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs)).await {
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
-            result.users()?.first().cloned().ok_or(Error::UnmanagedUser(format!(
+            result.users(user.project_identifier())?.first().cloned().ok_or(Error::UnmanagedUser(format!(
                 "User {} could not be found after adding - this could be because they already exist, but aren't managed? \
                  Look for the user in FreeIPA and either add them to the managed group or removed them from FreeIPA.",
                 user

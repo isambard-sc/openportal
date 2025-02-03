@@ -1497,9 +1497,19 @@ impl Display for SlurmAssociation {
 
 impl SlurmAssociation {
     pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
+        let account = clean_account_name(match mapping.local_group().starts_with("group.") {
+            //if it starts with "group.X" then return "X" as this is legacy account
+            true => mapping
+                .local_group()
+                .split('.')
+                .nth(1)
+                .unwrap_or(mapping.local_group()),
+            false => mapping.local_group(),
+        })?;
+
         Ok(SlurmAssociation {
             user: clean_user_name(mapping.local_user())?,
-            account: clean_account_name(mapping.local_group())?,
+            account,
         })
     }
 
@@ -1589,9 +1599,20 @@ impl Display for SlurmUser {
 
 impl SlurmUser {
     pub fn from_mapping(mapping: &UserMapping) -> Result<Self, Error> {
+        let default_account =
+            clean_account_name(match mapping.local_group().starts_with("group.") {
+                //if it starts with "group.X" then return "X" as this is legacy account
+                true => mapping
+                    .local_group()
+                    .split('.')
+                    .nth(1)
+                    .unwrap_or(mapping.local_group()),
+                false => mapping.local_group(),
+            })?;
+
         Ok(SlurmUser {
             name: mapping.local_user().to_string(),
-            default_account: Some(clean_account_name(mapping.local_group())?),
+            default_account: Some(default_account),
             associations: vec![SlurmAssociation::from_mapping(mapping)?],
         })
     }

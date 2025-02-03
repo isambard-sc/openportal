@@ -1250,8 +1250,6 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
         return Ok(None);
     }
 
-    tracing::info!("Force getting user: {}", user);
-
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("all".to_string(), "true".to_string());
@@ -1259,20 +1257,14 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
         kwargs
     };
 
-    tracing::info!("Calling user_find with: {:?}", kwargs);
-
     let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
 
     match result.users(&user.project_identifier())?.first() {
         Some(user) => {
-            tracing::info!("Found user: {}", user);
             cache::add_existing_user(user).await?;
             Ok(Some(user.clone()))
         }
-        None => {
-            tracing::info!("Could not find user: {}", user);
-            Ok(None)
-        }
+        None => Ok(None),
     }
 }
 

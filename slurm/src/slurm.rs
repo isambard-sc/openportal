@@ -1366,8 +1366,18 @@ impl Display for SlurmAccount {
 
 impl SlurmAccount {
     pub fn from_mapping(mapping: &ProjectMapping) -> Result<Self, Error> {
+        let name = clean_account_name(match mapping.local_group().starts_with("group.") {
+            //if it starts with "group.X" then return "X" as this is legacy account
+            true => mapping
+                .local_group()
+                .split('.')
+                .nth(1)
+                .unwrap_or(mapping.local_group()),
+            false => mapping.local_group(),
+        })?;
+
         Ok(SlurmAccount {
-            name: clean_account_name(mapping.local_group())?,
+            name,
             description: format!("Account for OpenPortal project {}", mapping.project()),
             organization: get_managed_organization(),
             limit: Usage::default(),

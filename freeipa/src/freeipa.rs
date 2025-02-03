@@ -680,15 +680,9 @@ impl IPAGroup {
             let identifier = match description.split("|").next() {
                 Some(identifier) => match ProjectIdentifier::parse(identifier.trim()) {
                     Ok(identifier) => identifier,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Could not parse identifier: {} for {} / {}. Error: {}",
-                            identifier,
-                            groupid,
-                            project,
-                            e
-                        );
-                        continue;
+                    Err(_) => {
+                        description = format!("{} | {}", project, description);
+                        project
                     }
                 },
                 None => {

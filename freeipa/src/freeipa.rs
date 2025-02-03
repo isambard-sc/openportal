@@ -695,8 +695,18 @@ impl IPAGroup {
             let project = match internal_groups.get(&groupid) {
                 Some(project) => project.clone(),
                 None => {
-                    tracing::warn!("Could not find internal project for group: {}", groupid);
-                    continue;
+                    let managed_group = get_managed_group()?;
+
+                    match groupid == managed_group.groupid() {
+                        true => managed_group.identifier().clone(),
+                        false => {
+                            tracing::warn!(
+                                "Could not find internal project for group: {}",
+                                groupid
+                            );
+                            continue;
+                        }
+                    }
                 }
             };
 

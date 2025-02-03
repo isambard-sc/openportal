@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.6.1] - 2025-02-03
 ### Added
 - Added support for legacy BriCS accounts and projects
 
@@ -268,6 +269,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.6.1]: https://github.com/isambard-sc/openportal/releases/tag/0.6.1
 [0.6.0]: https://github.com/isambard-sc/openportal/releases/tag/0.6.0
 [0.5.0]: https://github.com/isambard-sc/openportal/releases/tag/0.5.0
 [0.4.0]: https://github.com/isambard-sc/openportal/releases/tag/0.4.0

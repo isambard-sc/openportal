@@ -682,7 +682,7 @@ impl IPAGroup {
                     Ok(identifier) => identifier,
                     Err(_) => {
                         description = format!("{} | {}", project, description);
-                        project
+                        project.clone()
                     }
                 },
                 None => {
@@ -690,6 +690,8 @@ impl IPAGroup {
                     project.clone()
                 }
             };
+
+            tracing::info!("Constructing legacy group {} / {}", groupid, identifier);
 
             groups.push(IPAGroup {
                 groupid,
@@ -736,7 +738,7 @@ impl IPAGroup {
                         tracing::warn!(
                             "Could not parse identifier: {} for {}. Error: {}",
                             identifier,
-                            group,
+                            groupid,
                             e
                         );
                         continue;

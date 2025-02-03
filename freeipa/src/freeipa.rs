@@ -1282,7 +1282,18 @@ async fn get_groups_for_user(user: &IPAUser) -> Result<Vec<IPAGroup>, Error> {
 
     let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
 
-    let groups = result.groups()?;
+    let internal_groups = cache::get_internal_group_ids().await?;
+
+    let groups = result
+        .groups()?
+        .into_iter()
+        .chain(result.internal_groups(&internal_groups)?.into_iter())
+        .chain(
+            result
+                .legacy_groups(&user.identifier().portal_identifier())?
+                .into_iter(),
+        )
+        .collect::<Vec<IPAGroup>>();
 
     tracing::info!(
         "User {} is in groups: {:?}",

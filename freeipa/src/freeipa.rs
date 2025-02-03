@@ -836,7 +836,7 @@ impl IPAGroup {
                 Some(identifier) => match ProjectIdentifier::parse(identifier.trim()) {
                     Ok(identifier) => identifier,
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             "Could not parse identifier: {} for {}. Error: {}",
                             identifier,
                             groupid,
@@ -846,7 +846,7 @@ impl IPAGroup {
                     }
                 },
                 None => {
-                    tracing::warn!(
+                    tracing::debug!(
                         "Could not parse identifier from description: {}",
                         description
                     );
@@ -1690,13 +1690,13 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
     if let Some(mut user) = get_user(user).await? {
         if !user.is_managed() {
             tracing::warn!(
-                "Ignoring request for {} as they are not managed by OpenPortal",
-                user
+                "Ignoring request to add {} as they are not managed by OpenPortal",
+                user.identifier()
             );
             return Err(Error::UnmanagedUser(format!(
                 "User {} already exists in FreeIPA, but is not managed by OpenPortal. \
                  Either add this user to the managed group, or remove them from FreeIPA.",
-                user
+                user.identifier()
             )));
         }
 
@@ -1982,11 +1982,11 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     if !user.is_managed() {
         tracing::warn!(
             "Ignoring request to remove {} as they are not managed by OpenPortal",
-            user
+            user.identifier()
         );
         return Err(Error::UnmanagedUser(format!(
             "User {} is not managed by OpenPortal. Either add this user to the managed group, or remove them from FreeIPA.",
-            user
+            user.identifier()
         )));
     }
 
@@ -2108,11 +2108,11 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
     if !user.is_managed() {
         tracing::warn!(
             "Ignoring request to update homedir for {} as they are not managed by OpenPortal",
-            user
+            user.identifier()
         );
         return Err(Error::UnmanagedUser(format!(
             "User {} is not managed by OpenPortal. Either add this user to the managed group, or remove them from FreeIPA.",
-            user
+            user.identifier()
         )));
     }
 

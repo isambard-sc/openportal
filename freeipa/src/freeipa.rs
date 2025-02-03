@@ -660,7 +660,7 @@ impl IPAGroup {
                 continue;
             }
 
-            let project = match ProjectIdentifier::parse(&format!("{}.{}", portal, parts[1])) {
+            let project = match ProjectIdentifier::parse(&format!("{}.{}", parts[1], portal)) {
                 Ok(project) => project,
                 Err(e) => {
                     tracing::warn!("Could not parse project: {}. Error: {}", parts[1], e);

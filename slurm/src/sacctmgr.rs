@@ -174,10 +174,14 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
 
 async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
+    let cluster = cache::get_cluster().await?;
 
     let response = match runner()
         .await?
-        .run_json(&format!("SACCTMGR --json list accounts name={}", account))
+        .run_json(&format!(
+            "SACCTMGR --json list accounts name={} cluster={}",
+            account, cluster
+        ))
         .await
     {
         Ok(response) => response,
@@ -332,12 +336,13 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
 
 async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
     let user = clean_user_name(user)?;
+    let cluster = cache::get_cluster().await?;
 
     let response = runner()
         .await?
         .run_json(&format!(
-            "SACCTMGR --json list users name={} WithAssoc",
-            user
+            "SACCTMGR --json list users name={} cluster={} WithAssoc",
+            user, cluster
         ))
         .await?;
 
@@ -731,6 +736,7 @@ pub async fn get_usage_report(
     let mut report = ProjectUsageReport::new(project.project());
     let slurm_nodes = cache::get_nodes().await?;
     let now = chrono::Utc::now();
+    let cluster = cache::get_cluster().await?;
 
     // we now request the data day by day
     for day in dates.days() {
@@ -749,10 +755,11 @@ pub async fn get_usage_report(
         let response = runner()
             .await?
             .run_json(&format!(
-                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --json",
+                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} --json",
                 day,
                 day.next(),
-                account.name()
+                account.name(),
+                cluster
             ))
             .await?;
 

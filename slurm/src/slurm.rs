@@ -2630,6 +2630,7 @@ pub async fn get_usage_report(
     let mut report = ProjectUsageReport::new(project.project());
     let slurm_nodes = cache::get_nodes().await?;
     let now = chrono::Utc::now();
+    let cluster = cache::get_cluster().await?;
 
     // we now request the data day by day
     for day in dates.days() {
@@ -2648,10 +2649,11 @@ pub async fn get_usage_report(
         let response = sacctmgr::runner()
             .await?
             .run_json(&format!(
-                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --json",
+                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} --json",
                 day,
                 day.next(),
-                account.name()
+                account.name(),
+                cluster,
             ))
             .await?;
 

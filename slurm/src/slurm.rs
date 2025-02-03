@@ -1822,6 +1822,13 @@ impl SlurmNodes {
     }
 }
 
+fn get_fraction(used: u64, total: u64) -> f64 {
+    match total {
+        0 => 0.0,
+        _ => used as f64 / total as f64,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlurmJob {
     id: u64,
@@ -2486,18 +2493,18 @@ impl SlurmJob {
 
     pub fn requested_node_fraction(&self) -> f64 {
         // find the maximum fraction of the node that was used
-        let cpu_fraction = self.requested_cpus as f64 / self.node_info.cpus() as f64;
-        let gpu_fraction = self.requested_gpus as f64 / self.node_info.gpus() as f64;
-        let memory_fraction = self.requested_memory as f64 / self.node_info.mem() as f64;
+        let cpu_fraction = get_fraction(self.requested_cpus, self.node_info.cpus());
+        let gpu_fraction = get_fraction(self.requested_gpus, self.node_info.gpus());
+        let memory_fraction = get_fraction(self.requested_memory, self.node_info.mem());
 
         cpu_fraction.max(gpu_fraction).max(memory_fraction)
     }
 
     pub fn node_fraction(&self) -> f64 {
         // find the maximum fraction of the node that was used
-        let cpu_fraction = self.cpus as f64 / self.node_info.cpus() as f64;
-        let gpu_fraction = self.gpus as f64 / self.node_info.gpus() as f64;
-        let memory_fraction = self.memory as f64 / self.node_info.mem() as f64;
+        let cpu_fraction = get_fraction(self.cpus, self.node_info.cpus());
+        let gpu_fraction = get_fraction(self.gpus, self.node_info.gpus());
+        let memory_fraction = get_fraction(self.memory, self.node_info.mem());
 
         cpu_fraction.max(gpu_fraction).max(memory_fraction)
     }

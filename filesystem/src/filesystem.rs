@@ -198,6 +198,7 @@ async fn create_dir(
         // It is best to stop now, and not try to do anything,
         // as we should assume that another process has already beaten
         // us to creating the directory
+        tracing::info!("Directory already exists with required permissions.");
         return Ok(());
     }
 

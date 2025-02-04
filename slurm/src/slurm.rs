@@ -1723,11 +1723,7 @@ impl Display for SlurmNode {
 
 impl SlurmNode {
     fn new(cpus: u64, gpus: u64, mem: u64) -> Self {
-        SlurmNode {
-            cpus: cpus,
-            gpus: gpus,
-            mem: mem,
-        }
+        SlurmNode { cpus, gpus, mem }
     }
 
     pub fn construct(value: &serde_json::Value) -> Result<Self, Error> {

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Added in convenience functions to the Python API to make it easier
+  to query dates.
+
 ## [0.6.2] - 2025-02-04
 ### Fixed
 - General bugfixes in how the slurm accounting evaluated job consumption data.

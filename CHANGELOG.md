@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## Fixed
+- General bugfixes in how the slurm accounting evaluated job consumption data.
+
+- General bugfixes related to how agents handle mulitple slurm clusters.
+
 ## [0.6.1] - 2025-02-03
 ### Added
 - Added support for legacy BriCS accounts and projects

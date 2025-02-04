@@ -641,6 +641,12 @@ impl Date {
             .timestamp()
     }
 
+    pub fn yesterday() -> Self {
+        Self {
+            date: Date::today().date - chrono::Duration::days(1),
+        }
+    }
+
     pub fn today() -> Self {
         Self {
             date: chrono::Local::now().naive_local().into(),
@@ -657,6 +663,12 @@ impl Date {
         DateRange {
             start_date: Date { date: self.date },
             end_date: Date { date: self.date },
+        }
+    }
+
+    pub fn prev(self: &Date) -> Date {
+        Date {
+            date: self.date - chrono::Duration::days(1),
         }
     }
 
@@ -685,6 +697,48 @@ impl Date {
         }
     }
 
+    pub fn prev_week(self: &Date) -> DateRange {
+        let start_date = match self.date.weekday() {
+            chrono::Weekday::Mon => self.date - chrono::Duration::days(7),
+            chrono::Weekday::Tue => self.date - chrono::Duration::days(8),
+            chrono::Weekday::Wed => self.date - chrono::Duration::days(9),
+            chrono::Weekday::Thu => self.date - chrono::Duration::days(10),
+            chrono::Weekday::Fri => self.date - chrono::Duration::days(11),
+            chrono::Weekday::Sat => self.date - chrono::Duration::days(12),
+            chrono::Weekday::Sun => self.date - chrono::Duration::days(13),
+        };
+
+        let end_date = start_date + chrono::Duration::days(6);
+
+        DateRange {
+            start_date: Date { date: start_date },
+            end_date: Date { date: end_date },
+        }
+    }
+
+    pub fn next_week(self: &Date) -> DateRange {
+        let start_date = match self.date.weekday() {
+            chrono::Weekday::Mon => self.date + chrono::Duration::days(7),
+            chrono::Weekday::Tue => self.date + chrono::Duration::days(6),
+            chrono::Weekday::Wed => self.date + chrono::Duration::days(5),
+            chrono::Weekday::Thu => self.date + chrono::Duration::days(4),
+            chrono::Weekday::Fri => self.date + chrono::Duration::days(3),
+            chrono::Weekday::Sat => self.date + chrono::Duration::days(2),
+            chrono::Weekday::Sun => self.date + chrono::Duration::days(1),
+        };
+
+        let end_date = start_date + chrono::Duration::days(6);
+
+        DateRange {
+            start_date: Date { date: start_date },
+            end_date: Date { date: end_date },
+        }
+    }
+
+    pub fn this_week() -> DateRange {
+        Date::today().week()
+    }
+
     pub fn month(self: &Date) -> DateRange {
         // note that all the unwraps are safe, as we are always working with
         // valid dates.
@@ -704,6 +758,39 @@ impl Date {
             start_date: Date { date: start_date },
             end_date: Date { date: end_date },
         }
+    }
+
+    pub fn prev_month(self: &Date) -> DateRange {
+        // note that all the unwraps are safe, as we are always working with
+        // valid dates.
+
+        let end_of_last_month = self
+            .date
+            .with_day(1)
+            .unwrap_or(self.date)
+            .pred_opt()
+            .unwrap_or(self.date);
+
+        Date::from_chrono(&end_of_last_month).month()
+    }
+
+    pub fn next_month(self: &Date) -> DateRange {
+        // note that all the unwraps are safe, as we are always working with
+        // valid dates.
+        let end_of_this_month = self
+            .date
+            .with_month(self.date.month() + 1)
+            .unwrap_or(self.date)
+            .with_day(1)
+            .unwrap_or(self.date)
+            .pred_opt()
+            .unwrap_or(self.date);
+
+        Date::from_chrono(&end_of_this_month.succ_opt().unwrap_or(self.date)).month()
+    }
+
+    pub fn this_month() -> DateRange {
+        Date::today().month()
     }
 
     pub fn year(self: &Date) -> DateRange {
@@ -726,6 +813,44 @@ impl Date {
             start_date: Date { date: start_date },
             end_date: Date { date: end_date },
         }
+    }
+
+    pub fn prev_year(self: &Date) -> DateRange {
+        // note that all the unwraps are safe, as we are always working with
+        // valid dates.
+
+        let end_of_last_year = self
+            .date
+            .with_month(1)
+            .unwrap_or(self.date)
+            .with_day(1)
+            .unwrap_or(self.date)
+            .pred_opt()
+            .unwrap_or(self.date);
+
+        Date::from_chrono(&end_of_last_year).year()
+    }
+
+    pub fn next_year(self: &Date) -> DateRange {
+        // note that all the unwraps are safe, as we are always working with
+        // valid dates.
+
+        let end_of_this_year = self
+            .date
+            .with_year(self.date.year() + 1)
+            .unwrap_or(self.date)
+            .with_month(1)
+            .unwrap_or(self.date)
+            .with_day(1)
+            .unwrap_or(self.date)
+            .pred_opt()
+            .unwrap_or(self.date);
+
+        Date::from_chrono(&end_of_this_year.succ_opt().unwrap_or(self.date)).year()
+    }
+
+    pub fn this_year() -> DateRange {
+        Date::today().year()
     }
 
     pub fn date(&self) -> &chrono::NaiveDate {
@@ -820,20 +945,35 @@ impl DateRange {
 
         // some special cases
         match date_range.as_str() {
+            "yesterday" => {
+                return Ok(Date::yesterday().day());
+            }
             "today" => {
                 return Ok(Date::today().day());
+            }
+            "tomorrow" => {
+                return Ok(Date::tomorrow().day());
             }
             "this_day" => {
                 return Ok(Date::today().day());
             }
             "this_week" => {
-                return Ok(Date::today().week());
+                return Ok(Date::this_week());
+            }
+            "last_week" => {
+                return Ok(Date::today().prev_week());
             }
             "this_month" => {
-                return Ok(Date::today().month());
+                return Ok(Date::this_month());
+            }
+            "last_month" => {
+                return Ok(Date::today().prev_month());
             }
             "this_year" => {
                 return Ok(Date::today().year());
+            }
+            "last_year" => {
+                return Ok(Date::today().prev_year());
             }
             _ => {}
         }

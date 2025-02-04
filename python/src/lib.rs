@@ -671,6 +671,11 @@ impl DateRange {
     }
 
     #[staticmethod]
+    fn yesterday() -> PyResult<Self> {
+        Ok(grammar::Date::yesterday().day().into())
+    }
+
+    #[staticmethod]
     fn today() -> PyResult<Self> {
         Ok(grammar::Date::today().day().into())
     }
@@ -681,6 +686,16 @@ impl DateRange {
     }
 
     #[staticmethod]
+    fn last_month() -> PyResult<Self> {
+        Ok(grammar::Date::today().prev_month().into())
+    }
+
+    #[staticmethod]
+    fn next_month() -> PyResult<Self> {
+        Ok(grammar::Date::today().next_month().into())
+    }
+
+    #[staticmethod]
     fn this_month() -> PyResult<Self> {
         Ok(grammar::Date::today().month().into())
     }
@@ -688,6 +703,26 @@ impl DateRange {
     #[staticmethod]
     fn this_week() -> PyResult<Self> {
         Ok(grammar::Date::today().week().into())
+    }
+
+    #[staticmethod]
+    fn last_week() -> PyResult<Self> {
+        Ok(grammar::Date::today().prev_week().into())
+    }
+
+    #[staticmethod]
+    fn next_week() -> PyResult<Self> {
+        Ok(grammar::Date::today().next_week().into())
+    }
+
+    #[staticmethod]
+    fn last_year() -> PyResult<Self> {
+        Ok(grammar::Date::today().prev_year().into())
+    }
+
+    #[staticmethod]
+    fn next_year() -> PyResult<Self> {
+        Ok(grammar::Date::today().next_year().into())
     }
 
     #[staticmethod]

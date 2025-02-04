@@ -2634,9 +2634,27 @@ pub async fn get_usage_report(
 
     // we now request the data day by day
     for day in dates.days() {
-        if day.day().start_time().and_utc() > now {
+        let start_time = day.day().start_time().and_utc();
+        let end_time = day.day().end_time().and_utc();
+
+        if start_time > now {
             // we can't get the usage for this day yet as it is in the future
             continue;
+        }
+
+        let end_time = match now < end_time {
+            true => now,
+            false => end_time,
+        };
+
+        // check that the day contains <= 24 hours (86400 seconds)
+        if end_time.timestamp() - start_time.timestamp() > 86400 {
+            tracing::warn!(
+                "Day {} contains more than 24 hours - check this! {} : {}",
+                day,
+                start_time,
+                end_time
+            );
         }
 
         // have we got this report in the cache?
@@ -2657,8 +2675,7 @@ pub async fn get_usage_report(
             ))
             .await?;
 
-        let jobs =
-            SlurmJob::get_consumers(&response, &dates.start_time().and_utc(), &now, &slurm_nodes)?;
+        let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)?;
 
         let mut daily_report = DailyProjectUsageReport::default();
 

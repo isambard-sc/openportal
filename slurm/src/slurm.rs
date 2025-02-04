@@ -1724,9 +1724,9 @@ impl Display for SlurmNode {
 impl SlurmNode {
     fn new(cpus: u64, gpus: u64, mem: u64) -> Self {
         SlurmNode {
-            cpus: cpus.max(1),
-            gpus: gpus.max(1),
-            mem: mem.max(1),
+            cpus: cpus,
+            gpus: gpus,
+            mem: mem,
         }
     }
 

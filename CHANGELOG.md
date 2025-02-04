@@ -6,9 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.6.2] - 2025-02-04
 ### Fixed
 - General bugfixes in how the slurm accounting evaluated job consumption data.
-
 - General bugfixes related to how agents handle mulitple slurm clusters.
 
 ## [0.6.1] - 2025-02-03
@@ -274,6 +274,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.6.2]: https://github.com/isambard-sc/openportal/releases/tag/0.6.2
 [0.6.1]: https://github.com/isambard-sc/openportal/releases/tag/0.6.1
 [0.6.0]: https://github.com/isambard-sc/openportal/releases/tag/0.6.0
 [0.5.0]: https://github.com/isambard-sc/openportal/releases/tag/0.5.0

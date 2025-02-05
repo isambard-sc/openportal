@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Added a "is_protected_user" instruction, to allow querying for user accounts
+  that should not be managed by OpenPortal. This is useful for accounts that
+  exist and are managed by other systems, but which need to be seen by
+  portals interfacing via OpenPortal
+
 ## [0.7.0] - 2025-02-04
 ### Added
 - Added in convenience functions to the Python API to make it easier

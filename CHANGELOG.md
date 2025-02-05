@@ -6,7 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-### Added
+## [0.8.0] - 2025-02-05
+### Added
 - Added a "is_protected_user" instruction, to allow querying for user accounts
   that should not be managed by OpenPortal. This is useful for accounts that
   exist and are managed by other systems, but which need to be seen by
@@ -285,6 +286,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.8.0]: https://github.com/isambard-sc/openportal/releases/tag/0.8.0
 [0.7.0]: https://github.com/isambard-sc/openportal/releases/tag/0.7.0
 [0.6.2]: https://github.com/isambard-sc/openportal/releases/tag/0.6.2
 [0.6.1]: https://github.com/isambard-sc/openportal/releases/tag/0.6.1

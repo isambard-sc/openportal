@@ -127,6 +127,7 @@ impl Command {
                 Instruction::RemoveLocalUser(user) => Some(user.user().clone()),
                 Instruction::UpdateHomeDir(user, _) => Some(user),
                 Instruction::GetUserMapping(user) => Some(user),
+                Instruction::IsProtectedUser(user) => Some(user),
                 _ => None,
             };
 

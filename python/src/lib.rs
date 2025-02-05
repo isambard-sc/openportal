@@ -439,6 +439,17 @@ impl Job {
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }
+            "bool" => {
+                let result = match self.0.result::<bool>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok((result as u64).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
             "None" => Ok(PyNone::get(py).as_ref().clone()),
             "UserIdentifier" => {
                 let result = match self.0.result::<grammar::UserIdentifier>() {

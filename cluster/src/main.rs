@@ -9,7 +9,7 @@ use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, GetLimit, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
-    GetUserMapping, GetUsers, RemoveProject, RemoveUser, SetLimit,
+    GetUserMapping, GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
@@ -17,6 +17,8 @@ use templemeads::grammar::{
 use templemeads::job::{Envelope, Job};
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
+
+const AGENT_WAIT_TIME: u64 = 10;
 
 ///
 /// Main function for the cluster instance agent
@@ -139,6 +141,10 @@ async fn main() -> Result<()> {
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
                     job.completed(mapping)
                 }
+                IsProtectedUser(user) => {
+                    let is_protected = is_protected_user(me.name(), &user).await?;
+                    job.completed(is_protected)
+                }
                 GetProjectMapping(project) => {
                     let mapping = get_project_mapping(me.name(), &project).await?;
                     job.completed(mapping)
@@ -230,6 +236,18 @@ async fn remove_project_from_cluster(
 }
 
 async fn add_user_to_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    match is_protected_user(me, user).await {
+        Ok(true) => {
+            // get and return the existing user mapping
+            return get_user_mapping(me, user).await;
+        }
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => {
+            return Err(e);
+        }
+        _ => {}
+    }
+
     tracing::info!("Adding user to cluster: {}", user);
     let mapping = create_account(me, user).await?;
 
@@ -246,6 +264,18 @@ async fn add_user_to_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapp
 }
 
 async fn remove_user_from_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    match is_protected_user(me, user).await {
+        Ok(true) => {
+            // get and return the existing user mapping
+            return get_user_mapping(me, user).await;
+        }
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => {
+            return Err(e);
+        }
+        _ => {}
+    }
+
     tracing::info!("Removing user from cluster: {}", user);
 
     let mapping = remove_account(me, user).await?;
@@ -273,7 +303,7 @@ async fn remove_user_from_cluster(me: &str, user: &UserIdentifier) -> Result<Use
 
 async fn get_projects(me: &str, portal: &PortalIdentifier) -> Result<Vec<ProjectMapping>, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -308,7 +338,7 @@ async fn get_projects(me: &str, portal: &PortalIdentifier) -> Result<Vec<Project
 
 async fn create_project(me: &str, project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -345,7 +375,7 @@ async fn create_project(me: &str, project: &ProjectIdentifier) -> Result<Project
 
 async fn remove_project(me: &str, project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -382,7 +412,7 @@ async fn remove_project(me: &str, project: &ProjectIdentifier) -> Result<Project
 
 async fn get_accounts(me: &str, project: &ProjectIdentifier) -> Result<Vec<UserMapping>, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -417,7 +447,7 @@ async fn get_accounts(me: &str, project: &ProjectIdentifier) -> Result<Vec<UserM
 
 async fn create_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -454,7 +484,7 @@ async fn create_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, 
 
 async fn remove_account(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -494,7 +524,7 @@ async fn get_project_mapping(
     project: &ProjectIdentifier,
 ) -> Result<ProjectMapping, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -535,7 +565,7 @@ async fn get_project_mapping(
 
 async fn get_user_mapping(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -573,7 +603,7 @@ async fn get_user_mapping(me: &str, user: &UserIdentifier) -> Result<UserMapping
 
 async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Result<String, Error> {
     // find the Filesystem agent
-    match agent::filesystem(30).await {
+    match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
             // send the add_job to the filesystem agent
             let job = Job::parse(
@@ -610,7 +640,7 @@ async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
 
 async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Result<(), Error> {
     // find the Filesystem agent
-    match agent::filesystem(30).await {
+    match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
             // send the add_job to the filesystem agent
             let job = Job::parse(
@@ -649,7 +679,7 @@ async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
 
 async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<String, Error> {
     // find the Filesystem agent
-    match agent::filesystem(30).await {
+    match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
             // send the add_job to the filesystem agent
             let job = Job::parse(
@@ -686,7 +716,7 @@ async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<Stri
 
 async fn delete_user_directories(me: &str, mapping: &UserMapping) -> Result<(), Error> {
     // find the Filesystem agent
-    match agent::filesystem(30).await {
+    match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
             // send the add_job to the filesystem agent
             let job = Job::parse(
@@ -720,7 +750,7 @@ async fn delete_user_directories(me: &str, mapping: &UserMapping) -> Result<(), 
 
 async fn update_homedir(me: &str, user: &UserIdentifier, homedir: &str) -> Result<String, Error> {
     // find the Account agent
-    match agent::account(30).await {
+    match agent::account(AGENT_WAIT_TIME).await {
         Some(account) => {
             // send the add_job to the account agent
             let job = Job::parse(
@@ -767,7 +797,7 @@ async fn add_project_to_scheduler(
     mapping: &ProjectMapping,
 ) -> Result<(), Error> {
     // find the Scheduler agent
-    match agent::scheduler(30).await {
+    match agent::scheduler(AGENT_WAIT_TIME).await {
         Some(scheduler) => {
             // send the add_job to the scheduler agent
             let job = Job::parse(
@@ -805,7 +835,7 @@ async fn remove_project_from_scheduler(
     mapping: &ProjectMapping,
 ) -> Result<(), Error> {
     // find the Scheduler agent
-    match agent::scheduler(30).await {
+    match agent::scheduler(AGENT_WAIT_TIME).await {
         Some(scheduler) => {
             // send the add_job to the scheduler agent
             let job = Job::parse(
@@ -848,7 +878,7 @@ async fn add_user_to_scheduler(
     mapping: &UserMapping,
 ) -> Result<(), Error> {
     // find the Scheduler agent
-    match agent::scheduler(30).await {
+    match agent::scheduler(AGENT_WAIT_TIME).await {
         Some(scheduler) => {
             // send the add_job to the scheduler agent
             let job = Job::parse(
@@ -886,7 +916,7 @@ async fn remove_user_from_scheduler(
     mapping: &UserMapping,
 ) -> Result<(), Error> {
     // find the Scheduler agent
-    match agent::scheduler(30).await {
+    match agent::scheduler(AGENT_WAIT_TIME).await {
         Some(scheduler) => {
             // send the add_job to the scheduler agent
             let job = Job::parse(
@@ -924,7 +954,7 @@ async fn get_usage_report(
     dates: &DateRange,
 ) -> Result<ProjectUsageReport, Error> {
     // get the schedule agent
-    let scheduler = match agent::scheduler(30).await {
+    let scheduler = match agent::scheduler(AGENT_WAIT_TIME).await {
         Some(scheduler) => scheduler,
         None => {
             tracing::error!("No scheduler agent found");
@@ -983,7 +1013,7 @@ async fn get_project_limit(me: &str, project: &ProjectIdentifier) -> Result<Usag
     let mapping = get_project_mapping(me, project).await?;
 
     // find the scheduler agent
-    let scheduler = match agent::scheduler(30).await {
+    let scheduler = match agent::scheduler(AGENT_WAIT_TIME).await {
         Some(scheduler) => scheduler,
         None => {
             tracing::error!("No scheduler agent found");
@@ -1019,7 +1049,7 @@ pub async fn set_project_limit(
     let mapping = get_project_mapping(me, project).await?;
 
     // find the scheduler agent
-    let scheduler = match agent::scheduler(30).await {
+    let scheduler = match agent::scheduler(AGENT_WAIT_TIME).await {
         Some(scheduler) => scheduler,
         None => {
             tracing::error!("No scheduler agent found");
@@ -1050,4 +1080,39 @@ pub async fn set_project_limit(
     };
 
     Ok(limit)
+}
+
+async fn is_protected_user(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
+    // find the Account agent
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} is_protected_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(is_protected) => {
+                    tracing::info!("User is protected: {}", is_protected);
+                    Ok(is_protected)
+                }
+                None => {
+                    tracing::error!("No user found?");
+                    Err(Error::MissingUser(format!("Could not find user {}", user)))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
 }

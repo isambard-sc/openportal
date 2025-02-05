@@ -22,6 +22,12 @@ impl NamedType for String {
     }
 }
 
+impl NamedType for bool {
+    fn type_name() -> &'static str {
+        "bool"
+    }
+}
+
 impl NamedType for Vec<String> {
     fn type_name() -> &'static str {
         "Vec<String>"
@@ -1174,6 +1180,10 @@ pub enum Instruction {
     /// An instruction to get all users in a project
     GetUsers(ProjectIdentifier),
 
+    /// An instruction to check if a user is protected from being
+    /// managed by OpenPortal
+    IsProtectedUser(UserIdentifier),
+
     /// An instruction to add a user
     AddUser(UserIdentifier),
 
@@ -1694,6 +1704,19 @@ impl Instruction {
                     }
                 }
             }
+            "is_protected_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::IsProtectedUser(user)),
+                Err(_) => {
+                    tracing::error!(
+                        "is_protected_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "is_protected_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
             _ => {
                 tracing::error!("Invalid instruction: {}", s);
                 Err(Error::Parse(format!("Invalid instruction: {}", s)))
@@ -1742,6 +1765,7 @@ impl std::fmt::Display for Instruction {
                 write!(f, "set_limit {} {}", project, usage.seconds())
             }
             Instruction::GetLimit(project) => write!(f, "get_limit {}", project),
+            Instruction::IsProtectedUser(user) => write!(f, "is_protected_user {}", user),
         }
     }
 }

@@ -14,8 +14,8 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers, RemoveProject,
-    RemoveUser, UpdateHomeDir,
+    AddProject, AddUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers, IsProtectedUser,
+    RemoveProject, RemoveUser, UpdateHomeDir,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
@@ -141,6 +141,10 @@ async fn main() -> Result<()> {
                     let mapping = freeipa::get_user_mapping(&user).await?;
                     job.completed(mapping)
                 },
+                IsProtectedUser(user) => {
+                    let is_protected = freeipa::is_protected_user(&user).await?;
+                    job.completed(is_protected)
+                }
                 _ => {
                     Err(Error::InvalidInstruction(
                         format!("Invalid instruction: {}. FreeIPA only supports add_user and remove_user", job.instruction()),

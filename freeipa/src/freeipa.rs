@@ -1705,11 +1705,7 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
                 "Ignoring request to add {} as they are not managed by OpenPortal",
                 user.identifier()
             );
-            return Err(Error::UnmanagedUser(format!(
-                "User {} already exists in FreeIPA, but is not managed by OpenPortal. \
-                 Either add this user to the managed group, or remove them from FreeIPA.",
-                user.identifier()
-            )));
+            return Ok(user);
         }
 
         // make sure to re-enable if needed
@@ -2122,10 +2118,7 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
             "Ignoring request to update homedir for {} as they are not managed by OpenPortal",
             user.identifier()
         );
-        return Err(Error::UnmanagedUser(format!(
-            "User {} is not managed by OpenPortal. Either add this user to the managed group, or remove them from FreeIPA.",
-            user.identifier()
-        )));
+        return Ok(user.home().to_string());
     }
 
     if user.home() == homedir {
@@ -2296,5 +2289,12 @@ pub async fn get_user_mapping(user: &UserIdentifier) -> Result<UserMapping, Erro
             "User {} does not exist in FreeIPA",
             user
         ))),
+    }
+}
+
+pub async fn is_protected_user(user: &UserIdentifier) -> Result<bool, Error> {
+    match get_user(user).await? {
+        Some(user) => Ok(!user.is_managed()),
+        None => Ok(false),
     }
 }

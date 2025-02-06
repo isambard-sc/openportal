@@ -67,7 +67,7 @@ crate::async_runnable! {
                 }
 
                 // who is next in line to receive this job? - find it, and its zone
-                let next_agent = agent::find(&destination.agents()[1], 30).await.ok_or_else(|| {
+                let next_agent = agent::find(&destination.agents()[1], 5).await.ok_or_else(|| {
                     tracing::error!("Invalid instruction: {}. Cannot find next agent in destination {}", job.instruction(), destination);
                     Error::InvalidInstruction(
                         format!("Invalid instruction: {}. Cannot find next agent in destination {}",

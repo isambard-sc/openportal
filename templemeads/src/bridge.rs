@@ -12,7 +12,7 @@ use uuid::Uuid;
 pub async fn status(job: &Uuid) -> Result<Job, Error> {
     tracing::debug!("Received status request for job: {}", job);
 
-    match agent::portal(30).await {
+    match agent::portal(5).await {
         Some(portal) => {
             // get the (shared) board for the portal
             let board = match state::get(&portal).await {
@@ -44,7 +44,7 @@ pub async fn run(command: &str) -> Result<Job, Error> {
 
     let my_name = agent::name().await;
 
-    match agent::portal(30).await {
+    match agent::portal(5).await {
         Some(portal) => {
             let job = Job::parse(command, true)?;
 
@@ -70,7 +70,7 @@ pub async fn run(command: &str) -> Result<Job, Error> {
             // time for the portal to collect the result - in reality, the
             // actual job on the system will have a much shorter lifetime,
             // e.g. 1 minute
-            let job = job.set_lifetime(chrono::Duration::minutes(60));
+            let job = job.set_lifetime(chrono::Duration::minutes(15));
 
             Ok(job.put(&portal).await?)
         }

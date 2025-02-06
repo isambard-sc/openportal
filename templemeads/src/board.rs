@@ -305,7 +305,7 @@ impl Board {
         self.queued_commands.retain(|command| {
             if let Some(job) = command.job() {
                 if job.is_expired() {
-                    tracing::info!("Removing expired queued job {}", job);
+                    tracing::debug!("Removing expired queued job {}", job);
 
                     // remove any listeners for this job
                     if let Some(listeners) = self.waiters.remove(&job.id()) {

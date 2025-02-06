@@ -977,9 +977,13 @@ impl Connection {
         // we've now completed the handshake and can use the two session
         // keys to trust and secure both ends of the connection - we can
         // register this connection - must unregister when we close
-        exchange::register(self.clone())
-            .await
-            .with_context(|| "Error registering connection with exchange")?;
+        match exchange::register(self.clone()).await {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::warn!("Error registering connection with exchange: {:?}", e);
+                return Err(Error::Any(e.into()));
+            }
+        }
 
         // handle the sending of messages to others
         let received_from_peer = incoming.try_for_each(|msg| {

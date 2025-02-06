@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.8.2] - 2025-02-06
 ### Fixed
 - Extra protections to ensure that agents are connected to the cluster
   before it attempts anything, and to return valid results if existing
@@ -299,6 +300,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.8.2]: https://github.com/isambard-sc/openportal/releases/tag/0.8.2
 [0.8.1]: https://github.com/isambard-sc/openportal/releases/tag/0.8.1
 [0.8.0]: https://github.com/isambard-sc/openportal/releases/tag/0.8.0
 [0.7.0]: https://github.com/isambard-sc/openportal/releases/tag/0.7.0

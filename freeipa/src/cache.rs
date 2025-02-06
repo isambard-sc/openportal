@@ -342,6 +342,7 @@ pub async fn add_existing_groups(groups: &[IPAGroup]) -> Result<(), Error> {
 ///
 /// Remove a group from the database
 ///
+#[allow(dead_code)]
 pub async fn remove_existing_group(group: &IPAGroup) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
     cache.groups.remove(group.identifier());

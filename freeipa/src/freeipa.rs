@@ -1595,6 +1595,14 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
     );
 
     for user in users {
+        if !user.is_managed() {
+            tracing::warn!(
+                "Ignoring user {} as they are not managed by OpenPortal",
+                user.userid()
+            );
+            continue;
+        }
+
         match remove_user(user.identifier()).await {
             Ok(user) => {
                 tracing::info!("Successfully removed group user: {}", user);
@@ -1610,35 +1618,38 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
         };
     }
 
-    let kwargs = {
-        let mut kwargs = HashMap::new();
-        kwargs.insert("cn".to_string(), project_group.groupid().to_string());
-        kwargs
-    };
+    // DO NOT REMOVE THE GROUP AS WE MAY WANT TO RE-ADD IT LATER, AND
+    // WILL NEED TO USE THE SAME GID!
 
-    match call_post::<IPAResponse>("group_del", None, Some(kwargs)).await {
-        Ok(_) => {
-            tracing::info!("Successfully removed group: {}", project_group);
-            cache::remove_existing_group(&project_group).await?;
-        }
-        // match a Error::NotFound here
-        Err(Error::NotFound(_)) => {
-            tracing::info!(
-                "Group {} not found in FreeIPA. Assuming it has already been removed.",
-                project_group
-            );
+    // let kwargs = {
+    //     let mut kwargs = HashMap::new();
+    //     kwargs.insert("cn".to_string(), project_group.groupid().to_string());
+    //     kwargs
+    // };
 
-            // invalidate the cache, as FreeIPA has been changed behind our back
-            cache::clear().await?;
-        }
-        Err(e) => {
-            tracing::error!("Could not remove group: {}. Error: {}", project_group, e);
-            return Err(Error::Call(format!(
-                "Could not remove group: {}. Error: {}",
-                project_group, e
-            )));
-        }
-    }
+    // match call_post::<IPAResponse>("group_del", None, Some(kwargs)).await {
+    //     Ok(_) => {
+    //         tracing::info!("Successfully removed group: {}", project_group);
+    //         cache::remove_existing_group(&project_group).await?;
+    //     }
+    //     // match a Error::NotFound here
+    //     Err(Error::NotFound(_)) => {
+    //         tracing::info!(
+    //             "Group {} not found in FreeIPA. Assuming it has already been removed.",
+    //             project_group
+    //         );
+
+    //         // invalidate the cache, as FreeIPA has been changed behind our back
+    //         cache::clear().await?;
+    //     }
+    //     Err(e) => {
+    //         tracing::error!("Could not remove group: {}. Error: {}", project_group, e);
+    //         return Err(Error::Call(format!(
+    //             "Could not remove group: {}. Error: {}",
+    //             project_group, e
+    //         )));
+    //     }
+    // }
 
     Ok(project_group)
 }

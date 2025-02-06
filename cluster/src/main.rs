@@ -208,7 +208,20 @@ async fn remove_project_from_cluster(
 ) -> Result<ProjectMapping, Error> {
     tracing::info!("Removing project from cluster: {}", project);
 
+    // remove the users
     let mapping = remove_project(me, project).await?;
+
+    // now get the users who remain - if any do, then there
+    // are protected users left
+    let users = get_accounts(me, project).await?;
+
+    if !users.is_empty() {
+        tracing::warn!(
+            "Protected users found in project: {:?} - NOT REMOVING!",
+            users
+        );
+        return Ok(mapping);
+    }
 
     match delete_project_directories(me, &mapping).await {
         Ok(_) => {

@@ -92,6 +92,18 @@ async fn main() -> Result<()> {
                     job.completed(users)
                 },
                 AddProject(project) => {
+                    assert_agents_connected().await?;
+
+                    match agent::scheduler(AGENT_WAIT_TIME).await {
+                        Some(_) => {}
+                        None => {
+                            tracing::error!("No scheduler agent found");
+                            return Err(Error::MissingAgent(
+                                "Cannot run the job because there is no scheduler agent".to_string(),
+                            ));
+                        }
+                    }
+
                     // add the project to the cluster
                     let mapping = match add_project_to_cluster(me.name(), &project).await {
                         Ok(mapping) => mapping,
@@ -112,11 +124,28 @@ async fn main() -> Result<()> {
                     job.completed(mapping)
                 },
                 RemoveProject(project) => {
+                    assert_agents_connected().await?;
+
                     // remove the project from the cluster
                     let mapping = remove_project_from_cluster(me.name(), &project).await?;
                     job.completed(mapping)
                 },
                 AddUser(user) => {
+                    match assert_agents_connected().await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            // not a problem if the user already exists and is protected
+                            match is_protected_user(me.name(), &user).await? {
+                                true => {
+                                    return job.completed(get_user_mapping(me.name(), &user).await?);
+                                }
+                                false => {
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+
                     // add the user to the cluster
                     let mapping = match add_user_to_cluster(me.name(), &user).await {
                         Ok(mapping) => mapping,
@@ -137,6 +166,21 @@ async fn main() -> Result<()> {
                     job.completed(mapping)
                 }
                 RemoveUser(user) => {
+                    match assert_agents_connected().await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            // not a problem if the user already exists and is protected
+                            match is_protected_user(me.name(), &user).await? {
+                                true => {
+                                    return job.completed(get_user_mapping(me.name(), &user).await?);
+                                }
+                                false => {
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+
                     // remove the user from the cluster
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
                     job.completed(mapping)
@@ -182,6 +226,42 @@ async fn main() -> Result<()> {
 
     // run the agent
     run(config, cluster_runner).await?;
+
+    Ok(())
+}
+
+async fn assert_agents_connected() -> Result<(), Error> {
+    // check that we are connected to the filesystem and scheduler agents.
+    // Do nothing if we aren't
+    match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(_) => {}
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    }
+
+    match agent::scheduler(AGENT_WAIT_TIME).await {
+        Some(_) => {}
+        None => {
+            tracing::error!("No scheduler agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no scheduler agent".to_string(),
+            ));
+        }
+    }
+
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(_) => {}
+        None => {
+            tracing::error!("No account agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ));
+        }
+    }
 
     Ok(())
 }

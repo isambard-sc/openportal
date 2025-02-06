@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+- Extra protections to ensure that agents are connected to the cluster
+  before it attempts anything, and to return valid results if existing
+  protected users exist
+
 ## [0.8.1] - 2025-02-06
 ### Fixed
 - Stopped the freeipa agent from removing groups! This can lead to GID

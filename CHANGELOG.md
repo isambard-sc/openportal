@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Fixed
+- Stopped the freeipa agent from removing groups! This can lead to GID
+  information being lost, and is not what we want. Instead, we now
+  remove the user from the group, and leave the group alone. Now, if the
+  group with the same name is recreated, it will recover its previous
+  GID.
 
 ## [0.8.0] - 2025-02-05
 ### Added

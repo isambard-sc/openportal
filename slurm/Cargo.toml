@@ -3,7 +3,7 @@
 
 [package]
 name = "op-slurm"
-version = "0.8.2"
+version = "0.8.3"
 description = "Agent that interfaces OpenPortal with the slurm scheduler"
 edition = "2021"
 license = "MIT"

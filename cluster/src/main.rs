@@ -8,7 +8,8 @@ use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetLimit, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
+    AddProject, AddUser, GetHomeDir, GetLimit, GetLocalHomeDir, GetLocalProjectDirs,
+    GetProjectDirs, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
     GetUserMapping, GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit,
 };
 use templemeads::grammar::{
@@ -69,8 +70,6 @@ async fn main() -> Result<()> {
         ///
         pub async fn cluster_runner(envelope: Envelope) -> Result<Job, Error>
         {
-            tracing::info!("Using the cluster runner");
-
             let me = envelope.recipient();
             let job = envelope.job();
 
@@ -213,6 +212,24 @@ async fn main() -> Result<()> {
                 SetLimit(project, limit) => {
                     let limit = set_project_limit(me.name(), &project, limit).await?;
                     job.completed(limit)
+                }
+                GetHomeDir(user) => {
+                    let mapping = get_user_mapping(me.name(), &user).await?;
+                    let homedir = get_home_dir(me.name(), &mapping).await?;
+                    job.completed(homedir)
+                }
+                GetProjectDirs(project) => {
+                    let mapping = get_project_mapping(me.name(), &project).await?;
+                    let dirs = get_project_dirs(me.name(), &mapping).await?;
+                    job.completed(dirs)
+                }
+                GetLocalHomeDir(mapping) => {
+                    let homedir = get_home_dir(me.name(), &mapping).await?;
+                    job.completed(homedir)
+                }
+                GetLocalProjectDirs(mapping) => {
+                    let dirs = get_project_dirs(me.name(), &mapping).await?;
+                    job.completed(dirs)
                 }
                 _ => {
                     tracing::error!("Unknown instruction: {:?}", job.instruction());
@@ -1205,6 +1222,92 @@ async fn is_protected_user(me: &str, user: &UserIdentifier) -> Result<bool, Erro
             tracing::error!("No account agent found");
             Err(Error::MissingAgent(
                 "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_home_dir(me: &str, mapping: &UserMapping) -> Result<String, Error> {
+    // find the Filesystem agent
+    match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => {
+            // send the add_job to the filesystem agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} get_local_home_dir {}",
+                    me,
+                    filesystem.name(),
+                    mapping
+                ),
+                false,
+            )?
+            .put(&filesystem)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<String>()?;
+
+            match result {
+                Some(homedir) => {
+                    tracing::info!("User homedir retrieved: {:?}", homedir);
+                    Ok(homedir)
+                }
+                None => {
+                    tracing::error!("No homedir found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find homedir for user {}",
+                        mapping
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No filesystem agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_project_dirs(me: &str, mapping: &ProjectMapping) -> Result<Vec<String>, Error> {
+    // find the Filesystem agent
+    match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => {
+            // send the add_job to the filesystem agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} get_local_project_dirs {}",
+                    me,
+                    filesystem.name(),
+                    mapping
+                ),
+                false,
+            )?
+            .put(&filesystem)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<Vec<String>>()?;
+
+            match result {
+                Some(dirs) => {
+                    tracing::info!("Project directories retrieved: {:?}", dirs);
+                    Ok(dirs)
+                }
+                None => {
+                    tracing::error!("No directories found?");
+                    Err(Error::MissingProject(format!(
+                        "Could not find directories for project {}",
+                        mapping
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No filesystem agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
             ))
         }
     }

@@ -128,6 +128,8 @@ impl Command {
                 Instruction::UpdateHomeDir(user, _) => Some(user),
                 Instruction::GetUserMapping(user) => Some(user),
                 Instruction::IsProtectedUser(user) => Some(user),
+                Instruction::GetHomeDir(user) => Some(user),
+                Instruction::GetLocalHomeDir(user) => Some(user.user().clone()),
                 _ => None,
             };
 
@@ -157,6 +159,8 @@ impl Command {
                 Instruction::SetLocalLimit(project, _) => Some(project.project().clone()),
                 Instruction::GetLimit(project) => Some(project),
                 Instruction::SetLimit(project, _) => Some(project),
+                Instruction::GetProjectDirs(project) => Some(project),
+                Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
                 _ => None,
             };
 

@@ -1231,7 +1231,7 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
 /// a portal ensures user.group is unique within the portal. For now,
 /// we will just use user.group (as brics is the only portal)
 ///
-async fn identifier_to_userid(user: &UserIdentifier) -> Result<String, Error> {
+pub async fn identifier_to_userid(user: &UserIdentifier) -> Result<String, Error> {
     Ok(format!("{}.{}", user.username(), user.project()))
 }
 
@@ -1389,6 +1389,12 @@ fn get_primary_group(user: &UserIdentifier) -> Result<IPAGroup, Error> {
             project.project()
         ),
     )
+}
+
+pub async fn get_primary_group_name(user: &UserIdentifier) -> Result<String, Error> {
+    let group = get_primary_group(user)?;
+
+    Ok(group.groupid().to_string())
 }
 
 ///
@@ -1708,7 +1714,11 @@ async fn reenable_user(user: &IPAUser) -> Result<IPAUser, Error> {
 /// if there is an exising user with the same name, but which is not
 /// managed by OpenPortal
 ///
-pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
+pub async fn add_user(
+    user: &UserIdentifier,
+    instance: &Peer,
+    homedir: &Option<String>,
+) -> Result<IPAUser, Error> {
     // return the user if they already exist
     if let Some(mut user) = get_user(user).await? {
         if !user.is_managed() {
@@ -1766,7 +1776,7 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
     let managed_group = get_managed_group()?;
 
     // The user doesn't exist, so try to add
-    let kwargs = {
+    let mut kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("uid".to_string(), identifier_to_userid(user).await?);
         kwargs.insert("givenname".to_string(), user.username().to_string());
@@ -1776,6 +1786,11 @@ pub async fn add_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser,
 
         kwargs
     };
+
+    if let Some(homedir) = homedir {
+        kwargs.insert("homedirectory".to_string(), homedir.to_string());
+        tracing::info!("Adding user {} with home directory: {}", user, homedir);
+    }
 
     let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs)).await {
         Ok(result) => {

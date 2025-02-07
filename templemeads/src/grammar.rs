@@ -1196,6 +1196,14 @@ pub enum Instruction {
     /// An instruction to look up the mapping for a project
     GetProjectMapping(ProjectIdentifier),
 
+    /// An instruction to look up the path to the home directory
+    /// for a user - note this may not yet exist
+    GetHomeDir(UserIdentifier),
+
+    /// An instruction to look up the paths to the project directories
+    /// for a project - not that these may not yet exist
+    GetProjectDirs(ProjectIdentifier),
+
     /// An instruction to add a local user
     AddLocalUser(UserMapping),
 
@@ -1216,6 +1224,14 @@ pub enum Instruction {
 
     /// An instruction to set the limit of a local project
     SetLocalLimit(ProjectMapping, Usage),
+
+    /// Return the home directory of a local user
+    /// (note this does not guarantee the directory exists)
+    GetLocalHomeDir(UserMapping),
+
+    /// Return the project directories of a local project
+    /// (note this does not guarantee the directories exist)
+    GetLocalProjectDirs(ProjectMapping),
 
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
@@ -1717,6 +1733,55 @@ impl Instruction {
                     )))
                 }
             },
+            "get_home_dir" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::GetHomeDir(user)),
+                Err(_) => {
+                    tracing::error!("get_home_dir failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_home_dir failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_project_dirs" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::GetProjectDirs(project)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_project_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_project_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_local_home_dir" => match UserMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Ok(Instruction::GetLocalHomeDir(mapping)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_local_home_dir failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_local_home_dir failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_local_project_dirs" => match ProjectMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Ok(Instruction::GetLocalProjectDirs(mapping)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_local_project_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_local_project_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
             _ => {
                 tracing::error!("Invalid instruction: {}", s);
                 Err(Error::Parse(format!("Invalid instruction: {}", s)))
@@ -1766,6 +1831,12 @@ impl std::fmt::Display for Instruction {
             }
             Instruction::GetLimit(project) => write!(f, "get_limit {}", project),
             Instruction::IsProtectedUser(user) => write!(f, "is_protected_user {}", user),
+            Instruction::GetHomeDir(user) => write!(f, "get_home_dir {}", user),
+            Instruction::GetProjectDirs(project) => write!(f, "get_project_dirs {}", project),
+            Instruction::GetLocalHomeDir(mapping) => write!(f, "get_local_home_dir {}", mapping),
+            Instruction::GetLocalProjectDirs(mapping) => {
+                write!(f, "get_local_project_dirs {}", mapping)
+            }
         }
     }
 }

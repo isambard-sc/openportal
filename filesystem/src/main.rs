@@ -7,7 +7,8 @@ use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, RemoveLocalProject, RemoveLocalUser,
+    AddLocalProject, AddLocalUser, GetLocalHomeDir, GetLocalProjectDirs, RemoveLocalProject,
+    RemoveLocalUser,
 };
 use templemeads::grammar::ProjectMapping;
 use templemeads::job::{Envelope, Job};
@@ -127,6 +128,15 @@ async fn main() -> Result<()> {
                     tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
                     job.completed_none()
                 },
+                GetLocalHomeDir(mapping) => {
+                    let home_root = get_home_root(&mapping.clone().into()).await?;
+                    let home_dir = format!("{}/{}", home_root, mapping.local_user());
+                    job.completed(home_dir)
+                },
+                GetLocalProjectDirs(mapping) => {
+                    let project_dirs = get_project_dirs_and_links(&mapping).await?;
+                    job.completed(project_dirs)
+                },
                 _ => {
                     Err(Error::InvalidInstruction(
                         format!("Invalid instruction: {}. Filesystem only supports add_local_user and remove_local_user", job.instruction()),
@@ -139,6 +149,52 @@ async fn main() -> Result<()> {
     run(config, filesystem_runner).await?;
 
     Ok(())
+}
+
+///
+/// Return the root directory for all users in the passed project
+///
+async fn get_home_root(mapping: &ProjectMapping) -> Result<String, Error> {
+    // The name of the project directory comes from the project part of the ProjectIdentifier
+    // Eventually we would need to encode the portal into this...
+    let project_dir_name = mapping.project().project();
+
+    let home_root = cache::get_home_root().await?;
+
+    Ok(format!("{}/{}", home_root, project_dir_name))
+}
+
+///
+/// Return the paths to all of the project directories (including links)
+///
+async fn get_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Vec<String>, Error> {
+    // The name of the project directory comes from the project part of the ProjectIdentifier
+    // Eventually we would need to encode the portal into this...
+    let project_dir_name = mapping.project().project();
+
+    let project_dirs = cache::get_project_roots().await?;
+    let project_links = cache::get_project_links().await?;
+
+    if project_dirs.len() != project_links.len() {
+        return Err(Error::Misconfigured(
+            "Number of project directories does not match number of links".to_owned(),
+        ));
+    }
+
+    let mut dirs = Vec::new();
+
+    // Get the name of the project dirs
+    for dir in project_dirs {
+        let project_dir = format!("{}/{}", dir, project_dir_name);
+        dirs.push(project_dir);
+    }
+
+    // And also the links
+    for link in project_links.into_iter().flatten() {
+        dirs.push(filesystem::get_project_link(&link, &project_dir_name).await?);
+    }
+
+    Ok(dirs)
 }
 
 ///

@@ -17,6 +17,7 @@ use templemeads::grammar::Instruction::{
     AddProject, AddUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers, IsProtectedUser,
     RemoveProject, RemoveUser, UpdateHomeDir,
 };
+use templemeads::grammar::UserMapping;
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
@@ -103,6 +104,7 @@ async fn main() -> Result<()> {
         {
             let job = envelope.job();
             let sender = envelope.sender();
+            let me = envelope.recipient();
 
             match job.instruction() {
                 GetProjects(portal) => {
@@ -122,7 +124,17 @@ async fn main() -> Result<()> {
                     job.completed(users.iter().map(|u| u.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddUser(user) => {
-                    let user = freeipa::add_user(&user, &sender).await?;
+                    let local_user = freeipa::identifier_to_userid(&user).await?;
+                    let local_group = freeipa::get_primary_group_name(&user).await?;
+                    let mapping = UserMapping::new(&user, &local_user, &local_group)?;
+
+                    let homedir = get_home_dir(me.name(), &sender, &mapping).await?;
+
+                    if homedir.is_none() {
+                        tracing::warn!("No home directory preferred for user: {}", user);
+                    }
+
+                    let user = freeipa::add_user(&user, &sender, &homedir).await?;
                     job.completed(user.mapping()?)
                 },
                 RemoveUser(user) => {
@@ -157,4 +169,20 @@ async fn main() -> Result<()> {
     run(config, freeipa_runner).await?;
 
     Ok(())
+}
+
+async fn get_home_dir(
+    me: &str,
+    sender: &Peer,
+    mapping: &UserMapping,
+) -> Result<Option<String>, Error> {
+    let job = Job::parse(
+        &format!("{}.{} get_local_home_dir {}", me, sender.name(), mapping),
+        false,
+    )?;
+
+    let job = job.put(sender).await?;
+
+    // wait for the job to complete - get the result
+    job.wait().await?.result::<String>()
 }

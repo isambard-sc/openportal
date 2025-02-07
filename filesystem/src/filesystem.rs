@@ -54,7 +54,13 @@ pub async fn clean_and_check_permissions(permissions: &str) -> Result<u32, Error
 /// /dev, /proc, /sys, /run, /tmp, or /.
 ///
 pub async fn clean_and_check_path(path: &str, check_exists: bool) -> Result<String, Error> {
-    let mut path = Path::new(path.trim()).to_owned();
+    let mut path = path.trim();
+
+    while path.ends_with("/") {
+        path = path.trim_end_matches('/');
+    }
+
+    let mut path = Path::new(path).to_owned();
 
     // convert into a path
     if check_exists {
@@ -240,6 +246,15 @@ pub async fn create_project_dir(
     permissions: &str,
 ) -> Result<(), Error> {
     create_dir(dir, "root", groupname, permissions).await
+}
+
+pub async fn get_project_link(link: &str, project: &str) -> Result<String, Error> {
+    // replace either {PROJECT} or {project} with the value of project
+    let link = link
+        .replace("{PROJECT}", project)
+        .replace("{project}", project);
+
+    clean_and_check_path(&link, false).await
 }
 
 pub async fn create_project_link(dir: &str, link: &str, project: &str) -> Result<(), Error> {

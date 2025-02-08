@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
-
+use once_cell::sync::Lazy;
 use templemeads::Error;
 
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 
 use nix::unistd::{Gid, Group, Uid, User};
+
+use tokio::sync::Mutex;
+
+static FS_LOCK: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
 
 ///
 /// Clean and check the passed file / directory permissions. This function
@@ -201,6 +206,25 @@ async fn create_dir(
         tracing::info!("Directory already exists with required permissions.");
         return Ok(());
     }
+
+    // use a lock to ensure that only a single task can create directories
+    // at a time - this should prevent overloading the filesystem and
+    // reduce risk of filesystem-related race conditions
+    let now = chrono::Utc::now();
+    let _guard = loop {
+        match FS_LOCK.try_lock() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 15 {
+                    return Err(Error::State(
+                        "Could not acquire filesystem lock after 15 seconds".to_string(),
+                    ));
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
+    };
 
     // create the directory
     std::fs::create_dir(path).with_context(|| format!("Could not create directory '{}'", dir))?;

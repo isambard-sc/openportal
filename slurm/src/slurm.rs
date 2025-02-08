@@ -2588,6 +2588,31 @@ pub async fn connect(
 }
 
 pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
+    // get a lock for this user, as only a single task should be adding
+    // or removing this user at the same time
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_user_mutex(user.user()).await?.try_lock_owned() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    tracing::warn!(
+                        "Could not get lock to add user {} - another task is adding or removing.",
+                        user
+                    );
+
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to add user {} - another task is adding or removing.",
+                        user
+                    )));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
     let user: SlurmUser = get_user_create_if_not_exists(user).await?;
 
     tracing::info!("Added user: {}", user);
@@ -2596,6 +2621,34 @@ pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
 }
 
 pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
+    // get a lock for this project, as only a single task should be adding
+    // or removing this project at the same time
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_project_mutex(project.project())
+            .await?
+            .try_lock_owned()
+        {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    tracing::warn!(
+                        "Could not get lock to add project {} - another task is adding or removing.",
+                        project
+                    );
+
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to add project {} - another task is adding or removing.",
+                        project
+                    )));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
     let account = SlurmAccount::from_mapping(project)?;
 
     let account = get_account_create_if_not_exists(&account).await?;

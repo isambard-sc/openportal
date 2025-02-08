@@ -597,6 +597,14 @@ impl IPAUser {
     }
 
     ///
+    /// Return whether or not a user is protected - they are
+    /// protected if they are not managed
+    ///
+    pub fn is_protected(&self) -> bool {
+        !self.is_managed()
+    }
+
+    ///
     /// Return whether or not this user is enabled in FreeIPA
     ///
     pub fn is_enabled(&self) -> bool {
@@ -1755,6 +1763,10 @@ pub async fn add_user(
                 "Ignoring request to add {} as they are not managed by OpenPortal",
                 user.identifier()
             );
+
+            // make sure to add the user to the cache
+            cache::add_existing_user(&user).await?;
+
             return Ok(user);
         }
 
@@ -2110,7 +2122,7 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
         tracing::warn!(
             "Ignoring request to remove {} as they are not in the instance group {}",
             user.identifier(),
-            instance_group
+            instance_group.identifier()
         );
         return Ok(user);
     }
@@ -2174,7 +2186,15 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
             "Ignoring request to remove {} as they are in other resources: {:?}",
             user.identifier(),
             other_instance_groups
+                .iter()
+                .map(|g| g.identifier().to_string())
+                .collect::<Vec<String>>()
         );
+
+        // remove this user from the cache so that the list of users in this
+        // project for this resource will be properly updated
+        cache::remove_existing_user(&user).await?;
+
         return Ok(user);
     }
 
@@ -2435,7 +2455,7 @@ pub async fn get_users(
         // filter out users who are not in the instance group for this peer
         let users = cached_users
             .into_iter()
-            .filter(|user| user.in_group(instance_group.groupid()))
+            .filter(|user| user.is_protected() || user.in_group(instance_group.groupid()))
             .collect::<Vec<IPAUser>>();
 
         return Ok(users);
@@ -2450,7 +2470,7 @@ pub async fn get_users(
     // filter out users who are not in the instance group for this peer
     let users = users
         .into_iter()
-        .filter(|user| user.in_group(instance_group.groupid()))
+        .filter(|user| user.is_protected() || user.in_group(instance_group.groupid()))
         .collect::<Vec<IPAUser>>();
 
     Ok(users)

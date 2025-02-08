@@ -4,10 +4,11 @@
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use templemeads::grammar::{Date, ProjectIdentifier};
+use std::sync::Arc;
+use templemeads::grammar::{Date, ProjectIdentifier, UserIdentifier};
 use templemeads::usagereport::DailyProjectUsageReport;
 use templemeads::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::slurm::{SlurmAccount, SlurmNode, SlurmNodes, SlurmUser};
 
@@ -23,9 +24,35 @@ struct Database {
     users: HashMap<String, SlurmUser>,
     nodes: Option<SlurmNodes>,
     reports: HashMap<ProjectIdentifier, UsageDatabase>,
+    user_mutexes: HashMap<UserIdentifier, Arc<Mutex<()>>>,
+    project_mutexes: HashMap<ProjectIdentifier, Arc<Mutex<()>>>,
 }
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
+
+///
+/// Return a mutex that can be used to protect this user
+///
+pub async fn get_user_mutex(identifier: &UserIdentifier) -> Result<Arc<Mutex<()>>, Error> {
+    let mut cache = CACHE.write().await;
+    Ok(cache
+        .user_mutexes
+        .entry(identifier.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
+///
+/// Return a mutex that can be used to protect this project
+///
+pub async fn get_project_mutex(identifier: &ProjectIdentifier) -> Result<Arc<Mutex<()>>, Error> {
+    let mut cache = CACHE.write().await;
+    Ok(cache
+        .project_mutexes
+        .entry(identifier.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
 
 pub async fn get_option_cluster() -> Result<Option<String>, Error> {
     let cache = CACHE.read().await;

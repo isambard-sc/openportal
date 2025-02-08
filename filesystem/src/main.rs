@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
                     job.completed(home_dir)
                 },
                 RemoveLocalUser(mapping) => {
-                    tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                    tracing::info!("Will remove user files of {} when the project is removed", mapping);
                     job.completed_none()
                 },
                 GetLocalHomeDir(mapping) => {

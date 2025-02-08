@@ -146,19 +146,30 @@ async fn main() -> Result<()> {
                     }
 
                     // add the user to the cluster
-                    let mapping = match add_user_to_cluster(me.name(), &user).await {
-                        Ok(mapping) => mapping,
-                        Err(e) => {
-                            // we cannot leave a dangling user account,
-                            // so we need to remove the user from FreeIPA
-                            tracing::error!("Error adding user {} to cluster: {:?}", user, e);
+                    let mut attempts = 0;
 
-                            match remove_user_from_cluster(me.name(), &user).await {
-                                Ok(_) => tracing::info!("Removed partially added user {}", user),
-                                Err(e) => tracing::error!("Failed to remove partially added user {}: {:?}", user, e)
+                    let mapping = loop {
+                        match add_user_to_cluster(me.name(), &user).await {
+                            Ok(mapping) => break mapping,
+                            Err(e) => {
+                                attempts += 1;
+
+                                if attempts > 5 {
+                                    // we cannot leave a dangling user account,
+                                    // so we need to remove the user from FreeIPA
+                                    tracing::error!("Error adding user {} to cluster: {:?}", user, e);
+
+                                    match remove_account(me.name(), &user).await {
+                                        Ok(_) => tracing::info!("Removed partially added user {}", user),
+                                        Err(e) => tracing::error!("Failed to remove partially added user {}: {:?}", user, e)
+                                    }
+
+                                    return Err(e);
+                                }
+                                else {
+                                    tracing::warn!("Error adding user {} to cluster: {:?}. Trying again...", user, e);
+                                }
                             }
-
-                            return Err(e);
                         }
                     };
 
@@ -359,6 +370,7 @@ async fn add_user_to_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapp
     }
 
     tracing::info!("Adding user to cluster: {}", user);
+
     let mapping = create_account(me, user).await?;
 
     // now create their home directories

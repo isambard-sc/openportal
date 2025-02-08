@@ -458,7 +458,7 @@ impl IPAUser {
                     if memberof.contains(&legacy_primary_group) {
                         legacy_primary_group
                     } else {
-                        tracing::warn!(
+                        tracing::debug!(
                             "Could not find primary group {} for user: {}",
                             primary_group,
                             cn
@@ -1367,11 +1367,38 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
 ///
 /// Return the group that indicates that this user is managed
 ///
-fn get_managed_group() -> Result<IPAGroup, Error> {
+pub fn get_managed_group() -> Result<IPAGroup, Error> {
     IPAGroup::new(
         "openportal",
         &ProjectIdentifier::parse("openportal.openportal")?,
         "Group for all users managed by OpenPortal",
+    )
+}
+
+///
+/// Return the group that indicates that OpenPortal is managing this user
+/// for the resource controlled by the passed Peer
+///
+pub fn get_op_instance_group(peer: &Peer) -> Result<IPAGroup, Error> {
+    let group_name = format!("op-{}", peer);
+
+    // make sure that the group name only contains letters and numbers,
+    // replacing @ with $ and all other characters with _
+    let group_name = group_name
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => c,
+            //'@' => '$',
+            _ => '_',
+        })
+        .collect::<String>();
+
+    let id = ProjectIdentifier::parse(&format!("{}.instance", group_name))?;
+
+    IPAGroup::new(
+        &identifier_to_projectid(&id, false)?,
+        &id,
+        "Group for users in OpenPortal who access this instance",
     )
 }
 
@@ -1543,6 +1570,10 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
 ///
 
 ///
+/// Return the
+///
+
+///
 /// Add the project to FreeIPA - this will create the group for the project
 /// if it doesn't already exist. This returns the group
 ///
@@ -1563,7 +1594,10 @@ pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error>
 /// or it will return an error if it doesn't exist, or something else
 /// goes wrong
 ///
-pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error> {
+pub async fn remove_project(
+    project: &ProjectIdentifier,
+    instance: &Peer,
+) -> Result<IPAGroup, Error> {
     let project_group = match get_group(project).await {
         Ok(Some(group)) => group,
         Ok(None) => {
@@ -1609,7 +1643,7 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
             continue;
         }
 
-        match remove_user(user.identifier()).await {
+        match remove_user(user.identifier(), instance).await {
             Ok(user) => {
                 tracing::info!("Successfully removed group user: {}", user);
             }
@@ -1627,36 +1661,6 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<IPAGroup, Err
     // DO NOT REMOVE THE GROUP AS WE MAY WANT TO RE-ADD IT LATER, AND
     // WILL NEED TO USE THE SAME GID!
 
-    // let kwargs = {
-    //     let mut kwargs = HashMap::new();
-    //     kwargs.insert("cn".to_string(), project_group.groupid().to_string());
-    //     kwargs
-    // };
-
-    // match call_post::<IPAResponse>("group_del", None, Some(kwargs)).await {
-    //     Ok(_) => {
-    //         tracing::info!("Successfully removed group: {}", project_group);
-    //         cache::remove_existing_group(&project_group).await?;
-    //     }
-    //     // match a Error::NotFound here
-    //     Err(Error::NotFound(_)) => {
-    //         tracing::info!(
-    //             "Group {} not found in FreeIPA. Assuming it has already been removed.",
-    //             project_group
-    //         );
-
-    //         // invalidate the cache, as FreeIPA has been changed behind our back
-    //         cache::clear().await?;
-    //     }
-    //     Err(e) => {
-    //         tracing::error!("Could not remove group: {}. Error: {}", project_group, e);
-    //         return Err(Error::Call(format!(
-    //             "Could not remove group: {}. Error: {}",
-    //             project_group, e
-    //         )));
-    //     }
-    // }
-
     Ok(project_group)
 }
 
@@ -1671,7 +1675,7 @@ async fn reenable_user(user: &IPAUser) -> Result<IPAUser, Error> {
         Ok(_) => {
             let mut user = user.clone();
             user.set_enabled();
-            tracing::info!("Successfully re-enabled user: {}", user);
+            tracing::info!("Successfully re-enabled user: {}", user.identifier());
             // re-add the user to the cache
             cache::add_existing_user(&user).await?;
             Ok(user)
@@ -1679,7 +1683,7 @@ async fn reenable_user(user: &IPAUser) -> Result<IPAUser, Error> {
         Err(Error::NotFound(_)) => {
             tracing::warn!(
                 "User {} not found in FreeIPA. They have been removed behind our back and cannot be enabled.",
-                user
+                user.identifier()
             );
 
             // invalidate the cache, as FreeIPA has been changed behind our back
@@ -1688,7 +1692,7 @@ async fn reenable_user(user: &IPAUser) -> Result<IPAUser, Error> {
             Err(Error::NotFound(format!(
                 "User {} not found in FreeIPA. They have been removed behind our back and \
                  cannot be enabled.",
-                user
+                user.identifier()
             )))
         }
         Err(e) => {
@@ -1719,8 +1723,33 @@ pub async fn add_user(
     instance: &Peer,
     homedir: &Option<String>,
 ) -> Result<IPAUser, Error> {
-    // return the user if they already exist
-    if let Some(mut user) = get_user(user).await? {
+    // get a lock for this user, as only a single task should be adding
+    // or removing this user at the same time
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_user_mutex(user).await?.try_lock_owned() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    tracing::warn!(
+                        "Could not get lock to add user {} - another task is adding or removing.",
+                        user
+                    );
+
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to add user {} - another task is adding or removing.",
+                        user
+                    )));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
+    // return the up-to-date user if they already exist
+    if let Some(mut user) = force_get_user(user).await? {
         if !user.is_managed() {
             tracing::warn!(
                 "Ignoring request to add {} as they are not managed by OpenPortal",
@@ -1750,7 +1779,7 @@ pub async fn add_user(
             // make sure that the groups are correct for the existing user
             match sync_groups(&user, instance).await {
                 Ok(user) => {
-                    tracing::info!("Added user [cached] {}", user);
+                    tracing::info!("Added user [cached] {}", user.identifier());
                     return Ok(user);
                 }
                 Err(e) => {
@@ -1909,8 +1938,23 @@ pub async fn add_user(
             );
 
             // this failed, so we need to remove the user so that we can try again
-            // (there is a race condition here, but that would be fixed the next
-            //  time the user is added)
+            // BUT we can only remove the user if they aren't in any other instance groups...
+            for group in get_groups_for_user(&user).await? {
+                if group.is_instance_group() {
+                    tracing::warn!(
+                        "User {} is in instance group {}. Cannot remove user after failed add.",
+                        user.userid(),
+                        group.groupid()
+                    );
+                    return Err(Error::UnmanagedUser(format!(
+                        "User {} already exists in FreeIPA, but could not be added to the managed group. \
+                        They are in the instance group {}. Either remove them from this group, or try again later.",
+                        user.userid(),
+                        group.groupid()
+                    )));
+                }
+            }
+
             let kwargs = {
                 let mut kwargs = HashMap::new();
                 kwargs.insert("uid".to_string(), userid.clone());
@@ -1940,8 +1984,7 @@ pub async fn add_user(
         }
     }
 
-    // now synchronise the groups - this won't do anything if another
-    // thread has already beaten us to creating the user
+    // now synchronise the groups
     let mut attempts = 0;
 
     match loop {
@@ -1991,8 +2034,34 @@ pub async fn add_user(
 /// something else goes wrong. Note that the user must be managed by
 /// OpenPortal, or an error will be returned
 ///
-pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
-    let mut user = match get_user(user).await {
+pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
+    // get and lock a mutex on this user, as we should only have a single
+    // task adding or removing this user at once
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_user_mutex(user).await?.try_lock_owned() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    tracing::warn!(
+                        "Could not get lock to remove user {} - another task is adding or removing.",
+                        user
+                    );
+
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to remove user {} - another task is adding or removing.",
+                        user
+                    )));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
+    // force get this user, as we need to have up-to-date information from FreeIPA
+    let mut user = match force_get_user(user).await {
         Ok(Some(user)) => user,
         Ok(None) => {
             tracing::warn!(
@@ -2026,11 +2095,65 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
 
     if user.is_disabled() {
         // nothing to do
-        tracing::info!("User {} is already disabled. No changes needed.", user);
+        tracing::info!(
+            "User {} is already disabled. No changes needed.",
+            user.identifier()
+        );
         return Ok(user);
     }
 
-    // get all of the groups that this user is in
+    // get the group used for openportal users of this peer
+    let instance_group = get_op_instance_group(instance)?;
+
+    // don't do anything if the user isn't a member of this group
+    if !user.in_group(instance_group.groupid()) {
+        tracing::warn!(
+            "Ignoring request to remove {} as they are not in the instance group {}",
+            user.identifier(),
+            instance_group
+        );
+        return Ok(user);
+    }
+
+    // now remove the user from all of the instance groups for this peer
+    let instance_groups = cache::get_instance_groups(instance).await?;
+
+    for group in instance_groups {
+        let kwargs = {
+            let mut kwargs = HashMap::new();
+            kwargs.insert("cn".to_string(), group.groupid().to_string());
+            kwargs.insert("user".to_string(), user.userid().to_string());
+            kwargs
+        };
+
+        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs)).await {
+            Ok(_) => {
+                tracing::info!(
+                    "Successfully removed user {} from group {}",
+                    user.identifier(),
+                    group.groupid()
+                );
+            }
+            Err(Error::NotFound(_)) => {
+                tracing::info!(
+                    "Group {} not found in FreeIPA. Assuming it has already been removed.",
+                    group
+                );
+
+                cache::clear().await?;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Could not remove user {} from group {}. Error: {}",
+                    user.identifier(),
+                    group.groupid(),
+                    e
+                );
+            }
+        }
+    }
+
+    // check the groups again...
     let groups = match get_groups_for_user(&user).await {
         Ok(groups) => groups,
         Err(e) => {
@@ -2038,6 +2161,24 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
             vec![]
         }
     };
+
+    // now see if they are a member of any other peer instance groups
+    let other_instance_groups = groups
+        .iter()
+        .filter(|g| g.is_instance_group())
+        .filter(|g| g.identifier() != instance_group.identifier())
+        .collect::<Vec<&IPAGroup>>();
+
+    if !other_instance_groups.is_empty() {
+        tracing::warn!(
+            "Ignoring request to remove {} as they are in other resources: {:?}",
+            user.identifier(),
+            other_instance_groups
+        );
+        return Ok(user);
+    }
+
+    // it is safe to remove the user - they aren't in any other resource
 
     // remove the user from all groups EXCEPT the managed group
     // This is necessary to make sure that we don't accidentally
@@ -2096,23 +2237,24 @@ pub async fn remove_user(user: &UserIdentifier) -> Result<IPAUser, Error> {
     match call_post::<IPAResponse>("user_disable", None, Some(kwargs)).await {
         Ok(_) => {
             user.set_disabled();
-            tracing::info!("Successfully removed user: {}", user);
+            tracing::info!("Successfully removed user: {}", user.identifier());
             cache::remove_existing_user(&user).await?;
         }
         Err(Error::NotFound(_)) => {
             tracing::info!(
                 "User {} not found in FreeIPA. Assuming it has already been removed.",
-                user
+                user.identifier()
             );
 
             // clear the cache as FreeIPA has been changed behind our back
             cache::clear().await?;
         }
         Err(e) => {
-            tracing::error!("Could not remove user: {}. Error: {}", user, e);
+            tracing::error!("Could not remove user: {}. Error: {}", user.identifier(), e);
             return Err(Error::Call(format!(
                 "Could not remove user: {}. Error: {}",
-                user, e
+                user.identifier(),
+                e
             )));
         }
     }
@@ -2256,7 +2398,10 @@ pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Erro
 /// passed project. Note that this will only return users who are
 /// managed by OpenPortal
 ///
-pub async fn get_users(project: &ProjectIdentifier) -> Result<Vec<IPAUser>, Error> {
+pub async fn get_users(
+    project: &ProjectIdentifier,
+    instance: &Peer,
+) -> Result<Vec<IPAUser>, Error> {
     tracing::info!("Getting users for project: {}", project);
 
     // don't get the users for project identifiers that use internal portal names
@@ -2283,10 +2428,17 @@ pub async fn get_users(project: &ProjectIdentifier) -> Result<Vec<IPAUser>, Erro
         }
     };
 
+    let instance_group = get_op_instance_group(instance)?;
     let cached_users = cache::get_users_in_group(&project_group).await?;
 
     if !cached_users.is_empty() {
-        return Ok(cached_users);
+        // filter out users who are not in the instance group for this peer
+        let users = cached_users
+            .into_iter()
+            .filter(|user| user.in_group(instance_group.groupid()))
+            .collect::<Vec<IPAUser>>();
+
+        return Ok(users);
     }
 
     // there are no users, meaning that we have not checked yet, or there
@@ -2294,6 +2446,12 @@ pub async fn get_users(project: &ProjectIdentifier) -> Result<Vec<IPAUser>, Erro
     let users = force_get_users_in_group(&project_group).await?;
 
     cache::set_users_in_group(&project_group, &users).await?;
+
+    // filter out users who are not in the instance group for this peer
+    let users = users
+        .into_iter()
+        .filter(|user| user.in_group(instance_group.groupid()))
+        .collect::<Vec<IPAUser>>();
 
     Ok(users)
 }

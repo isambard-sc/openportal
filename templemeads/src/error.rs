@@ -61,7 +61,7 @@ pub enum Error {
     Expired(String),
 
     #[error("{0}")]
-    LockError(String),
+    Locked(String),
 
     #[error("{0}")]
     Login(String),

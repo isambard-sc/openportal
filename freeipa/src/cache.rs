@@ -7,9 +7,11 @@ use std::collections::{HashMap, HashSet};
 use templemeads::agent::Peer;
 use templemeads::grammar::{ProjectIdentifier, UserIdentifier};
 use templemeads::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
-use crate::freeipa::{IPAGroup, IPAUser};
+use std::sync::Arc;
+
+use crate::freeipa::{get_op_instance_group, IPAGroup, IPAUser};
 
 /// This file manages the directory of all users added to the system
 
@@ -20,6 +22,7 @@ struct Database {
     system_groups: Vec<IPAGroup>,
     instance_groups: HashMap<Peer, Vec<IPAGroup>>,
     users_in_group: HashMap<ProjectIdentifier, HashSet<UserIdentifier>>,
+    user_mutexes: HashMap<UserIdentifier, Arc<Mutex<()>>>,
 }
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
@@ -31,6 +34,18 @@ static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::defaul
 pub async fn get_user(identifier: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
     let cache = CACHE.read().await;
     Ok(cache.users.get(identifier).cloned())
+}
+
+///
+/// Return a mutex that can be used to protect this user
+///
+pub async fn get_user_mutex(identifier: &UserIdentifier) -> Result<Arc<Mutex<()>>, Error> {
+    let mut cache = CACHE.write().await;
+    Ok(cache
+        .user_mutexes
+        .entry(identifier.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
 }
 
 ///
@@ -244,8 +259,26 @@ pub async fn set_system_groups(groups: &[IPAGroup]) -> Result<(), Error> {
 /// for all users managed by OpenPortal who are added to this instance
 ///
 pub async fn set_instance_groups(groups: &HashMap<Peer, Vec<IPAGroup>>) -> Result<(), Error> {
+    // make sure to add the instance group for each peer to the list,
+    // if it doesn't already exist
+    let mut instance_groups = groups.clone();
+
+    for (peer, groups) in groups {
+        let op_instance_group = get_op_instance_group(peer)?;
+
+        if !groups
+            .iter()
+            .any(|g| g.groupid() == op_instance_group.groupid())
+        {
+            let mut groups = groups.clone();
+            groups.push(op_instance_group);
+            instance_groups.insert(peer.clone(), groups);
+        }
+    }
+
     let mut cache = CACHE.write().await;
     cache.instance_groups = groups.clone();
+
     tracing::info!("Setting instance groups to {:?}", cache.instance_groups);
     Ok(())
 }
@@ -256,12 +289,31 @@ pub async fn set_instance_groups(groups: &HashMap<Peer, Vec<IPAGroup>>) -> Resul
 /// are on instance groups for this instance
 ///
 pub async fn get_instance_groups(instance: &Peer) -> Result<Vec<IPAGroup>, Error> {
-    let cache = CACHE.read().await;
-    Ok(cache
+    let mut groups = CACHE
+        .read()
+        .await
         .instance_groups
         .get(instance)
         .cloned()
-        .unwrap_or_default())
+        .unwrap_or_default();
+
+    let op_instance_group = get_op_instance_group(instance)?;
+
+    // does groups contains a group with the same groupid as op_instance_group?
+    // This would be the case if groups is empty (no user supplied instance groups)
+    if !groups
+        .iter()
+        .any(|g| g.groupid() == op_instance_group.groupid())
+    {
+        groups.push(op_instance_group);
+
+        let mut cache = CACHE.write().await;
+        cache
+            .instance_groups
+            .insert(instance.clone(), groups.clone());
+    }
+
+    Ok(groups)
 }
 
 ///

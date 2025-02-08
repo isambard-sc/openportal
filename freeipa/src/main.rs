@@ -116,11 +116,11 @@ async fn main() -> Result<()> {
                     job.completed(project.mapping()?)
                 },
                 RemoveProject(project) => {
-                    let project = freeipa::remove_project(&project).await?;
+                    let project = freeipa::remove_project(&project, &sender).await?;
                     job.completed(project.mapping()?)
                 },
                 GetUsers(project) => {
-                    let users = freeipa::get_users(&project).await?;
+                    let users = freeipa::get_users(&project, &sender).await?;
                     job.completed(users.iter().map(|u| u.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddUser(user) => {
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
                     job.completed(user.mapping()?)
                 },
                 RemoveUser(user) => {
-                    let user = freeipa::remove_user(&user).await?;
+                    let user = freeipa::remove_user(&user, &sender).await?;
                     job.completed(user.mapping()?)
                 },
                 UpdateHomeDir(user, homedir) => {

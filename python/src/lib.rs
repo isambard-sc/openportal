@@ -45,7 +45,7 @@ fn local_load_config(config_file: &path::PathBuf) -> Result<(), Error> {
     let mut singleton_config = match SINGLETON_CONFIG.write() {
         Ok(guard) => guard,
         Err(e) => {
-            return Err(Error::LockError(format!(
+            return Err(Error::Locked(format!(
                 "Could not get a lock on the config. Error: {:?}",
                 e
             )))
@@ -66,7 +66,7 @@ fn get_config() -> Result<BridgeConfig, Error> {
     let locked_config = match SINGLETON_CONFIG.read() {
         Ok(locked_config) => locked_config,
         Err(e) => {
-            return Err(Error::LockError(format!(
+            return Err(Error::Locked(format!(
                 "Could not get a lock on the config. Error: {:?}",
                 e
             )))

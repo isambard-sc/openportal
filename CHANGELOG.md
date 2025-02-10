@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added instructions to ask for the home and project directories for a
+  user and project.
+- Changed the order of creating a user account, so that now `op-freeipa`
+  will ask `op-filesystem` for the expected home account details before
+  actually creating the account. This way, the home directory can be
+  part of the account creation process, preventing FreeIPA from triggering
+  the creation of home directories in the wrong place.
+- Added FreeIPA groups that record which OpenPortal instances a user is
+  a member of. This lets OpenPortal know if a user is a member of multiple
+  instances, thus preventing removing a user from one instance from
+  removing them from all instances. This also adds some additional layers
+  of protection against accidental removal of users from instances.
+- Added mutex locking around adding / removing individual users in
+  `op-freeipa` and `op-slurm`, and around each directory creation
+  operation in `op-filesystem`. This removes the possibility of many
+  race conditions, and that we aren't going to accidentally try to
+  add and remove a single user at the same time. New processes try to
+  get the lock for 10 seconds, and if they can't, they will return an
+  error.
 
 ## [0.8.3] - 2025-02-06
 ### Fixed

@@ -12,6 +12,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::env;
 use std::fmt::Display;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::vec::Vec;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
@@ -31,7 +32,7 @@ use crate::exchange;
 use crate::message::Message;
 
 #[derive(Debug, Clone, PartialEq)]
-enum ConnectionState {
+enum ConnectionStatus {
     None,
     Connecting,
     Connected,
@@ -40,8 +41,66 @@ enum ConnectionState {
 }
 
 #[derive(Debug, Clone)]
+struct ConnectionState {
+    status: ConnectionStatus,
+    last_activity: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for ConnectionState {
+    fn default() -> Self {
+        ConnectionState {
+            status: ConnectionStatus::None,
+            last_activity: chrono::Utc::now(),
+        }
+    }
+}
+
+impl ConnectionState {
+    fn set_error(&mut self) {
+        self.status = ConnectionStatus::Error;
+        self.last_activity = chrono::Utc::now();
+    }
+
+    fn set_disconnected(&mut self) {
+        self.status = ConnectionStatus::Disconnected;
+        self.last_activity = chrono::Utc::now();
+    }
+
+    fn set_connecting(&mut self) -> Result<(), Error> {
+        if self.status == ConnectionStatus::None {
+            self.status = ConnectionStatus::Connecting;
+            self.last_activity = chrono::Utc::now();
+            Ok(())
+        } else {
+            Err(Error::BusyLine(format!(
+                "Connection is already {:?}",
+                self.status
+            )))
+        }
+    }
+
+    fn set_connected(&mut self) -> Result<(), Error> {
+        if self.status == ConnectionStatus::Connecting {
+            self.status = ConnectionStatus::Connected;
+            self.last_activity = chrono::Utc::now();
+            Ok(())
+        } else {
+            Err(Error::BusyLine(format!(
+                "Connection is not connecting - it is {:?}",
+                self.status
+            )))
+        }
+    }
+
+    fn register_activity(&mut self) {
+        self.last_activity = chrono::Utc::now();
+        tracing::info!("Activity registered at: {:?}", self.last_activity);
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Connection {
-    state: Arc<TokioMutex<ConnectionState>>,
+    state: Arc<StdMutex<ConnectionState>>,
     config: ServiceConfig,
     inner_key: Option<SecretKey>,
     outer_key: Option<SecretKey>,
@@ -164,7 +223,7 @@ struct Handshake {
 impl Connection {
     pub fn new(config: ServiceConfig) -> Self {
         Connection {
-            state: Arc::new(TokioMutex::new(ConnectionState::None)),
+            state: Arc::new(StdMutex::new(ConnectionState::default())),
             config,
             inner_key: None,
             outer_key: None,
@@ -195,6 +254,15 @@ impl Connection {
     /// Send a message to the peer on the other end of the connection.
     ///
     pub async fn send_message(&self, message: &str) -> Result<(), Error> {
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.register_activity();
+            }
+            Err(e) => {
+                tracing::warn!("Error registering activity: {:?}", e);
+            }
+        }
+
         let tx = self.tx.as_ref().ok_or_else(|| {
             tracing::warn!("No connection to send message to!");
             Error::InvalidPeer("No connection to send message to!".to_string())
@@ -243,8 +311,16 @@ impl Connection {
     ///
     pub async fn set_error(&mut self) {
         self.closed_connection().await;
-        let mut state = self.state.lock().await;
-        *state = ConnectionState::Error;
+
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.set_error();
+            }
+            Err(e) => {
+                tracing::warn!("Error setting connection state to error: {:?}", e);
+            }
+        }
+
         self.tx = None;
         self.inner_key = None;
         self.outer_key = None;
@@ -265,8 +341,14 @@ impl Connection {
                 tracing::error!("Error unregistering connection with exchange: {:?}", e);
             });
 
-        let mut state = self.state.lock().await;
-        *state = ConnectionState::Disconnected;
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.set_disconnected();
+            }
+            Err(e) => {
+                tracing::warn!("Error setting connection state to disconnected: {:?}", e);
+            }
+        }
         self.tx = None;
         self.inner_key = None;
         self.outer_key = None;
@@ -291,16 +373,16 @@ impl Connection {
         };
 
         // now check that we aren't already handling a connection
-        {
-            let mut state = self.state.lock().await;
-            if *state != ConnectionState::None {
-                tracing::warn!("Already handling a connection - closing new connection.");
-                return Err(Error::BusyLine(format!(
-                    "Already handling a connection {:?} - closing new connection.",
-                    state
-                )));
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.set_connecting()?;
             }
-            *state = ConnectionState::Connecting;
+            Err(e) => {
+                tracing::warn!("Error setting connection state to connecting: {:?}", e);
+                return Err(Error::BusyLine(
+                    "Error setting connection state to connecting.".to_string(),
+                ));
+            }
         }
 
         // we now know we are the only ones handling a connection,
@@ -564,14 +646,30 @@ impl Connection {
         };
 
         // we have now connected :-)
-        {
-            let mut state = self.state.lock().await;
-            *state = ConnectionState::Connected;
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.set_connected()?;
+            }
+            Err(e) => {
+                tracing::warn!("Error setting connection state to connected: {:?}", e);
+                return Err(Error::BusyLine(
+                    "Error setting connection state to connected.".to_string(),
+                ));
+            }
         }
 
         // and now we can start the message handling loop - make sure to
         // handle the sending of messages to others
         let received_from_peer = incoming.try_for_each(|msg| {
+            match self.state.lock() {
+                Ok(mut state) => {
+                    state.register_activity();
+                }
+                Err(e) => {
+                    tracing::warn!("Error registering activity: {:?}", e);
+                }
+            }
+
             // we need to deenvelope the message
             let msg: String = match deenvelope_message(
                 msg,
@@ -655,16 +753,16 @@ impl Connection {
         }
 
         // check we aren't handling another connection
-        {
-            let mut state = self.state.lock().await;
-            if *state != ConnectionState::None {
-                tracing::warn!("Already handling a connection - closing new connection.");
-                return Err(Error::BusyLine(format!(
-                    "Already handling a connection {:?} - closing new connection.",
-                    state
-                )));
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.set_connecting()?;
             }
-            *state = ConnectionState::Connecting;
+            Err(e) => {
+                tracing::warn!("Error setting connection state to connecting: {:?}", e);
+                return Err(Error::BusyLine(
+                    "Error setting connection state to connecting.".to_string(),
+                ));
+            }
         }
 
         // we now know we are the only ones handling the connection,
@@ -970,9 +1068,17 @@ impl Connection {
         self.inner_key_salt = Some(inner_key_salt.clone());
         self.outer_key_salt = Some(outer_key_salt.clone());
         self.peer = Some(peer.to_peer().clone());
-        {
-            let mut state = self.state.lock().await;
-            *state = ConnectionState::Connected;
+
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.set_connected()?;
+            }
+            Err(e) => {
+                tracing::warn!("Error setting connection state to connected: {:?}", e);
+                return Err(Error::BusyLine(
+                    "Error setting connection state to connected.".to_string(),
+                ));
+            }
         }
 
         // we've now completed the handshake and can use the two session

@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use orion::{aead, auth, hazardous::kdf::hkdf, kdf};
-use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
+use secrecy::{zeroize::Zeroize, CloneableSecret, SecretBox, SerializableSecret};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
 use std::fmt::Display;
@@ -121,10 +121,9 @@ impl Zeroize for Key {
 
 /// Permits cloning, Debug printing as [[REDACTED]] and serialising
 impl CloneableSecret for Key {}
-impl DebugSecret for Key {}
 impl SerializableSecret for Key {}
 
-pub type SecretKey = Secret<Key>;
+pub type SecretKey = SecretBox<Key>;
 
 impl Key {
     ///
@@ -143,9 +142,9 @@ impl Key {
     /// let key = Key::generate();
     /// ```
     pub fn generate() -> SecretKey {
-        Key {
+        Box::new(Key {
             data: aead::SecretKey::default().unprotected_as_bytes().to_vec(),
-        }
+        })
         .into()
     }
 
@@ -163,7 +162,7 @@ impl Key {
         hkdf::sha512::derive_key(&salt.data, &self.data, additional_info, &mut new_key)
             .context("Failed to derive key.")?;
 
-        Ok(Key { data: new_key }.into())
+        Ok(Box::new(Key { data: new_key }).into())
     }
 
     ///
@@ -199,7 +198,7 @@ impl Key {
         let salt =
             kdf::Salt::from_slice(&salt).context("Failed to create a salt from the salt data.")?;
 
-        Ok(Key {
+        Ok(Box::new(Key {
             data: kdf::derive_key(
                 &kdf::Password::from_slice(password.as_bytes())
                     .context(format!("Failed to generate a password from {}", password))?,
@@ -211,7 +210,7 @@ impl Key {
             .context("Failed to derive key from password.")?
             .unprotected_as_bytes()
             .to_vec(),
-        }
+        })
         .into())
     }
 
@@ -219,9 +218,9 @@ impl Key {
     /// Create and return a null key - this should not be used
     ///
     pub fn null() -> SecretKey {
-        Key {
+        Box::new(Key {
             data: vec![0; KEY_SIZE],
-        }
+        })
         .into()
     }
 
@@ -416,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_key_from_password() {
-        let key: Secret<Key> = Key::from_password("password").unwrap_or_else(|err| {
+        let key: SecretBox<Key> = Key::from_password("password").unwrap_or_else(|err| {
             unreachable!("Failed to create key from password: {}", err);
         });
 
@@ -431,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_key_encrypt_decrypt() {
-        let key: Secret<Key> = Key::generate();
+        let key: SecretBox<Key> = Key::generate();
 
         let encrypted_data: String = key
             .expose_secret()
@@ -452,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_key_sign_verify() {
-        let key: Secret<Key> = Key::generate();
+        let key: SecretBox<Key> = Key::generate();
 
         let signature: Signature = key
             .expose_secret()

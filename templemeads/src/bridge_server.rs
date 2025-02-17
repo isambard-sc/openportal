@@ -383,8 +383,6 @@ async fn status(
     }
 }
 
-/// Functions for the Bridge server
-
 ///
 /// Function spawned to run the API server in a background thread
 ///

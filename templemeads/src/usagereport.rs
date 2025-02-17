@@ -429,9 +429,7 @@ impl ProjectUsageReport {
     pub fn usage(&self, user: &UserIdentifier) -> Usage {
         // get the local username
         match self.users.get(user) {
-            Some(local_user) => {
-                return self.reports.values().map(|r| r.usage(local_user)).sum();
-            }
+            Some(local_user) => self.reports.values().map(|r| r.usage(local_user)).sum(),
             None => Usage::default(),
         }
     }

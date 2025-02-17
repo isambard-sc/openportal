@@ -291,7 +291,7 @@ impl IpOrRange {
     pub fn new(ip: &str) -> Result<Self, Error> {
         match ip.parse() {
             Ok(ip) => Ok(IpOrRange::IP(ip)),
-            Err(_) => match IpRange::new(ip, "") {
+            Err(_) => match IpRange::<iptools::iprange::IPv4>::new(ip, "") {
                 Ok(_) => Ok(IpOrRange::Range(ip.to_string())),
                 Err(err) => Err(Error::Parse(format!(
                     "Could not parse IP address or range: {}, error {}",
@@ -304,7 +304,7 @@ impl IpOrRange {
     pub fn matches(&self, addr: &IpAddr) -> bool {
         match self {
             IpOrRange::IP(ip) => ip == addr,
-            IpOrRange::Range(range) => match IpRange::new(range, "") {
+            IpOrRange::Range(range) => match IpRange::<iptools::iprange::IPv4>::new(range, "") {
                 Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
                 Err(_) => {
                     tracing::warn!("Could not parse IP range: {}", range);

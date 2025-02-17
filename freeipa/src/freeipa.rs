@@ -5,8 +5,7 @@ use anyhow::Context;
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use reqwest::{cookie::Jar, Client};
-use secrecy::ExposeSecret;
-use secrecy::Secret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -234,7 +233,7 @@ struct FreeAuth {
     server: String,
     jar: Arc<Jar>,
     user: String,
-    password: Secret<String>,
+    password: SecretString,
     num_reconnects: u32,
 }
 
@@ -244,7 +243,7 @@ impl FreeAuth {
             server: "".to_string(),
             jar: Arc::new(Jar::default()),
             user: "".to_string(),
-            password: Secret::new("".to_string()),
+            password: SecretString::default(),
             num_reconnects: 0,
         }
     }
@@ -264,7 +263,7 @@ fn should_allow_invalid_certs() -> bool {
 /// This returns a cookie jar that will contain the resulting authorisation
 /// cookie, and which can be used for subsequent calls to the server.
 ///
-async fn login(server: &str, user: &str, password: &Secret<String>) -> Result<Arc<Jar>, Error> {
+async fn login(server: &str, user: &str, password: &SecretString) -> Result<Arc<Jar>, Error> {
     let jar = Arc::new(Jar::default());
 
     let client = Client::builder()
@@ -997,7 +996,7 @@ impl IPAGroup {
     }
 }
 
-pub async fn connect(server: &str, user: &str, password: &Secret<String>) -> Result<(), Error> {
+pub async fn connect(server: &str, user: &str, password: &SecretString) -> Result<(), Error> {
     // overwrite the global FreeIPA client with a new one
     let mut auth = FREEIPA_AUTH.lock().await;
 
@@ -1572,14 +1571,6 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
         }
     }
 }
-
-///
-/// Functions in the freeipa public API
-///
-
-///
-/// Return the
-///
 
 ///
 /// Add the project to FreeIPA - this will create the group for the project

@@ -12,6 +12,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::env;
 use std::fmt::Display;
 use std::sync::Arc;
+use std::vec::Vec;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::connect_async;

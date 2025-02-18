@@ -180,7 +180,7 @@ async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, E
     let response = match runner()
         .await?
         .run_json(&format!(
-            "SACCTMGR --json list accounts name={} cluster={}",
+            "SACCTMGR --json list accounts withassoc name={} cluster={}",
             account, cluster
         ))
         .await

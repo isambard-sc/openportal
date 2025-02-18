@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.9.1] - 2025-02-18
 ### Added
 - Added a command to force a disconnect of an open connection. Changed
   the keepalive logic so that, if a keepalive message can't be sent,
@@ -343,6 +345,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.9.1]: https://github.com/isambard-sc/openportal/releases/tag/0.9.1
 [0.9.0]: https://github.com/isambard-sc/openportal/releases/tag/0.9.0
 [0.8.3]: https://github.com/isambard-sc/openportal/releases/tag/0.8.3
 [0.8.2]: https://github.com/isambard-sc/openportal/releases/tag/0.8.2

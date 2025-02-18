@@ -480,7 +480,7 @@ pub struct ServiceConfig {
     url: String,
     ip: IpAddr,
     port: u16,
-    heathcheck_port: Option<u16>,
+    healthcheck_port: Option<u16>,
     proxy_header: Option<String>,
 
     servers: Vec<ServerConfig>,
@@ -521,7 +521,7 @@ impl ServiceConfig {
                 .parse()
                 .with_context(|| format!("Could not parse IP address: {}", ip))?,
             port: *port,
-            heathcheck_port: *healthcheck_port,
+            healthcheck_port: *healthcheck_port,
             proxy_header: proxy_header.clone(),
             servers: Vec::new(),
             clients: Vec::new(),
@@ -590,7 +590,7 @@ impl ServiceConfig {
     }
 
     pub fn healthcheck_port(&self) -> Option<u16> {
-        self.heathcheck_port
+        self.healthcheck_port
     }
 
     pub fn proxy_header(&self) -> Option<String> {

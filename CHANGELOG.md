@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added a command to force a disconnect of an open connection. Changed
+  the keepalive logic so that, if a keepalive message can't be sent,
+  then the connection is automatically disconnected and remade. This
+  should prevent hangs caused by one half of a connection being down.
+- Added a "last activity" tracker to the connections, and a periodic
+  watchdog that checks for connections that have been inactive for
+  more than 5 minutes (much greater than the keepalive period).
+  This will automatically disconnect the connection, and log a warning,
+  with the connection automatically remade. This should prevent
+  connections getting stuck in a stuck half-open state.
+- Updated to support the latest version of rust, plus to use the latest
+  version of all dependencies. This includes upgrading to the new
+  secrecy 0.10 from 0.8, which required internal code changes. This
+  doesn't impact anything external.
 
 ## [0.9.0] - 2025-02-10
 ### Added

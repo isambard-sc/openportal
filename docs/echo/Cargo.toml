@@ -14,12 +14,12 @@ repository = "https://github.com/chryswoods/openportal/"
 built = { version = "0.7", default-features = false, features = ["git2"] }
 
 [dependencies]
-anyhow = { version="1.0.86", features = ["backtrace"] }
-clap = { version = "4.5.11", default-features = false, features = ["derive", "color", "help", "usage", "error-context","suggestions", "env", "std", "string"] }
+anyhow = { version="1.0.95", features = ["backtrace"] }
+clap = { version = "4.5.29", default-features = false, features = ["derive", "color", "help", "usage", "error-context","suggestions", "env", "std", "string"] }
 paddington = { path = "../../paddington" }
-tokio = { version = "1.0", features = ["full"] }
-tracing = "0.1.40"
-tracing-subscriber = "0.3.18"
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
 
 [lints.rust]
 unsafe_code = "forbid"

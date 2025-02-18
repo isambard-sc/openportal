@@ -6,7 +6,7 @@ use anyhow::Result;
 use chrono::TimeZone;
 use once_cell::sync::Lazy;
 use reqwest::{Client, Url};
-use secrecy::{ExposeSecret, Secret};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -453,7 +453,7 @@ struct SlurmAuth {
     token_command: String,
     token_lifespan: u32,
     user: String,
-    jwt: Secret<String>,
+    jwt: SecretString,
     jwt_creation_time: u64,
     version: String,
     num_reconnects: u32,
@@ -466,7 +466,7 @@ impl SlurmAuth {
             token_command: "".to_string(),
             token_lifespan: 1800,
             user: "".to_string(),
-            jwt: Secret::new("".to_string()),
+            jwt: SecretString::default(),
             jwt_creation_time: 0,
             version: "".to_string(),
             num_reconnects: 0,
@@ -486,7 +486,7 @@ impl SlurmAuth {
 static SLURM_AUTH: Lazy<Mutex<SlurmAuth>> = Lazy::new(|| Mutex::new(SlurmAuth::default()));
 
 struct SlurmSession {
-    jwt: Secret<String>,
+    jwt: SecretString,
     version: String,
     start_time: u64,
 }
@@ -773,7 +773,7 @@ async fn login(
     }
 
     Ok(SlurmSession {
-        jwt: Secret::new(jwt),
+        jwt: jwt.into(),
         version: version.to_string(),
         start_time: now.as_secs(),
     })
@@ -1299,10 +1299,6 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 }
 
 ///
-/// Public API
-///
-
-///
 /// Return the organization that indicates that this user / account is managed
 ///
 pub fn get_managed_organization() -> String {
@@ -1347,7 +1343,7 @@ impl PartialEq for SlurmAccount {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.organization == other.organization
-            && self.description.to_ascii_lowercase() == other.description.to_ascii_lowercase()
+            && self.description.eq_ignore_ascii_case(&other.description)
     }
 }
 
@@ -2547,7 +2543,7 @@ pub async fn connect(
     auth.server = server.to_string();
     auth.user = user.to_string();
     auth.token_command = token_command.to_string();
-    auth.jwt = Secret::new("".to_string());
+    auth.jwt = SecretString::default();
     auth.token_lifespan = token_lifespan;
     auth.num_reconnects = 0;
 

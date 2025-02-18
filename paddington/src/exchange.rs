@@ -3,12 +3,15 @@
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::RwLock;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 
+use crate::command::Command;
 use crate::connection::Connection;
 use crate::error::Error;
 use crate::message::Message;
@@ -64,6 +67,10 @@ pub struct Exchange {
     tx: UnboundedSender<Message>,
     // handler holds object that implements the MessageHandler trait
     handler: Option<AsyncMessageHandler>,
+
+    // active watchdog checks - ensures that we don't flood the exchange
+    // if a connection flaps
+    watchdogs: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for Exchange {
@@ -126,6 +133,7 @@ impl Exchange {
             connections: HashMap::new(),
             tx,
             handler: None,
+            watchdogs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -267,4 +275,97 @@ pub fn received(message: Message) -> Result<(), Error> {
         tracing::error!("Error sending message: {}", e);
         Error::Send(format!("Error sending message: {}", e))
     })
+}
+
+pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
+    let name = format!("{}@{}", peer, zone);
+
+    let connection = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+        }
+    }
+    .connections
+    .get(&name)
+    .cloned();
+
+    if let Some(mut connection) = connection {
+        connection.watchdog().await?;
+
+        // make sure we are the only watchdog for this connection
+        let watchdogs = match SINGLETON_EXCHANGE.read() {
+            Ok(exchange) => exchange.watchdogs.clone(),
+            Err(e) => {
+                return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+            }
+        };
+
+        match watchdogs.lock() {
+            Ok(watchdogs) => {
+                if watchdogs.contains(&name) {
+                    tracing::warn!("Watchdog already active for {} - skipping", name);
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                return Err(Error::Poison(format!("Error getting lock: {}", e)));
+            }
+        };
+
+        // wait 27 seconds and then send the watchdog message again
+        tokio::time::sleep(tokio::time::Duration::from_secs(27)).await;
+
+        // remove the entry for this connection - other's should be able to send
+        match watchdogs.lock() {
+            Ok(mut watchdogs) => {
+                watchdogs.remove(&name);
+            }
+            Err(e) => {
+                return Err(Error::Poison(format!("Error getting lock: {}", e)));
+            }
+        }
+
+        match received(Command::watchdog(peer, zone).into()) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Error sending watchdog message to {}: {}", name, e);
+                match connection.disconnect().await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("Error disconnecting {}: {}", name, e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    } else {
+        Err(Error::UnnamedConnection(format!(
+            "Connection {}@{} not found",
+            peer, zone
+        )))
+    }
+}
+
+pub async fn disconnect(peer: &str, zone: &str) -> Result<(), Error> {
+    let connection = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+        }
+    }
+    .connections
+    .get(&format!("{}@{}", peer, zone))
+    .cloned();
+
+    if let Some(mut connection) = connection {
+        connection.disconnect().await?;
+        Ok(())
+    } else {
+        Err(Error::UnnamedConnection(format!(
+            "Connection {} not found",
+            peer
+        )))
+    }
 }

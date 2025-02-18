@@ -10,8 +10,6 @@ use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Grammar for all of the commands that can be sent to agents
-
 pub trait NamedType {
     fn type_name() -> &'static str;
 }
@@ -204,8 +202,6 @@ impl From<UserIdentifier> for ProjectIdentifier {
         }
     }
 }
-
-/// Serialize and Deserialize via the string representation
 
 impl Serialize for ProjectIdentifier {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -433,8 +429,6 @@ impl From<UserMapping> for ProjectMapping {
         }
     }
 }
-
-/// Serialize and Deserialize via the string representation
 
 impl Serialize for ProjectMapping {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

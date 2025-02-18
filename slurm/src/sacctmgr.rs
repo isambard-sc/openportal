@@ -635,10 +635,6 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
     Ok(slurm_user)
 }
 
-///
-/// Public API
-///
-
 pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str) {
     tracing::info!(
         "Using command line slurmd commands: sacctmgr: {}, scontrol: {}",

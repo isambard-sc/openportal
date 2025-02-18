@@ -11,7 +11,7 @@ use paddington::config::{
     load as load_config, save as save_config, Defaults as ServiceDefaults, ServiceConfig,
 };
 use paddington::invite::{load as load_invite, save as save_invite};
-use secrecy::Secret;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -52,10 +52,10 @@ impl Config {
         }
     }
 
-    pub fn secret(&self, key: &str) -> Option<Secret<String>> {
+    pub fn secret(&self, key: &str) -> Option<SecretString> {
         match self.extras.get(key) {
             Some(value) => match self.service.decrypt::<String>(value) {
-                Ok(secret) => Some(Secret::<String>::new(secret)),
+                Ok(secret) => Some(secret.into()),
                 Err(e) => {
                     tracing::error!("Failed to decrypt secret for key '{}': {:?}", key, e);
                     None

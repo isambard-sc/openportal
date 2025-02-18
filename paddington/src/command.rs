@@ -15,6 +15,14 @@ pub enum Command {
         engine: String,
         version: String,
     },
+    Watchdog {
+        agent: String,
+        zone: String,
+    },
+    Disconnect {
+        agent: String,
+        zone: String,
+    },
     Disconnected {
         agent: String,
         zone: String,
@@ -31,8 +39,22 @@ impl Command {
         }
     }
 
+    pub fn disconnect(agent: &str, zone: &str) -> Self {
+        Self::Disconnect {
+            agent: agent.to_owned(),
+            zone: zone.to_owned(),
+        }
+    }
+
     pub fn disconnected(agent: &str, zone: &str) -> Self {
         Self::Disconnected {
+            agent: agent.to_owned(),
+            zone: zone.to_owned(),
+        }
+    }
+
+    pub fn watchdog(agent: &str, zone: &str) -> Self {
+        Self::Watchdog {
             agent: agent.to_owned(),
             zone: zone.to_owned(),
         }

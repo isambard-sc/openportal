@@ -25,6 +25,14 @@ async fn health() -> Result<Json<serde_json::Value>, AppError> {
     Ok(Json(json!({"status": "ok"})))
 }
 
+//
+// Server info endpoint for the web API
+//
+#[tracing::instrument(skip_all)]
+async fn server_info() -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(json!({"cert": "123456"})))
+}
+
 ///
 /// Function spawned to run the API server in a background thread
 ///
@@ -79,10 +87,16 @@ pub async fn spawn(ip: IpAddr, port: u16) -> Result<(), Error> {
         }
     }
 
-    tracing::info!("Starting health check server on {}:{}/health", ip, port);
+    tracing::info!(
+        "Starting health check server on {}:{}/health and cert server on /info",
+        ip,
+        port
+    );
 
     // create the web API
-    let app = Router::new().route("/health", get(health));
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/info", get(server_info));
 
     // create a TCP listener on the specified port
     let listener = tokio::net::TcpListener::bind(&std::net::SocketAddr::new(ip, port)).await?;

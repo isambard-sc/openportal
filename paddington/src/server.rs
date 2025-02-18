@@ -21,7 +21,7 @@ async fn handle_connection(
 
     match connection.handle_connection(stream).await {
         Ok(_) => {
-            tracing::info!("Connection handled successfully");
+            tracing::debug!("Connection closed after successful handling");
         }
         Err(e) => {
             tracing::error!("Error handling connection: {}", e);

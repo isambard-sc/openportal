@@ -94,7 +94,6 @@ impl ConnectionState {
 
     fn register_activity(&mut self) {
         self.last_activity = chrono::Utc::now();
-        tracing::info!("Activity registered at: {:?}", self.last_activity);
     }
 }
 
@@ -251,16 +250,63 @@ impl Connection {
     }
 
     ///
+    /// Close the connection
+    ///
+    pub async fn disconnect(&mut self) -> Result<(), Error> {
+        if let Some(tx) = self.tx.as_ref() {
+            tracing::warn!(
+                "Disconnecting connection to peer: {}@{}",
+                self.name(),
+                self.zone()
+            );
+            let mut tx = tx.lock().await;
+            tx.close()
+                .await
+                .with_context(|| "Error closing connection")?;
+        }
+
+        Ok(())
+    }
+
+    ///
+    /// Watchdog check the connection is still active
+    ///
+    pub async fn watchdog(&mut self) -> Result<(), Error> {
+        let last_activity = match self.state.lock() {
+            Ok(state) => state.last_activity,
+            Err(e) => {
+                tracing::warn!("Error getting last activity: {:?}", e);
+                // return ok as we will check again
+                return Ok(());
+            }
+        };
+
+        if last_activity < chrono::Utc::now() - chrono::Duration::seconds(300) {
+            tracing::warn!(
+                "*WATCHDOG* Connection to peer: {}@{} has not been active for over 300 seconds - disconnecting",
+                self.name(),
+                self.zone()
+            );
+
+            match self.disconnect().await {
+                Ok(_) => (),
+                Err(e) => {
+                    // only log this, as we are already in a watchdog
+                    tracing::warn!("Error disconnecting connection: {:?}", e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    ///
     /// Send a message to the peer on the other end of the connection.
     ///
     pub async fn send_message(&self, message: &str) -> Result<(), Error> {
-        match self.state.lock() {
-            Ok(mut state) => {
-                state.register_activity();
-            }
-            Err(e) => {
-                tracing::warn!("Error registering activity: {:?}", e);
-            }
+        if message.is_empty() {
+            tracing::warn!("Empty message - not sending");
+            return Ok(());
         }
 
         let tx = self.tx.as_ref().ok_or_else(|| {
@@ -299,6 +345,16 @@ impl Connection {
         )?)
         .await
         .with_context(|| "Error sending message to peer")?;
+
+        // record the last time we successfully sent a message
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.register_activity();
+            }
+            Err(e) => {
+                tracing::warn!("Error registering activity: {:?}", e);
+            }
+        }
 
         Ok(())
     }
@@ -661,13 +717,10 @@ impl Connection {
         // and now we can start the message handling loop - make sure to
         // handle the sending of messages to others
         let received_from_peer = incoming.try_for_each(|msg| {
-            match self.state.lock() {
-                Ok(mut state) => {
-                    state.register_activity();
-                }
-                Err(e) => {
-                    tracing::warn!("Error registering activity: {:?}", e);
-                }
+            if msg.is_empty() {
+                // this may happen, e.g. if the connection is closed
+                // This can be safely ignored
+                return future::ok(());
             }
 
             // we need to deenvelope the message
@@ -689,6 +742,16 @@ impl Connection {
                 .unwrap_or_else(|e| {
                     tracing::warn!("Error handling message: {:?}", e);
                 });
+
+            // record the last time we successfully received a message
+            match self.state.lock() {
+                Ok(mut state) => {
+                    state.register_activity();
+                }
+                Err(e) => {
+                    tracing::warn!("Error registering activity: {:?}", e);
+                }
+            }
 
             future::ok(())
         });
@@ -715,6 +778,11 @@ impl Connection {
                 return Err(Error::Any(e.into()));
             }
         }
+
+        // now tell ourselves that we have received a watchdog message
+        // from this peer - this will start a periodic watchdog check
+        exchange::received(Command::watchdog(&peer_name, &peer_zone).into())
+            .with_context(|| "Error triggering /watchdog control message")?;
 
         // finally, send a keepalive message to the peer - this will start
         // a ping-pong with the peer that should keep it open
@@ -1127,6 +1195,11 @@ impl Connection {
             Command::connected(&peer_name, &peer_zone, &peer_engine, &peer_version).into(),
         )
         .with_context(|| "Error triggering /connected control message")?;
+
+        // now tell ourselves that we have received a watchdog message
+        // from this peer - this will start a periodic watchdog check
+        exchange::received(Command::watchdog(&peer_name, &peer_zone).into())
+            .with_context(|| "Error triggering /watchdog control message")?;
 
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;

@@ -38,12 +38,22 @@ pub async fn process_control_message(
             // queued jobs for this peer
             job::send_queued(&peer).await?;
         }
+        ControlCommand::Disconnect { agent, zone } => {
+            let peer = Peer::new(&agent, &zone);
+            tracing::warn!("Force disconnect from agent: {}", peer);
+            paddington::disconnect(&agent, &zone).await?;
+        }
         ControlCommand::Disconnected { agent, zone } => {
             let peer = Peer::new(&agent, &zone);
             tracing::info!("Disconnected from agent: {}", peer);
         }
         ControlCommand::Error { error } => {
             tracing::error!("Received error: {}", error);
+        }
+        ControlCommand::Watchdog { agent, zone } => {
+            let peer = Peer::new(&agent, &zone);
+            tracing::debug!("Received watchdog from agent: {}", peer);
+            paddington::watchdog(&agent, &zone).await?;
         }
     }
 

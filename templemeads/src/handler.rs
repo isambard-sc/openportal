@@ -15,6 +15,8 @@ use once_cell::sync::Lazy;
 use paddington::async_message_handler;
 use paddington::message::{Message, MessageType};
 use std::boxed::Box;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
@@ -22,6 +24,7 @@ struct ServiceDetails {
     service: String,
     agent_type: AgentType,
     runner: AsyncRunnable,
+    keepalives: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for ServiceDetails {
@@ -30,6 +33,7 @@ impl Default for ServiceDetails {
             service: String::new(),
             agent_type: agent::Type::Portal,
             runner: default_runner,
+            keepalives: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -264,13 +268,42 @@ async_message_handler! {
                     return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
                 }
 
-                // wait 20 seconds and send a keep alive message back
-                tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+                // check that we are the only one sending keepalives to this peer
+                let name = format!("{}@{}", sender, zone);
+
+                match service_info.keepalives.lock() {
+                    Ok(mut keepalives) => {
+                        if keepalives.contains(&name) {
+                            tracing::warn!("Duplicate keepalive message from {} in zone {}", sender, zone);
+                            return Ok(());
+                        }
+
+                        keepalives.insert(name.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Error locking keepalives: {}", e);
+                        return Ok(());
+                    }
+                }
+
+                // wait 23 seconds and send a keep alive message back
+                tokio::time::sleep(tokio::time::Duration::from_secs(23)).await;
+
+                match service_info.keepalives.lock() {
+                    Ok(mut keepalives) => {
+                        keepalives.remove(&name);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Error locking keepalives: {}", e);
+                        return Ok(());
+                    }
+                }
 
                 match paddington::send(Message::keepalive(&sender, &zone)).await {
                     Ok(_) => {}
                     Err(e) => {
-                        tracing::warn!("Error sending keepalive message to {} in zone {}: {}", sender, zone, e);
+                        tracing::warn!("Error sending keepalive message to {} in zone {}: {}. Disconnecting peer.", sender, zone, e);
+                        paddington::disconnect(&sender, &zone).await?;
                     }
                 }
 

@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use reqwest::{Client, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
@@ -810,12 +810,15 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
         )));
     }
 
+    let cluster = cache::get_cluster().await?;
+
     let payload = serde_json::json!({
         "accounts": [
             {
                 "name": account.name,
                 "description": account.description,
-                "organization": account.organization
+                "organization": account.organization,
+                "cluster": cluster
             }
         ]
     });
@@ -872,10 +875,26 @@ async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, E
         }
     };
 
-    match SlurmAccount::construct(account) {
-        Ok(account) => Ok(Some(account)),
+    let account = match SlurmAccount::construct(account) {
+        Ok(account) => account,
         Err(e) => {
             tracing::warn!("Could not construct account from response: {}", e);
+            return Ok(None);
+        }
+    };
+
+    cache::add_account(&account).await?;
+
+    let cluster = cache::get_cluster().await?;
+
+    match account.in_cluster(&cluster) {
+        true => Ok(Some(account)),
+        false => {
+            tracing::warn!(
+                "Account {} is not in cluster {} - ignoring",
+                account.name(),
+                cluster
+            );
             Ok(None)
         }
     }
@@ -950,39 +969,53 @@ async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
 async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
     let existing_account = get_account(account.name()).await?;
 
+    let cluster = cache::get_cluster().await?;
+
     if let Some(existing_account) = existing_account {
-        if account.organization() != get_managed_organization() {
-            tracing::warn!(
+        if existing_account.in_cluster(&cluster) {
+            if account.organization() != get_managed_organization() {
+                tracing::warn!(
                 "Account {} is not managed by the openportal organization - we cannot manage it.",
                 account
             );
-            return Err(Error::UnmanagedGroup(format!(
-                "Cannot add Slurm account as {} is not managed by openportal",
-                account
-            )));
-        }
+                return Err(Error::UnmanagedGroup(format!(
+                    "Cannot add Slurm account as {} is not managed by openportal",
+                    account
+                )));
+            }
 
-        if existing_account.description() != account.description()
-            || existing_account.organization() != account.organization()
-        {
-            // the account exists, but the details are different
-            tracing::warn!(
-                "Account {} exists, but with different details.",
-                account.name()
-            );
-            tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account)
-        }
+            if existing_account.description() != account.description()
+                || existing_account.organization() != account.organization()
+            {
+                // the account exists, but the details are different
+                tracing::warn!(
+                    "Account {} exists, but with different details.",
+                    account.name()
+                );
+                tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account)
+            }
 
-        tracing::info!("Using existing slurm account {}", existing_account);
-        return Ok(existing_account);
+            tracing::info!("Using existing slurm account {}", existing_account);
+            return Ok(existing_account);
+        }
     }
 
     // it doesn't, so create it
     tracing::info!("Creating new slurm account: {}", account.name());
     let account = force_add_slurm_account(account).await?;
-    cache::add_account(&account).await?;
 
-    Ok(account.clone())
+    // get the account as created
+    match get_account(account.name()).await {
+        Ok(Some(account)) => Ok(account),
+        Ok(None) => {
+            tracing::error!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
+        Err(e) => {
+            tracing::error!("Could not get account {}: {}", account.name(), e);
+            Err(e)
+        }
+    }
 }
 
 async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
@@ -1337,6 +1370,7 @@ pub struct SlurmAccount {
     description: String,
     organization: String,
     limit: Usage,
+    clusters: HashSet<String>,
 }
 
 impl PartialEq for SlurmAccount {
@@ -1344,6 +1378,8 @@ impl PartialEq for SlurmAccount {
         self.name == other.name
             && self.organization == other.organization
             && self.description.eq_ignore_ascii_case(&other.description)
+            && self.limit == other.limit
+            && self.clusters == other.clusters
     }
 }
 
@@ -1351,11 +1387,12 @@ impl Display for SlurmAccount {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmAccount {{ name: {}, description: {}, organization: {}, limit: {} }}",
+            "SlurmAccount {{ name: {}, description: {}, organization: {}, limit: {}, clusters: {:?} }}",
             self.name(),
             self.description(),
             self.organization(),
-            self.limit()
+            self.limit(),
+            self.clusters()
         )
     }
 }
@@ -1377,6 +1414,7 @@ impl SlurmAccount {
             description: format!("Account for OpenPortal project {}", mapping.project()),
             organization: get_managed_organization(),
             limit: Usage::default(),
+            clusters: HashSet::new(),
         })
     }
 
@@ -1445,11 +1483,53 @@ impl SlurmAccount {
             }
         };
 
+        let associations = match result.get("associations") {
+            Some(associations) => associations.clone(),
+            None => {
+                tracing::warn!("Could not get associations from account: {:?}", result);
+                serde_json::Value::Array(Vec::new())
+            }
+        };
+
+        let associations = match associations.as_array() {
+            Some(associations) => associations.clone(),
+            None => {
+                tracing::warn!("Associations is not an array: {:?}", associations);
+                Vec::new()
+            }
+        };
+
+        let mut clusters = HashSet::new();
+
+        for association in associations {
+            let cluster = match association.get("cluster") {
+                Some(cluster) => cluster,
+                None => {
+                    tracing::warn!("Could not get cluster from association: {:?}", association);
+                    continue;
+                }
+            };
+
+            let cluster = match cluster.as_str() {
+                Some(cluster) => cluster,
+                None => {
+                    tracing::warn!(
+                        "Could not get cluster as string from association: {:?}",
+                        cluster
+                    );
+                    continue;
+                }
+            };
+
+            clusters.insert(cluster.to_string());
+        }
+
         Ok(SlurmAccount {
             name: clean_account_name(name)?,
             description: description.to_string(),
             organization: organization.to_string(),
             limit: Usage::default(),
+            clusters,
         })
     }
 
@@ -1471,6 +1551,14 @@ impl SlurmAccount {
 
     pub fn set_limit(&mut self, limit: &Usage) {
         self.limit = *limit;
+    }
+
+    pub fn clusters(&self) -> &HashSet<String> {
+        &self.clusters
+    }
+
+    pub fn in_cluster(&self, cluster: &str) -> bool {
+        self.clusters.contains(cluster)
     }
 
     pub fn is_managed(&self) -> bool {

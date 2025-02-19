@@ -306,33 +306,38 @@ async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
 async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
     let existing_account = get_account(account.name()).await?;
 
+    let cluster = cache::get_cluster().await?;
+
     if let Some(existing_account) = existing_account {
-        if !account.is_managed() {
-            tracing::warn!(
-                "Account {} is not managed by the openportal organization.",
-                account
-            );
-        }
+        if existing_account.in_cluster(&cluster) {
+            if !account.is_managed() {
+                tracing::warn!(
+                    "Account {} is not managed by the openportal organization.",
+                    account
+                );
+            }
 
-        if existing_account != *account {
-            // the account exists, but the details are different
-            tracing::warn!(
-                "Account {} exists, but with different details.",
-                account.name()
-            );
-            tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account)
+            tracing::info!("Using existing slurm account {}", existing_account);
+            return Ok(existing_account);
         }
-
-        tracing::info!("Using existing slurm account {}", existing_account);
-        return Ok(existing_account);
     }
 
     // it doesn't, so create it
     tracing::info!("Creating new slurm account: {}", account.name());
     let account = force_add_slurm_account(account).await?;
-    cache::add_account(&account).await?;
 
-    Ok(account.clone())
+    // get the account as created
+    match get_account(account.name()).await {
+        Ok(Some(account)) => Ok(account),
+        Ok(None) => {
+            tracing::error!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
+        Err(e) => {
+            tracing::error!("Could not get account {}: {}", account.name(), e);
+            Err(e)
+        }
+    }
 }
 
 async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {

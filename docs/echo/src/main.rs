@@ -85,8 +85,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    templemeads::config::initialise_tracing();
 
     // parse the command line arguments
     let args: Args = Args::parse();

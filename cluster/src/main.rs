@@ -31,8 +31,7 @@ const AGENT_WAIT_TIME: u64 = 10;
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    templemeads::config::initialise_tracing();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(

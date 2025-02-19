@@ -22,6 +22,7 @@ pub mod agent;
 pub mod board;
 pub mod bridge;
 pub mod command;
+pub mod config;
 pub mod destination;
 pub use error::Error;
 pub mod grammar;

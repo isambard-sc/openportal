@@ -198,10 +198,7 @@ fn is_config_loaded() -> PyResult<bool> {
 #[pyfunction]
 fn initialize_tracing() -> PyResult<()> {
     // Initialize tracing
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set global default subscriber");
-    tracing::info!("Tracing initialized");
+    templemeads::config::initialise_tracing();
     Ok(())
 }
 

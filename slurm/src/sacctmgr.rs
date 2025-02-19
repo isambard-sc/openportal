@@ -502,13 +502,14 @@ async fn add_user_association(
     if user
         .associations()
         .iter()
-        .any(|a| a.account() == account.name())
+        .any(|a| a.account() == account.name() && a.cluster() == cluster)
     {
         // the association already exists
         tracing::info!(
-            "User {} already associated with account {}",
+            "User {} already associated with account {} in cluster {}",
             user.name(),
-            account.name()
+            account.name(),
+            cluster
         );
     } else {
         // create the account association first
@@ -587,6 +588,8 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
         get_account_create_if_not_exists(&SlurmAccount::from_mapping(&user.clone().into())?)
             .await?;
 
+    let cluster = cache::get_cluster().await?;
+
     // now get the user from slurm
     let slurm_user = get_user(user.local_user()).await?;
 
@@ -596,15 +599,16 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
             && slurm_user
                 .associations()
                 .iter()
-                .any(|a| a.account() == slurm_account.name())
+                .any(|a| a.account() == slurm_account.name() && a.cluster() == cluster)
         {
             tracing::info!("Using existing user {}", slurm_user);
             return Ok(slurm_user);
         } else {
             tracing::warn!(
-                "User {} exists, but is not default associated with the requested account '{}'.",
+                "User {} exists, but is not default associated with the requested account '{}' in cluster {}.",
                 user,
-                slurm_account
+                slurm_account,
+                cluster
             );
         }
     }
@@ -828,17 +832,29 @@ pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
 
     match get_account(account.name()).await? {
         Some(account) => Ok(*account.limit()),
-        None => Ok(Usage::default()),
+        None => {
+            tracing::warn!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
     }
 }
 
 pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage, Error> {
     // this is a null function for now... it just sets and returns a cached value
-    let mut account = SlurmAccount::from_mapping(project)?;
+    let account = SlurmAccount::from_mapping(project)?;
 
-    account.set_limit(limit);
+    match get_account(account.name()).await? {
+        Some(account) => {
+            let mut account = account.clone();
+            account.set_limit(limit);
 
-    cache::add_account(&account).await?;
+            cache::add_account(&account).await?;
 
-    Ok(*account.limit())
+            Ok(*account.limit())
+        }
+        None => {
+            tracing::warn!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
+    }
 }

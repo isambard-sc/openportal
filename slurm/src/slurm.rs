@@ -1185,12 +1185,13 @@ async fn add_user_association(
 
     let mut user = user.clone();
     let mut user_changed = false;
+    let cluster = cache::get_cluster().await?;
 
     // first, add the association if it doesn't exist
     if !user
         .associations()
         .iter()
-        .any(|a| a.account() == account.name())
+        .any(|a| a.account() == account.name() && a.cluster() == cluster)
     {
         // make sure that we have this association on the account
         add_account_association(account).await?;
@@ -1203,7 +1204,7 @@ async fn add_user_association(
                     "account": account.name,
                     "comment": format!("Association added by OpenPortal between user {} and account {}",
                                        user.name, account.name),
-                    "cluster": "linux",
+                    "cluster": cluster,
                     "is_default": true
                 }
             ]
@@ -1273,6 +1274,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 
     // now get the user from slurm
     let slurm_user = get_user(user.local_user()).await?;
+    let cluster = cache::get_cluster().await?;
 
     if let Some(slurm_user) = slurm_user {
         // the user exists - check that the account is associated with the user
@@ -1280,15 +1282,16 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
             && slurm_user
                 .associations()
                 .iter()
-                .any(|a| a.account() == slurm_account.name())
+                .any(|a| a.account() == slurm_account.name() && a.cluster() == cluster)
         {
             tracing::info!("Using existing user {}", slurm_user);
             return Ok(slurm_user);
         } else {
             tracing::warn!(
-                "User {} exists, but is not default associated with the requested account '{}'.",
+                "User {} exists, but is not default associated with the requested account '{}' in cluster {}.",
                 user,
-                slurm_account
+                slurm_account,
+                cluster
             );
         }
     }
@@ -1378,7 +1381,7 @@ impl PartialEq for SlurmAccount {
         self.name == other.name
             && self.organization == other.organization
             && self.description.eq_ignore_ascii_case(&other.description)
-            && self.limit == other.limit
+            // && self.limit == other.limit // ignore limit for now as it is not set
             && self.clusters == other.clusters
     }
 }
@@ -1570,15 +1573,17 @@ impl SlurmAccount {
 pub struct SlurmAssociation {
     user: String,
     account: String,
+    cluster: String,
 }
 
 impl Display for SlurmAssociation {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmAssociation {{ user: {}, account: {} }}",
+            "SlurmAssociation {{ user: {}, account: {}, cluster: {} }}",
             self.user(),
-            self.account()
+            self.account(),
+            self.cluster()
         )
     }
 }
@@ -1598,6 +1603,7 @@ impl SlurmAssociation {
         Ok(SlurmAssociation {
             user: clean_user_name(mapping.local_user())?,
             account,
+            cluster: "".to_string(),
         })
     }
 
@@ -1645,9 +1651,33 @@ impl SlurmAssociation {
             }
         };
 
+        let cluster = match value.get("cluster") {
+            Some(cluster) => cluster,
+            None => {
+                tracing::warn!("Could not get cluster from association: {:?}", value);
+                return Err(Error::Call(
+                    "Could not get cluster from association".to_string(),
+                ));
+            }
+        };
+
+        let cluster = match cluster.as_str() {
+            Some(cluster) => cluster,
+            None => {
+                tracing::warn!(
+                    "Could not get cluster as string from association: {:?}",
+                    cluster
+                );
+                return Err(Error::Call(
+                    "Could not get cluster as string from association".to_string(),
+                ));
+            }
+        };
+
         Ok(SlurmAssociation {
             user: user.to_string(),
             account: clean_account_name(account)?,
+            cluster: cluster.to_string(),
         })
     }
 
@@ -1657,6 +1687,10 @@ impl SlurmAssociation {
 
     pub fn account(&self) -> &str {
         &self.account
+    }
+
+    pub fn cluster(&self) -> &str {
+        &self.cluster
     }
 }
 
@@ -2853,17 +2887,29 @@ pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
 
     match get_account(account.name()).await? {
         Some(account) => Ok(*account.limit()),
-        None => Ok(Usage::default()),
+        None => {
+            tracing::warn!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
     }
 }
 
 pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage, Error> {
     // this is a null function for now... it just sets and returns a cached value
-    let mut account = SlurmAccount::from_mapping(project)?;
+    let account = SlurmAccount::from_mapping(project)?;
 
-    account.set_limit(limit);
+    match get_account(account.name()).await? {
+        Some(account) => {
+            let mut account = account.clone();
+            account.set_limit(limit);
 
-    cache::add_account(&account).await?;
+            cache::add_account(&account).await?;
 
-    Ok(*account.limit())
+            Ok(*account.limit())
+        }
+        None => {
+            tracing::warn!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
+    }
 }

@@ -270,11 +270,12 @@ async_message_handler! {
 
                 // check that we are the only one sending keepalives to this peer
                 let name = format!("{}@{}", sender, zone);
+                tracing::debug!("Keepalive message from {}", name);
 
                 match service_info.keepalives.lock() {
                     Ok(mut keepalives) => {
                         if keepalives.contains(&name) {
-                            tracing::warn!("Duplicate keepalive message from {} in zone {}", sender, zone);
+                            tracing::warn!("Duplicate keepalive message from {} in zone {} - skipping", sender, zone);
                             return Ok(());
                         }
 
@@ -287,18 +288,21 @@ async_message_handler! {
                 }
 
                 // wait 23 seconds and send a keep alive message back
+                tracing::debug!("Keepalive sleeping for 23 seconds from {}", name);
                 tokio::time::sleep(tokio::time::Duration::from_secs(23)).await;
+                tracing::debug!("Keepalive reawakened from {}", name);
 
                 match service_info.keepalives.lock() {
                     Ok(mut keepalives) => {
                         keepalives.remove(&name);
                     }
                     Err(e) => {
-                        tracing::warn!("Error locking keepalives: {}", e);
+                        tracing::error!("Error locking keepalives: {}", e);
                         return Ok(());
                     }
                 }
 
+                tracing::debug!("Sending keepalive message to {} again", name);
                 match paddington::send(Message::keepalive(&sender, &zone)).await {
                     Ok(_) => {}
                     Err(e) => {
@@ -306,6 +310,8 @@ async_message_handler! {
                         paddington::disconnect(&sender, &zone).await?;
                     }
                 }
+
+                tracing::debug!("End of keepalive for {}", name);
 
                 Ok(())
             }

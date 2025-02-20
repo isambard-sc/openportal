@@ -291,22 +291,29 @@ pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
     .cloned();
 
     if let Some(mut connection) = connection {
+        tracing::debug!("Sending watchdog to {}", name);
         connection.watchdog().await?;
+        tracing::debug!("Sent watchdog to {}", name);
 
         // make sure we are the only watchdog for this connection
         let watchdogs = match SINGLETON_EXCHANGE.read() {
             Ok(exchange) => exchange.watchdogs.clone(),
             Err(e) => {
+                tracing::error!("Error getting read lock: {}", e);
                 return Err(Error::Poison(format!("Error getting read lock: {}", e)));
             }
         };
 
+        tracing::debug!("Checking watchdogs for {}", name);
+
         match watchdogs.lock() {
-            Ok(watchdogs) => {
+            Ok(mut watchdogs) => {
                 if watchdogs.contains(&name) {
                     tracing::warn!("Watchdog already active for {} - skipping", name);
                     return Ok(());
                 }
+
+                watchdogs.insert(name.clone());
             }
             Err(e) => {
                 return Err(Error::Poison(format!("Error getting lock: {}", e)));
@@ -314,20 +321,27 @@ pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
         };
 
         // wait 27 seconds and then send the watchdog message again
+        tracing::debug!("Waiting for 27 seconds before sending watchdog again");
         tokio::time::sleep(tokio::time::Duration::from_secs(27)).await;
+        tracing::debug!("Checking watchdogs for {} again...", name);
 
         // remove the entry for this connection - other's should be able to send
         match watchdogs.lock() {
             Ok(mut watchdogs) => {
+                tracing::debug!("Removing watchdog for {}", name);
                 watchdogs.remove(&name);
             }
             Err(e) => {
+                tracing::error!("Error getting lock: {}", e);
                 return Err(Error::Poison(format!("Error getting lock: {}", e)));
             }
         }
 
+        tracing::debug!("Sending watchdog to {} again", name);
         match received(Command::watchdog(peer, zone).into()) {
-            Ok(_) => {}
+            Ok(_) => {
+                tracing::debug!("Sent watchdog to {} again", name);
+            }
             Err(e) => {
                 tracing::error!("Error sending watchdog message to {}: {}", name, e);
                 match connection.disconnect().await {
@@ -338,6 +352,8 @@ pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
                 }
             }
         }
+
+        tracing::debug!("End of watchdog for {}", name);
 
         Ok(())
     } else {

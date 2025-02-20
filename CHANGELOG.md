@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added configurable logging - output now respects the value of the
+  `RUST_LOG` environment variable, using the standard `env_logger` crate.
+- Added json logging, which is controlled by the `RUST_LOG_FORMAT` environment
+  variable. If this is set to `json`, then logs will be output in JSON format.
+- Fixed a communications flood caused by a connection not detecting if
+  multiple watchdog messages are already in flight. Now only a single
+  watchdog message is pending send, using the same mechanism as the
+  keepalive messages.
 
 ## [0.9.2] - 2025-02-19
 ### Fixed

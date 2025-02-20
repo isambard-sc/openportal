@@ -3,7 +3,7 @@
 
 [package]
 name = "example-echo"
-version = "0.9.4"
+version = "0.9.5"
 description = "Paddington Echo Service example"
 edition = "2021"
 license = "MIT"

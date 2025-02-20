@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added an environment variable to turn on checking of the user
+  class in FreeIPA. This is the double-check that isn't really needed
+  and gets in the way now. The default is to not check the user
+  class is "openportal". Setting the environment variable
+  `OPENPORTAL_REQUIRE_MANAGED_CLASS` to `true` will turn on the check.
+
+### Fixed
+- Made the logic for modifying users in FreeIPA more robust - now always
+  re-fetch if the user is in the openportal group so that this info
+  is always up to date.
+- Cleaned up the logic for removal - a user will be removed even if
+  they aren't in any of the resource instance groups. This removed an
+  edge case where they were not in a resource instance group, but were
+  still active, but openportal would not remove them.
 
 ## [0.9.4] - 2025-02-20
 ### Fixed

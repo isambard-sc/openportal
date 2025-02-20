@@ -592,7 +592,15 @@ impl IPAUser {
             Err(_) => return false,
         };
 
-        self.in_group(&managed_group) && self.userclass() == managed_group
+        match std::env::var("OPENPORTAL_REQUIRE_MANAGED_CLASS") {
+            Ok(value) => match value.to_lowercase().as_str() {
+                "true" | "yes" | "1" => {
+                    self.in_group(&managed_group) && self.userclass() == managed_group
+                }
+                _ => self.in_group(&managed_group),
+            },
+            Err(_) => self.in_group(&managed_group),
+        }
     }
 
     ///
@@ -2108,14 +2116,30 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
     // get the group used for openportal users of this peer
     let instance_group = get_op_instance_group(instance)?;
 
-    // don't do anything if the user isn't a member of this group
+    // maybe don't do anything if the user isn't a member of this group
     if !user.in_group(instance_group.groupid()) {
-        tracing::warn!(
-            "Ignoring request to remove {} as they are not in the instance group {}",
-            user.identifier(),
-            instance_group.identifier()
-        );
-        return Ok(user);
+        // check that they are in any groups...
+        let in_other_instance_groups = match get_groups_for_user(&user).await {
+            Ok(groups) => !groups
+                .iter()
+                .filter(|g| g.is_instance_group())
+                .filter(|g| g.identifier() != instance_group.identifier())
+                .collect::<Vec<&IPAGroup>>()
+                .is_empty(),
+            Err(e) => {
+                tracing::error!("Could not get groups for user {}. Error: {}", user, e);
+                false
+            }
+        };
+
+        if in_other_instance_groups {
+            tracing::warn!(
+                "Ignoring request to remove {} as they are not in the instance group {}, but are in other resources",
+                user.identifier(),
+                instance_group.identifier(),
+            );
+            return Ok(user);
+        }
     }
 
     // now remove the user from all of the instance groups for this peer
@@ -2156,7 +2180,7 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
         }
     }
 
-    // check the groups again...
+    // refetch the groups for this user, as they will have changed
     let groups = match get_groups_for_user(&user).await {
         Ok(groups) => groups,
         Err(e) => {
@@ -2165,13 +2189,14 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
         }
     };
 
-    // now see if they are a member of any other peer instance groups
+    // get all of the other instance groups for this user
     let other_instance_groups = groups
         .iter()
         .filter(|g| g.is_instance_group())
         .filter(|g| g.identifier() != instance_group.identifier())
         .collect::<Vec<&IPAGroup>>();
 
+    // don't remove the user if they are on different resources
     if !other_instance_groups.is_empty() {
         tracing::warn!(
             "Ignoring request to remove {} as they are in other resources: {:?}",
@@ -2488,7 +2513,12 @@ pub async fn get_user_mapping(user: &UserIdentifier) -> Result<UserMapping, Erro
 }
 
 pub async fn is_protected_user(user: &UserIdentifier) -> Result<bool, Error> {
-    match get_user(user).await? {
+    // need to get the up-to-date version of the user,
+    // in case their details have been changed in FreeIPA
+    // behind our back. Important that we don't say a user
+    // isn't protected when they have been manually removed from
+    // the managed group...
+    match force_get_user(user).await? {
         Some(user) => Ok(!user.is_managed()),
         None => Ok(false),
     }

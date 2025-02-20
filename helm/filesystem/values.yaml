@@ -8,6 +8,7 @@ image:
   name: op-filesystem
   tag:  # defaults to appVersion if not set
 log_level: info
+log_format: json
 secret_name: filesystem-config
 port: 80
 health_port: 8080

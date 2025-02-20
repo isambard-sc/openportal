@@ -8,6 +8,7 @@ image:
   name: op-slurm
   tag:  # defaults to appVersion if not set
 log_level: info
+log_format: json
 secret_name: slurm-config
 port: 80
 health_port: 8080

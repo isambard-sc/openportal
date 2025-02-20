@@ -8,6 +8,7 @@ image:
   name: op-freeipa
   tag:  # defaults to appVersion if not set
 log_level: info
+log_format: json
 secret_name: freeipa-config
 port: 80
 health_port: 8080

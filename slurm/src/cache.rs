@@ -20,6 +20,7 @@ struct UsageDatabase {
 #[derive(Debug, Clone, Default)]
 struct Database {
     cluster: Option<String>,
+    parent_account: String,
     accounts: HashMap<String, SlurmAccount>,
     users: HashMap<String, SlurmUser>,
     nodes: Option<SlurmNodes>,
@@ -79,6 +80,33 @@ pub async fn set_cluster(cluster: &str) -> Result<(), Error> {
 
     cache.cluster = Some(cluster.to_string());
     Ok(())
+}
+
+pub async fn set_parent_account(parent_account: &str) -> Result<(), Error> {
+    let parent_account = parent_account.trim();
+
+    if parent_account.is_empty() {
+        return Err(Error::Bug("Parent account cannot be empty".to_string()));
+    }
+
+    let mut cache = CACHE.write().await;
+
+    cache.parent_account = parent_account.to_string();
+
+    Ok(())
+}
+
+///
+/// Return the name of the parent account
+///
+pub async fn get_parent_account() -> Result<String, Error> {
+    let cache = CACHE.read().await;
+
+    if cache.parent_account.is_empty() {
+        return Err(Error::Bug("Parent account has not been set".to_string()));
+    }
+
+    Ok(cache.parent_account.clone())
 }
 
 ///

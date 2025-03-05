@@ -158,12 +158,16 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?;
 
+    // get the parent account name from the cache
+    let parent_account = cache::get_parent_account().await?;
+
     runner()
         .await?
         .run(&format!(
-            "SACCTMGR --immediate add account name=\"{}\" cluster=\"{}\" organization=\"{}\" description=\"{}\"",
+            "SACCTMGR --immediate add account name=\"{}\" cluster=\"{}\" parent=\"{}\" organization=\"{}\" description=\"{}\"",
             account.name(),
             cluster,
+            parent_account,
             account.organization(),
             account.description()
         ))
@@ -471,11 +475,15 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?;
 
+    // get the parent account name from the cache
+    let parent_account = cache::get_parent_account().await?;
+
     runner().await?.run(
         &format!(
-            "SACCTMGR --immediate add account name=\"{}\" Clusters=\"{}\" Associations=\"{}\" Comment=\"Created by OpenPortal\"",
+            "SACCTMGR --immediate add account name=\"{}\" Clusters=\"{}\" parent=\"{}\" Associations=\"{}\" Comment=\"Created by OpenPortal\"",
             account.name(),
             cluster,
+            parent_account,
             account.name()
         )
     ).await?;

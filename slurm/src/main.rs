@@ -97,6 +97,10 @@ async fn main() -> Result<()> {
 
     sacctmgr::set_commands(&sacct_command, &sacctmgr_command, &scontrol_command).await;
 
+    // get the parent account that should be used for all accounts
+    let parent_account = config.option("parent-account", "root");
+    cache::set_parent_account(&parent_account).await?;
+
     if slurm_server.is_empty() {
         // we are using sacctmgr and the commandline to interact
         // with slurm, because slurmrestd is not available

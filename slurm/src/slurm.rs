@@ -811,6 +811,7 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     }
 
     let cluster = cache::get_cluster().await?;
+    let parent_account = cache::get_parent_account().await?;
 
     let payload = serde_json::json!({
         "accounts": [
@@ -818,7 +819,8 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
                 "name": account.name,
                 "description": account.description,
                 "organization": account.organization,
-                "cluster": cluster
+                "cluster": cluster,
+                "parent": parent_account
             }
         ]
     });
@@ -1150,11 +1152,15 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?;
 
+    // get the parent account name from the cache
+    let parent_account = cache::get_parent_account().await?;
+
     // add the association condition to the account
     let payload = serde_json::json!({
         "association_condition": {
             "accounts": [account.name],
             "clusters": [cluster],
+            "parent": [parent_account],
             "association": {
                 "defaultqos": "normal",
                 "comment": format!("Association added by OpenPortal for account {}", account.name)

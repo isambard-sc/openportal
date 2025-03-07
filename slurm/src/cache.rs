@@ -20,6 +20,7 @@ struct UsageDatabase {
 #[derive(Debug, Clone, Default)]
 struct Database {
     cluster: Option<String>,
+    partition: Option<String>,
     parent_account: String,
     accounts: HashMap<String, SlurmAccount>,
     users: HashMap<String, SlurmUser>,
@@ -79,6 +80,29 @@ pub async fn set_cluster(cluster: &str) -> Result<(), Error> {
     }
 
     cache.cluster = Some(cluster.to_string());
+    Ok(())
+}
+
+pub async fn get_partition() -> Result<Option<String>, Error> {
+    let cache = CACHE.read().await;
+
+    match cache.partition {
+        Some(ref partition) => Ok(Some(partition.clone())),
+        None => Ok(None),
+    }
+}
+
+pub async fn set_partition(partition: &str) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+
+    let partition = partition.trim();
+
+    if partition.is_empty() {
+        cache.partition = None;
+    } else {
+        cache.partition = Some(partition.to_string());
+    }
+
     Ok(())
 }
 

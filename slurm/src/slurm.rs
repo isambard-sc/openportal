@@ -2804,6 +2804,12 @@ pub async fn get_usage_report(
     let slurm_nodes = cache::get_nodes().await?;
     let now = chrono::Utc::now();
     let cluster = cache::get_cluster().await?;
+    let partition = cache::get_partition().await?;
+
+    let partition_command = match partition {
+        Some(partition) => format!("--partition={}", partition),
+        None => "".to_string(),
+    };
 
     // we now request the data day by day
     for day in dates.days() {
@@ -2840,11 +2846,12 @@ pub async fn get_usage_report(
         let response = sacctmgr::runner()
             .await?
             .run_json(&format!(
-                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} --json",
+                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
                 day,
                 day.next(),
                 account.name(),
                 cluster,
+                partition_command
             ))
             .await?;
 

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Added ability to specify the partition used for accounting for a slurm
+  account. This is useful if different services use different partitions
+  to separate out the accounting.
+
 ## [0.9.6] - 2025-03-05
 ### Added
 - Added ability to control the parent account of slurm accounts that

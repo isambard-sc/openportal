@@ -1576,6 +1576,97 @@ impl SlurmAccount {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlurmLimit {
+    account: String,
+    cluster: String,
+    cpu_limit: Option<Usage>,
+    gpu_limit: Option<Usage>,
+    mem_limit: Option<Usage>,
+}
+
+impl Display for SlurmLimit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "SlurmLimit {{ account: {}, cluster: {}, cpu: {:?}, gpu: {:?}, mem: {:?} }}",
+            self.account(),
+            self.cluster(),
+            self.cpu_limit(),
+            self.gpu_limit(),
+            self.mem_limit()
+        )
+    }
+}
+
+impl SlurmLimit {
+    pub fn construct(result: &serde_json::Value) -> Result<Self, Error> {
+        let account = match result.get("account") {
+            Some(account) => account,
+            None => {
+                tracing::warn!("Could not get account from limit: {:?}", result);
+                return Err(Error::Call("Could not get account from limit".to_string()));
+            }
+        };
+
+        let account = match account.as_str() {
+            Some(account) => account,
+            None => {
+                tracing::warn!("Could not get account as string from limit: {:?}", account);
+                return Err(Error::Call(
+                    "Could not get account as string from limit".to_string(),
+                ));
+            }
+        };
+
+        let cluster = match result.get("cluster") {
+            Some(cluster) => cluster,
+            None => {
+                tracing::warn!("Could not get cluster from limit: {:?}", result);
+                return Err(Error::Call("Could not get cluster from limit".to_string()));
+            }
+        };
+
+        let cluster = match cluster.as_str() {
+            Some(cluster) => cluster,
+            None => {
+                tracing::warn!("Could not get cluster as string from limit: {:?}", cluster);
+                return Err(Error::Call(
+                    "Could not get cluster as string from limit".to_string(),
+                ));
+            }
+        };
+
+        Ok(SlurmLimit {
+            account: clean_account_name(account)?,
+            cluster: cluster.to_string(),
+            cpu_limit: None,
+            gpu_limit: None,
+            mem_limit: None,
+        })
+    }
+
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    pub fn cluster(&self) -> &str {
+        &self.cluster
+    }
+
+    pub fn cpu_limit(&self) -> Option<Usage> {
+        self.cpu_limit
+    }
+
+    pub fn gpu_limit(&self) -> Option<Usage> {
+        self.gpu_limit
+    }
+
+    pub fn mem_limit(&self) -> Option<Usage> {
+        self.mem_limit
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SlurmAssociation {
     user: String,
     account: String,
@@ -1913,6 +2004,18 @@ impl SlurmNode {
     pub fn mem(&self) -> u64 {
         self.mem
     }
+
+    pub fn has_cpus(&self) -> bool {
+        self.cpus > 0
+    }
+
+    pub fn has_gpus(&self) -> bool {
+        self.gpus > 0
+    }
+
+    pub fn has_mem(&self) -> bool {
+        self.mem > 0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1931,6 +2034,10 @@ impl SlurmNodes {
 
     pub fn set_default(&mut self, default: &SlurmNode) {
         self.default = default.clone();
+    }
+
+    pub fn get_default(&self) -> &SlurmNode {
+        &self.default
     }
 
     pub fn set(&mut self, name: &str, node: &SlurmNode) {

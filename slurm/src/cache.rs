@@ -205,6 +205,17 @@ pub async fn set_node(name: &str, node: &SlurmNode) -> Result<(), Error> {
     Ok(())
 }
 
+pub async fn get_default_node() -> Result<SlurmNode, Error> {
+    let cache = CACHE.read().await;
+
+    match cache.nodes {
+        Some(ref nodes) => Ok(nodes.get_default().clone()),
+        None => Err(Error::Bug(
+            "No nodes have been set in the cache".to_string(),
+        )),
+    }
+}
+
 pub async fn get_nodes() -> Result<SlurmNodes, Error> {
     let cache = CACHE.read().await;
 

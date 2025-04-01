@@ -1890,7 +1890,7 @@ pub async fn add_user(
             tracing::error!("Could not add user: {}. Error: {}", user, e);
             match get_user(user).await? {
                 Some(user) => {
-                    tracing::info!("User already exists: {}", user);
+                    tracing::debug!("User already exists: {}", user);
                     user
                 }
                 None => {
@@ -2327,7 +2327,7 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
 
     if user.home() == homedir {
         // nothing to do
-        tracing::info!(
+        tracing::debug!(
             "Homedir for user {} is already {}. No changes needed.",
             user.identifier(),
             homedir
@@ -2394,7 +2394,7 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
 /// passed portal
 ///
 pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Error> {
-    tracing::info!("Getting managed groups for portal: {}", portal);
+    tracing::debug!("Getting managed groups for portal: {}", portal);
     if is_internal_portal(&portal.portal()) {
         // return an empty set of groups for internal portals
         return Ok(Vec::new());
@@ -2438,7 +2438,7 @@ pub async fn get_users(
     project: &ProjectIdentifier,
     instance: &Peer,
 ) -> Result<Vec<IPAUser>, Error> {
-    tracing::info!("Getting users for project: {}", project);
+    tracing::debug!("Getting users for project: {}", project);
 
     // don't get the users for project identifiers that use internal portal names
     // as they aren't public

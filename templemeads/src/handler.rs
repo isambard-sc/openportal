@@ -170,7 +170,7 @@ async fn process_command(
                             tracing::warn!("Not rerunning job that has already errored: {}", job);
                         }
                         _ => {
-                            tracing::info!("{} : {}", job.destination(), job.instruction());
+                            tracing::info!("Execute {} : {}", job.destination(), job.instruction());
 
                             job = match runner(Envelope::new(recipient, sender, zone, &job)).await {
                                 Ok(job) => job,

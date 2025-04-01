@@ -44,7 +44,7 @@ crate::async_runnable! {
                 // This is a job that should have been received from
                 // the bridge, and which is to be interpreted and passed
                 // south-bound to the agents for processing
-                tracing::info!("{} : {}", destination, instruction);
+                tracing::debug!("{} : {}", destination, instruction);
                 tracing::debug!("This was from {:?}", envelope);
 
                 if destination.agents().len() < 2 {

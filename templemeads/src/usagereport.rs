@@ -148,8 +148,6 @@ impl Usage {
             .parse::<u64>()
             .with_context(|| format!("Failed to parse seconds from '{}'", duration))?;
 
-        tracing::info!("Parsed seconds: {}", seconds * units);
-
         Ok(Self {
             seconds: seconds * units,
         })

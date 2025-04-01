@@ -661,6 +661,8 @@ impl Job {
     }
 
     pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
+        tracing::info!("Put {} : {}", self.destination(), self.instruction());
+
         self.assert_is_not_expired()?;
 
         // transition the job to pending, recording where it was sent

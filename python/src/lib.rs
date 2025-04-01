@@ -93,7 +93,7 @@ fn call_get<T>(function: &str) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
-    tracing::info!("Calling get /{}", function);
+    tracing::debug!("Calling get /{}", function);
 
     let config = get_config()?;
     let date = Utc::now();
@@ -111,7 +111,7 @@ where
         .send()
         .with_context(|| format!("Could not call function: {}", function))?;
 
-    tracing::info!("Response: {:?}", result);
+    tracing::debug!("Response: {:?}", result);
 
     if result.status().is_success() {
         Ok(result.json::<T>().context("Could not decode from json")?)
@@ -129,7 +129,7 @@ fn call_post<T>(function: &str, arguments: serde_json::Value) -> Result<T, Error
 where
     T: DeserializeOwned,
 {
-    tracing::info!("Calling post /{} with arguments: {:?}", function, arguments);
+    tracing::debug!("Calling post /{} with arguments: {:?}", function, arguments);
 
     let config = get_config()?;
     let date = Utc::now();
@@ -154,7 +154,7 @@ where
         .send()
         .with_context(|| format!("Could not call function: {}", function))?;
 
-    tracing::info!("Response: {:?}", result);
+    tracing::debug!("Response: {:?}", result);
 
     if result.status().is_success() {
         Ok(result.json::<T>().context("Could not decode from json")?)
@@ -244,7 +244,7 @@ impl Health {
 ///
 #[pyfunction]
 fn health() -> PyResult<Health> {
-    tracing::info!("Calling /health");
+    tracing::debug!("Calling /health");
     match call_get::<Health>("health") {
         Ok(response) => Ok(response),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),

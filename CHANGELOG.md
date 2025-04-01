@@ -11,6 +11,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   account. This is useful if different services use different partitions
   to separate out the accounting.
 
+- Added getting and setting of slurm limits, updating the set_limit
+  command to access a unit designator (e.g. "hours"). Defaults to
+  seconds if not specified.
+
+- Cleaned up the log messages so the agents are less chatty at the
+  "INFO" level, and the flow of jobs through agents is easier to follow.
+
 ## [0.9.6] - 2025-03-05
 ### Added
 - Added ability to control the parent account of slurm accounts that

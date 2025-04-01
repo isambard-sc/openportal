@@ -1952,10 +1952,7 @@ impl SlurmNode {
                     ));
                 }
             },
-            None => {
-                tracing::warn!("Could not get cpus from node: {:?}", value);
-                return Err(Error::Call("Could not get cpus from node".to_string()));
-            }
+            None => 0,
         };
 
         let gpus = match value.get("gpus") {
@@ -1968,10 +1965,7 @@ impl SlurmNode {
                     ));
                 }
             },
-            None => {
-                tracing::warn!("Could not get gpus from node: {:?}", value);
-                return Err(Error::Call("Could not get gpus from node".to_string()));
-            }
+            None => 0,
         };
 
         let mem = match value.get("mem") {
@@ -1984,10 +1978,7 @@ impl SlurmNode {
                     ));
                 }
             },
-            None => {
-                tracing::warn!("Could not get mem from node: {:?}", value);
-                return Err(Error::Call("Could not get mem from node".to_string()));
-            }
+            None => 0,
         };
 
         Ok(SlurmNode::new(cpus, gpus, mem))

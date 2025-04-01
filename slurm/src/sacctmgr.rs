@@ -948,6 +948,12 @@ pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage,
     match get_account(account.name()).await? {
         Some(account) => {
             let mut account = account.clone();
+
+            tracing::info!(
+                "Setting limit for account {} to {:?}",
+                account.name(),
+                limit
+            );
             account.set_limit(limit);
 
             let cluster = cache::get_cluster().await?;
@@ -981,8 +987,8 @@ pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage,
             if !tres.is_empty() {
                 runner()
                     .await?
-                    .run_json(&format!(
-                        "SACCTMGR modify account {} set GrpTRESMins={} where cluster={}",
+                    .run(&format!(
+                        "SACCTMGR --immediate modify account {} set GrpTRESMins={} where cluster={}",
                         account.name(),
                         tres.join(","),
                         cluster,

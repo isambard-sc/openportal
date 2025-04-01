@@ -6,15 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.10.0] - 2025-04-01
 ### Added
 - Added ability to specify the partition used for accounting for a slurm
   account. This is useful if different services use different partitions
   to separate out the accounting.
-
 - Added getting and setting of slurm limits, updating the set_limit
   command to access a unit designator (e.g. "hours"). Defaults to
   seconds if not specified.
-
 - Cleaned up the log messages so the agents are less chatty at the
   "INFO" level, and the flow of jobs through agents is easier to follow.
 
@@ -403,6 +402,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.10.0]: https://github.com/isambard-sc/openportal/releases/tag/0.10.0
 [0.9.6]: https://github.com/isambard-sc/openportal/releases/tag/0.9.6
 [0.9.5]: https://github.com/isambard-sc/openportal/releases/tag/0.9.5
 [0.9.4]: https://github.com/isambard-sc/openportal/releases/tag/0.9.4

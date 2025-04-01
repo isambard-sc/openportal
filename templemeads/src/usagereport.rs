@@ -110,8 +110,6 @@ impl std::fmt::Display for Usage {
 
 impl Usage {
     pub fn parse(duration: &str) -> Result<Self, Error> {
-        tracing::info!("Parsing duration: {}", duration);
-
         let mut units = 1; // seconds
 
         let parts: Vec<&str> = duration.split_whitespace().collect();

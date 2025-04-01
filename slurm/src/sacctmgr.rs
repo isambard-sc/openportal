@@ -80,7 +80,7 @@ impl SlurmRunner {
     pub async fn run(&self, cmd: &str) -> Result<String, Error> {
         let processed_cmd = self.process(cmd)?;
 
-        tracing::info!("Running command: {:?}", processed_cmd);
+        tracing::debug!("Running command: {:?}", processed_cmd);
 
         let output = match tokio::process::Command::new(&processed_cmd[0])
             .args(&processed_cmd[1..])
@@ -322,7 +322,7 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
                 );
             }
 
-            tracing::info!("Using existing slurm account {}", existing_account);
+            tracing::debug!("Using existing slurm account {}", existing_account);
             return Ok(existing_account);
         }
     }
@@ -514,7 +514,7 @@ async fn add_user_association(
         .any(|a| a.account() == account.name() && a.cluster() == cluster)
     {
         // the association already exists
-        tracing::info!(
+        tracing::debug!(
             "User {} already associated with account {} in cluster {}",
             user.name(),
             account.name(),
@@ -550,11 +550,11 @@ async fn add_user_association(
 
         user_changed = true;
 
-        tracing::info!("Updated user: {}", user);
+        tracing::debug!("Updated user: {}", user);
     }
 
     if make_default && *user.default_account() != Some(account.name().to_string()) {
-        tracing::info!("Will set user default account here");
+        tracing::debug!("Will set user default account here");
 
         runner()
             .await?
@@ -585,7 +585,7 @@ async fn add_user_association(
         // now cache the updated user
         cache::add_user(&user).await?;
     } else {
-        tracing::info!("Using existing user: {}", user);
+        tracing::debug!("Using existing user: {}", user);
     }
 
     Ok(user)
@@ -610,7 +610,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
                 .iter()
                 .any(|a| a.account() == slurm_account.name() && a.cluster() == cluster)
         {
-            tracing::info!("Using existing user {}", slurm_user);
+            tracing::debug!("Using existing user {}", slurm_user);
             return Ok(slurm_user);
         } else {
             tracing::warn!(
@@ -659,7 +659,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 }
 
 pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str) {
-    tracing::info!(
+    tracing::debug!(
         "Using command line slurmd commands: sacctmgr: {}, scontrol: {}",
         sacctmgr,
         scontrol
@@ -688,11 +688,11 @@ pub async fn find_cluster() -> Result<(), Error> {
         .map(|line| line.split('|').next().unwrap_or_default().to_string())
         .collect();
 
-    tracing::info!("Clusters: {:?}", clusters);
+    tracing::debug!("Clusters: {:?}", clusters);
 
     if let Some(requested_cluster) = requested_cluster {
         if clusters.contains(&requested_cluster) {
-            tracing::info!("Using requested cluster: {}", requested_cluster);
+            tracing::debug!("Using requested cluster: {}", requested_cluster);
         } else {
             tracing::warn!(
                 "Requested cluster {} not found in list of clusters: {:?}",
@@ -702,7 +702,7 @@ pub async fn find_cluster() -> Result<(), Error> {
             return Err(Error::Login("Requested cluster not found".to_string()));
         }
     } else {
-        tracing::info!(
+        tracing::debug!(
             "Using the first cluster available by default: {}",
             clusters[0]
         );
@@ -884,59 +884,97 @@ pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
 
     let cluster = cache::get_cluster().await?;
 
-    let limit = match limits
+    let project_limit = account.limit();
+
+    let slurm_limit = match limits
         .iter()
         .find(|l| l.account() == account.name() && l.cluster() == cluster)
     {
-        Some(limit) => limit,
+        Some(slurm_limit) => slurm_limit,
         None => {
             tracing::warn!("Could not find limit for account {}", account.name());
             return Err(Error::NotFound(account.name().to_string()));
         }
     };
 
+    tracing::debug!(
+        "Found limit for account {}: {}",
+        account.name(),
+        slurm_limit
+    );
+
     let node = cache::get_default_node().await?;
 
-    if node.has_cpus() {
-        if let Some(cpu_limit) = limit.cpu_limit() {
-            let check = (node.cpus() as f64 * cpu_limit.minutes()) as u64;
+    let mut actual_slurm_limit: Option<Usage> = None;
+
+    if node.has_cpus() && node.cpus() > 0 {
+        if let Some(cpu_limit) = slurm_limit.cpu_limit() {
+            let check = node.cpus() * project_limit.seconds();
             if check != cpu_limit.seconds() {
-                tracing::warn!(
-                    "CPU limit for account {} does not match: {} != {}",
-                    account.name(),
-                    check,
-                    cpu_limit.seconds()
-                );
+                if check != 0 {
+                    tracing::warn!(
+                        "CPU limit for account {} does not match: {} != {}",
+                        account.name(),
+                        check,
+                        cpu_limit.seconds()
+                    );
+                }
+
+                actual_slurm_limit = Some(Usage::new(cpu_limit.seconds() / node.cpus()));
             }
         }
     }
 
-    if node.has_gpus() {
-        if let Some(gpu_limit) = limit.gpu_limit() {
-            let check = (node.gpus() as f64 * gpu_limit.minutes()) as u64;
+    if node.has_gpus() && node.gpus() > 0 {
+        if let Some(gpu_limit) = slurm_limit.gpu_limit() {
+            let check = node.gpus() * project_limit.seconds();
             if check != gpu_limit.seconds() {
-                tracing::warn!(
-                    "GPU limit for account {} does not match: {} != {}",
-                    account.name(),
-                    check,
-                    gpu_limit.seconds()
-                );
+                if check != 0 {
+                    tracing::warn!(
+                        "GPU limit for account {} does not match: {} != {}",
+                        account.name(),
+                        check,
+                        gpu_limit.seconds()
+                    );
+                }
+
+                if actual_slurm_limit.is_none() {
+                    actual_slurm_limit = Some(Usage::new(gpu_limit.seconds() / node.gpus()));
+                }
             }
         }
     }
 
-    if node.has_mem() {
-        if let Some(mem_limit) = limit.mem_limit() {
-            let check = (node.mem() as f64 * mem_limit.minutes()) as u64;
+    if node.has_mem() && node.mem() > 0 {
+        if let Some(mem_limit) = slurm_limit.mem_limit() {
+            let check = node.mem() * project_limit.seconds();
             if check != mem_limit.seconds() {
-                tracing::warn!(
-                    "Memory limit for account {} does not match: {} != {}",
-                    account.name(),
-                    check,
-                    mem_limit.seconds()
-                );
+                if check != 0 {
+                    tracing::warn!(
+                        "Memory limit for account {} does not match: {} != {}",
+                        account.name(),
+                        check,
+                        mem_limit.seconds()
+                    );
+                }
+
+                if actual_slurm_limit.is_none() {
+                    actual_slurm_limit = Some(Usage::new(mem_limit.seconds() / node.mem()));
+                }
             }
         }
+    }
+
+    if let Some(actual_slurm_limit) = actual_slurm_limit {
+        // we need to set this to the actual slurm limit
+        let mut account = account.clone();
+        account.set_limit(&actual_slurm_limit);
+
+        // now save the account to the cache
+        cache::add_account(&account).await?;
+
+        tracing::info!("Updated account limit to {}", actual_slurm_limit);
+        return Ok(actual_slurm_limit);
     }
 
     Ok(*account.limit())
@@ -949,11 +987,6 @@ pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage,
         Some(account) => {
             let mut account = account.clone();
 
-            tracing::info!(
-                "Setting limit for account {} to {:?}",
-                account.name(),
-                limit
-            );
             account.set_limit(limit);
 
             let cluster = cache::get_cluster().await?;

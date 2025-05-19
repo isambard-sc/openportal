@@ -199,6 +199,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             list,
             remove,
             zone,
+            rotate,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -247,6 +248,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             add,
             list,
             remove,
+            rotate,
             zone,
         }) => {
             if *list {
@@ -283,6 +285,17 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 config.service.remove_server(server, zone)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' removed.", server);
+                return Ok(None);
+            }
+
+            if let Some(server) = rotate {
+                // read the invitation from the passed toml file
+                let invite = load_invite(server)?;
+
+                let mut config = load_config::<Config>(&config_file)?;
+                config.service.rotate_server_keys(invite)?;
+                save_config(&config, &config_file)?;
+                tracing::info!("Server '{}' rotated.", server.display());
                 return Ok(None);
             }
 
@@ -375,6 +388,13 @@ enum Commands {
             help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
         )]
         zone: Option<String>,
+
+        #[arg(
+            long,
+            short = 'R',
+            help = "Name of the client whose keys are being rotated"
+        )]
+        rotate: Option<String>,
     },
 
     /// Adding and removing servers
@@ -402,6 +422,13 @@ enum Commands {
             help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
         )]
         zone: Option<String>,
+
+        #[arg(
+            long,
+            short = 'R',
+            help = "File containing the rotation invite from a server which is rotating keys"
+        )]
+        rotate: Option<PathBuf>,
     },
 
     /// Initialise the Service

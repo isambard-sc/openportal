@@ -13,6 +13,7 @@ use tokio::task::JoinSet;
 
 use crate::command::Command;
 use crate::connection::Connection;
+use crate::connection::StandbyStatus;
 use crate::error::Error;
 use crate::message::Message;
 
@@ -71,6 +72,9 @@ pub struct Exchange {
     // active watchdog checks - ensures that we don't flood the exchange
     // if a connection flaps
     watchdogs: Arc<Mutex<HashSet<String>>>,
+
+    // whether or not we are a secondary server
+    is_secondary: bool,
 }
 
 impl Default for Exchange {
@@ -134,8 +138,56 @@ impl Exchange {
             tx,
             handler: None,
             watchdogs: Arc::new(Mutex::new(HashSet::new())),
+            is_secondary: false,
         }
     }
+}
+
+#[allow(dead_code)]
+pub async fn set_is_primary() -> Result<(), Error> {
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
+        }
+    };
+
+    exchange.is_secondary = false;
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn set_is_secondary() -> Result<(), Error> {
+    let connections = match SINGLETON_EXCHANGE.write() {
+        Ok(mut exchange) => {
+            if exchange.is_secondary {
+                None
+            } else {
+                exchange.is_secondary = true;
+                Some(exchange.connections.clone())
+            }
+        }
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
+        }
+    };
+
+    // possible race conditions here, if we are quickly re-enabled
+    // as the primary - but these will be sorted out when everything
+    // reconnects
+
+    if let Some(mut connections) = connections {
+        // if we are changing the state from primary to secondary
+        // we should disconnect all connections
+        for connection in connections.values_mut() {
+            if let Err(e) = connection.disconnect().await {
+                tracing::error!("Error disconnecting connection: {}", e);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn set_name(name: &str) -> Result<(), Error> {
@@ -164,12 +216,16 @@ pub async fn set_handler(handler: AsyncMessageHandler) -> Result<(), Error> {
     Ok(())
 }
 
+fn get_key_from_str(name: &str, zone: &str) -> String {
+    format!("{}@{}", name, zone)
+}
+
 fn get_recipient(message: &Message) -> String {
-    format!("{}@{}", message.recipient(), message.zone())
+    get_key_from_str(message.recipient(), message.zone())
 }
 
 fn get_key(connection: &Connection) -> String {
-    format!("{}@{}", connection.name(), connection.zone())
+    get_key_from_str(&connection.name(), &connection.zone())
 }
 
 pub async fn unregister(connection: &Connection) -> Result<(), Error> {
@@ -203,6 +259,33 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+pub async fn check_standby(name: &str, zone: &str) -> Result<StandbyStatus, Error> {
+    let exchange = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+        }
+    };
+
+    if exchange.is_secondary {
+        return Ok(StandbyStatus::secondary_server());
+    }
+
+    if exchange
+        .connections
+        .contains_key(&get_key_from_str(name, zone))
+    {
+        // there is a connection with this name and zone, so any more
+        // connections will become secondary
+        Ok(StandbyStatus::secondary_client())
+    } else {
+        // there isn't, so this could be a primary connection
+        // (subject to the race condition - it will only become primary
+        //  if it wins the race)
+        Ok(StandbyStatus::primary())
+    }
 }
 
 pub async fn register(connection: Connection) -> Result<(), Error> {
@@ -278,7 +361,7 @@ pub fn received(message: Message) -> Result<(), Error> {
 }
 
 pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
-    let name = format!("{}@{}", peer, zone);
+    let name = get_key_from_str(peer, zone);
 
     let connection = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
@@ -358,8 +441,8 @@ pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::UnnamedConnection(format!(
-            "Connection {}@{} not found",
-            peer, zone
+            "Connection {} not found",
+            name
         )))
     }
 }
@@ -372,7 +455,7 @@ pub async fn disconnect(peer: &str, zone: &str) -> Result<(), Error> {
         }
     }
     .connections
-    .get(&format!("{}@{}", peer, zone))
+    .get(&get_key_from_str(peer, zone))
     .cloned();
 
     if let Some(mut connection) = connection {

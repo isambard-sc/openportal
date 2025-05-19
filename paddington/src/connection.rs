@@ -110,25 +110,80 @@ pub struct Connection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandbyStatus {
+    server_is_secondary: bool,
+    client_is_secondary: bool,
+}
+
+impl Display for StandbyStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.server_is_secondary() {
+            write!(f, "Server is secondary")
+        } else if self.client_is_secondary() {
+            write!(f, "Client is secondary")
+        } else {
+            write!(f, "Primary")
+        }
+    }
+}
+
+impl StandbyStatus {
+    pub fn primary() -> Self {
+        StandbyStatus {
+            server_is_secondary: false,
+            client_is_secondary: false,
+        }
+    }
+
+    pub fn secondary_server() -> Self {
+        StandbyStatus {
+            server_is_secondary: true,
+            client_is_secondary: false,
+        }
+    }
+
+    pub fn secondary_client() -> Self {
+        StandbyStatus {
+            server_is_secondary: false,
+            client_is_secondary: true,
+        }
+    }
+
+    pub fn is_primary(&self) -> bool {
+        !self.server_is_secondary && !self.client_is_secondary
+    }
+
+    pub fn server_is_secondary(&self) -> bool {
+        self.server_is_secondary
+    }
+
+    pub fn client_is_secondary(&self) -> bool {
+        self.client_is_secondary
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PeerDetails {
     name: String,
     zone: String,
     version: u32,
+    standby_status: StandbyStatus,
 }
 
 impl Display for PeerDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.name, self.zone)
+        write!(f, "{} ({}) - {}", self.name, self.zone, self.standby_status)
     }
 }
 
 impl PeerDetails {
-    fn new(name: &str, zone: &str) -> Self {
-        // everything is currently version 1
+    fn new(name: &str, zone: &str, status: &StandbyStatus) -> Self {
+        // everything is currently version 2
         PeerDetails {
             name: name.to_string(),
             zone: zone.to_string(),
-            version: 1,
+            version: 2,
+            standby_status: status.clone(),
         }
     }
 
@@ -142,6 +197,19 @@ impl PeerDetails {
 
     fn version(&self) -> u32 {
         self.version
+    }
+
+    fn status(&self) -> &StandbyStatus {
+        &self.standby_status
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckStandby {}
+
+impl CheckStandby {
+    fn new() -> Self {
+        CheckStandby {}
     }
 }
 
@@ -573,7 +641,8 @@ impl Connection {
         // the final step is for the client to send the server its PeerDetails,
         // and for the server to respond. These should match up with
         // what we expect
-        let peer_details = PeerDetails::new(&self.config.name(), &peer_zone);
+        let peer_details =
+            PeerDetails::new(&self.config.name(), &peer_zone, &StandbyStatus::primary());
 
         let message = match envelope_message(
             peer_details,
@@ -666,15 +735,74 @@ impl Connection {
             ));
         }
 
-        if peer_details.version() != 1 {
+        if peer_details.version() != 2 {
             tracing::warn!(
-                "Peer version does not match expected version: {} != 1",
+                "Peer version does not match expected version: {} != 2",
                 peer_details.version()
             );
             self.set_error().await;
             return Err(Error::InvalidPeer(
                 "Peer version does not match expected version.".to_string(),
             ));
+        }
+
+        // check to see if this is a primary or standby (secondary) connection
+        let standby = peer_details.status();
+
+        if !standby.is_primary() {
+            if standby.server_is_secondary() {
+                tracing::warn!("Server is a secondary connection - not allowed");
+                self.set_error().await;
+                return Err(Error::ServerIsSecondary(
+                    "Server is a secondary connection - not allowed".to_string(),
+                ));
+            }
+
+            while standby.client_is_secondary() {
+                // wait 1 second and then ask the server to check again
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                let message = envelope_message(
+                    CheckStandby::new(),
+                    &inner_key,
+                    &outer_key,
+                    &inner_key_salt,
+                    &outer_key_salt,
+                )?;
+
+                if let Err(r) = outgoing.send(message).await {
+                    self.set_error().await;
+                    return Err(Error::Any(r.into()));
+                }
+
+                // wait for the response
+                let message = incoming.next().await.ok_or_else(|| {
+                    tracing::warn!("No standby response received - closing connection");
+                    Error::InvalidPeer(
+                        "No standby response received - closing connection.".to_string(),
+                    )
+                })??;
+
+                let standby = deenvelope_message::<StandbyStatus>(
+                    message,
+                    &inner_key,
+                    &outer_key,
+                    &inner_key_salt,
+                    &outer_key_salt,
+                )
+                .with_context(|| "Error de-enveloping standby response - closing connection")?;
+
+                if standby.is_primary() {
+                    tracing::info!("Connection is now primary - continuing");
+                    break;
+                } else if standby.server_is_secondary() {
+                    tracing::warn!("Server is a secondary connection - not allowed");
+                    self.set_error().await;
+                    return Err(Error::ServerIsSecondary(
+                        "Server is a secondary connection - not allowed".to_string(),
+                    ));
+                }
+            }
         }
 
         tracing::info!("Handshake complete!");
@@ -1098,9 +1226,9 @@ impl Connection {
             ));
         }
 
-        if peer_details.version() != 1 {
+        if peer_details.version() != 2 {
             tracing::warn!(
-                "Peer version does not match expected version: {} != 1",
+                "Peer version does not match expected version: {} != 2",
                 peer_details.version()
             );
             return Err(Error::InvalidPeer(
@@ -1108,8 +1236,15 @@ impl Connection {
             ));
         }
 
+        // now we know that the peer is valid, check to see if either we or the
+        // peer are 'standby' (secondary), and so would need to wait until
+        // the primary fails before completing the connection
+        let standby: StandbyStatus = exchange::check_standby(&peer_name, &peer_zone)
+            .await
+            .with_context(|| "Error checking if peer is standby")?;
+
         // now send back our PeerDetials
-        let peer_details = PeerDetails::new(&service_name, &peer_zone);
+        let peer_details = PeerDetails::new(&service_name, &peer_zone, &standby);
 
         let message = envelope_message(
             peer_details,
@@ -1123,6 +1258,71 @@ impl Connection {
             .send(message)
             .await
             .with_context(|| "Error sending response to peer - closing connection")?;
+
+        if !standby.is_primary() {
+            if standby.server_is_secondary() {
+                // we are a secondary server - the peer should disconnect and
+                // try to connect to the primary
+                return Err(Error::ServerIsSecondary(
+                    "Server is standby - closing connection.".to_string(),
+                ));
+            }
+
+            while standby.client_is_secondary() {
+                // the peer is a secondary client - we will keep communicating
+                // with them until the primary fails, and can then switch over
+                // to them as needed - first, wait for the peer to ask us
+                // to check the status again
+                let message = incoming.next().await.ok_or_else(|| {
+                    tracing::warn!("No standby request received - closing connection.");
+                    Error::InvalidPeer(
+                        "No standby request received - closing connection.".to_string(),
+                    )
+                })??;
+
+                let _ = deenvelope_message::<CheckStandby>(
+                    message,
+                    &inner_key,
+                    &outer_key,
+                    &inner_key_salt,
+                    &outer_key_salt,
+                )
+                .with_context(|| "Error de-enveloping message - closing connection.")?;
+
+                // check to see the new standby status
+                let status: StandbyStatus = exchange::check_standby(&peer_name, &peer_zone)
+                    .await
+                    .with_context(|| "Error checking if peer is standby")?;
+
+                // send back the new status
+                let message = envelope_message(
+                    status,
+                    &inner_key,
+                    &outer_key,
+                    &inner_key_salt,
+                    &outer_key_salt,
+                )?;
+
+                outgoing
+                    .send(message)
+                    .await
+                    .with_context(|| "Error sending response to peer - closing connection")?;
+
+                if standby.server_is_secondary() {
+                    // we are a standby server - the peer should disconnect and
+                    // try to connect to the primary
+                    return Err(Error::ServerIsSecondary(
+                        "Server is secondary - closing connection.".to_string(),
+                    ));
+                }
+
+                if standby.is_primary() {
+                    // this is now a primary connection - we can continue from here
+                    tracing::info!("Connection is now primary - continuing");
+                    break;
+                }
+            }
+        }
 
         tracing::info!("Handshake complete!");
 

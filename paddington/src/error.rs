@@ -29,6 +29,12 @@ pub enum Error {
     InvalidPeer(String),
 
     #[error("{0}")]
+    ServerIsSecondary(String),
+
+    #[error("{0}")]
+    ClientIsSecondary(String),
+
+    #[error("{0}")]
     NotExists(String),
 
     #[error("{0}")]

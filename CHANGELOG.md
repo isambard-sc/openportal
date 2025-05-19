@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added support for high availability (HA) for client OpenPortal agents.
+  This allows for client agents to be run on multiple nodes, with only
+  one node being active at a time, and automatic failover to other nodes
+  if the active node fails. The failover also ensures that all client
+  connections are failed over to the same node. Note that HA for
+  server agents is not yet supported - including agents that act
+  as both servers and clients. There should still only be a single
+  instance of such agents in a network. HA for server agents
+  in planned.
 
 ## [0.10.0] - 2025-04-01
 ### Added

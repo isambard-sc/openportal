@@ -35,6 +35,9 @@ pub enum Error {
     ClientIsSecondary(String),
 
     #[error("{0}")]
+    PeerIsSecondary(String),
+
+    #[error("{0}")]
     NotExists(String),
 
     #[error("{0}")]
@@ -51,6 +54,9 @@ pub enum Error {
 
     #[error("{0}")]
     Send(String),
+
+    #[error("{0}")]
+    TooManyStandbyConnections(String),
 
     #[error("{0}")]
     UnknownPeer(String),

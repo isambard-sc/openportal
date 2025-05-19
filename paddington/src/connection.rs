@@ -750,6 +750,13 @@ impl Connection {
         let standby = peer_details.status();
 
         if !standby.is_primary() {
+            tracing::debug!("Peer is a standby connection: {}", standby);
+
+            // get a RAII object to increment the number of secondary
+            // connections for this peer
+            let waiter =
+                exchange::get_standby_waiter(peer_details.name(), peer_details.zone()).await?;
+
             if standby.server_is_secondary() {
                 tracing::warn!("Server is a secondary connection - not allowed");
                 self.set_error().await;
@@ -758,9 +765,12 @@ impl Connection {
                 ));
             }
 
-            while standby.client_is_secondary() {
+            let mut client_is_secondary = standby.client_is_secondary();
+
+            while client_is_secondary {
                 // wait 1 second and then ask the server to check again
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tracing::debug!("Asking server to check standby status");
 
                 let message = envelope_message(
                     CheckStandby::new(),
@@ -792,9 +802,11 @@ impl Connection {
                 )
                 .with_context(|| "Error de-enveloping standby response - closing connection")?;
 
+                tracing::debug!("Standby status: {}", standby);
+
                 if standby.is_primary() {
                     tracing::info!("Connection is now primary - continuing");
-                    break;
+                    client_is_secondary = false;
                 } else if standby.server_is_secondary() {
                     tracing::warn!("Server is a secondary connection - not allowed");
                     self.set_error().await;
@@ -803,6 +815,9 @@ impl Connection {
                     ));
                 }
             }
+
+            // make sure we've dropped the waiter (should be automatic)
+            drop(waiter);
         }
 
         tracing::info!("Handshake complete!");
@@ -1260,7 +1275,15 @@ impl Connection {
             .with_context(|| "Error sending response to peer - closing connection")?;
 
         if !standby.is_primary() {
+            // get a RAII object to increment the number of secondary
+            // connections for this peer
+            let waiter = exchange::get_standby_waiter(&peer_name, &peer_zone).await?;
+
+            tracing::debug!("Peer is standby - checking status");
+
             if standby.server_is_secondary() {
+                tracing::warn!("Server is a secondary connection - disconnecting!");
+
                 // we are a secondary server - the peer should disconnect and
                 // try to connect to the primary
                 return Err(Error::ServerIsSecondary(
@@ -1268,7 +1291,16 @@ impl Connection {
                 ));
             }
 
-            while standby.client_is_secondary() {
+            let mut client_is_secondary = standby.client_is_secondary();
+
+            while client_is_secondary {
+                tracing::debug!("While loop iteration {}", client_is_secondary);
+                tracing::debug!(
+                    "Client {}@{} is secondary - checking status...",
+                    peer_name,
+                    peer_zone
+                );
+
                 // the peer is a secondary client - we will keep communicating
                 // with them until the primary fails, and can then switch over
                 // to them as needed - first, wait for the peer to ask us
@@ -1290,13 +1322,20 @@ impl Connection {
                 .with_context(|| "Error de-enveloping message - closing connection.")?;
 
                 // check to see the new standby status
-                let status: StandbyStatus = exchange::check_standby(&peer_name, &peer_zone)
+                let standby: StandbyStatus = exchange::check_standby(&peer_name, &peer_zone)
                     .await
                     .with_context(|| "Error checking if peer is standby")?;
 
+                tracing::debug!(
+                    "Peer {}@{} is now {}",
+                    peer_name,
+                    peer_zone,
+                    standby.to_string()
+                );
+
                 // send back the new status
                 let message = envelope_message(
-                    status,
+                    standby.clone(),
                     &inner_key,
                     &outer_key,
                     &inner_key_salt,
@@ -1309,6 +1348,8 @@ impl Connection {
                     .with_context(|| "Error sending response to peer - closing connection")?;
 
                 if standby.server_is_secondary() {
+                    tracing::warn!("Server is a secondary connection - disconnecting!");
+
                     // we are a standby server - the peer should disconnect and
                     // try to connect to the primary
                     return Err(Error::ServerIsSecondary(
@@ -1319,9 +1360,12 @@ impl Connection {
                 if standby.is_primary() {
                     // this is now a primary connection - we can continue from here
                     tracing::info!("Connection is now primary - continuing");
-                    break;
+                    client_is_secondary = false;
                 }
             }
+
+            // make sure we've dropped the waiter (should be automatic)
+            drop(waiter);
         }
 
         tracing::info!("Handshake complete!");

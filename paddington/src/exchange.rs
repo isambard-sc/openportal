@@ -75,11 +75,103 @@ pub struct Exchange {
 
     // whether or not we are a secondary server
     is_secondary: bool,
+
+    // a hash counting the number of standby connections
+    // per peer
+    standby_peers: HashMap<String, u32>,
 }
 
 impl Default for Exchange {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+async fn increment_standby_count(name: &str, zone: &str) {
+    let key = get_key_from_str(name, zone);
+
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            tracing::error!("Error getting write lock: {}", e);
+            return;
+        }
+    };
+
+    let count = exchange.standby_peers.entry(key).or_insert(0);
+    *count += 1;
+    tracing::debug!("Incremented standby count for {}@{}: {}", name, zone, count);
+}
+
+async fn decrement_standby_count(name: &str, zone: &str) {
+    let key = get_key_from_str(name, zone);
+
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            tracing::error!("Error getting write lock: {}", e);
+            return;
+        }
+    };
+
+    if let Some(count) = exchange.standby_peers.get(&key) {
+        let new_count = count.saturating_sub(1);
+
+        if new_count == 0 {
+            exchange.standby_peers.remove(&key);
+        } else {
+            exchange.standby_peers.insert(key.clone(), new_count);
+        }
+
+        tracing::debug!(
+            "Decremented standby count for {}@{}: {}",
+            name,
+            zone,
+            new_count
+        );
+    } else {
+        tracing::debug!("No standby count for {}@{}", name, zone);
+    }
+}
+
+fn get_standby_count(exchange: &Exchange, name: &str, zone: &str) -> u32 {
+    let key = get_key_from_str(name, zone);
+    *exchange.standby_peers.get(&key).unwrap_or(&0)
+}
+
+#[derive(Default, Clone)]
+pub struct StandbyWaiter {
+    name: String,
+    zone: String,
+    dropped: bool,
+}
+
+impl StandbyWaiter {
+    pub fn new(name: &str, zone: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            zone: zone.to_string(),
+            dropped: false,
+        }
+    }
+
+    async fn terminate(&self) {
+        tracing::debug!("Terminating StandbyWaiter: {}@{}", self.name, self.zone);
+        decrement_standby_count(&self.name, &self.zone).await;
+        tracing::debug!("StandbyWaiter terminated: {}@{}", self.name, self.zone);
+    }
+}
+
+impl Drop for StandbyWaiter {
+    fn drop(&mut self) {
+        tracing::debug!("Dropping StandbyWaiter: {}@{}", self.name, self.zone);
+
+        if !self.dropped {
+            let mut this = StandbyWaiter::default();
+            std::mem::swap(self, &mut this);
+            this.dropped = true;
+            tokio::spawn(async move { this.terminate().await });
+        }
     }
 }
 
@@ -139,6 +231,7 @@ impl Exchange {
             handler: None,
             watchdogs: Arc::new(Mutex::new(HashSet::new())),
             is_secondary: false,
+            standby_peers: HashMap::new(),
         }
     }
 }
@@ -261,6 +354,11 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
+pub async fn get_standby_waiter(name: &str, zone: &str) -> Result<Arc<StandbyWaiter>, Error> {
+    increment_standby_count(name, zone).await;
+    Ok(Arc::new(StandbyWaiter::new(name, zone)))
+}
+
 pub async fn check_standby(name: &str, zone: &str) -> Result<StandbyStatus, Error> {
     let exchange = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
@@ -268,6 +366,15 @@ pub async fn check_standby(name: &str, zone: &str) -> Result<StandbyStatus, Erro
             return Err(Error::Poison(format!("Error getting read lock: {}", e)));
         }
     };
+
+    // if the number of standby connections is greater than 16 then raise
+    // an error to terminate the connection - this prevents a DoS attack
+    if get_standby_count(&exchange, name, zone) > 16 {
+        return Err(Error::TooManyStandbyConnections(format!(
+            "Too many standby connections for {}@{}",
+            name, zone
+        )));
+    }
 
     if exchange.is_secondary {
         return Ok(StandbyStatus::secondary_server());
@@ -288,7 +395,7 @@ pub async fn check_standby(name: &str, zone: &str) -> Result<StandbyStatus, Erro
     }
 }
 
-pub async fn register(connection: Connection) -> Result<(), Error> {
+async fn locked_register(connection: Connection) -> Result<bool, Error> {
     let name = connection.name();
     let zone = connection.zone();
 
@@ -320,7 +427,61 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
         )));
     }
 
-    exchange.connections.insert(key, connection);
+    // go through and see if we have any standby connections that
+    // are for keys that are alphabetically more than this one.
+    // If so, then we need to disconnect them all, as this is a
+    // standby-only agent
+    let is_standby_only = exchange
+        .standby_peers
+        .iter()
+        .any(|(k, v)| *v > 0 && k > &key);
+
+    if !is_standby_only {
+        exchange.connections.insert(key, connection);
+    }
+
+    Ok(is_standby_only)
+}
+
+pub async fn register(connection: Connection) -> Result<(), Error> {
+    let is_standby_only = locked_register(connection.clone()).await?;
+
+    if is_standby_only {
+        let mut connections = match SINGLETON_EXCHANGE.read() {
+            Ok(exchange) => exchange.connections.clone(),
+            Err(e) => {
+                return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+            }
+        };
+
+        // potential race condition here, but this will be resolved when
+        // all of the peers disconnect and reconnect
+
+        for connection in connections.values_mut() {
+            match connection.disconnect().await {
+                Ok(_) => {
+                    tracing::debug!("Disconnected connection: {}", connection.name());
+                }
+                Err(e) => {
+                    tracing::error!("Error disconnecting connection: {}", e);
+                }
+            }
+        }
+
+        // NOTE THAT WE DON'T YET REMOVE ANY SERVERS - THEY COULD STILL
+        // BE LISTENING FOR CONNECTIONS. WE DO NEED TO WORK OUT HOW
+        // TO HANDLE HA FOR SERVERS - THIS IS A WORK IN PROGRESS
+
+        // PROBABLY THE BEST ROUTE IS TO HAVE A CONTROL MESSAGE WE SEND
+        // OURSELVES THAT SWITCHES US OVER TO SECONDARY MODE - THIS WOULD
+        // AVOID HAVING TO DISCONNECT EVERYTHING ABOVE - CHALLENGE IS
+        // HOW TO SEND A MESSAGE TO SWITCH US BACK TO PRIMARY MODE
+
+        return Err(Error::PeerIsSecondary(
+            "This peer is fully secondary".to_string(),
+        ));
+    }
+
     Ok(())
 }
 

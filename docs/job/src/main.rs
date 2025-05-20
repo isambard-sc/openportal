@@ -208,7 +208,7 @@ async fn run_cluster(invitation: &Path) -> Result<(), Error> {
     )?;
 
     // now give the invitation to connect to the server to the client
-    service.add_server(invite)?;
+    service.add_server(&invite)?;
 
     // now create the config for this agent - this combines
     // the paddington service configuration with the Agent::Type

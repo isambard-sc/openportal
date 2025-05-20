@@ -270,6 +270,22 @@ impl ServerConfig {
     pub fn outer_key(&self) -> SecretKey {
         self.outer_key.clone()
     }
+
+    pub fn rotate_keys(&mut self, invite: &Invite) -> Result<(), Error> {
+        // verify that the name and zone match the invite
+        if self.name != invite.name() || self.zone != invite.zone() {
+            return Err(Error::Peer(format!(
+                "Server name and zone do not match invite: {} {}",
+                self.name, self.zone
+            )));
+        }
+
+        // copy the keys from the invite
+        self.inner_key = invite.inner_key();
+        self.outer_key = invite.outer_key();
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -391,6 +407,11 @@ impl ClientConfig {
 
     pub fn outer_key(&self) -> SecretKey {
         self.outer_key.clone()
+    }
+
+    pub fn rotate_keys(&mut self) {
+        self.inner_key = Key::generate();
+        self.outer_key = Key::generate();
     }
 }
 
@@ -597,6 +618,28 @@ impl ServiceConfig {
         self.proxy_header.clone()
     }
 
+    fn clean_zone(&self, zone: &Option<String>) -> Result<String, Error> {
+        let zone = zone.clone().unwrap_or_else(default_zone);
+        let zone = zone.trim();
+
+        if zone.is_empty() {
+            return Err(Error::Peer("No zone provided.".to_string()));
+        }
+
+        // make sure that zone is [a-zA-Z0-9_]
+        if !zone
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::Peer(format!(
+                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
+                zone
+            )));
+        }
+
+        Ok(zone.to_string())
+    }
+
     pub fn add_client(
         &mut self,
         name: &str,
@@ -610,23 +653,7 @@ impl ServiceConfig {
             return Err(Error::Peer("No client name provided.".to_string()));
         }
 
-        let zone = zone.clone().unwrap_or_else(default_zone);
-        let zone = zone.trim();
-
-        if zone.is_empty() {
-            return Err(Error::Peer("No zone provided.".to_string()));
-        }
-
-        // make sure that zone is [a-zA-Z0-9_]
-        if !zone
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(Error::Peer(format!(
-                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
-                zone
-            )));
-        }
+        let zone = self.clean_zone(zone)?;
 
         // check if we already have a client with this name in this zone
         for c in self.clients.iter() {
@@ -638,37 +665,21 @@ impl ServiceConfig {
             }
         }
 
-        let client = ClientConfig::new(name, &ip, zone);
+        let client = ClientConfig::new(name, &ip, &zone);
 
         self.clients.push(client.clone());
 
         Ok(Invite::new(
             &self.name,
             &self.url,
-            zone,
+            &zone,
             &client.inner_key,
             &client.outer_key,
         ))
     }
 
     pub fn remove_client(&mut self, name: &str, zone: &Option<String>) -> Result<(), Error> {
-        let zone = zone.clone().unwrap_or_else(default_zone);
-        let zone = zone.trim();
-
-        if zone.is_empty() {
-            return Err(Error::Peer("No zone provided.".to_string()));
-        }
-
-        // make sure that zone is [a-zA-Z0-9_-]
-        if !zone
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(Error::Peer(format!(
-                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
-                zone
-            )));
-        }
+        let zone = self.clean_zone(zone)?;
 
         self.clients = self
             .clients
@@ -680,7 +691,7 @@ impl ServiceConfig {
         Ok(())
     }
 
-    pub fn add_server(&mut self, invite: Invite) -> Result<(), Error> {
+    pub fn add_server(&mut self, invite: &Invite) -> Result<(), Error> {
         for server in self.servers.iter() {
             if server.name == invite.name() && server.zone == invite.zone() {
                 return Err(Error::Peer(format!(
@@ -691,7 +702,7 @@ impl ServiceConfig {
             }
         }
 
-        let server = ServerConfig::from_invite(&invite)?;
+        let server = ServerConfig::from_invite(invite)?;
 
         if server.url.is_empty() {
             tracing::warn!("No valid URL provided for server {}.", server.name());
@@ -704,23 +715,7 @@ impl ServiceConfig {
     }
 
     pub fn remove_server(&mut self, name: &str, zone: &Option<String>) -> Result<(), Error> {
-        let zone = zone.clone().unwrap_or_else(default_zone);
-        let zone = zone.trim();
-
-        if zone.is_empty() {
-            return Err(Error::Peer("No zone provided.".to_string()));
-        }
-
-        // make sure that zone is [a-zA-Z0-9_]
-        if !zone
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(Error::Peer(format!(
-                "Zone '{}' contains invalid characters. It must be alphanumeric or - _.",
-                zone
-            )));
-        }
+        let zone = self.clean_zone(zone)?;
 
         self.servers = self
             .servers
@@ -728,6 +723,58 @@ impl ServiceConfig {
             .filter(|server| server.name != name || server.zone != zone)
             .cloned()
             .collect();
+
+        Ok(())
+    }
+
+    pub fn rotate_client_keys(
+        &mut self,
+        name: &str,
+        zone: &Option<String>,
+    ) -> Result<Invite, Error> {
+        let zone = self.clean_zone(zone)?;
+
+        // find the client with the given name and zone
+        let client = self
+            .clients
+            .iter_mut()
+            .find(|c| c.name == name && c.zone == zone)
+            .ok_or_else(|| {
+                Error::Peer(format!(
+                    "Client with name '{}' not found in zone {}.",
+                    name, zone
+                ))
+            })?;
+
+        // rotate the keys
+        client.rotate_keys();
+
+        // save as a new invite
+        Ok(Invite::new(
+            &self.name,
+            &self.url,
+            &zone,
+            &client.inner_key,
+            &client.outer_key,
+        ))
+    }
+
+    pub fn rotate_server_keys(&mut self, invite: &Invite) -> Result<(), Error> {
+        // find the server with the given name and zone
+        let server = self
+            .servers
+            .iter_mut()
+            .find(|s| s.name == invite.name() && s.zone == invite.zone())
+            .ok_or_else(|| {
+                Error::Peer(format!(
+                    "Server with name '{}' not found in zone {}.",
+                    invite.name(),
+                    invite.zone()
+                ))
+            })?;
+
+        // rotate the keys
+        server.rotate_keys(invite)?;
 
         Ok(())
     }
@@ -855,7 +902,7 @@ mod tests {
             });
 
         // give the invitation to the secondary
-        secondary.add_server(invite).unwrap_or_else(|e| {
+        secondary.add_server(&invite).unwrap_or_else(|e| {
             unreachable!("Cannot add primary to secondary: {}", e);
         });
 

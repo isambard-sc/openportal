@@ -750,7 +750,12 @@ impl Connection {
         let standby = peer_details.status();
 
         if !standby.is_primary() {
-            tracing::debug!("Peer is a standby connection: {}", standby);
+            tracing::info!(
+                "Connection to {}@{} is not primary: {}",
+                peer_name,
+                peer_zone,
+                standby
+            );
 
             // get a RAII object to increment the number of secondary
             // connections for this peer
@@ -805,10 +810,19 @@ impl Connection {
                 tracing::debug!("Standby status: {}", standby);
 
                 if standby.is_primary() {
-                    tracing::info!("Connection is now primary - continuing");
+                    tracing::info!(
+                        "Connection for {}@{} is now primary - continuing",
+                        peer_name,
+                        peer_zone
+                    );
+
                     client_is_secondary = false;
                 } else if standby.server_is_secondary() {
-                    tracing::warn!("Server is a secondary connection - not allowed");
+                    tracing::warn!(
+                        "Server for {}@{} is a secondary connection - not allowed",
+                        peer_name,
+                        peer_zone
+                    );
                     self.set_error().await;
                     return Err(Error::ServerIsSecondary(
                         "Server is a secondary connection - not allowed".to_string(),
@@ -1258,6 +1272,13 @@ impl Connection {
             .await
             .with_context(|| "Error checking if peer is standby")?;
 
+        tracing::info!(
+            "Peer {}@{} is {}",
+            peer_name,
+            peer_zone,
+            standby.to_string()
+        );
+
         // now send back our PeerDetials
         let peer_details = PeerDetails::new(&service_name, &peer_zone, &standby);
 
@@ -1348,18 +1369,28 @@ impl Connection {
                     .with_context(|| "Error sending response to peer - closing connection")?;
 
                 if standby.server_is_secondary() {
-                    tracing::warn!("Server is a secondary connection - disconnecting!");
+                    tracing::warn!(
+                        "Server is a secondary connection - disconnecting {}@{}!",
+                        peer_name,
+                        peer_zone
+                    );
 
                     // we are a standby server - the peer should disconnect and
                     // try to connect to the primary
-                    return Err(Error::ServerIsSecondary(
-                        "Server is secondary - closing connection.".to_string(),
-                    ));
+                    return Err(Error::ServerIsSecondary(format!(
+                        "Server is standby - closing connection {}@{}.",
+                        peer_name, peer_zone
+                    )));
                 }
 
                 if standby.is_primary() {
                     // this is now a primary connection - we can continue from here
-                    tracing::info!("Connection is now primary - continuing");
+                    tracing::info!(
+                        "Connection for {}@{} is now primary - continuing",
+                        peer_name,
+                        peer_zone
+                    );
+
                     client_is_secondary = false;
                 }
             }
@@ -1448,7 +1479,12 @@ impl Connection {
         pin_mut!(received_from_peer, send_to_peer);
         future::select(received_from_peer, send_to_peer).await;
 
-        tracing::info!("{} disconnected", &client_ip);
+        tracing::info!(
+            "{} for {}@{} disconnected",
+            &client_ip,
+            peer_name,
+            peer_zone
+        );
 
         // we've exited, meaning that this connection is now closed
         self.closed_connection().await;

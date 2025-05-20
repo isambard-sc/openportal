@@ -109,12 +109,48 @@ impl std::fmt::Display for Usage {
 }
 
 impl Usage {
-    pub fn parse(seconds: &str) -> Result<Self, Error> {
-        let seconds = seconds
-            .parse::<u64>()
-            .with_context(|| format!("Failed to parse seconds from '{}'", seconds))?;
+    pub fn parse(duration: &str) -> Result<Self, Error> {
+        let mut units = 1; // seconds
 
-        Ok(Self { seconds })
+        let parts: Vec<&str> = duration.split_whitespace().collect();
+
+        if parts.is_empty() {
+            tracing::error!(
+                "get_limit failed to parse '{}'. No duration found",
+                duration
+            );
+            return Err(Error::Parse(format!(
+                "get_limit failed to parse '{}'. No duration found",
+                duration
+            )));
+        }
+
+        if parts.len() > 1 {
+            units = match parts[1].to_ascii_lowercase().as_str() {
+                "seconds" | "second" | "s" => 1,
+                "minutes" | "minute" | "m" => 60,
+                "hours" | "hour" | "h" => 3600,
+                "days" | "day" | "d" => 86400,
+                _ => {
+                    tracing::error!(
+                                "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
+                                &parts[1..].join(" "),
+                            );
+                    return Err(Error::Parse(format!(
+                                "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
+                                &parts[1..].join(" "),
+                            )));
+                }
+            };
+        }
+
+        let seconds = parts[0]
+            .parse::<u64>()
+            .with_context(|| format!("Failed to parse seconds from '{}'", duration))?;
+
+        Ok(Self {
+            seconds: seconds * units,
+        })
     }
 
     pub fn new(seconds: u64) -> Self {

@@ -1660,7 +1660,7 @@ impl Instruction {
                 }
 
                 match ProjectIdentifier::parse(parts[1]) {
-                    Ok(project) => match Usage::parse(parts[2]) {
+                    Ok(project) => match Usage::parse(&parts[2..].join(" ")) {
                         Ok(usage) => Ok(Instruction::SetLimit(project, usage)),
                         Err(e) => {
                             tracing::error!(

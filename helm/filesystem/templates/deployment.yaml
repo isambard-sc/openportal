@@ -25,6 +25,8 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.log_level | quote }}
+            - name: RUST_LOG_FORMAT
+              value: {{ .Values.log_format | quote }}
           ports:
             - containerPort: {{ .Values.port }}
           readinessProbe:

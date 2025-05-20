@@ -3,7 +3,7 @@
 
 [package]
 name = "example-job"
-version = "0.9.1"
+version = "0.10.0"
 description = "templemeads job example"
 edition = "2021"
 license = "MIT"
@@ -20,7 +20,7 @@ paddington = { path = "../../paddington" }
 templemeads = { path = "../../templemeads" }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
+
 
 [lints.rust]
 unsafe_code = "forbid"

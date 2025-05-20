@@ -31,8 +31,7 @@ const AGENT_WAIT_TIME: u64 = 10;
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    templemeads::config::initialise_tracing();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -76,7 +75,7 @@ async fn main() -> Result<()> {
             match job.instruction() {
                 GetProjects(portal) => {
                     // get the list of projects from the cluster
-                    tracing::info!("Getting list of projects for portal {}", portal);
+                    tracing::debug!("Getting list of projects for portal {}", portal);
 
                     let projects = get_projects(me.name(), &portal).await?;
 
@@ -84,7 +83,7 @@ async fn main() -> Result<()> {
                 },
                 GetUsers(project) => {
                     // get the list of users from the cluster
-                    tracing::info!("Getting list of users in project {}", project);
+                    tracing::debug!("Getting list of users in project {}", project);
 
                     let users = get_accounts(me.name(), &project).await?;
 
@@ -440,7 +439,7 @@ async fn get_projects(me: &str, portal: &PortalIdentifier) -> Result<Vec<Project
 
             match result {
                 Some(projects) => {
-                    tracing::info!("Projects retrieved from account agent: {:?}", projects);
+                    tracing::debug!("Projects retrieved from account agent: {:?}", projects);
                     Ok(projects)
                 }
                 None => {
@@ -549,7 +548,7 @@ async fn get_accounts(me: &str, project: &ProjectIdentifier) -> Result<Vec<UserM
 
             match result {
                 Some(users) => {
-                    tracing::info!("Users retrieved from account agent: {:?}", users);
+                    tracing::debug!("Users retrieved from account agent: {:?}", users);
                     Ok(users)
                 }
                 None => {
@@ -661,7 +660,7 @@ async fn get_project_mapping(
 
             match result {
                 Some(mapping) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "Project mapping retrieved from account agent: {:?}",
                         mapping
                     );
@@ -1221,7 +1220,7 @@ async fn is_protected_user(me: &str, user: &UserIdentifier) -> Result<bool, Erro
 
             match result {
                 Some(is_protected) => {
-                    tracing::info!("User is protected: {}", is_protected);
+                    tracing::debug!("User is protected: {}", is_protected);
                     Ok(is_protected)
                 }
                 None => {
@@ -1261,7 +1260,7 @@ async fn get_home_dir(me: &str, mapping: &UserMapping) -> Result<String, Error> 
 
             match result {
                 Some(homedir) => {
-                    tracing::info!("User homedir retrieved: {:?}", homedir);
+                    tracing::debug!("User homedir retrieved: {:?}", homedir);
                     Ok(homedir)
                 }
                 None => {
@@ -1304,7 +1303,7 @@ async fn get_project_dirs(me: &str, mapping: &ProjectMapping) -> Result<Vec<Stri
 
             match result {
                 Some(dirs) => {
-                    tracing::info!("Project directories retrieved: {:?}", dirs);
+                    tracing::debug!("Project directories retrieved: {:?}", dirs);
                     Ok(dirs)
                 }
                 None => {

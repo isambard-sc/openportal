@@ -85,8 +85,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    templemeads::config::initialise_tracing();
 
     // parse the command line arguments
     let args: Args = Args::parse();
@@ -191,7 +190,7 @@ async fn run_client(invitation: &Path) -> Result<(), Error> {
     )?;
 
     // now give the invitation to connect to the server to the client
-    service.add_server(invite)?;
+    service.add_server(&invite)?;
 
     // set the handler for the echo-client service
     set_handler(echo_client_handler).await?;

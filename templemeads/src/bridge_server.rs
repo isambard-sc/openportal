@@ -334,7 +334,7 @@ async fn run(
         Some(serde_json::json!({"command": payload.command})),
     )?;
 
-    tracing::info!("Running command: {}", payload.command);
+    tracing::debug!("Running command: {}", payload.command);
 
     match bridge_run(&payload.command).await {
         Ok(job) => Ok(Json(job)),

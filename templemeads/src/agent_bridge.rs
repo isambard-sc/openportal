@@ -194,6 +194,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             list,
             remove,
             zone,
+            rotate,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -220,7 +221,10 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 )?;
 
                 save_config(&config, &config_file)?;
-                save_invite(&invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;
+                save_invite(
+                    &invite,
+                    &PathBuf::from(format!("./invite_{}_{}.toml", invite.name(), invite.zone())),
+                )?;
 
                 tracing::info!("Client '{}' added.", client);
                 return Ok(None);
@@ -234,6 +238,20 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 return Ok(None);
             }
 
+            if let Some(client) = rotate {
+                let mut config = load_config::<Config>(&config_file)?;
+                let invite = config.service.rotate_client_keys(client, zone)?;
+
+                save_config(&config, &config_file)?;
+                save_invite(
+                    &invite,
+                    &PathBuf::from(format!("./rotate_{}_{}.toml", invite.name(), invite.zone())),
+                )?;
+
+                tracing::info!("Client '{}' rotated.", client);
+                return Ok(None);
+            }
+
             let _ = Args::command().print_help();
 
             return Ok(None);
@@ -243,6 +261,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             list,
             remove,
             zone,
+            rotate,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -267,7 +286,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
 
                 let mut config = load_config::<Config>(&config_file)?;
-                config.service.add_server(invite)?;
+                config.service.add_server(&invite)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' added.", server.display());
                 return Ok(None);
@@ -278,6 +297,17 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 config.service.remove_server(server, zone)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' removed.", server);
+                return Ok(None);
+            }
+
+            if let Some(server) = rotate {
+                // read the invitation from the passed toml file
+                let invite = load_invite(server)?;
+
+                let mut config = load_config::<Config>(&config_file)?;
+                config.service.rotate_server_keys(&invite)?;
+                save_config(&config, &config_file)?;
+                tracing::info!("Server '{}' rotated.", server.display());
                 return Ok(None);
             }
 
@@ -362,6 +392,13 @@ enum Commands {
             help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
         )]
         zone: Option<String>,
+
+        #[arg(
+            long,
+            short = 'R',
+            help = "Name of the client whose keys are being rotated"
+        )]
+        rotate: Option<String>,
     },
 
     /// Adding and removing servers
@@ -389,6 +426,13 @@ enum Commands {
             help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
         )]
         zone: Option<String>,
+
+        #[arg(
+            long,
+            short = 'R',
+            help = "File containing the rotation invite from a server which is rotating keys"
+        )]
+        rotate: Option<PathBuf>,
     },
 
     /// Initialise the Service

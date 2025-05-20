@@ -12,7 +12,8 @@ use tokio::sync::{Mutex, MutexGuard};
 use crate::cache;
 use crate::slurm::SlurmJob;
 use crate::slurm::{
-    clean_account_name, clean_user_name, get_managed_organization, SlurmAccount, SlurmUser,
+    clean_account_name, clean_user_name, get_managed_organization, SlurmAccount, SlurmLimit,
+    SlurmUser,
 };
 
 #[derive(Debug, Clone)]
@@ -79,7 +80,7 @@ impl SlurmRunner {
     pub async fn run(&self, cmd: &str) -> Result<String, Error> {
         let processed_cmd = self.process(cmd)?;
 
-        tracing::info!("Running command: {:?}", processed_cmd);
+        tracing::debug!("Running command: {:?}", processed_cmd);
 
         let output = match tokio::process::Command::new(&processed_cmd[0])
             .args(&processed_cmd[1..])
@@ -158,12 +159,16 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?;
 
+    // get the parent account name from the cache
+    let parent_account = cache::get_parent_account().await?;
+
     runner()
         .await?
         .run(&format!(
-            "SACCTMGR --immediate add account name=\"{}\" cluster=\"{}\" organization=\"{}\" description=\"{}\"",
+            "SACCTMGR --immediate add account name=\"{}\" cluster=\"{}\" parent=\"{}\" organization=\"{}\" description=\"{}\"",
             account.name(),
             cluster,
+            parent_account,
             account.organization(),
             account.description()
         ))
@@ -175,9 +180,14 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
 async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
+    let cluster = cache::get_cluster().await?;
+
     let response = match runner()
         .await?
-        .run_json(&format!("SACCTMGR --json list accounts name={}", account))
+        .run_json(&format!(
+            "SACCTMGR --json list accounts withassoc name={} cluster={}",
+            account, cluster
+        ))
         .await
     {
         Ok(response) => response,
@@ -301,33 +311,38 @@ async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
 async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
     let existing_account = get_account(account.name()).await?;
 
+    let cluster = cache::get_cluster().await?;
+
     if let Some(existing_account) = existing_account {
-        if !account.is_managed() {
-            tracing::warn!(
-                "Account {} is not managed by the openportal organization.",
-                account
-            );
-        }
+        if existing_account.in_cluster(&cluster) {
+            if !account.is_managed() {
+                tracing::warn!(
+                    "Account {} is not managed by the openportal organization.",
+                    account
+                );
+            }
 
-        if existing_account != *account {
-            // the account exists, but the details are different
-            tracing::warn!(
-                "Account {} exists, but with different details.",
-                account.name()
-            );
-            tracing::warn!("Existing: {:?}, new: {:?}", existing_account, account)
+            tracing::debug!("Using existing slurm account {}", existing_account);
+            return Ok(existing_account);
         }
-
-        tracing::info!("Using existing slurm account {}", existing_account);
-        return Ok(existing_account);
     }
 
     // it doesn't, so create it
     tracing::info!("Creating new slurm account: {}", account.name());
     let account = force_add_slurm_account(account).await?;
-    cache::add_account(&account).await?;
 
-    Ok(account.clone())
+    // get the account as created
+    match get_account(account.name()).await {
+        Ok(Some(account)) => Ok(account),
+        Ok(None) => {
+            tracing::error!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
+        Err(e) => {
+            tracing::error!("Could not get account {}: {}", account.name(), e);
+            Err(e)
+        }
+    }
 }
 
 async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
@@ -461,11 +476,15 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?;
 
+    // get the parent account name from the cache
+    let parent_account = cache::get_parent_account().await?;
+
     runner().await?.run(
         &format!(
-            "SACCTMGR --immediate add account name=\"{}\" Clusters=\"{}\" Associations=\"{}\" Comment=\"Created by OpenPortal\"",
+            "SACCTMGR --immediate add account name=\"{}\" Clusters=\"{}\" parent=\"{}\" Associations=\"{}\" Comment=\"Created by OpenPortal\"",
             account.name(),
             cluster,
+            parent_account,
             account.name()
         )
     ).await?;
@@ -492,13 +511,14 @@ async fn add_user_association(
     if user
         .associations()
         .iter()
-        .any(|a| a.account() == account.name())
+        .any(|a| a.account() == account.name() && a.cluster() == cluster)
     {
         // the association already exists
-        tracing::info!(
-            "User {} already associated with account {}",
+        tracing::debug!(
+            "User {} already associated with account {} in cluster {}",
             user.name(),
-            account.name()
+            account.name(),
+            cluster
         );
     } else {
         // create the account association first
@@ -530,11 +550,11 @@ async fn add_user_association(
 
         user_changed = true;
 
-        tracing::info!("Updated user: {}", user);
+        tracing::debug!("Updated user: {}", user);
     }
 
     if make_default && *user.default_account() != Some(account.name().to_string()) {
-        tracing::info!("Will set user default account here");
+        tracing::debug!("Will set user default account here");
 
         runner()
             .await?
@@ -565,7 +585,7 @@ async fn add_user_association(
         // now cache the updated user
         cache::add_user(&user).await?;
     } else {
-        tracing::info!("Using existing user: {}", user);
+        tracing::debug!("Using existing user: {}", user);
     }
 
     Ok(user)
@@ -577,6 +597,8 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
         get_account_create_if_not_exists(&SlurmAccount::from_mapping(&user.clone().into())?)
             .await?;
 
+    let cluster = cache::get_cluster().await?;
+
     // now get the user from slurm
     let slurm_user = get_user(user.local_user()).await?;
 
@@ -586,15 +608,16 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
             && slurm_user
                 .associations()
                 .iter()
-                .any(|a| a.account() == slurm_account.name())
+                .any(|a| a.account() == slurm_account.name() && a.cluster() == cluster)
         {
-            tracing::info!("Using existing user {}", slurm_user);
+            tracing::debug!("Using existing user {}", slurm_user);
             return Ok(slurm_user);
         } else {
             tracing::warn!(
-                "User {} exists, but is not default associated with the requested account '{}'.",
+                "User {} exists, but is not default associated with the requested account '{}' in cluster {}.",
                 user,
-                slurm_account
+                slurm_account,
+                cluster
             );
         }
     }
@@ -636,7 +659,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 }
 
 pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str) {
-    tracing::info!(
+    tracing::debug!(
         "Using command line slurmd commands: sacctmgr: {}, scontrol: {}",
         sacctmgr,
         scontrol
@@ -665,11 +688,11 @@ pub async fn find_cluster() -> Result<(), Error> {
         .map(|line| line.split('|').next().unwrap_or_default().to_string())
         .collect();
 
-    tracing::info!("Clusters: {:?}", clusters);
+    tracing::debug!("Clusters: {:?}", clusters);
 
     if let Some(requested_cluster) = requested_cluster {
         if clusters.contains(&requested_cluster) {
-            tracing::info!("Using requested cluster: {}", requested_cluster);
+            tracing::debug!("Using requested cluster: {}", requested_cluster);
         } else {
             tracing::warn!(
                 "Requested cluster {} not found in list of clusters: {:?}",
@@ -679,7 +702,7 @@ pub async fn find_cluster() -> Result<(), Error> {
             return Err(Error::Login("Requested cluster not found".to_string()));
         }
     } else {
-        tracing::info!(
+        tracing::debug!(
             "Using the first cluster available by default: {}",
             clusters[0]
         );
@@ -729,6 +752,12 @@ pub async fn get_usage_report(
     let slurm_nodes = cache::get_nodes().await?;
     let now = chrono::Utc::now();
     let cluster = cache::get_cluster().await?;
+    let partition = cache::get_partition().await?;
+
+    let partition_command = match partition {
+        Some(partition) => format!("--partition={}", partition),
+        None => "".to_string(),
+    };
 
     // we now request the data day by day
     for day in dates.days() {
@@ -765,11 +794,12 @@ pub async fn get_usage_report(
         let response = runner()
             .await?
             .run_json(&format!(
-                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} --json",
+                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
                 day,
                 day.next(),
                 account.name(),
-                cluster
+                cluster,
+                partition_command
             ))
             .await?;
 
@@ -813,22 +843,200 @@ pub async fn get_usage_report(
 }
 
 pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
-    // this is a null function for now... just return the cached value
     let account = SlurmAccount::from_mapping(project)?;
 
-    match get_account(account.name()).await? {
-        Some(account) => Ok(*account.limit()),
-        None => Ok(Usage::default()),
+    let account = match get_account(account.name()).await? {
+        Some(account) => account,
+        None => {
+            tracing::warn!("Could not get account {}", account.name());
+            return Err(Error::NotFound(account.name().to_string()));
+        }
+    };
+
+    // check that the limits in slurm match up...
+    let response = runner()
+        .await?
+        .run_json(&format!(
+            "SACCTMGR --json show association where account={} cluster={}",
+            account.name(),
+            cache::get_cluster().await?
+        ))
+        .await?;
+
+    let limits = match response.get("associations") {
+        Some(limits) => match limits.as_array() {
+            Some(limits) => {
+                let mut slurm_limits: Vec<SlurmLimit> = Vec::new();
+
+                for limit in limits {
+                    slurm_limits.push(SlurmLimit::construct(limit)?);
+                }
+
+                slurm_limits
+            }
+            None => {
+                tracing::warn!("Limits is not an array: {:?}", limits);
+                return Err(Error::Call("Limits is not an array".to_string()));
+            }
+        },
+        None => Vec::new(),
+    };
+
+    let cluster = cache::get_cluster().await?;
+
+    let project_limit = account.limit();
+
+    let slurm_limit = match limits
+        .iter()
+        .find(|l| l.account() == account.name() && l.cluster() == cluster)
+    {
+        Some(slurm_limit) => slurm_limit,
+        None => {
+            tracing::warn!("Could not find limit for account {}", account.name());
+            return Err(Error::NotFound(account.name().to_string()));
+        }
+    };
+
+    tracing::debug!(
+        "Found limit for account {}: {}",
+        account.name(),
+        slurm_limit
+    );
+
+    let node = cache::get_default_node().await?;
+
+    let mut actual_slurm_limit: Option<Usage> = None;
+
+    if node.has_cpus() && node.cpus() > 0 {
+        if let Some(cpu_limit) = slurm_limit.cpu_limit() {
+            let check = node.cpus() * project_limit.seconds();
+            if check != cpu_limit.seconds() {
+                if check != 0 {
+                    tracing::warn!(
+                        "CPU limit for account {} does not match: {} != {}",
+                        account.name(),
+                        check,
+                        cpu_limit.seconds()
+                    );
+                }
+
+                actual_slurm_limit = Some(Usage::new(cpu_limit.seconds() / node.cpus()));
+            }
+        }
     }
+
+    if node.has_gpus() && node.gpus() > 0 {
+        if let Some(gpu_limit) = slurm_limit.gpu_limit() {
+            let check = node.gpus() * project_limit.seconds();
+            if check != gpu_limit.seconds() {
+                if check != 0 {
+                    tracing::warn!(
+                        "GPU limit for account {} does not match: {} != {}",
+                        account.name(),
+                        check,
+                        gpu_limit.seconds()
+                    );
+                }
+
+                if actual_slurm_limit.is_none() {
+                    actual_slurm_limit = Some(Usage::new(gpu_limit.seconds() / node.gpus()));
+                }
+            }
+        }
+    }
+
+    if node.has_mem() && node.mem() > 0 {
+        if let Some(mem_limit) = slurm_limit.mem_limit() {
+            let check = node.mem() * project_limit.seconds();
+            if check != mem_limit.seconds() {
+                if check != 0 {
+                    tracing::warn!(
+                        "Memory limit for account {} does not match: {} != {}",
+                        account.name(),
+                        check,
+                        mem_limit.seconds()
+                    );
+                }
+
+                if actual_slurm_limit.is_none() {
+                    actual_slurm_limit = Some(Usage::new(mem_limit.seconds() / node.mem()));
+                }
+            }
+        }
+    }
+
+    if let Some(actual_slurm_limit) = actual_slurm_limit {
+        // we need to set this to the actual slurm limit
+        let mut account = account.clone();
+        account.set_limit(&actual_slurm_limit);
+
+        // now save the account to the cache
+        cache::add_account(&account).await?;
+
+        tracing::info!("Updated account limit to {}", actual_slurm_limit);
+        return Ok(actual_slurm_limit);
+    }
+
+    Ok(*account.limit())
 }
 
 pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage, Error> {
-    // this is a null function for now... it just sets and returns a cached value
-    let mut account = SlurmAccount::from_mapping(project)?;
+    let account = SlurmAccount::from_mapping(project)?;
 
-    account.set_limit(limit);
+    match get_account(account.name()).await? {
+        Some(account) => {
+            let mut account = account.clone();
 
-    cache::add_account(&account).await?;
+            account.set_limit(limit);
 
-    Ok(*account.limit())
+            let cluster = cache::get_cluster().await?;
+
+            // calculate the GRES limits in terms of CPU, GPU and Memory
+            let node = cache::get_default_node().await?;
+
+            let mut tres: Vec<String> = Vec::new();
+
+            if node.has_cpus() {
+                tres.push(format!(
+                    "cpu={}",
+                    (node.cpus() as f64 * limit.minutes()) as u64
+                ));
+            }
+
+            if node.has_gpus() {
+                tres.push(format!(
+                    "gres/gpu={}",
+                    (node.gpus() as f64 * limit.minutes()) as u64
+                ));
+            }
+
+            if node.has_mem() {
+                tres.push(format!(
+                    "mem={}",
+                    (node.mem() as f64 * limit.minutes()) as u64
+                ));
+            }
+
+            if !tres.is_empty() {
+                runner()
+                    .await?
+                    .run(&format!(
+                        "SACCTMGR --immediate modify account {} set GrpTRESMins={} where cluster={}",
+                        account.name(),
+                        tres.join(","),
+                        cluster,
+                    ))
+                    .await?;
+            }
+
+            // now we've made the change, save the account to the cache
+            cache::add_account(&account).await?;
+
+            Ok(*account.limit())
+        }
+        None => {
+            tracing::warn!("Could not get account {}", account.name());
+            Err(Error::NotFound(account.name().to_string()))
+        }
+    }
 }

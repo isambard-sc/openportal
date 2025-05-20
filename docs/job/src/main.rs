@@ -86,8 +86,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    templemeads::config::initialise_tracing();
 
     // parse the command line arguments
     let args: Args = Args::parse();
@@ -209,7 +208,7 @@ async fn run_cluster(invitation: &Path) -> Result<(), Error> {
     )?;
 
     // now give the invitation to connect to the server to the client
-    service.add_server(invite)?;
+    service.add_server(&invite)?;
 
     // now create the config for this agent - this combines
     // the paddington service configuration with the Agent::Type

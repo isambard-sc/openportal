@@ -20,6 +20,8 @@ struct UsageDatabase {
 #[derive(Debug, Clone, Default)]
 struct Database {
     cluster: Option<String>,
+    partition: Option<String>,
+    parent_account: String,
     accounts: HashMap<String, SlurmAccount>,
     users: HashMap<String, SlurmUser>,
     nodes: Option<SlurmNodes>,
@@ -70,17 +72,95 @@ pub async fn get_cluster() -> Result<String, Error> {
 
 pub async fn set_cluster(cluster: &str) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+
+    if cache.cluster != Some(cluster.to_string()) {
+        cache.accounts.clear();
+        cache.users.clear();
+        cache.reports.clear();
+    }
+
     cache.cluster = Some(cluster.to_string());
     Ok(())
 }
 
+pub async fn get_partition() -> Result<Option<String>, Error> {
+    let cache = CACHE.read().await;
+
+    match cache.partition {
+        Some(ref partition) => Ok(Some(partition.clone())),
+        None => Ok(None),
+    }
+}
+
+pub async fn set_partition(partition: &str) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
+
+    let partition = partition.trim();
+
+    if partition.is_empty() {
+        cache.partition = None;
+    } else {
+        cache.partition = Some(partition.to_string());
+    }
+
+    Ok(())
+}
+
+pub async fn set_parent_account(parent_account: &str) -> Result<(), Error> {
+    let parent_account = parent_account.trim();
+
+    if parent_account.is_empty() {
+        return Err(Error::Bug("Parent account cannot be empty".to_string()));
+    }
+
+    let mut cache = CACHE.write().await;
+
+    cache.parent_account = parent_account.to_string();
+
+    Ok(())
+}
+
+///
+/// Return the name of the parent account
+///
+pub async fn get_parent_account() -> Result<String, Error> {
+    let cache = CACHE.read().await;
+
+    if cache.parent_account.is_empty() {
+        return Err(Error::Bug("Parent account has not been set".to_string()));
+    }
+
+    Ok(cache.parent_account.clone())
+}
+
+///
+/// Return the account from the cache - this is guaranteed to
+/// be an account that is associated with the cluster being managed
+///
 pub async fn get_account(name: &str) -> Result<Option<SlurmAccount>, Error> {
     let cache = CACHE.read().await;
     Ok(cache.accounts.get(name).cloned())
 }
 
+///
+/// Add an account to the cache - note that this will silently
+/// ignore accounts that are not associated with the cluster
+///
 pub async fn add_account(account: &SlurmAccount) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+
+    // we only cache accounts that match the cluster
+    if let Some(ref cluster) = cache.cluster {
+        if !account.in_cluster(cluster) {
+            tracing::warn!(
+                "Ignoring account '{}' as it is not associated with cluster '{}'",
+                account.name(),
+                cluster
+            );
+            return Ok(());
+        }
+    }
+
     cache
         .accounts
         .insert(account.name().to_string(), account.clone());
@@ -123,6 +203,17 @@ pub async fn set_node(name: &str, node: &SlurmNode) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+pub async fn get_default_node() -> Result<SlurmNode, Error> {
+    let cache = CACHE.read().await;
+
+    match cache.nodes {
+        Some(ref nodes) => Ok(nodes.get_default().clone()),
+        None => Err(Error::Bug(
+            "No nodes have been set in the cache".to_string(),
+        )),
+    }
 }
 
 pub async fn get_nodes() -> Result<SlurmNodes, Error> {

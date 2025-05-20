@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Added
+- Added support for high availability (HA) for client OpenPortal agents.
+  This allows for client agents to be run on multiple nodes, with only
+  one node being active at a time, and automatic failover to other nodes
+  if the active node fails. The failover also ensures that all client
+  connections are failed over to the same node. Note that HA for
+  server agents is not yet supported - including agents that act
+  as both servers and clients. There should still only be a single
+  instance of such agents in a network. HA for server agents
+  in planned.
+
+- Added command line options to support rotating of client and server
+  keys. Use the `client --rotate name --zone zone` on a server to
+  rotate the keys for the specified client in the specified zone. This
+  will write out a key rotation file, which can be passed to the
+  client via the `server --rotate filename` option.
+
+## [0.10.0] - 2025-04-01
+### Added
+- Added ability to specify the partition used for accounting for a slurm
+  account. This is useful if different services use different partitions
+  to separate out the accounting.
+- Added getting and setting of slurm limits, updating the set_limit
+  command to access a unit designator (e.g. "hours"). Defaults to
+  seconds if not specified.
+- Cleaned up the log messages so the agents are less chatty at the
+  "INFO" level, and the flow of jobs through agents is easier to follow.
+
+## [0.9.6] - 2025-03-05
+### Added
+- Added ability to control the parent account of slurm accounts that
+  are added via openportal. This defaults to "root" (the default), but
+  can be changed by setting the `parent_account` option in the
+  `op-slurm` configuration file. Note that the parent account must
+  exist already - if it doesn't, then the account creation will fail.
+
+## [0.9.5] - 2025-02-20
+### Added
+- Added an environment variable to turn on checking of the user
+  class in FreeIPA. This is the double-check that isn't really needed
+  and gets in the way now. The default is to not check the user
+  class is "openportal". Setting the environment variable
+  `OPENPORTAL_REQUIRE_MANAGED_CLASS` to `true` will turn on the check.
+
+### Fixed
+- Made the logic for modifying users in FreeIPA more robust - now always
+  re-fetch if the user is in the openportal group so that this info
+  is always up to date.
+- Cleaned up the logic for removal - a user will be removed even if
+  they aren't in any of the resource instance groups. This removed an
+  edge case where they were not in a resource instance group, but were
+  still active, but openportal would not remove them.
+
+## [0.9.4] - 2025-02-20
+### Fixed
+- Made sure that RUST_LOG_FORMAT is configurable from the helm chart.
+
+## [0.9.3] - 2025-02-20
+### Added
+- Added configurable logging - output now respects the value of the
+  `RUST_LOG` environment variable, using the standard `env_logger` crate.
+- Added json logging, which is controlled by the `RUST_LOG_FORMAT` environment
+  variable. If this is set to `json`, then logs will be output in JSON format.
+- Fixed a communications flood caused by a connection not detecting if
+  multiple watchdog messages are already in flight. Now only a single
+  watchdog message is pending send, using the same mechanism as the
+  keepalive messages.
+
+## [0.9.2] - 2025-02-19
+### Fixed
+- Fixed incorrect handling of the `cluster` field in slurm that meant
+  that race conditions prevented users and accounts from being properly
+  added to multiple clusters within the same slurmd instance.
 
 ## [0.9.1] - 2025-02-18
 ### Added
@@ -345,6 +418,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.10.0]: https://github.com/isambard-sc/openportal/releases/tag/0.10.0
+[0.9.6]: https://github.com/isambard-sc/openportal/releases/tag/0.9.6
+[0.9.5]: https://github.com/isambard-sc/openportal/releases/tag/0.9.5
+[0.9.4]: https://github.com/isambard-sc/openportal/releases/tag/0.9.4
+[0.9.3]: https://github.com/isambard-sc/openportal/releases/tag/0.9.3
+[0.9.2]: https://github.com/isambard-sc/openportal/releases/tag/0.9.2
 [0.9.1]: https://github.com/isambard-sc/openportal/releases/tag/0.9.1
 [0.9.0]: https://github.com/isambard-sc/openportal/releases/tag/0.9.0
 [0.8.3]: https://github.com/isambard-sc/openportal/releases/tag/0.8.3

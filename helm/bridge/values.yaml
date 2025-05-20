@@ -8,6 +8,7 @@ image:
   name: op-bridge
   tag:  # defaults to appVersion if not set
 log_level: info
+log_format: json
 secret_name: bridge-config
 port: 80
 bridge_port: 8800

@@ -28,8 +28,7 @@ mod slurm;
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    templemeads::config::initialise_tracing();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -82,11 +81,23 @@ async fn main() -> Result<()> {
 
     cache::set_default_node(&slurm::SlurmNode::construct(&slurm_default_node)?).await?;
 
+    // get the (optional) cluster used for this account
     let slurm_cluster = config.option("slurm-cluster", "");
 
     if !slurm_cluster.is_empty() {
         cache::set_cluster(&slurm_cluster).await?;
     }
+
+    // get the (optional) partition used for this account
+    let slurm_partition = config.option("slurm-partition", "");
+
+    if !slurm_partition.is_empty() {
+        cache::set_partition(&slurm_partition).await?;
+    }
+
+    // get the parent account that should be used for all accounts
+    let parent_account = config.option("parent-account", "root");
+    cache::set_parent_account(&parent_account).await?;
 
     let slurm_server = config.option("slurm-server", "");
 

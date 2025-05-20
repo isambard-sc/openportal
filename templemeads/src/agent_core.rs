@@ -226,7 +226,10 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 )?;
 
                 save_config(&config, &config_file)?;
-                save_invite(&invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;
+                save_invite(
+                    &invite,
+                    &PathBuf::from(format!("./invite_{}_{}.toml", invite.name(), invite.zone())),
+                )?;
 
                 tracing::info!("Client '{}' added.", client);
                 return Ok(None);
@@ -237,6 +240,20 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 config.service.remove_client(client, zone)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Client '{}' removed.", client);
+                return Ok(None);
+            }
+
+            if let Some(client) = rotate {
+                let mut config = load_config::<Config>(&config_file)?;
+                let invite = config.service.rotate_client_keys(client, zone)?;
+
+                save_config(&config, &config_file)?;
+                save_invite(
+                    &invite,
+                    &PathBuf::from(format!("./rotate_{}_{}.toml", invite.name(), invite.zone())),
+                )?;
+
+                tracing::info!("Client '{}' rotated.", client);
                 return Ok(None);
             }
 
@@ -274,7 +291,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
 
                 let mut config = load_config::<Config>(&config_file)?;
-                config.service.add_server(invite)?;
+                config.service.add_server(&invite)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' added.", server.display());
                 return Ok(None);
@@ -293,7 +310,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 let invite = load_invite(server)?;
 
                 let mut config = load_config::<Config>(&config_file)?;
-                config.service.rotate_server_keys(invite)?;
+                config.service.rotate_server_keys(&invite)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' rotated.", server.display());
                 return Ok(None);

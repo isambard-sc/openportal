@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   instance of such agents in a network. HA for server agents
   in planned.
 
+- Added command line options to support rotating of client and server
+  keys. Use the `client --rotate name --zone zone` on a server to
+  rotate the keys for the specified client in the specified zone. This
+  will write out a key rotation file, which can be passed to the
+  client via the `server --rotate filename` option.
+
 ## [0.10.0] - 2025-04-01
 ### Added
 - Added ability to specify the partition used for accounting for a slurm

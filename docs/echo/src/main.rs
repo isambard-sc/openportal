@@ -190,7 +190,7 @@ async fn run_client(invitation: &Path) -> Result<(), Error> {
     )?;
 
     // now give the invitation to connect to the server to the client
-    service.add_server(invite)?;
+    service.add_server(&invite)?;
 
     // set the handler for the echo-client service
     set_handler(echo_client_handler).await?;

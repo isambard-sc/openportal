@@ -1155,12 +1155,85 @@ impl<'de> Deserialize<'de> for DateRange {
 }
 
 ///
+/// Details about a project that exists in a portal.
+/// This holds all data as "option" as not all details
+/// will be set by all portals. Also, using "option" allows
+/// this struct to be used in "update" requests, as only
+/// the fields that are set will be updated.
+///
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectDetails {
+    /// The name of the project
+    name: Option<String>,
+
+    /// The description of the project
+    description: Option<String>,
+
+    /// The email address(es) of the leads of the project
+    leads: Option<Vec<String>>,
+
+    /// The email address(es) of the co-leads of the project
+    co_leads: Option<Vec<String>>,
+
+    /// The email address(es) of other members of the project
+    members: Option<Vec<String>>,
+
+    /// Proposed start date of the project
+    start_date: Option<Date>,
+
+    /// Proposed end date of the project
+    end_date: Option<Date>,
+
+    /// The number of credit (hours) allocated to the project
+    credit: Option<Usage>,
+}
+
+impl ProjectDetails {
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            description: None,
+            leads: None,
+            co_leads: None,
+            members: None,
+            start_date: None,
+            end_date: None,
+            credit: None,
+        }
+    }
+
+    pub fn parse(json: &str) -> Result<Self, Error> {
+        ProjectDetails::from_json(json)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json).map_err(|e| Error::Parse(e.to_string()))
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for ProjectDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_json())
+    }
+}
+
+///
 /// Enum of all of the instructions that can be sent to agents
 ///
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// An instruction to submit a job to the portal
     Submit(Destination, Arc<Instruction>),
+
+    /// An instruction to create a project in a portal
+    CreateProject(ProjectIdentifier, ProjectDetails),
+
+    /// An instruction to update a project in a portal
+    UpdateProject(ProjectIdentifier, ProjectDetails),
 
     /// An instruction to get all projects managed by a portal
     GetProjects(PortalIdentifier),
@@ -1281,6 +1354,50 @@ impl Instruction {
                         "submit failed to parse the destination for: {}. {}",
                         &parts[1..].join(" "),
                         e
+                    )))
+                }
+            },
+            "create_project" => match ProjectIdentifier::parse(parts[1]) {
+                Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
+                    Ok(details) => Ok(Instruction::CreateProject(project, details)),
+                    Err(_) => {
+                        tracing::error!(
+                            "create_project failed to parse: {}",
+                            &parts[2..].join(" ")
+                        );
+                        Err(Error::Parse(format!(
+                            "create_project failed to parse: {}",
+                            &parts[2..].join(" ")
+                        )))
+                    }
+                },
+                Err(_) => {
+                    tracing::error!("create_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "create_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "update_project" => match ProjectIdentifier::parse(parts[1]) {
+                Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
+                    Ok(details) => Ok(Instruction::UpdateProject(project, details)),
+                    Err(_) => {
+                        tracing::error!(
+                            "update_project failed to parse: {}",
+                            &parts[2..].join(" ")
+                        );
+                        Err(Error::Parse(format!(
+                            "update_project failed to parse: {}",
+                            &parts[2..].join(" ")
+                        )))
+                    }
+                },
+                Err(_) => {
+                    tracing::error!("update_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "update_project failed to parse: {}",
+                        &parts[1..].join(" ")
                     )))
                 }
             },
@@ -1789,6 +1906,12 @@ impl std::fmt::Display for Instruction {
         match self {
             Instruction::Submit(destination, command) => {
                 write!(f, "submit {} {}", destination, command)
+            }
+            Instruction::CreateProject(project, details) => {
+                write!(f, "create_project {} {}", project, details)
+            }
+            Instruction::UpdateProject(project, details) => {
+                write!(f, "update_project {} {}", project, details)
             }
             Instruction::GetProjects(portal) => write!(f, "get_projects {}", portal),
             Instruction::AddProject(project) => write!(f, "add_project {}", project),

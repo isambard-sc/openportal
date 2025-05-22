@@ -147,6 +147,8 @@ impl Command {
             }
 
             let project = match instruction.clone() {
+                Instruction::CreateProject(project, _) => Some(project),
+                Instruction::UpdateProject(project, _) => Some(project),
                 Instruction::AddProject(project) => Some(project),
                 Instruction::AddLocalProject(project) => Some(project.project().clone()),
                 Instruction::RemoveLocalProject(project) => Some(project.project().clone()),

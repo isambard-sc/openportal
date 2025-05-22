@@ -61,6 +61,8 @@ pub async fn run(command: &str) -> Result<Job, Error> {
                 )));
             }
 
+            tracing::info!("JOB = {:?}", job);
+
             let job = Job::parse(
                 &format!("{}.{} submit {}", my_name, portal.name(), command),
                 true,

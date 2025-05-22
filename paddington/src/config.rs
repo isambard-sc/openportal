@@ -626,13 +626,13 @@ impl ServiceConfig {
             return Err(Error::Peer("No zone provided.".to_string()));
         }
 
-        // make sure that zone is [a-zA-Z0-9_]
+        // make sure that zone is [a-zA-Z0-9_<>]
         if !zone
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '<' || c == '>')
         {
             return Err(Error::Peer(format!(
-                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
+                "Zone '{}' contains invalid characters. It must be alphanumeric or - _ < >",
                 zone
             )));
         }

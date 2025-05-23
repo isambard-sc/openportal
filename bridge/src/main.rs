@@ -8,8 +8,8 @@ use templemeads::agent::bridge::{process_args, run, Defaults};
 use templemeads::agent::Type::Portal;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{CreateProject, UpdateProject};
-use templemeads::grammar::{ProjectDetails, ProjectIdentifier, ProjectMapping};
 use templemeads::job::{Envelope, Job};
+use templemeads::server;
 use templemeads::Error;
 
 ///
@@ -89,12 +89,38 @@ async fn main() -> Result<()> {
                 CreateProject(project, details) => {
                     // create a new project in the cluster
                     tracing::debug!("Creating project {} with details {:?}", project, details);
-                    job.completed(create_project(&project, &details).await?)
+
+                    let board = server::get_board().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
                 }
                 UpdateProject(project, details) => {
                     // update the project in the cluster
                     tracing::debug!("Updating project {} with details {:?}", project, details);
-                    job.completed(update_project(&project, &details).await?)
+
+                    let board = server::get_board().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
                 }
                 _ => {
                     tracing::error!("Unknown instruction: {:?}", job.instruction());
@@ -110,26 +136,4 @@ async fn main() -> Result<()> {
     run(config, bridge_runner).await?;
 
     Ok(())
-}
-
-async fn create_project(
-    project: &ProjectIdentifier,
-    details: &ProjectDetails,
-) -> Result<ProjectMapping, Error> {
-    tracing::info!("Creating project {} with details {:?}", project, details);
-
-    Err(Error::IncompleteCode(
-        "Create project not implemented".to_string(),
-    ))
-}
-
-async fn update_project(
-    project: &ProjectIdentifier,
-    details: &ProjectDetails,
-) -> Result<ProjectMapping, Error> {
-    tracing::info!("Updating project {} with details {:?}", project, details);
-
-    Err(Error::IncompleteCode(
-        "Update project not implemented".to_string(),
-    ))
 }

@@ -1297,6 +1297,42 @@ impl ProjectDetails {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
+
+    pub fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    pub fn class(&self) -> Option<ProjectClass> {
+        self.class.clone()
+    }
+
+    pub fn description(&self) -> Option<String> {
+        self.description.clone()
+    }
+
+    pub fn leads(&self) -> Option<Vec<String>> {
+        self.leads.clone()
+    }
+
+    pub fn co_leads(&self) -> Option<Vec<String>> {
+        self.co_leads.clone()
+    }
+
+    pub fn members(&self) -> Option<Vec<String>> {
+        self.members.clone()
+    }
+
+    pub fn start_date(&self) -> Option<Date> {
+        self.start_date.clone()
+    }
+
+    pub fn end_date(&self) -> Option<Date> {
+        self.end_date.clone()
+    }
+
+    pub fn credit(&self) -> Option<Usage> {
+        self.credit
+    }
 }
 
 impl std::fmt::Display for ProjectDetails {

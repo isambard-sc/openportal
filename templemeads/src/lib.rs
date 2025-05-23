@@ -6,6 +6,8 @@ mod account;
 mod agent_bridge;
 mod agent_core;
 mod bridge_server;
+mod bridgeboard;
+mod bridgestate;
 mod control_message;
 mod custom;
 mod error;
@@ -33,4 +35,5 @@ pub mod usagereport;
 
 pub mod server {
     pub use crate::bridge_server::sign_api_call;
+    pub use crate::bridgestate::get as get_board;
 }

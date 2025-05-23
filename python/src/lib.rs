@@ -1588,6 +1588,141 @@ impl From<grammar::ProjectMapping> for ProjectMapping {
     }
 }
 
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectClass(grammar::ProjectClass);
+
+#[pymethods]
+impl ProjectClass {
+    #[new]
+    fn new(class: &str) -> PyResult<Self> {
+        match grammar::ProjectClass::parse(class) {
+            Ok(project_class) => Ok(Self(project_class)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectClass> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectClass> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &ProjectClass, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+}
+
+impl From<grammar::ProjectClass> for ProjectClass {
+    fn from(project_class: grammar::ProjectClass) -> Self {
+        ProjectClass(project_class)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectDetails(grammar::ProjectDetails);
+
+#[pymethods]
+impl ProjectDetails {
+    #[new]
+    fn new(details: &str) -> PyResult<Self> {
+        match grammar::ProjectDetails::parse(details) {
+            Ok(project_details) => Ok(Self(project_details)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectDetails> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectDetails> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &ProjectDetails, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> PyResult<Option<String>> {
+        Ok(self.0.name())
+    }
+
+    #[getter]
+    fn project_class(&self) -> PyResult<Option<ProjectClass>> {
+        Ok(self.0.class().map(|pc| pc.into()))
+    }
+
+    #[getter]
+    fn description(&self) -> PyResult<Option<String>> {
+        Ok(self.0.description())
+    }
+
+    #[getter]
+    fn leads(&self) -> PyResult<Option<Vec<String>>> {
+        Ok(self.0.leads())
+    }
+
+    #[getter]
+    fn co_leads(&self) -> PyResult<Option<Vec<String>>> {
+        Ok(self.0.co_leads())
+    }
+
+    #[getter]
+    fn members(&self) -> PyResult<Option<Vec<String>>> {
+        Ok(self.0.members())
+    }
+
+    #[getter]
+    fn start_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+        Ok(self.0.start_date().map(|date| date.to_chrono()))
+    }
+
+    #[getter]
+    fn end_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+        Ok(self.0.end_date().map(|date| date.to_chrono()))
+    }
+
+    #[getter]
+    fn credit(&self) -> PyResult<Option<Usage>> {
+        Ok(self.0.credit().map(|credit| credit.into()))
+    }
+}
+
+impl From<grammar::ProjectDetails> for ProjectDetails {
+    fn from(project_details: grammar::ProjectDetails) -> Self {
+        ProjectDetails(project_details)
+    }
+}
+
 ///
 /// Run the passed command on the OpenPortal system.
 /// This will return a Job object that can be used to query the
@@ -1654,6 +1789,33 @@ fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
     }
 }
 
+///
+/// Fetch all of the jobs that OpenPortal has passed back to us
+/// to run
+///
+#[pyfunction]
+fn fetch_jobs() -> PyResult<Vec<Job>> {
+    match call_get::<Vec<job::Job>>("fetch_jobs") {
+        Ok(response) => Ok(response.into_iter().map(|j| j.into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
+/// Send back the result of us running a job that was passed to us by
+/// OpenPortal.
+///
+#[pyfunction]
+fn send_result(job: Job) -> PyResult<()> {
+    match call_post::<job::Job>(
+        "send_result",
+        serde_json::json!({"job": job.0.id().to_string()}),
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
@@ -1663,6 +1825,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
     m.add_function(wrap_pyfunction!(get, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_jobs, m)?)?;
+    m.add_function(wrap_pyfunction!(send_result, m)?)?;
 
     m.add_class::<Health>()?;
     m.add_class::<Job>()?;

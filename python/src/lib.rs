@@ -409,6 +409,24 @@ impl Job {
         self.is_finished()
     }
 
+    fn completed(&self, result: &str) -> PyResult<Job> {
+        let result = match self.0.completed(result.to_string()) {
+            Ok(result) => result,
+            Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        };
+
+        Ok(result.into())
+    }
+
+    fn errored(&self, error: &str) -> PyResult<Job> {
+        let result = match self.0.errored(error) {
+            Ok(result) => result,
+            Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        };
+
+        Ok(result.into())
+    }
+
     #[getter]
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if !self.is_finished()? {
@@ -1807,10 +1825,7 @@ fn fetch_jobs() -> PyResult<Vec<Job>> {
 ///
 #[pyfunction]
 fn send_result(job: Job) -> PyResult<()> {
-    match call_post::<job::Job>(
-        "send_result",
-        serde_json::json!({"job": job.0.id().to_string()}),
-    ) {
+    match call_post::<Health>("send_result", serde_json::json!(job.0)) {
         Ok(_) => Ok(()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }

@@ -420,17 +420,19 @@ async fn fetch_jobs(
 async fn send_result(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(payload): Json<Job>,
+    Json(job): Json<Job>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    tracing::debug!("Send result: {:?}", job);
+
     verify_headers(
         &state,
         &headers,
         "post",
         "send_result",
-        Some(serde_json::json!({"job": payload})),
+        Some(serde_json::json!(job)),
     )?;
 
-    tracing::debug!("Sending result: {:?}", payload);
+    tracing::debug!("Sending result: {:?}", job);
 
     // get the BridgeBoard
     let board = get_board().await;
@@ -438,7 +440,7 @@ async fn send_result(
     match board {
         Ok(board) => {
             let mut board = board.write().await;
-            board.update(&payload);
+            board.update(&job);
             Ok(Json(json!({"status": "ok"})))
         }
         Err(e) => {

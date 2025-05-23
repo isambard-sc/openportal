@@ -1155,6 +1155,86 @@ impl<'de> Deserialize<'de> for DateRange {
 }
 
 ///
+/// The class of Project to create in a portal. This can be used
+/// e.g. to specify that a project is for a particular class of
+/// infrastructure (e.g. "cpu-cluster", "gpu-cluster" etc.).
+/// The classes available on a portal are controlled by the
+/// portal administrator, and can be arbitrarily defined. Note
+/// however that once a project has been created in a class,
+/// it cannot be changed.
+///
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectClass {
+    /// The name of the class - this must not have any spaces
+    /// or special characters
+    name: String,
+}
+
+impl ProjectClass {
+    pub fn parse(name: &str) -> Result<Self, Error> {
+        let name = name.trim();
+
+        if name.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectClass - cannot be empty '{}'",
+                name
+            )));
+        };
+
+        if name.contains(' ') {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectClass - cannot contain spaces '{}'",
+                name
+            )));
+        };
+
+        // name can only be alphanumeric, underscores and dashes
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectClass - can only contain alphanumeric characters, underscores and dashes '{}'",
+                name
+            )));
+        };
+
+        Ok(Self {
+            name: name.to_string(),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for ProjectClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl Serialize for ProjectClass {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectClass {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        ProjectClass::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -1165,6 +1245,9 @@ impl<'de> Deserialize<'de> for DateRange {
 pub struct ProjectDetails {
     /// The name of the project
     name: Option<String>,
+
+    /// The class of the project
+    class: Option<ProjectClass>,
 
     /// The description of the project
     description: Option<String>,
@@ -1192,6 +1275,7 @@ impl ProjectDetails {
     pub fn new() -> Self {
         Self {
             name: None,
+            class: None,
             description: None,
             leads: None,
             co_leads: None,
@@ -1363,11 +1447,11 @@ impl Instruction {
                     Err(_) => {
                         tracing::error!(
                             "create_project failed to parse: {}",
-                            &parts[2..].join(" ")
+                            &parts[3..].join(" ")
                         );
                         Err(Error::Parse(format!(
                             "create_project failed to parse: {}",
-                            &parts[2..].join(" ")
+                            &parts[3..].join(" ")
                         )))
                     }
                 },

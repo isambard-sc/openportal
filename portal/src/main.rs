@@ -3,21 +3,25 @@
 
 use anyhow::Result;
 
+use templemeads::agent;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
+
+use templemeads::agent::Type::{Bridge, Portal};
+use templemeads::grammar::Instruction::{CreateProject, Submit, UpdateProject};
+use templemeads::grammar::{ProjectDetails, ProjectIdentifier, ProjectMapping};
+use templemeads::job::{Envelope, Job};
+use templemeads::Error;
 
 ///
-/// Main function for the bridge application
+/// Main function for the portal instance agent
 ///
-/// The purpose of this application is to bridge between the user portal
-/// (e.g. Waldur) and OpenPortal.
-///
-/// It does this by providing a "Client" agent in OpenPortal that can be
-/// used to make requests over the OpenPortal protocol.
-///
-/// It also provides a web API that can be called by the user portal to
-/// submit and get information about those requests. This API is designed
-/// to be called via, e.g. the openportal Python client.
+/// This purpose of this agent is to manage an individual instance
+/// of a user and project management portal. It receives commands
+/// from that portal that it forwards to other agents, and it can
+/// send and receive commands from other portals to which it is
+/// connected
 ///
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -53,8 +57,285 @@ async fn main() -> Result<()> {
         }
     };
 
+    async_runnable! {
+        ///
+        /// Runnable function that will be called when a job is received
+        /// by the portal. This creates a firewall between the agents
+        /// south of the portal (which e.g. actually create accounts etc)
+        /// the agents north of the portal (which e.g. create or query
+        /// allocations) and the bridge agent to the east/west of the portal,
+        /// which connects to the graphical portal user interface.
+        ///
+        pub async fn portal_runner(envelope: Envelope) -> Result<Job, Error>
+        {
+            let me = envelope.recipient();
+            let mut job = envelope.job();
+
+            let mut agent_is_bridge = false;
+            let mut agent_is_portal = false;
+
+            // Get information about the agent that sent this job
+            // The only agents that can send jobs to a portal are
+            // bridge agents, and other portal agents that have
+            // expressly be configured to be given permission.
+            // This permission is based on the zone of the portal to portal
+            // connection
+            match agent::agent_type(&envelope.sender()).await {
+                Some(Bridge) => {
+                    agent_is_bridge = true;
+                }
+                Some(Portal) => {
+                    if !portal_to_portal_allowed(&envelope.sender(), &envelope.recipient()) {
+                        return Err(Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. Portal {} is not allowed to send jobs to portal {}", job.instruction(), envelope.sender(), envelope.recipient()),
+                        ));
+                    }
+                    agent_is_portal = true;
+                }
+                _ => {
+                    return Err(Error::InvalidInstruction(
+                        format!("Invalid instruction: {}. Only bridge agents can submit instructions to the portal", job.instruction()),
+                    ));
+                }
+            }
+
+            let sender = envelope.sender();
+
+            // match instructions that can only be sent by bridge agents
+            match job.instruction() {
+                Submit(destination, instruction) => {
+                    if !agent_is_bridge {
+                        return Err(Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. Only bridge agents can submit instructions to the portal", job.instruction()),
+                        ));
+                    }
+
+                    // This is a job that should have been received from
+                    // the bridge, and which is to be interpreted and passed
+                    // south-bound to the agents for processing
+                    tracing::debug!("{} : {}", destination, instruction);
+                    tracing::debug!("This was from {:?}", envelope);
+
+                    if destination.agents().len() < 2 {
+                        tracing::error!("Invalid instruction: {}. Destination must have at least two agents", job.instruction());
+                        return Err(Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. Destination must have at least two agents", job.instruction()),
+                        ));
+                    }
+
+                    // the first agent in the destination is the agent should be this portal
+                    let first_agent = destination.agents()[0].clone();
+
+                    if first_agent != envelope.recipient().name() {
+                        tracing::error!("Invalid instruction: {}. First agent in destination should be this portal ({})", job.instruction(), envelope.recipient().name());
+                        return Err(Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. First agent in destination should be this portal ({})",
+                                        job.instruction(),
+                                        envelope.recipient().name())
+                        ));
+                    }
+
+                    // who is next in line to receive this job? - find it, and its zone
+                    let next_agent = agent::find(&destination.agents()[1], 5).await.ok_or_else(|| {
+                        tracing::error!("Invalid instruction: {}. Cannot find next agent in destination {}", job.instruction(), destination);
+                        Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. Cannot find next agent in destination {}",
+                                    job.instruction(), destination),
+                        )
+                    })?;
+
+                    // create the job and send it to the board for the next agent
+                    let southbound_job = Job::parse(&format!("{} {}", destination, instruction), true)?.put(&next_agent).await?;
+
+                    job = job.running(Some("Job registered - processing...".to_string()))?;
+                    job = job.update(&sender).await?;
+
+                    // Wait for the submitted job to complete
+                    let southbound_job = southbound_job.wait().await?;
+
+                    if southbound_job.is_expired() {
+                        tracing::error!("{} : {} : Error - job expired!", destination, instruction);
+                        job = job.errored("ExpirationError{{}}")?;
+                    } else if (southbound_job.is_error()) {
+                        if let Some(message) = southbound_job.error_message() {
+                            tracing::error!("{} : {} : Error - {}", destination, instruction, message);
+                            job = job.errored(&format!("RuntimeError{{{}}}", message))?;
+                        }
+                        else {
+                            tracing::error!("{} : {} : Error - unknown error", destination, instruction);
+                            job = job.errored("UnknownError{{}}")?;
+                        }
+                    }
+                    else {
+                        tracing::info!("{} : {} : Success", destination, instruction);
+                        job = job.copy_result_from(&southbound_job)?;
+                    }
+
+                    return Ok(job);
+                }
+                _ => {
+                    if !agent_is_portal {
+                        return Err(Error::InvalidInstruction(
+                            format!("Invalid instruction: {}. Only portal agents can send instructions to the portal", job.instruction()),
+                        ));
+                    }
+                }
+            }
+
+            // match instructions that can be sent by portal agents
+            match job.instruction() {
+                CreateProject(project, details) => {
+                    tracing::debug!("Creating project {} with details {}", project, details);
+
+                    job.completed(
+                        create_project(me.name(), &project, &details).await?)
+                }
+                UpdateProject(project, details) => {
+                    tracing::debug!("Updating project {} with details {}", project, details);
+
+                    job.completed(
+                        update_project(me.name(), &project, &details).await?)
+                }
+                _ => {
+                    tracing::error!("Invalid instruction: {}. Only portal agents can send instructions to the portal", job.instruction());
+                    return Err(Error::InvalidInstruction(
+                        format!("Invalid instruction: {}. Only portal agents can send instructions to the portal", job.instruction()),
+                    ));
+                }
+            }
+        }
+    };
+
     // run the portal agent
-    run(config).await?;
+    run(config, portal_runner).await?;
 
     Ok(())
+}
+
+const BRIDGE_WAIT_TIME: u64 = 5;
+
+///
+/// Return the zone that should be used for a portal to portal
+/// connection where the sender has the ability to send jobs
+/// to the recipient (but the recipient cannot send jobs to the sender)
+///
+fn portal_to_portal_zone(sender: &agent::Peer, recipient: &agent::Peer) -> String {
+    format!("{}>{}", sender.name(), recipient.name())
+}
+
+///
+/// Return whether or not the sender has permission to send jobs
+/// to the recipient, assuming they are both portals
+///
+fn portal_to_portal_allowed(sender: &agent::Peer, recipient: &agent::Peer) -> bool {
+    (sender.zone() == recipient.zone())
+        && (sender.zone() == portal_to_portal_zone(sender, recipient))
+}
+
+///
+/// Create a new project
+///
+pub async fn create_project(
+    me: &str,
+    project: &ProjectIdentifier,
+    details: &ProjectDetails,
+) -> Result<ProjectMapping, Error> {
+    // we need to connect to our bridge agent, so it can be used
+    // to tell the connected portal software to create the project.
+    // This will return the ProjectIdentifier of the project that was
+    // created, which we can then return as a ProjectMapping
+
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            // send the create_project job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} create_project {} {}",
+                    me,
+                    bridge.name(),
+                    project,
+                    details
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<ProjectMapping>()?;
+
+            match result {
+                Some(project) => {
+                    tracing::debug!("Project created by bridge agent: {:?}", project);
+                    Ok(project)
+                }
+                None => {
+                    tracing::warn!("No project created?");
+                    Err(Error::MissingProject(
+                        "No project created by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Update an existing project
+///
+pub async fn update_project(
+    me: &str,
+    project: &ProjectIdentifier,
+    details: &ProjectDetails,
+) -> Result<ProjectMapping, Error> {
+    // we need to connect to our bridge agent, so it can be used
+    // to tell the connected portal software to create the project.
+    // This will return the ProjectIdentifier of the project that was
+    // created, which we can then return as a ProjectMapping
+
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            // send the update_project job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} update_project {} {}",
+                    me,
+                    bridge.name(),
+                    project,
+                    details
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<ProjectMapping>()?;
+
+            match result {
+                Some(project) => {
+                    tracing::debug!("Project created by bridge agent: {:?}", project);
+                    Ok(project)
+                }
+                None => {
+                    tracing::warn!("No project created?");
+                    Err(Error::MissingProject(
+                        "No project created by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
 }

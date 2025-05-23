@@ -129,11 +129,7 @@ async fn main() -> Result<()> {
 
                     let homedir = get_home_dir(me.name(), &sender, &mapping).await?;
 
-                    if homedir.is_none() {
-                        tracing::warn!("No home directory preferred for user: {}", user);
-                    }
-
-                    let user = freeipa::add_user(&user, &sender, &homedir).await?;
+                    let user = freeipa::add_user(&user, &sender, &Some(homedir)).await?;
                     job.completed(user.mapping()?)
                 },
                 RemoveUser(user) => {
@@ -170,11 +166,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn get_home_dir(
-    me: &str,
-    sender: &Peer,
-    mapping: &UserMapping,
-) -> Result<Option<String>, Error> {
+async fn get_home_dir(me: &str, sender: &Peer, mapping: &UserMapping) -> Result<String, Error> {
     let job = Job::parse(
         &format!("{}.{} get_local_home_dir {}", me, sender.name(), mapping),
         false,
@@ -183,5 +175,19 @@ async fn get_home_dir(
     let job = job.put(sender).await?;
 
     // wait for the job to complete - get the result
-    job.wait().await?.result::<String>()
+    let mut home_dir = job.wait().await?.result::<String>()?;
+
+    while home_dir.is_none() {
+        // wait for the job to complete - get the result
+        let job = job.wait().await?;
+        home_dir = job.result::<String>()?;
+    }
+
+    if let Some(homedir) = home_dir {
+        Ok(homedir)
+    } else {
+        Err(Error::InvalidInstruction(
+            "No home directory found".to_string(),
+        ))
+    }
 }

@@ -8,7 +8,8 @@ use crate::usagereport::Usage;
 use anyhow::Context;
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::{hash::Hash, sync::Arc};
 
 pub trait NamedType {
     fn type_name() -> &'static str;
@@ -1252,14 +1253,9 @@ pub struct ProjectDetails {
     /// The description of the project
     description: Option<String>,
 
-    /// The email address(es) of the leads of the project
-    leads: Option<Vec<String>>,
-
-    /// The email address(es) of the co-leads of the project
-    co_leads: Option<Vec<String>>,
-
-    /// The email address(es) of other members of the project
-    members: Option<Vec<String>>,
+    /// The email address(es) of the members of the project,
+    /// (keys) and their roles (values).
+    members: Option<HashMap<String, String>>,
 
     /// Proposed start date of the project
     start_date: Option<Date>,
@@ -1277,8 +1273,6 @@ impl ProjectDetails {
             name: None,
             class: None,
             description: None,
-            leads: None,
-            co_leads: None,
             members: None,
             start_date: None,
             end_date: None,
@@ -1302,36 +1296,130 @@ impl ProjectDetails {
         self.name.clone()
     }
 
+    pub fn set_name(&mut self, name: &str) {
+        let name = name.trim();
+
+        if name.is_empty() {
+            self.name = None;
+        } else {
+            self.name = Some(name.to_string());
+        }
+    }
+
+    pub fn clear_name(&mut self) {
+        self.name = None;
+    }
+
     pub fn class(&self) -> Option<ProjectClass> {
         self.class.clone()
+    }
+
+    pub fn set_class(&mut self, class: ProjectClass) {
+        self.class = Some(class);
+    }
+
+    pub fn clear_class(&mut self) {
+        self.class = None;
     }
 
     pub fn description(&self) -> Option<String> {
         self.description.clone()
     }
 
-    pub fn leads(&self) -> Option<Vec<String>> {
-        self.leads.clone()
+    pub fn set_description(&mut self, description: &str) {
+        let description = description.trim();
+
+        if description.is_empty() {
+            self.description = None;
+        } else {
+            self.description = Some(description.to_string());
+        }
     }
 
-    pub fn co_leads(&self) -> Option<Vec<String>> {
-        self.co_leads.clone()
+    pub fn clear_description(&mut self) {
+        self.description = None;
     }
 
-    pub fn members(&self) -> Option<Vec<String>> {
+    pub fn members(&self) -> Option<HashMap<String, String>> {
         self.members.clone()
+    }
+
+    pub fn add_member(&mut self, email: &str, role: &str) {
+        let email = email.trim();
+        let role = role.trim();
+
+        if email.is_empty() || role.is_empty() {
+            tracing::warn!(
+                "Invalid ProjectDetails - email or role cannot be empty: email='{}', role='{}'",
+                email,
+                role
+            );
+            return;
+        };
+
+        let members = self.members.get_or_insert_with(HashMap::new);
+        members.insert(email.to_string(), role.to_string());
+    }
+
+    pub fn remove_member(&mut self, email: &str) {
+        let email = email.trim();
+
+        if email.is_empty() {
+            tracing::warn!("Invalid ProjectDetails - email cannot be empty");
+            return;
+        };
+
+        if let Some(members) = &mut self.members {
+            members.remove(email);
+        }
+    }
+
+    pub fn set_members(&mut self, members: HashMap<String, String>) {
+        if members.is_empty() {
+            self.members = None;
+        } else {
+            self.members = Some(members);
+        }
+    }
+
+    pub fn clear_members(&mut self) {
+        self.members = None;
     }
 
     pub fn start_date(&self) -> Option<Date> {
         self.start_date.clone()
     }
 
+    pub fn set_start_date(&mut self, start_date: Date) {
+        self.start_date = Some(start_date)
+    }
+
+    pub fn clear_start_date(&mut self) {
+        self.start_date = None;
+    }
+
     pub fn end_date(&self) -> Option<Date> {
         self.end_date.clone()
     }
 
+    pub fn set_end_date(&mut self, end_date: Date) {
+        self.end_date = Some(end_date)
+    }
+
+    pub fn clear_end_date(&mut self) {
+        self.end_date = None;
+    }
+
     pub fn credit(&self) -> Option<Usage> {
         self.credit
+    }
+
+    pub fn set_credit(&mut self, credit: Usage) {
+        self.credit = Some(credit)
+    }
+
+    pub fn clear_credit(&mut self) {
+        self.credit = None;
     }
 }
 

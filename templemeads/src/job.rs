@@ -312,6 +312,14 @@ impl Job {
         })
     }
 
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self).map_err(Error::SerdeJson)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json).map_err(Error::SerdeJson)
+    }
+
     pub fn id(&self) -> Uuid {
         self.id
     }

@@ -921,6 +921,14 @@ impl DateRange {
     }
 
     #[staticmethod]
+    fn parse(date_range: String) -> PyResult<Self> {
+        match grammar::DateRange::parse(&date_range) {
+            Ok(date_range) => Ok(date_range.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
     fn yesterday() -> PyResult<Self> {
         Ok(grammar::Date::yesterday().day().into())
     }

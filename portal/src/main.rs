@@ -9,7 +9,7 @@ use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 
 use templemeads::agent::Type::{Bridge, Portal};
-use templemeads::grammar::Instruction::{CreateProject, Submit, UpdateProject};
+use templemeads::grammar::Instruction::{CreateProject, GetProject, Submit, UpdateProject};
 use templemeads::grammar::{ProjectDetails, ProjectIdentifier, ProjectMapping};
 use templemeads::job::{Envelope, Job};
 use templemeads::Error;
@@ -196,6 +196,12 @@ async fn main() -> Result<()> {
                     job.completed(
                         update_project(me.name(), &project, &details).await?)
                 }
+                GetProject(project) => {
+                    tracing::debug!("Getting project {}", project);
+
+                    job.completed(
+                        get_project(me.name(), &project).await?)
+                }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
                     return Err(Error::InvalidInstruction(
@@ -331,6 +337,51 @@ pub async fn update_project(
                 }
             }
         }
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get an existing project
+///
+pub async fn get_project(me: &str, project: &ProjectIdentifier) -> Result<ProjectDetails, Error> {
+    // we need to connect to our bridge agent, so it can be used
+    // to tell the connected portal software to create the project.
+    // This will return the ProjectIdentifier of the project that was
+    // created, which we can then return as a ProjectMapping
+
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            // send the get_project job to the bridge agent
+            let job = Job::parse(
+                &format!("{}.{} get_project {}", me, bridge.name(), project),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<ProjectDetails>()?;
+
+            match result {
+                Some(project) => {
+                    tracing::debug!("Project retrieved by bridge agent: {:?}", project);
+                    Ok(project)
+                }
+                None => {
+                    tracing::warn!("No project retrieved?");
+                    Err(Error::MissingProject(
+                        "No project retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
         None => {
             tracing::error!("No bridge agent found");
             Err(Error::MissingAgent(

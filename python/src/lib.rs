@@ -773,6 +773,28 @@ impl Job {
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }
+            "ProjectDetails" => {
+                let result = match self.0.result::<grammar::ProjectDetails>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectDetails::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
+            "ProjectClass" => {
+                let result = match self.0.result::<grammar::ProjectClass>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectClass::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(PyNone::get(py).as_ref().clone()),
+                }
+            }
             "Vec<String>" => {
                 let result = match self.0.result::<Vec<String>>() {
                     Ok(result) => result,

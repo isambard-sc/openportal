@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use reqwest::Client;
+use url::Url;
 
 use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
@@ -50,6 +52,7 @@ async fn main() -> Result<()> {
         Some("http://localhost:3000".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(3000),
+        Some("http://localhost/signal".to_owned()),
     );
 
     // now parse the command line arguments to get the service configuration
@@ -60,6 +63,12 @@ async fn main() -> Result<()> {
             return Ok(());
         }
     };
+
+    let board = server::get_board().await?;
+
+    if let Some(signal_url) = &config.bridge.signal_url {
+        board.write().await.set_signal_url(signal_url.clone());
+    }
 
     async_runnable! {
         ///
@@ -94,6 +103,21 @@ async fn main() -> Result<()> {
 
                     let waiter = board.write().await.add(&job)?;
 
+                    // now signal the web-portal connected to the bridge
+                    // that this job is ready to be processed
+                    let signal_url = board.read().await.signal_url();
+
+                    match signal_web_portal(&signal_url, &job).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // remove the job from the board as it will not be processed
+                            board.write().await.remove(&job)?;
+                            return job.errored(
+                                &format!("Failed to signal web portal: {}", e),
+                            );
+                        }
+                    }
+
                     let mut result = waiter.result().await?;
 
                     while !result.is_finished() {
@@ -112,6 +136,21 @@ async fn main() -> Result<()> {
 
                     let waiter = board.write().await.add(&job)?;
 
+                    // now signal the web-portal connected to the bridge
+                    // that this job is ready to be processed
+                    let signal_url = board.read().await.signal_url();
+
+                    match signal_web_portal(&signal_url, &job).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // remove the job from the board as it will not be processed
+                            board.write().await.remove(&job)?;
+                            return job.errored(
+                                &format!("Failed to signal web portal: {}", e),
+                            );
+                        }
+                    }
+
                     let mut result = waiter.result().await?;
 
                     while !result.is_finished() {
@@ -129,6 +168,21 @@ async fn main() -> Result<()> {
                     let board = server::get_board().await?;
 
                     let waiter = board.write().await.add(&job)?;
+
+                    // now signal the web-portal connected to the bridge
+                    // that this job is ready to be processed
+                    let signal_url = board.read().await.signal_url();
+
+                    match signal_web_portal(&signal_url, &job).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // remove the job from the board as it will not be processed
+                            board.write().await.remove(&job)?;
+                            return job.errored(
+                                &format!("Failed to signal web portal: {}", e),
+                            );
+                        }
+                    }
 
                     let mut result = waiter.result().await?;
 
@@ -152,6 +206,93 @@ async fn main() -> Result<()> {
 
     // run the Bridge agent
     run(config, bridge_runner).await?;
+
+    Ok(())
+}
+
+fn should_allow_invalid_certs() -> bool {
+    match std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS") {
+        Ok(value) => value.to_lowercase() == "true",
+        Err(_) => false,
+    }
+}
+
+///
+/// Call 'get' on the passed signal URL, passing in the job ID
+/// as the 'job_id' query parameter. Do nothing if the signal URL
+/// is not set. Attempt to call this 5 times, then give up
+///
+pub async fn signal_web_portal(signal_url: &Option<Url>, job: &Job) -> Result<(), Error> {
+    if let Some(url) = signal_url {
+        let job_id = job.id().to_string();
+        let mut attempts = 0;
+
+        let client = Client::builder()
+            .danger_accept_invalid_certs(should_allow_invalid_certs())
+            .build()
+            .with_context(|| {
+                format!(
+                    "Failed to build HTTP client for signaling web portal for job: {}",
+                    job_id
+                )
+            })?;
+
+        while attempts < 5 {
+            attempts += 1;
+
+            let response = match client
+                .get(url.clone())
+                .query(&[("job_id", job_id.as_str())])
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!(
+                        "Attempt {}: Failed to signal web portal for job: {}. Error: {}",
+                        attempts,
+                        job_id,
+                        e
+                    );
+                    // Wait before retrying
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+            if response.status().is_success() {
+                tracing::info!("Successfully signaled web portal for job: {}", job_id);
+                return Ok(());
+            } else {
+                tracing::warn!(
+                    "Failed to signal web portal for job: {}. Status: {}",
+                    job_id,
+                    response.status()
+                );
+            }
+
+            // Wait before retrying
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        }
+
+        tracing::error!(
+            "Failed to signal web portal after 5 attempts for job: {}",
+            job_id
+        );
+
+        return Err(Error::Unknown(
+            format!(
+                "Failed to signal web portal after 5 attempts for job: {}",
+                job_id
+            )
+            .to_string(),
+        ));
+    } else {
+        tracing::warn!(
+            "Signal URL is not set, skipping signaling web portal for job: {}",
+            job.id()
+        );
+    }
 
     Ok(())
 }

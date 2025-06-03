@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::oneshot;
+use url::Url;
 use uuid::Uuid;
 
 use crate::board::{Listener, Waiter};
@@ -13,6 +14,8 @@ use crate::job::Job;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BridgeBoard {
     jobs: HashMap<Uuid, Job>,
+
+    signal_url: Option<Url>,
 
     // do not serialise or clone the waiters
     #[serde(skip)]
@@ -24,6 +27,7 @@ impl Clone for BridgeBoard {
     fn clone(&self) -> Self {
         Self {
             jobs: self.jobs.clone(),
+            signal_url: self.signal_url.clone(),
             waiters: HashMap::new(),
         }
     }
@@ -33,6 +37,7 @@ impl BridgeBoard {
     pub fn new() -> Self {
         Self {
             jobs: HashMap::new(),
+            signal_url: None,
             waiters: HashMap::new(),
         }
     }
@@ -223,5 +228,13 @@ impl BridgeBoard {
         for job_id in expired_jobs.iter() {
             let _ = self.jobs.remove(job_id);
         }
+    }
+
+    pub fn set_signal_url(&mut self, url: Url) {
+        self.signal_url = Some(url);
+    }
+
+    pub fn signal_url(&self) -> Option<Url> {
+        self.signal_url.clone()
     }
 }

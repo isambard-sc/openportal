@@ -79,6 +79,7 @@ impl Defaults {
         bridge_url: Option<String>,
         bridge_ip: Option<String>,
         bridge_port: Option<u16>,
+        signal_url: Option<String>,
     ) -> Self {
         Self {
             service: ServiceDefaults::parse(
@@ -90,7 +91,7 @@ impl Defaults {
                 healthcheck_port,
                 proxy_header,
             ),
-            bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port),
+            bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port, signal_url),
         }
     }
 }
@@ -132,6 +133,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             bridge_port,
             healthcheck_port,
             proxy_header,
+            signal_url,
             force,
         }) => {
             let local_healthcheck_port;
@@ -163,6 +165,9 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                         .unwrap_or(defaults.bridge.ip())
                         .parse::<IpAddr>()?,
                     bridge_port.unwrap_or_else(|| defaults.bridge.port()),
+                    &signal_url
+                        .clone()
+                        .unwrap_or_else(|| defaults.bridge.signal_url()),
                 ),
                 agent: AgentType::Bridge,
             };
@@ -496,6 +501,13 @@ enum Commands {
             help = "Optional header to use for proxying requests - look in this for the client IP address"
         )]
         proxy_header: Option<String>,
+
+        #[arg(
+            long,
+            short = 's',
+            help = "URL to call to signal when a new job is available to be processed"
+        )]
+        signal_url: Option<String>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

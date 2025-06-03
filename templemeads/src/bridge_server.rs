@@ -58,6 +58,7 @@ pub struct Config {
     pub ip: IpAddr,
     pub port: u16,
     pub key: SecretKey,
+    pub signal_url: Option<Url>,
 }
 
 fn create_webserver_url(url: &str) -> Result<Url, Error> {
@@ -97,8 +98,20 @@ fn create_webserver_url(url: &str) -> Result<Url, Error> {
     Ok(format!("{}://{}:{}{}", scheme, host, port, path).parse::<Url>()?)
 }
 
+fn create_signal_url(signal_url: &str) -> Result<Option<Url>, Error> {
+    let url = signal_url
+        .parse::<Url>()
+        .with_context(|| format!("Could not parse signal URL: {}", signal_url))?;
+
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(anyhow::anyhow!("Signal URL must be http or https").into());
+    }
+
+    Ok(Some(url))
+}
+
 impl Config {
-    pub fn new(url: &str, ip: IpAddr, port: u16) -> Self {
+    pub fn new(url: &str, ip: IpAddr, port: u16, signal_url: &str) -> Self {
         Self {
             url: create_webserver_url(url).unwrap_or_else(|e| {
                 tracing::error!(
@@ -112,6 +125,15 @@ impl Config {
             ip,
             port,
             key: Key::generate(),
+            signal_url: create_signal_url(signal_url).unwrap_or_else(|e| {
+                tracing::error!(
+                    "Could not parse signal URL: {} because '{}'. Using None",
+                    signal_url,
+                    e
+                );
+                #[allow(clippy::unwrap_used)]
+                None
+            }),
         }
     }
 }
@@ -121,14 +143,21 @@ pub struct Defaults {
     url: String,
     ip: String,
     port: u16,
+    signal_url: String,
 }
 
 impl Defaults {
-    pub fn parse(url: Option<String>, ip: Option<String>, port: Option<u16>) -> Self {
+    pub fn parse(
+        url: Option<String>,
+        ip: Option<String>,
+        port: Option<u16>,
+        signal_url: Option<String>,
+    ) -> Self {
         Self {
             url: url.unwrap_or("http://localhost:8042".to_owned()),
             ip: ip.unwrap_or("127.0.0.1".to_owned()),
             port: port.unwrap_or(8042),
+            signal_url: signal_url.unwrap_or("http://localhost/signal".to_owned()),
         }
     }
 
@@ -142,6 +171,10 @@ impl Defaults {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn signal_url(&self) -> String {
+        self.signal_url.clone()
     }
 }
 

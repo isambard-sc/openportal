@@ -276,13 +276,13 @@ pub async fn signal_web_portal(signal_url: &Option<Url>, job: &Job) -> Result<()
         }
 
         tracing::error!(
-            "Failed to signal web portal after 5 attempts for job: {}",
+            "Failed to signal web portal after 5 re-attempts for job: {}",
             job_id
         );
 
         return Err(Error::Unknown(
             format!(
-                "Failed to signal web portal after 5 attempts for job: {}",
+                "Failed to signal web portal after 5 re-attempts for job: {}",
                 job_id
             )
             .to_string(),

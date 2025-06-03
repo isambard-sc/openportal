@@ -8,7 +8,8 @@ use crate::usagereport::Usage;
 use anyhow::Context;
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::{hash::Hash, sync::Arc};
 
 pub trait NamedType {
     fn type_name() -> &'static str;
@@ -1155,12 +1156,304 @@ impl<'de> Deserialize<'de> for DateRange {
 }
 
 ///
+/// The class of Project to create in a portal. This can be used
+/// e.g. to specify that a project is for a particular class of
+/// infrastructure (e.g. "cpu-cluster", "gpu-cluster" etc.).
+/// The classes available on a portal are controlled by the
+/// portal administrator, and can be arbitrarily defined. Note
+/// however that once a project has been created in a class,
+/// it cannot be changed.
+///
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectClass {
+    /// The name of the class - this must not have any spaces
+    /// or special characters
+    name: String,
+}
+
+impl ProjectClass {
+    pub fn parse(name: &str) -> Result<Self, Error> {
+        let name = name.trim();
+
+        if name.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectClass - cannot be empty '{}'",
+                name
+            )));
+        };
+
+        if name.contains(' ') {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectClass - cannot contain spaces '{}'",
+                name
+            )));
+        };
+
+        // name can only be alphanumeric, underscores and dashes
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::Parse(format!(
+                "Invalid ProjectClass - can only contain alphanumeric characters, underscores and dashes '{}'",
+                name
+            )));
+        };
+
+        Ok(Self {
+            name: name.to_string(),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl NamedType for ProjectClass {
+    fn type_name() -> &'static str {
+        "ProjectClass"
+    }
+}
+
+impl std::fmt::Display for ProjectClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl Serialize for ProjectClass {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectClass {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        ProjectClass::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
+/// Details about a project that exists in a portal.
+/// This holds all data as "option" as not all details
+/// will be set by all portals. Also, using "option" allows
+/// this struct to be used in "update" requests, as only
+/// the fields that are set will be updated.
+///
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectDetails {
+    /// The name of the project
+    name: Option<String>,
+
+    /// The class of the project
+    class: Option<ProjectClass>,
+
+    /// The description of the project
+    description: Option<String>,
+
+    /// The email address(es) of the members of the project,
+    /// (keys) and their roles (values).
+    members: Option<HashMap<String, String>>,
+
+    /// Proposed start date of the project
+    start_date: Option<Date>,
+
+    /// Proposed end date of the project
+    end_date: Option<Date>,
+
+    /// The number of credit (hours) allocated to the project
+    credit: Option<Usage>,
+}
+
+impl NamedType for ProjectDetails {
+    fn type_name() -> &'static str {
+        "ProjectDetails"
+    }
+}
+
+impl ProjectDetails {
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            class: None,
+            description: None,
+            members: None,
+            start_date: None,
+            end_date: None,
+            credit: None,
+        }
+    }
+
+    pub fn parse(json: &str) -> Result<Self, Error> {
+        ProjectDetails::from_json(json)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json).map_err(|e| Error::Parse(e.to_string()))
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    pub fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    pub fn set_name(&mut self, name: &str) {
+        let name = name.trim();
+
+        if name.is_empty() {
+            self.name = None;
+        } else {
+            self.name = Some(name.to_string());
+        }
+    }
+
+    pub fn clear_name(&mut self) {
+        self.name = None;
+    }
+
+    pub fn class(&self) -> Option<ProjectClass> {
+        self.class.clone()
+    }
+
+    pub fn set_class(&mut self, class: ProjectClass) {
+        self.class = Some(class);
+    }
+
+    pub fn clear_class(&mut self) {
+        self.class = None;
+    }
+
+    pub fn description(&self) -> Option<String> {
+        self.description.clone()
+    }
+
+    pub fn set_description(&mut self, description: &str) {
+        let description = description.trim();
+
+        if description.is_empty() {
+            self.description = None;
+        } else {
+            self.description = Some(description.to_string());
+        }
+    }
+
+    pub fn clear_description(&mut self) {
+        self.description = None;
+    }
+
+    pub fn members(&self) -> Option<HashMap<String, String>> {
+        self.members.clone()
+    }
+
+    pub fn add_member(&mut self, email: &str, role: &str) {
+        let email = email.trim();
+        let role = role.trim();
+
+        if email.is_empty() || role.is_empty() {
+            tracing::warn!(
+                "Invalid ProjectDetails - email or role cannot be empty: email='{}', role='{}'",
+                email,
+                role
+            );
+            return;
+        };
+
+        let members = self.members.get_or_insert_with(HashMap::new);
+        members.insert(email.to_string(), role.to_string());
+    }
+
+    pub fn remove_member(&mut self, email: &str) {
+        let email = email.trim();
+
+        if email.is_empty() {
+            tracing::warn!("Invalid ProjectDetails - email cannot be empty");
+            return;
+        };
+
+        if let Some(members) = &mut self.members {
+            members.remove(email);
+        }
+    }
+
+    pub fn set_members(&mut self, members: HashMap<String, String>) {
+        if members.is_empty() {
+            self.members = None;
+        } else {
+            self.members = Some(members);
+        }
+    }
+
+    pub fn clear_members(&mut self) {
+        self.members = None;
+    }
+
+    pub fn start_date(&self) -> Option<Date> {
+        self.start_date.clone()
+    }
+
+    pub fn set_start_date(&mut self, start_date: Date) {
+        self.start_date = Some(start_date)
+    }
+
+    pub fn clear_start_date(&mut self) {
+        self.start_date = None;
+    }
+
+    pub fn end_date(&self) -> Option<Date> {
+        self.end_date.clone()
+    }
+
+    pub fn set_end_date(&mut self, end_date: Date) {
+        self.end_date = Some(end_date)
+    }
+
+    pub fn clear_end_date(&mut self) {
+        self.end_date = None;
+    }
+
+    pub fn credit(&self) -> Option<Usage> {
+        self.credit
+    }
+
+    pub fn set_credit(&mut self, credit: Usage) {
+        self.credit = Some(credit)
+    }
+
+    pub fn clear_credit(&mut self) {
+        self.credit = None;
+    }
+}
+
+impl std::fmt::Display for ProjectDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_json())
+    }
+}
+
+///
 /// Enum of all of the instructions that can be sent to agents
 ///
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// An instruction to submit a job to the portal
     Submit(Destination, Arc<Instruction>),
+
+    /// An instruction to create a project in a portal
+    CreateProject(ProjectIdentifier, ProjectDetails),
+
+    /// An instruction to update a project in a portal
+    UpdateProject(ProjectIdentifier, ProjectDetails),
 
     /// An instruction to get all projects managed by a portal
     GetProjects(PortalIdentifier),
@@ -1281,6 +1574,50 @@ impl Instruction {
                         "submit failed to parse the destination for: {}. {}",
                         &parts[1..].join(" "),
                         e
+                    )))
+                }
+            },
+            "create_project" => match ProjectIdentifier::parse(parts[1]) {
+                Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
+                    Ok(details) => Ok(Instruction::CreateProject(project, details)),
+                    Err(_) => {
+                        tracing::error!(
+                            "create_project failed to parse: {}",
+                            &parts[3..].join(" ")
+                        );
+                        Err(Error::Parse(format!(
+                            "create_project failed to parse: {}",
+                            &parts[3..].join(" ")
+                        )))
+                    }
+                },
+                Err(_) => {
+                    tracing::error!("create_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "create_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "update_project" => match ProjectIdentifier::parse(parts[1]) {
+                Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
+                    Ok(details) => Ok(Instruction::UpdateProject(project, details)),
+                    Err(_) => {
+                        tracing::error!(
+                            "update_project failed to parse: {}",
+                            &parts[2..].join(" ")
+                        );
+                        Err(Error::Parse(format!(
+                            "update_project failed to parse: {}",
+                            &parts[2..].join(" ")
+                        )))
+                    }
+                },
+                Err(_) => {
+                    tracing::error!("update_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "update_project failed to parse: {}",
+                        &parts[1..].join(" ")
                     )))
                 }
             },
@@ -1782,6 +2119,90 @@ impl Instruction {
             }
         }
     }
+
+    pub fn command(&self) -> String {
+        match self {
+            Instruction::Submit(_, _) => "submit".to_string(),
+            Instruction::CreateProject(_, _) => "create_project".to_string(),
+            Instruction::UpdateProject(_, _) => "update_project".to_string(),
+            Instruction::GetProjects(_) => "get_projects".to_string(),
+            Instruction::AddProject(_) => "add_project".to_string(),
+            Instruction::RemoveProject(_) => "remove_project".to_string(),
+            Instruction::GetUsers(_) => "get_users".to_string(),
+            Instruction::AddUser(_) => "add_user".to_string(),
+            Instruction::RemoveUser(_) => "remove_user".to_string(),
+            Instruction::GetUserMapping(_) => "get_user_mapping".to_string(),
+            Instruction::GetProjectMapping(_) => "get_project_mapping".to_string(),
+            Instruction::GetHomeDir(_) => "get_home_dir".to_string(),
+            Instruction::GetProjectDirs(_) => "get_project_dirs".to_string(),
+            Instruction::AddLocalUser(_) => "add_local_user".to_string(),
+            Instruction::RemoveLocalUser(_) => "remove_local_user".to_string(),
+            Instruction::AddLocalProject(_) => "add_local_project".to_string(),
+            Instruction::RemoveLocalProject(_) => "remove_local_project".to_string(),
+            Instruction::GetLocalUsageReport(_, _) => "get_local_usage_report".to_string(),
+            Instruction::GetLocalLimit(_) => "get_local_limit".to_string(),
+            Instruction::SetLocalLimit(_, _) => "set_local_limit".to_string(),
+            Instruction::GetLocalHomeDir(_) => "get_local_home_dir".to_string(),
+            Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
+            Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
+            Instruction::GetUsageReport(_, _) => "get_usage_report".to_string(),
+            Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
+            Instruction::SetLimit(_, _) => "set_limit".to_string(),
+            Instruction::GetLimit(_) => "get_limit".to_string(),
+            Instruction::IsProtectedUser(_) => "is_protected_user".to_string(),
+        }
+    }
+
+    pub fn arguments(&self) -> Vec<String> {
+        match self {
+            Instruction::Submit(destination, command) => {
+                vec![destination.to_string(), command.to_string()]
+            }
+            Instruction::CreateProject(project, details) => {
+                vec![project.to_string(), details.to_string()]
+            }
+            Instruction::UpdateProject(project, details) => {
+                vec![project.to_string(), details.to_string()]
+            }
+            Instruction::GetProjects(portal) => vec![portal.to_string()],
+            Instruction::AddProject(project) => vec![project.to_string()],
+            Instruction::RemoveProject(project) => vec![project.to_string()],
+            Instruction::GetUsers(project) => vec![project.to_string()],
+            Instruction::AddUser(user) => vec![user.to_string()],
+            Instruction::RemoveUser(user) => vec![user.to_string()],
+            Instruction::GetUserMapping(user) => vec![user.to_string()],
+            Instruction::GetProjectMapping(project) => vec![project.to_string()],
+            Instruction::GetHomeDir(user) => vec![user.to_string()],
+            Instruction::GetProjectDirs(project) => vec![project.to_string()],
+            Instruction::AddLocalUser(mapping) => vec![mapping.to_string()],
+            Instruction::RemoveLocalUser(mapping) => vec![mapping.to_string()],
+            Instruction::AddLocalProject(mapping) => vec![mapping.to_string()],
+            Instruction::RemoveLocalProject(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalUsageReport(mapping, date_range) => {
+                vec![mapping.to_string(), date_range.to_string()]
+            }
+            Instruction::GetLocalLimit(mapping) => vec![mapping.to_string()],
+            Instruction::SetLocalLimit(mapping, usage) => {
+                vec![mapping.to_string(), usage.seconds().to_string()]
+            }
+            Instruction::GetLocalHomeDir(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalProjectDirs(mapping) => vec![mapping.to_string()],
+            Instruction::UpdateHomeDir(user, homedir) => {
+                vec![user.to_string(), homedir.clone()]
+            }
+            Instruction::GetUsageReport(project, date_range) => {
+                vec![project.to_string(), date_range.to_string()]
+            }
+            Instruction::GetUsageReports(portal, date_range) => {
+                vec![portal.to_string(), date_range.to_string()]
+            }
+            Instruction::SetLimit(project, usage) => {
+                vec![project.to_string(), usage.seconds().to_string()]
+            }
+            Instruction::GetLimit(project) => vec![project.to_string()],
+            Instruction::IsProtectedUser(user) => vec![user.to_string()],
+        }
+    }
 }
 
 impl std::fmt::Display for Instruction {
@@ -1789,6 +2210,12 @@ impl std::fmt::Display for Instruction {
         match self {
             Instruction::Submit(destination, command) => {
                 write!(f, "submit {} {}", destination, command)
+            }
+            Instruction::CreateProject(project, details) => {
+                write!(f, "create_project {} {}", project, details)
+            }
+            Instruction::UpdateProject(project, details) => {
+                write!(f, "update_project {} {}", project, details)
             }
             Instruction::GetProjects(portal) => write!(f, "get_projects {}", portal),
             Instruction::AddProject(project) => write!(f, "add_project {}", project),

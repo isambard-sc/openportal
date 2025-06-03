@@ -214,6 +214,15 @@ impl Registrar {
     }
 
     ///
+    /// Return the name of the first bridge agent in the system
+    ///
+    fn bridge(&self) -> Option<Peer> {
+        self.peers_by_type
+            .get(&Type::Bridge)
+            .and_then(|v| v.first().cloned())
+    }
+
+    ///
     /// Return the name of the first account agent in the system
     ///
     fn account(&self) -> Option<Peer> {
@@ -294,6 +303,32 @@ pub async fn portal(wait: u64) -> Option<Peer> {
 
     loop {
         match REGISTAR.read().await.portal() {
+            Some(peer) => return Some(peer),
+            None => match now.elapsed() {
+                Ok(elapsed) => {
+                    if elapsed > wait {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            },
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+///
+/// Return the name of the first bridge agent in the system
+/// Note that this will wait for up to 30 seconds for a bridge
+/// agent to be registered before returning None
+///
+pub async fn bridge(wait: u64) -> Option<Peer> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
+
+    loop {
+        match REGISTAR.read().await.bridge() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {

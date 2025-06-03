@@ -3,7 +3,14 @@
 
 use anyhow::Result;
 
+use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
+use templemeads::agent::Type::Portal;
+use templemeads::async_runnable;
+use templemeads::grammar::Instruction::{CreateProject, UpdateProject};
+use templemeads::job::{Envelope, Job};
+use templemeads::server;
+use templemeads::Error;
 
 ///
 /// Main function for the bridge application
@@ -54,8 +61,79 @@ async fn main() -> Result<()> {
         }
     };
 
+    async_runnable! {
+        ///
+        /// Runnable function that will be called when a job is received
+        /// by the agent
+        ///
+        pub async fn bridge_runner(envelope: Envelope) -> Result<Job, Error>
+        {
+            let job = envelope.job();
+
+            // Get information about the agent that sent this job
+            // The only agents that can send jobs to a portal are
+            // bridge agents, and other portal agents that have
+            // expressly be configured to be given permission.
+            // This permission is based on the zone of the portal to portal
+            // connection
+            match agent::agent_type(&envelope.sender()).await {
+                Some(Portal) => {}
+                _ => {
+                    return Err(Error::InvalidInstruction(
+                        format!("Invalid instruction: {}. Only portal agents can submit instructions to a bridge", job.instruction()),
+                    ));
+                }
+            }
+
+            match job.instruction() {
+                CreateProject(project, details) => {
+                    // create a new project in the cluster
+                    tracing::debug!("Creating project {} with details {:?}", project, details);
+
+                    let board = server::get_board().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
+                }
+                UpdateProject(project, details) => {
+                    // update the project in the cluster
+                    tracing::debug!("Updating project {} with details {:?}", project, details);
+
+                    let board = server::get_board().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
+                }
+                _ => {
+                    tracing::error!("Unknown instruction: {:?}", job.instruction());
+                    Err(Error::UnknownInstruction(
+                        format!("Unknown instruction: {:?}", job.instruction()).to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
     // run the Bridge agent
-    run(config).await?;
+    run(config, bridge_runner).await?;
 
     Ok(())
 }

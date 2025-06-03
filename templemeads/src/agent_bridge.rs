@@ -8,6 +8,7 @@ use crate::bridge_server::{
 };
 use crate::error::Error;
 use crate::handler::{process_message, set_my_service_details};
+use crate::runnable::AsyncRunnable;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -26,7 +27,7 @@ use std::path::PathBuf;
 /// This listens for requests from the bridge http server and
 /// bridges those to the other Agents in the OpenPortal system.
 ///
-pub async fn run(config: Config) -> Result<(), Error> {
+pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     if config.service.name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
@@ -38,7 +39,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
     }
 
     // pass the service details onto the handler
-    set_my_service_details(&config.service.name(), &config.agent, None).await?;
+    set_my_service_details(&config.service.name(), &config.agent, Some(runner)).await?;
 
     // spawn the bridge server
     spawn(config.bridge).await?;

@@ -84,10 +84,10 @@ impl Invite {
         if !self
             .zone
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '<' || c == '>')
         {
             return Err(Error::InvalidPeer(format!(
-                "Zone '{}' contains invalid characters. It must be alphanumeric or - _",
+                "Zone '{}' contains invalid characters. It must be alphanumeric or - _ < >",
                 self.zone
             )));
         }

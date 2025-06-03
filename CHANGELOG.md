@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.11.0] - 2025-05-21
 ### Added
 - Added support for high availability (HA) for client OpenPortal agents.
   This allows for client agents to be run on multiple nodes, with only
@@ -15,7 +17,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   as both servers and clients. There should still only be a single
   instance of such agents in a network. HA for server agents
   in planned.
-
 - Added command line options to support rotating of client and server
   keys. Use the `client --rotate name --zone zone` on a server to
   rotate the keys for the specified client in the specified zone. This
@@ -418,6 +419,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.11.0]: https://github.com/isambard-sc/openportal/releases/tag/0.11.0
 [0.10.0]: https://github.com/isambard-sc/openportal/releases/tag/0.10.0
 [0.9.6]: https://github.com/isambard-sc/openportal/releases/tag/0.9.6
 [0.9.5]: https://github.com/isambard-sc/openportal/releases/tag/0.9.5

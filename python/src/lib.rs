@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDate, PyDateTime, PyList, PyNone, PyString};
 use pyo3::{IntoPyObject, PyResult, Python};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path;
 use std::sync::RwLock;
 use templemeads::destination;
@@ -292,6 +293,20 @@ impl Job {
         }
     }
 
+    fn to_json(&self) -> PyResult<String> {
+        self.0
+            .to_json()
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match job::Job::from_json(json) {
+            Ok(job) => Ok(job.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     #[getter]
     fn id(&self) -> PyResult<Uuid> {
         Ok(self.0.id().into())
@@ -407,6 +422,211 @@ impl Job {
         }
 
         self.is_finished()
+    }
+
+    fn completed(&self, py: Python<'_>, result: Py<PyAny>) -> PyResult<Job> {
+        // this is horrible, but it looks like the only way to do it?
+        match result.extract::<bool>(py) {
+            Ok(result) => {
+                let result = match self.0.completed(result) {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+                Ok(result.into())
+            }
+            Err(_) => match result.extract::<String>(py) {
+                Ok(result) => {
+                    let result = match self.0.completed(result) {
+                        Ok(result) => result,
+                        Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                    };
+                    Ok(result.into())
+                }
+                Err(_) => match result.extract::<UserIdentifier>(py) {
+                    Ok(result) => {
+                        let result = match self.0.completed(result.0.clone()) {
+                            Ok(result) => result,
+                            Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                        };
+                        Ok(result.into())
+                    }
+                    Err(_) => match result.extract::<ProjectIdentifier>(py) {
+                        Ok(result) => {
+                            let result = match self.0.completed(result.0.clone()) {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+                                }
+                            };
+                            Ok(result.into())
+                        }
+                        Err(_) => match result.extract::<PortalIdentifier>(py) {
+                            Ok(result) => {
+                                let result = match self.0.completed(result.0.clone()) {
+                                    Ok(result) => result,
+                                    Err(e) => {
+                                        return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+                                    }
+                                };
+                                Ok(result.into())
+                            }
+                            Err(_) => match result.extract::<UserMapping>(py) {
+                                Ok(result) => {
+                                    let result = match self.0.completed(result.0.clone()) {
+                                        Ok(result) => result,
+                                        Err(e) => {
+                                            return Err(PyErr::new::<PyOSError, _>(format!(
+                                                "{:?}",
+                                                e
+                                            )))
+                                        }
+                                    };
+                                    Ok(result.into())
+                                }
+                                Err(_) => match result.extract::<ProjectMapping>(py) {
+                                    Ok(result) => {
+                                        let result = match self.0.completed(result.0.clone()) {
+                                            Ok(result) => result,
+                                            Err(e) => {
+                                                return Err(PyErr::new::<PyOSError, _>(format!(
+                                                    "{:?}",
+                                                    e
+                                                )))
+                                            }
+                                        };
+                                        Ok(result.into())
+                                    }
+                                    Err(_) => match result.extract::<UsageReport>(py) {
+                                        Ok(result) => {
+                                            let result = match self.0.completed(result.0.clone()) {
+                                                Ok(result) => result,
+                                                Err(e) => {
+                                                    return Err(PyErr::new::<PyOSError, _>(
+                                                        format!("{:?}", e),
+                                                    ))
+                                                }
+                                            };
+                                            Ok(result.into())
+                                        }
+                                        Err(_) => match result.extract::<ProjectUsageReport>(py) {
+                                            Ok(result) => {
+                                                let result =
+                                                    match self.0.completed(result.0.clone()) {
+                                                        Ok(result) => result,
+                                                        Err(e) => {
+                                                            return Err(PyErr::new::<PyOSError, _>(
+                                                                format!("{:?}", e),
+                                                            ))
+                                                        }
+                                                    };
+                                                Ok(result.into())
+                                            }
+                                            Err(_) => match result.extract::<Usage>(py) {
+                                                Ok(result) => {
+                                                    let result = match self.0.completed(result.0) {
+                                                        Ok(result) => result,
+                                                        Err(e) => {
+                                                            return Err(PyErr::new::<PyOSError, _>(
+                                                                format!("{:?}", e),
+                                                            ))
+                                                        }
+                                                    };
+                                                    Ok(result.into())
+                                                }
+                                                Err(_) => match result.extract::<DateRange>(py) {
+                                                    Ok(result) => {
+                                                        let result = match self
+                                                            .0
+                                                            .completed(result.0.clone())
+                                                        {
+                                                            Ok(result) => result,
+                                                            Err(e) => {
+                                                                return Err(PyErr::new::<
+                                                                    PyOSError,
+                                                                    _,
+                                                                >(
+                                                                    format!(
+                                                                    "{:?}",
+                                                                    e
+                                                                )
+                                                                ))
+                                                            }
+                                                        };
+                                                        Ok(result.into())
+                                                    }
+                                                    Err(_) => match result
+                                                        .extract::<ProjectClass>(py)
+                                                    {
+                                                        Ok(result) => {
+                                                            let result = match self
+                                                                .0
+                                                                .completed(result.0.clone())
+                                                            {
+                                                                Ok(result) => result,
+                                                                Err(e) => {
+                                                                    return Err(PyErr::new::<
+                                                                        PyOSError,
+                                                                        _,
+                                                                    >(
+                                                                        format!(
+                                                                        "{:?}",
+                                                                        e
+                                                                    )
+                                                                    ))
+                                                                }
+                                                            };
+                                                            Ok(result.into())
+                                                        }
+                                                        Err(_) => match result
+                                                            .extract::<ProjectDetails>(py)
+                                                        {
+                                                            Ok(result) => {
+                                                                let result = match self
+                                                                    .0
+                                                                    .completed(result.0.clone())
+                                                                {
+                                                                    Ok(result) => result,
+                                                                    Err(e) => {
+                                                                        return Err(PyErr::new::<
+                                                                            PyOSError,
+                                                                            _,
+                                                                        >(
+                                                                            format!(
+                                                                            "{:?}",
+                                                                            e
+                                                                        )
+                                                                        ))
+                                                                    }
+                                                                };
+                                                                Ok(result.into())
+                                                            }
+                                                            Err(_) => {
+                                                                Err(PyErr::new::<PyOSError, _>(
+                                                                    "Could not extract result type",
+                                                                ))
+                                                            }
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+    }
+
+    fn errored(&self, error: &str) -> PyResult<Job> {
+        let result = match self.0.errored(error) {
+            Ok(result) => result,
+            Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        };
+
+        Ok(result.into())
     }
 
     #[getter]
@@ -1180,6 +1400,16 @@ impl Instruction {
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
+
+    #[getter]
+    fn command(&self) -> PyResult<String> {
+        Ok(self.0.command())
+    }
+
+    #[getter]
+    fn arguments(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.arguments().clone())
+    }
 }
 
 impl From<grammar::Instruction> for Instruction {
@@ -1284,6 +1514,31 @@ impl Status {
             CompareOp::Ne => Ok(self.0 != other.0),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    #[staticmethod]
+    fn created() -> PyResult<Status> {
+        Ok(Status(job::Status::Created))
+    }
+
+    #[staticmethod]
+    fn pending() -> PyResult<Status> {
+        Ok(Status(job::Status::Pending))
+    }
+
+    #[staticmethod]
+    fn running() -> PyResult<Status> {
+        Ok(Status(job::Status::Running))
+    }
+
+    #[staticmethod]
+    fn complete() -> PyResult<Status> {
+        Ok(Status(job::Status::Complete))
+    }
+
+    #[staticmethod]
+    fn error() -> PyResult<Status> {
+        Ok(Status(job::Status::Error))
     }
 }
 
@@ -1588,6 +1843,230 @@ impl From<grammar::ProjectMapping> for ProjectMapping {
     }
 }
 
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectClass(grammar::ProjectClass);
+
+#[pymethods]
+impl ProjectClass {
+    #[new]
+    fn new(class: &str) -> PyResult<Self> {
+        match grammar::ProjectClass::parse(class) {
+            Ok(project_class) => Ok(Self(project_class)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectClass> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectClass> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &ProjectClass, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+}
+
+impl From<grammar::ProjectClass> for ProjectClass {
+    fn from(project_class: grammar::ProjectClass) -> Self {
+        ProjectClass(project_class)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectDetails(grammar::ProjectDetails);
+
+#[pymethods]
+impl ProjectDetails {
+    #[new]
+    fn new(details: &str) -> PyResult<Self> {
+        match grammar::ProjectDetails::parse(details) {
+            Ok(project_details) => Ok(Self(project_details)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectDetails> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectDetails> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &ProjectDetails, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> PyResult<Option<String>> {
+        Ok(self.0.name())
+    }
+
+    #[setter]
+    fn set_name(&mut self, name: &str) -> PyResult<()> {
+        self.0.set_name(name);
+        Ok(())
+    }
+
+    fn clear_name(&mut self) -> PyResult<()> {
+        self.0.clear_name();
+        Ok(())
+    }
+
+    #[getter]
+    fn project_class(&self) -> PyResult<Option<ProjectClass>> {
+        Ok(self.0.class().map(|pc| pc.into()))
+    }
+
+    #[setter]
+    fn set_project_class(&mut self, class: &ProjectClass) -> PyResult<()> {
+        self.0.set_class(class.0.clone());
+        Ok(())
+    }
+
+    fn clear_project_class(&mut self) -> PyResult<()> {
+        self.0.clear_class();
+        Ok(())
+    }
+
+    #[getter]
+    fn description(&self) -> PyResult<Option<String>> {
+        Ok(self.0.description())
+    }
+
+    #[setter]
+    fn set_description(&mut self, description: &str) -> PyResult<()> {
+        self.0.set_description(description);
+        Ok(())
+    }
+
+    fn clear_description(&mut self) -> PyResult<()> {
+        self.0.clear_description();
+        Ok(())
+    }
+
+    #[getter]
+    fn members(&self) -> PyResult<Option<HashMap<String, String>>> {
+        Ok(self.0.members())
+    }
+
+    #[setter]
+    fn set_members(&mut self, members: HashMap<String, String>) -> PyResult<()> {
+        self.0.set_members(members);
+        Ok(())
+    }
+
+    fn clear_members(&mut self) -> PyResult<()> {
+        self.0.clear_members();
+        Ok(())
+    }
+
+    fn add_member(&mut self, username: &str, role: &str) -> PyResult<()> {
+        self.0.add_member(username, role);
+        Ok(())
+    }
+
+    fn remove_member(&mut self, username: &str) -> PyResult<()> {
+        self.0.remove_member(username);
+        Ok(())
+    }
+
+    #[getter]
+    fn start_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+        Ok(self.0.start_date().map(|date| date.to_chrono()))
+    }
+
+    #[setter]
+    fn set_start_date(&mut self, start_date: Option<chrono::NaiveDate>) -> PyResult<()> {
+        if let Some(date) = start_date {
+            self.0.set_start_date(grammar::Date::from_chrono(&date));
+        } else {
+            self.0.clear_start_date();
+        }
+        Ok(())
+    }
+
+    fn clear_start_date(&mut self) -> PyResult<()> {
+        self.0.clear_start_date();
+        Ok(())
+    }
+
+    #[getter]
+    fn end_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+        Ok(self.0.end_date().map(|date| date.to_chrono()))
+    }
+
+    #[setter]
+    fn set_end_date(&mut self, end_date: Option<chrono::NaiveDate>) -> PyResult<()> {
+        if let Some(date) = end_date {
+            self.0.set_end_date(grammar::Date::from_chrono(&date));
+        } else {
+            self.0.clear_end_date();
+        }
+        Ok(())
+    }
+
+    fn clear_end_date(&mut self) -> PyResult<()> {
+        self.0.clear_end_date();
+        Ok(())
+    }
+
+    #[getter]
+    fn credit(&self) -> PyResult<Option<Usage>> {
+        Ok(self.0.credit().map(|credit| credit.into()))
+    }
+
+    #[setter]
+    fn set_credit(&mut self, credit: Option<Usage>) -> PyResult<()> {
+        if let Some(usage) = credit {
+            self.0.set_credit(usage.0);
+        } else {
+            self.0.clear_credit();
+        }
+        Ok(())
+    }
+
+    fn clear_credit(&mut self) -> PyResult<()> {
+        self.0.clear_credit();
+        Ok(())
+    }
+}
+
+impl From<grammar::ProjectDetails> for ProjectDetails {
+    fn from(project_details: grammar::ProjectDetails) -> Self {
+        ProjectDetails(project_details)
+    }
+}
+
 ///
 /// Run the passed command on the OpenPortal system.
 /// This will return a Job object that can be used to query the
@@ -1654,6 +2133,54 @@ fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
     }
 }
 
+///
+/// Fetch all of the jobs that OpenPortal has passed back to us
+/// to run
+///
+#[pyfunction]
+fn fetch_jobs() -> PyResult<Vec<Job>> {
+    match call_get::<Vec<job::Job>>("fetch_jobs") {
+        Ok(response) => Ok(response.into_iter().map(|j| j.into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
+    let uid: uuid::Uuid = match job_id.extract::<Uuid>(py) {
+        Ok(uid) => uid.0,
+        Err(_) => match job_id.extract::<Job>(py) {
+            Ok(job) => job.0.id(),
+            Err(_) => match job_id.extract::<String>(py) {
+                Ok(uid) => uuid::Uuid::parse_str(&uid)
+                    .map_err(|_| PyErr::new::<PyOSError, _>("Job ID must be a string or a Uuid"))?,
+                Err(_) => {
+                    return Err(PyErr::new::<PyOSError, _>(
+                        "Job ID must be a string or a Uuid",
+                    ))
+                }
+            },
+        },
+    };
+
+    match call_post::<job::Job>("fetch_job", serde_json::json!(uid)) {
+        Ok(response) => Ok(response.into()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
+/// Send back the result of us running a job that was passed to us by
+/// OpenPortal.
+///
+#[pyfunction]
+fn send_result(job: Job) -> PyResult<()> {
+    match call_post::<Health>("send_result", serde_json::json!(job.0)) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
@@ -1663,6 +2190,9 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
     m.add_function(wrap_pyfunction!(get, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_job, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_jobs, m)?)?;
+    m.add_function(wrap_pyfunction!(send_result, m)?)?;
 
     m.add_class::<Health>()?;
     m.add_class::<Job>()?;
@@ -1679,6 +2209,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Usage>()?;
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;
+    m.add_class::<ProjectDetails>()?;
+    m.add_class::<ProjectClass>()?;
 
     Ok(())
 }

@@ -147,6 +147,8 @@ impl Command {
             }
 
             let project = match instruction.clone() {
+                Instruction::CreateProject(project, _) => Some(project),
+                Instruction::UpdateProject(project, _) => Some(project),
                 Instruction::AddProject(project) => Some(project),
                 Instruction::AddLocalProject(project) => Some(project.project().clone()),
                 Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
@@ -308,6 +310,14 @@ impl Job {
             result_type: None,
             board: None,
         })
+    }
+
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self).map_err(Error::SerdeJson)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json).map_err(Error::SerdeJson)
     }
 
     pub fn id(&self) -> Uuid {

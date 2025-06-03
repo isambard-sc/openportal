@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::bridge::{run as bridge_run, status as bridge_status};
+use crate::bridgestate::get as get_board;
 use crate::error::Error;
 use crate::job::Job;
 
@@ -384,6 +385,118 @@ async fn status(
 }
 
 ///
+/// The 'fetch_jobs' endpoint for the web API. This will return a list
+/// of all of the jobs that OpenPortal has sent to us that we need
+/// to process
+///
+#[tracing::instrument(skip_all)]
+async fn fetch_jobs(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Job>>, AppError> {
+    verify_headers(&state, &headers, "get", "fetch_jobs", None)?;
+
+    tracing::debug!("Fetching jobs");
+
+    // get the BridgeBoard
+    let board = get_board().await;
+    match board {
+        Ok(board) => {
+            let jobs = board.read().await.unfinished_jobs();
+            Ok(Json(jobs))
+        }
+        Err(e) => {
+            tracing::error!("Error getting jobs: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+///
+/// The 'fetch_job' endpoint for the web API. This will return a specific
+/// job that OpenPortal has sent to us that we need to process.
+///
+#[tracing::instrument(skip_all)]
+async fn fetch_job(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(uid): Json<Uuid>,
+) -> Result<Json<Job>, AppError> {
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "fetch_job",
+        Some(serde_json::json!(uid)),
+    )?;
+
+    tracing::debug!("fetch_job: {:?}", uid);
+
+    // get the BridgeBoard
+    let board = get_board().await;
+    match board {
+        Ok(board) => {
+            let job = board
+                .read()
+                .await
+                .unfinished_jobs()
+                .into_iter()
+                .find(|j| j.id() == uid);
+
+            match job {
+                Some(job) => Ok(Json(job.clone())),
+                None => Err(AppError(
+                    anyhow::anyhow!("Job not found"),
+                    Some(StatusCode::NOT_FOUND),
+                )),
+            }
+        }
+        Err(e) => {
+            tracing::error!("Error getting jobs: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+///
+/// The 'send_result' endpoint for the web API. This will send the
+/// result of a job that we need to process back to the OpenPortal system.
+///
+#[tracing::instrument(skip_all)]
+async fn send_result(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(job): Json<Job>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    tracing::debug!("Send result: {:?}", job);
+
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "send_result",
+        Some(serde_json::json!(job)),
+    )?;
+
+    tracing::debug!("Sending result: {:?}", job);
+
+    // get the BridgeBoard
+    let board = get_board().await;
+
+    match board {
+        Ok(board) => {
+            let mut board = board.write().await;
+            board.update(&job);
+            Ok(Json(json!({"status": "ok"})))
+        }
+        Err(e) => {
+            tracing::error!("Error getting jobs: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+///
 /// Function spawned to run the API server in a background thread
 ///
 async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
@@ -412,6 +525,9 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
         .route("/health", get(health))
         .route("/run", post(run))
         .route("/status", post(status))
+        .route("/fetch_job", post(fetch_job))
+        .route("/fetch_jobs", get(fetch_jobs))
+        .route("/send_result", post(send_result))
         .with_state(state);
 
     // create a TCP listener on the specified port

@@ -17,6 +17,7 @@ built = { version = "0.7", default-features = false, features = ["git2"] }
 anyhow = { version="1.0.95", features = ["backtrace"] }
 templemeads = { path = "../../../templemeads" }
 tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1.41"
 
 [lints.rust]
 unsafe_code = "forbid"

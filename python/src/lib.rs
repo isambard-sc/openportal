@@ -554,9 +554,59 @@ impl Job {
                                                         };
                                                         Ok(result.into())
                                                     }
-                                                    Err(_) => Err(PyErr::new::<PyOSError, _>(
-                                                        "Invalid result type",
-                                                    )),
+                                                    Err(_) => match result
+                                                        .extract::<ProjectClass>(py)
+                                                    {
+                                                        Ok(result) => {
+                                                            let result = match self
+                                                                .0
+                                                                .completed(result.0.clone())
+                                                            {
+                                                                Ok(result) => result,
+                                                                Err(e) => {
+                                                                    return Err(PyErr::new::<
+                                                                        PyOSError,
+                                                                        _,
+                                                                    >(
+                                                                        format!(
+                                                                        "{:?}",
+                                                                        e
+                                                                    )
+                                                                    ))
+                                                                }
+                                                            };
+                                                            Ok(result.into())
+                                                        }
+                                                        Err(_) => match result
+                                                            .extract::<ProjectDetails>(py)
+                                                        {
+                                                            Ok(result) => {
+                                                                let result = match self
+                                                                    .0
+                                                                    .completed(result.0.clone())
+                                                                {
+                                                                    Ok(result) => result,
+                                                                    Err(e) => {
+                                                                        return Err(PyErr::new::<
+                                                                            PyOSError,
+                                                                            _,
+                                                                        >(
+                                                                            format!(
+                                                                            "{:?}",
+                                                                            e
+                                                                        )
+                                                                        ))
+                                                                    }
+                                                                };
+                                                                Ok(result.into())
+                                                            }
+                                                            Err(_) => {
+                                                                Err(PyErr::new::<PyOSError, _>(
+                                                                    "Could not extract result type",
+                                                                ))
+                                                            }
+                                                        },
+                                                    },
                                                 },
                                             },
                                         },
@@ -1349,6 +1399,16 @@ impl Instruction {
             CompareOp::Ne => Ok(self.0 != other.0),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    #[getter]
+    fn command(&self) -> PyResult<String> {
+        Ok(self.0.command())
+    }
+
+    #[getter]
+    fn arguments(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.arguments().clone())
     }
 }
 
@@ -2149,6 +2209,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Usage>()?;
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;
+    m.add_class::<ProjectDetails>()?;
+    m.add_class::<ProjectClass>()?;
 
     Ok(())
 }

@@ -174,9 +174,9 @@ async fn main() -> Result<()> {
                     return Ok(job);
                 }
                 _ => {
-                    if !agent_is_portal {
+                    if !(agent_is_portal || agent_is_bridge) {
                         return Err(Error::InvalidInstruction(
-                            format!("Invalid instruction: {}. Only portal agents can send instructions to the portal", job.instruction()),
+                            format!("Invalid instruction: {}. Only portal or bridge agents can send instructions to the portal", job.instruction()),
                         ));
                     }
                 }
@@ -197,9 +197,9 @@ async fn main() -> Result<()> {
                         update_project(me.name(), &project, &details).await?)
                 }
                 _ => {
-                    tracing::error!("Invalid instruction: {}. Only portal agents can send instructions to the portal", job.instruction());
+                    tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
                     return Err(Error::InvalidInstruction(
-                        format!("Invalid instruction: {}. Only portal agents can send instructions to the portal", job.instruction()),
+                        format!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction()),
                     ));
                 }
             }

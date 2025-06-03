@@ -1210,6 +1210,12 @@ impl ProjectClass {
     }
 }
 
+impl NamedType for ProjectClass {
+    fn type_name() -> &'static str {
+        "ProjectClass"
+    }
+}
+
 impl std::fmt::Display for ProjectClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name)
@@ -1265,6 +1271,12 @@ pub struct ProjectDetails {
 
     /// The number of credit (hours) allocated to the project
     credit: Option<Usage>,
+}
+
+impl NamedType for ProjectDetails {
+    fn type_name() -> &'static str {
+        "ProjectDetails"
+    }
 }
 
 impl ProjectDetails {
@@ -2105,6 +2117,90 @@ impl Instruction {
                 tracing::error!("Invalid instruction: {}", s);
                 Err(Error::Parse(format!("Invalid instruction: {}", s)))
             }
+        }
+    }
+
+    pub fn command(&self) -> String {
+        match self {
+            Instruction::Submit(_, _) => "submit".to_string(),
+            Instruction::CreateProject(_, _) => "create_project".to_string(),
+            Instruction::UpdateProject(_, _) => "update_project".to_string(),
+            Instruction::GetProjects(_) => "get_projects".to_string(),
+            Instruction::AddProject(_) => "add_project".to_string(),
+            Instruction::RemoveProject(_) => "remove_project".to_string(),
+            Instruction::GetUsers(_) => "get_users".to_string(),
+            Instruction::AddUser(_) => "add_user".to_string(),
+            Instruction::RemoveUser(_) => "remove_user".to_string(),
+            Instruction::GetUserMapping(_) => "get_user_mapping".to_string(),
+            Instruction::GetProjectMapping(_) => "get_project_mapping".to_string(),
+            Instruction::GetHomeDir(_) => "get_home_dir".to_string(),
+            Instruction::GetProjectDirs(_) => "get_project_dirs".to_string(),
+            Instruction::AddLocalUser(_) => "add_local_user".to_string(),
+            Instruction::RemoveLocalUser(_) => "remove_local_user".to_string(),
+            Instruction::AddLocalProject(_) => "add_local_project".to_string(),
+            Instruction::RemoveLocalProject(_) => "remove_local_project".to_string(),
+            Instruction::GetLocalUsageReport(_, _) => "get_local_usage_report".to_string(),
+            Instruction::GetLocalLimit(_) => "get_local_limit".to_string(),
+            Instruction::SetLocalLimit(_, _) => "set_local_limit".to_string(),
+            Instruction::GetLocalHomeDir(_) => "get_local_home_dir".to_string(),
+            Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
+            Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
+            Instruction::GetUsageReport(_, _) => "get_usage_report".to_string(),
+            Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
+            Instruction::SetLimit(_, _) => "set_limit".to_string(),
+            Instruction::GetLimit(_) => "get_limit".to_string(),
+            Instruction::IsProtectedUser(_) => "is_protected_user".to_string(),
+        }
+    }
+
+    pub fn arguments(&self) -> Vec<String> {
+        match self {
+            Instruction::Submit(destination, command) => {
+                vec![destination.to_string(), command.to_string()]
+            }
+            Instruction::CreateProject(project, details) => {
+                vec![project.to_string(), details.to_string()]
+            }
+            Instruction::UpdateProject(project, details) => {
+                vec![project.to_string(), details.to_string()]
+            }
+            Instruction::GetProjects(portal) => vec![portal.to_string()],
+            Instruction::AddProject(project) => vec![project.to_string()],
+            Instruction::RemoveProject(project) => vec![project.to_string()],
+            Instruction::GetUsers(project) => vec![project.to_string()],
+            Instruction::AddUser(user) => vec![user.to_string()],
+            Instruction::RemoveUser(user) => vec![user.to_string()],
+            Instruction::GetUserMapping(user) => vec![user.to_string()],
+            Instruction::GetProjectMapping(project) => vec![project.to_string()],
+            Instruction::GetHomeDir(user) => vec![user.to_string()],
+            Instruction::GetProjectDirs(project) => vec![project.to_string()],
+            Instruction::AddLocalUser(mapping) => vec![mapping.to_string()],
+            Instruction::RemoveLocalUser(mapping) => vec![mapping.to_string()],
+            Instruction::AddLocalProject(mapping) => vec![mapping.to_string()],
+            Instruction::RemoveLocalProject(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalUsageReport(mapping, date_range) => {
+                vec![mapping.to_string(), date_range.to_string()]
+            }
+            Instruction::GetLocalLimit(mapping) => vec![mapping.to_string()],
+            Instruction::SetLocalLimit(mapping, usage) => {
+                vec![mapping.to_string(), usage.seconds().to_string()]
+            }
+            Instruction::GetLocalHomeDir(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalProjectDirs(mapping) => vec![mapping.to_string()],
+            Instruction::UpdateHomeDir(user, homedir) => {
+                vec![user.to_string(), homedir.clone()]
+            }
+            Instruction::GetUsageReport(project, date_range) => {
+                vec![project.to_string(), date_range.to_string()]
+            }
+            Instruction::GetUsageReports(portal, date_range) => {
+                vec![portal.to_string(), date_range.to_string()]
+            }
+            Instruction::SetLimit(project, usage) => {
+                vec![project.to_string(), usage.seconds().to_string()]
+            }
+            Instruction::GetLimit(project) => vec![project.to_string()],
+            Instruction::IsProtectedUser(user) => vec![user.to_string()],
         }
     }
 }

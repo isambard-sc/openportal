@@ -76,6 +76,11 @@ impl Destination {
         self.agents.first().unwrap_or(&"".to_string()).clone()
     }
 
+    pub fn second(&self) -> String {
+        // there are always at least two agents in a destination
+        self.agents.get(1).unwrap_or(&"".to_string()).clone()
+    }
+
     pub fn last(&self) -> String {
         // there are always at least two agents in a destination
         self.agents.last().unwrap_or(&"".to_string()).clone()

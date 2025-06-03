@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
                     }
                     _ => {
                         Err(Error::InvalidInstruction(
-                            format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
+                            format!("Invalid instruction: {}. Slurm agents do not support this instruction", job.instruction()),
                         ))
                     }
                 }

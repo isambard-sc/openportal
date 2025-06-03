@@ -149,6 +149,7 @@ impl Command {
             let project = match instruction.clone() {
                 Instruction::CreateProject(project, _) => Some(project),
                 Instruction::UpdateProject(project, _) => Some(project),
+                Instruction::GetProject(project) => Some(project),
                 Instruction::AddProject(project) => Some(project),
                 Instruction::AddLocalProject(project) => Some(project.project().clone()),
                 Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
@@ -905,7 +906,7 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn wait(&self) -> Result<Job, Error> {
+    async fn _wait(&self) -> Result<Job, Error> {
         if self.is_finished() {
             return Ok(self.clone());
         }
@@ -947,6 +948,30 @@ impl Job {
         let result = waiter.result().await?;
 
         Ok(result)
+    }
+
+    pub async fn wait(&self) -> Result<Job, Error> {
+        let mut job = self._wait().await?;
+
+        // if the job is still running, then we need to wait for it to finish
+        let mut rewaits = 0;
+
+        while !job.is_finished() {
+            // wait for the job to finish
+            tracing::warn!("Wait returned even if the job is not finished: {:?}", job);
+            rewaits += 1;
+
+            if rewaits > 10 {
+                tracing::error!("Job is still not finished after 10 waits: {:?}", job);
+                return Err(Error::InvalidState(
+                    "Job is still not finished after 10 waits".to_owned(),
+                ));
+            }
+
+            job = job._wait().await?;
+        }
+
+        Ok(job)
     }
 }
 

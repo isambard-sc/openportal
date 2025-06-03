@@ -7,7 +7,7 @@ use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
 use templemeads::agent::Type::Portal;
 use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{CreateProject, UpdateProject};
+use templemeads::grammar::Instruction::{CreateProject, GetProject, UpdateProject};
 use templemeads::job::{Envelope, Job};
 use templemeads::server;
 use templemeads::Error;
@@ -107,6 +107,24 @@ async fn main() -> Result<()> {
                 UpdateProject(project, details) => {
                     // update the project in the cluster
                     tracing::debug!("Updating project {} with details {:?}", project, details);
+
+                    let board = server::get_board().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
+                }
+                GetProject(project) => {
+                    // get the project from the cluster
+                    tracing::debug!("Getting project {}", project);
 
                     let board = server::get_board().await?;
 

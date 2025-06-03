@@ -1455,6 +1455,9 @@ pub enum Instruction {
     /// An instruction to update a project in a portal
     UpdateProject(ProjectIdentifier, ProjectDetails),
 
+    /// An instruction to get the details of a single project
+    GetProject(ProjectIdentifier),
+
     /// An instruction to get all projects managed by a portal
     GetProjects(PortalIdentifier),
 
@@ -1617,6 +1620,16 @@ impl Instruction {
                     tracing::error!("update_project failed to parse: {}", &parts[1..].join(" "));
                     Err(Error::Parse(format!(
                         "update_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::GetProject(project)),
+                Err(_) => {
+                    tracing::error!("get_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_project failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }
@@ -2125,6 +2138,7 @@ impl Instruction {
             Instruction::Submit(_, _) => "submit".to_string(),
             Instruction::CreateProject(_, _) => "create_project".to_string(),
             Instruction::UpdateProject(_, _) => "update_project".to_string(),
+            Instruction::GetProject(_) => "get_project".to_string(),
             Instruction::GetProjects(_) => "get_projects".to_string(),
             Instruction::AddProject(_) => "add_project".to_string(),
             Instruction::RemoveProject(_) => "remove_project".to_string(),
@@ -2164,6 +2178,7 @@ impl Instruction {
             Instruction::UpdateProject(project, details) => {
                 vec![project.to_string(), details.to_string()]
             }
+            Instruction::GetProject(project) => vec![project.to_string()],
             Instruction::GetProjects(portal) => vec![portal.to_string()],
             Instruction::AddProject(project) => vec![project.to_string()],
             Instruction::RemoveProject(project) => vec![project.to_string()],
@@ -2217,6 +2232,7 @@ impl std::fmt::Display for Instruction {
             Instruction::UpdateProject(project, details) => {
                 write!(f, "update_project {} {}", project, details)
             }
+            Instruction::GetProject(project) => write!(f, "get_project {}", project),
             Instruction::GetProjects(portal) => write!(f, "get_projects {}", portal),
             Instruction::AddProject(project) => write!(f, "add_project {}", project),
             Instruction::RemoveProject(project) => write!(f, "remove_project {}", project),

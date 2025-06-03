@@ -5,33 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.12.0] - 2025-06-03
 ### Added
 - Added new commands to support the creation and updating of projects in
   attached portals. These are `create_project`, `update_project`, and
   `get_project`, all of which use new `ProjectDetails` and `ProjectClass`
   objects to describe the project in more detail.
-
 - Added the ability for portals to send commands to other portals. This allows
   a "higher level" portal to send `create_project` and `update_project`
   commands to a "lower level" portal, which will create the project there.
   Then, other commands (such as `get_usage_report` and `get_project`)
   can be used to query and get data about projects owned by the
   "higher level" portal.
-
 - Added the ability for the bridge agent connected to a portal to also
   send `create_project`, `update_project` and `get_project` commands
   to its attached portal. This allows the Python interface created
   via OpenPortal to be used to create and manage projects directly
   in the portal, without needing to use the web portal's own API.
   This should simplify automation of project creation and management.
-
 - Added a bridge-side job board, so that jobs sent from a portal
   to a bridge (so that the attached web portal can access and process
   them) can now be accessed from Python, processed, and then the
   results sent back to the portal. The web-portal, via a Python interface,
   can now call `fetch_job`, `fetch_jobs` and `send_result` to
   get any jobs sent to the bridge, and send back the results.
-
 - Added more functions to the Python API and made it easier to use.
   Can now properly use the `Job` class from Python, have more
   detail about the job status, and the `Instruction` class now
@@ -48,7 +46,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   that if it re-awakens more than 10 times it will return
   an error. This should prevent an infinite loop. This fixes
   issue #12.
-
 - Fixed a bug where FreeIPA was allowed to create user accounts
   when the home directory was not set. Now, this will raise an
   error. This fixes issue #13.
@@ -466,6 +463,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.12.0]: https://github.com/isambard-sc/openportal/releases/tag/0.12.0
 [0.11.0]: https://github.com/isambard-sc/openportal/releases/tag/0.11.0
 [0.10.0]: https://github.com/isambard-sc/openportal/releases/tag/0.10.0
 [0.9.6]: https://github.com/isambard-sc/openportal/releases/tag/0.9.6

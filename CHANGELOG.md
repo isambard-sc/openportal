@@ -5,13 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## [0.12.1] - 2025-06-04
 ### Added
 - Added a "signal_url" that can be called by the bridge to signal
   the connected web-portal that a new job has been submitted and
   is awaiting processing. The Job ID is submitted as a query
   parameter, providing an effective shared secret that the
   connected web-portal can use to fetch the job from the bridge.
-
 - Added support for more instructions that can be sent to the
   connected web-portal. These are `get_project_mapping`
   and `get_usage_report`. Added in the python wrapping for
@@ -475,6 +476,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.12.1]: https://github.com/isambard-sc/openportal/releases/tag/0.12.1
 [0.12.0]: https://github.com/isambard-sc/openportal/releases/tag/0.12.0
 [0.11.0]: https://github.com/isambard-sc/openportal/releases/tag/0.11.0
 [0.10.0]: https://github.com/isambard-sc/openportal/releases/tag/0.10.0

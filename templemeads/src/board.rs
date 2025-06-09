@@ -34,6 +34,10 @@ pub struct Board {
     // do not serialise or clone the waiters
     #[serde(skip)]
     waiters: HashMap<Uuid, Vec<Listener>>,
+
+    // do not serialise the duplicates
+    #[serde(skip)]
+    duplicates: HashMap<Uuid, Vec<Uuid>>,
 }
 
 impl Clone for Board {
@@ -44,6 +48,7 @@ impl Clone for Board {
             jobs: self.jobs.clone(),
             queued_commands: self.queued_commands.clone(),
             waiters: HashMap::new(),
+            duplicates: self.duplicates.clone(),
         }
     }
 }
@@ -55,6 +60,7 @@ impl Board {
             jobs: HashMap::new(),
             queued_commands: Vec::new(),
             waiters: HashMap::new(),
+            duplicates: HashMap::new(),
         }
     }
 
@@ -166,12 +172,65 @@ impl Board {
             }
         }
 
+        // if this is a new job then check for any duplicates
+        if updated && job.is_pending() {
+            // do through all of the existing jobs to see if there are
+            // any others that are pending and have the same destination
+            // and command
+            for (id, existing_job) in &self.jobs.clone() {
+                if job.is_duplicate_of(existing_job) {
+                    // change the status of our job to be a duplicate
+                    let duplicate = match job.duplicate(existing_job) {
+                        Ok(dup) => dup,
+                        Err(e) => {
+                            tracing::error!("Failed to create duplicate job: {}", e);
+                            continue;
+                        }
+                    };
+
+                    // we now need to update this job to be a duplicate
+                    self.jobs.insert(duplicate.id(), duplicate.clone());
+
+                    // now record this as a duplicate for the original's ID
+                    self.duplicates.entry(*id).or_default().push(duplicate.id());
+                }
+            }
+        }
+
         // if we have any waiters for this job then notify them if the
         // job has been updated and it is in a finished state
         if updated && job.is_finished() {
             if let Some(listeners) = self.waiters.remove(&job.id()) {
                 for listener in listeners {
                     listener.notify(job.clone());
+                }
+            }
+
+            // if we have any duplicates for this job then we also
+            // need to update those duplicates and notify their listeners
+            if let Some(duplicate_ids) = self.duplicates.remove(&job.id()) {
+                for duplicate_id in duplicate_ids {
+                    if let Some(duplicate_job) = self.jobs.get_mut(&duplicate_id) {
+                        // update the duplicate job to be finished
+                        *duplicate_job = match duplicate_job.copy_result_from(job) {
+                            Ok(dup) => dup,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to copy result from job {}: {}",
+                                    job.id(),
+                                    e
+                                );
+                                duplicate_job.errored("Failed to copy result from original job")?
+                            }
+                        };
+
+                        // notify any listeners for the duplicate job
+                        if let Some(listeners) = self.waiters.remove(&duplicate_id) {
+                            for listener in listeners {
+                                listener.notify(duplicate_job.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -203,6 +262,44 @@ impl Board {
         }
 
         let removed = self.jobs.remove(&job.id()).is_some();
+
+        // we also need to wake up any waiters for this job and
+        // remove any duplicates
+        if let Some(listeners) = self.waiters.remove(&job.id()) {
+            for listener in listeners {
+                listener.notify(job.clone());
+            }
+        }
+
+        if let Some(duplicate_ids) = self.duplicates.remove(&job.id()) {
+            for duplicate_id in duplicate_ids {
+                if let Some(duplicate_job) = self.jobs.remove(&duplicate_id) {
+                    let duplicate_job = match duplicate_job.copy_result_from(job) {
+                        Ok(dup) => dup,
+                        Err(e) => {
+                            tracing::error!("Failed to copy result from job {}: {}", job.id(), e);
+                            match duplicate_job.errored("Failed to copy result from original job") {
+                                Ok(dup) => dup,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to mark duplicate job as errored: {}",
+                                        e
+                                    );
+                                    duplicate_job
+                                }
+                            }
+                        }
+                    };
+
+                    // notify any listeners for the duplicate job
+                    if let Some(listeners) = self.waiters.remove(&duplicate_id) {
+                        for listener in listeners {
+                            listener.notify(duplicate_job.clone());
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(removed)
     }
@@ -283,6 +380,18 @@ impl Board {
             .iter()
             .filter_map(|(id, job)| {
                 if job.is_expired() {
+                    // make sure that the job is in an errored state
+                    let job = match job.is_finished() {
+                        true => job.clone(),
+                        false => match job.errored("Job expired") {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::error!("Failed to mark job as errored: {}", e);
+                                job.clone()
+                            }
+                        },
+                    };
+
                     // remove any listeners for this job
                     if let Some(listeners) = self.waiters.remove(id) {
                         for listener in listeners {

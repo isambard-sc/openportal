@@ -39,7 +39,15 @@ where
     T: DeserializeOwned,
 {
     // get the auth details from the global FreeIPA client
+    tracing::debug!(
+        "Call post function: {}, args = {:?}, kwargs = {:?}",
+        func,
+        args,
+        kwargs
+    );
+    tracing::debug!("Awaiting lock for auth...");
     let mut auth = auth().await?;
+    tracing::debug!("Lock obtained for auth!");
     auth.num_reconnects = 0;
 
     let url = format!("{}/ipa/session/json", &auth.server);
@@ -77,6 +85,7 @@ where
 
     // if this is an authorisation error, try to reconnect
     while result.status().as_u16() == 401 {
+        tracing::warn!("Login error: 401 - authorisation failed.");
         auth.num_reconnects += 1;
 
         if auth.num_reconnects > 3 {
@@ -1128,7 +1137,9 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
                 kwargs
             };
 
+            tracing::debug!("Call group_find for project: {}", project);
             let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+            tracing::debug!("group_find result: {:?}", result);
 
             if is_internal_portal(&project.portal()) {
                 let internal_groups = cache::get_internal_group_ids().await?;
@@ -1193,8 +1204,10 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
                             kwargs
                         };
 
+                        tracing::debug!("Call group_find for legacy project: {}", project);
                         let result =
                             call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+                        tracing::debug!("group_find legacy result: {:?}", result);
 
                         match result.legacy_groups(&project.portal_identifier())?.first() {
                             Some(group) => {

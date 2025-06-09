@@ -143,52 +143,80 @@ async fn process_command(
                 }
             };
 
-            match job.destination().position(recipient, sender) {
-                Position::Downstream => {
-                    // if we are downstream, then we continue to let the job
-                    // flow downstream
-                    if let Some(agent) = job.destination().next(recipient) {
-                        let peer = Peer::new(&agent, zone);
-                        agent::wait_for(&peer, 30).await?;
+            if job.is_duplicate() {
+                tracing::info!("Job is a duplicate: {}", job);
 
-                        job = match job.put(&peer).await {
-                            Ok(job) => job,
-                            Err(e) => {
-                                tracing::error!("Error putting job: {}", e);
-                                job.errored(&e.to_string())?
+                // the existing job is being processed. We now need to wait
+                // for that to finish - when it does, our new job will
+                // be updated with the result
+                while !job.is_finished() {
+                    job = job.wait().await?;
+
+                    if !job.is_finished() {
+                        tracing::warn!("Still waiting for duplicate job to finish: {}", job);
+                        job.assert_is_not_expired()?;
+                    }
+                }
+            } else {
+                match job.destination().position(recipient, sender) {
+                    Position::Downstream => {
+                        // if we are downstream, then we continue to let the job
+                        // flow downstream
+                        if let Some(agent) = job.destination().next(recipient) {
+                            let peer = Peer::new(&agent, zone);
+                            agent::wait_for(&peer, 30).await?;
+
+                            job = match job.put(&peer).await {
+                                Ok(job) => job,
+                                Err(e) => {
+                                    tracing::error!("Error putting job: {}", e);
+                                    job.errored(&e.to_string())?
+                                }
                             }
                         }
                     }
-                }
-                Position::Destination => {
-                    // we are the destination, so we need to take action
-                    match job.state() {
-                        Status::Complete => {
-                            tracing::warn!("Not rerunning job that has already completed: {}", job);
-                        }
-                        Status::Error => {
-                            tracing::warn!("Not rerunning job that has already errored: {}", job);
-                        }
-                        _ => {
-                            tracing::info!("Execute {} : {}", job.destination(), job.instruction());
+                    Position::Destination => {
+                        // we are the destination, so we need to take action
+                        match job.state() {
+                            Status::Complete => {
+                                tracing::warn!(
+                                    "Not rerunning job that has already completed: {}",
+                                    job
+                                );
+                            }
+                            Status::Error => {
+                                tracing::warn!(
+                                    "Not rerunning job that has already errored: {}",
+                                    job
+                                );
+                            }
+                            _ => {
+                                tracing::info!(
+                                    "Execute {} : {}",
+                                    job.destination(),
+                                    job.instruction()
+                                );
 
-                            job = match runner(Envelope::new(recipient, sender, zone, &job)).await {
-                                Ok(job) => job,
-                                Err(e) => {
-                                    tracing::error!("Error running job: {}", e);
-                                    job.errored(&e.to_string())?
-                                }
-                            };
+                                job = match runner(Envelope::new(recipient, sender, zone, &job))
+                                    .await
+                                {
+                                    Ok(job) => job,
+                                    Err(e) => {
+                                        tracing::error!("Error running job: {}", e);
+                                        job.errored(&e.to_string())?
+                                    }
+                                };
+                            }
                         }
                     }
-                }
-                Position::Error => {
-                    tracing::error!("Job has got into an errored position: {}", job);
-                    job = job.errored("Job has got into an errored position")?;
-                }
-                _ => {
-                    tracing::warn!("Job {} is being put, but is not moving?", job);
-                    job = job.errored("Job has got into an unknown position")?;
+                    Position::Error => {
+                        tracing::error!("Job has got into an errored position: {}", job);
+                        job = job.errored("Job has got into an errored position")?;
+                    }
+                    _ => {
+                        tracing::warn!("Job {} is being put, but is not moving?", job);
+                        job = job.errored("Job has got into an unknown position")?;
+                    }
                 }
             }
 

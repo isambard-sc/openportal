@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
 
                 match job.instruction() {
                     AddLocalProject(project) => {
-                        sacctmgr::add_project(&project).await?;
+                        sacctmgr::add_project(&project, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalProject(project) => {
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
                         job.completed_none()
                     },
                     AddLocalUser(user) => {
-                        sacctmgr::add_user(&user).await?;
+                        sacctmgr::add_user(&user, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalUser(mapping) => {
@@ -148,15 +148,15 @@ async fn main() -> Result<()> {
                         job.completed_none()
                     },
                     GetLocalUsageReport(mapping, dates) => {
-                        let report = sacctmgr::get_usage_report(&mapping, &dates).await?;
+                        let report = sacctmgr::get_usage_report(&mapping, &dates, job.expires()).await?;
                         job.completed(report)
                     }
                     GetLocalLimit(mapping) => {
-                        let limit = sacctmgr::get_limit(&mapping).await?;
+                        let limit = sacctmgr::get_limit(&mapping, job.expires()).await?;
                         job.completed(limit)
                     }
                     SetLocalLimit(mapping, limit) => {
-                        let limit = sacctmgr::set_limit(&mapping, &limit).await?;
+                        let limit = sacctmgr::set_limit(&mapping, &limit, job.expires()).await?;
                         job.completed(limit)
                     }
                     _ => {
@@ -218,7 +218,7 @@ async fn main() -> Result<()> {
 
                 match job.instruction() {
                     AddLocalProject(project) => {
-                        slurm::add_project(&project).await?;
+                        slurm::add_project(&project, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalProject(project) => {
@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
                         job.completed_none()
                     },
                     AddLocalUser(user) => {
-                        slurm::add_user(&user).await?;
+                        slurm::add_user(&user, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalUser(mapping) => {
@@ -242,15 +242,15 @@ async fn main() -> Result<()> {
                     },
                     GetLocalUsageReport(mapping, dates) => {
                         // use sacctmgr for now, as we need to validate the API response
-                        let report = slurm::get_usage_report(&mapping, &dates).await?;
+                        let report = slurm::get_usage_report(&mapping, &dates, job.expires()).await?;
                         job.completed(report)
                     }
                     GetLocalLimit(mapping) => {
-                        let limit = slurm::get_limit(&mapping).await?;
+                        let limit = slurm::get_limit(&mapping, job.expires()).await?;
                         job.completed(limit)
                     }
                     SetLocalLimit(mapping, limit) => {
-                        let limit = slurm::set_limit(&mapping, &limit).await?;
+                        let limit = slurm::set_limit(&mapping, &limit, job.expires()).await?;
                         job.completed(limit)
                     }
                     _ => {

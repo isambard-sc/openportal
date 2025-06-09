@@ -84,11 +84,21 @@ impl SlurmRunner {
 
         tracing::debug!("Running command: {:?}", processed_cmd);
 
-        let output = match tokio::process::Command::new(&processed_cmd[0])
+        let output = tokio::process::Command::new(&processed_cmd[0])
             .args(&processed_cmd[1..])
-            .output()
-            .await
-        {
+            .kill_on_drop(true)
+            .output();
+
+        // use a tokio timeout to ensure we won't block indefinitely - no job should take more than 60 seconds
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(60), output).await {
+            Ok(output) => output,
+            Err(_) => {
+                tracing::error!("Command '{}' timed out after 30 seconds", cmd);
+                return Err(Error::Call("Command timed out".to_string()));
+            }
+        };
+
+        let output = match output {
             Ok(output) => output,
             Err(e) => {
                 tracing::error!("Could not run command '{}': {}", cmd, e);

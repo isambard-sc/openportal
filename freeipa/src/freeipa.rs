@@ -9,6 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use templemeads::grammar::{
     PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
@@ -67,9 +68,12 @@ where
         "id": id,
     });
 
+    // no query should take longer than 60 seconds
+    // Use a timeout to prevent deadlocks from failed servers
     let client = Client::builder()
         .cookie_provider(Arc::clone(&auth.jar))
         .danger_accept_invalid_certs(should_allow_invalid_certs())
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 
@@ -107,6 +111,7 @@ where
                 let client = Client::builder()
                     .cookie_provider(Arc::clone(&auth.jar))
                     .danger_accept_invalid_certs(should_allow_invalid_certs())
+                    .timeout(Duration::from_secs(60))
                     .build()
                     .context("Could not build client")?;
 
@@ -278,6 +283,7 @@ async fn login(server: &str, user: &str, password: &SecretString) -> Result<Arc<
     let client = Client::builder()
         .cookie_provider(Arc::clone(&jar))
         .danger_accept_invalid_certs(should_allow_invalid_certs())
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 

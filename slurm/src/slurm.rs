@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
+use std::time::Duration;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
 use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
@@ -100,6 +101,7 @@ async fn call_get(
     tracing::debug!("Calling function {}", url);
 
     let client = Client::builder()
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 
@@ -144,6 +146,7 @@ async fn call_get(
 
                 // create a new client with the new cookies
                 let client = Client::builder()
+                    .timeout(Duration::from_secs(60))
                     .build()
                     .context("Could not build client")?;
 
@@ -299,6 +302,7 @@ async fn call_post(
     tracing::debug!("Calling function {} with payload: {:?}", url, payload);
 
     let client = Client::builder()
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 
@@ -344,6 +348,7 @@ async fn call_post(
 
                 // create a new client with the new cookies
                 let client = Client::builder()
+                    .timeout(Duration::from_secs(60))
                     .build()
                     .context("Could not build client")?;
 
@@ -568,6 +573,7 @@ async fn login(
 
     // create a client
     let client = Client::builder()
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 

@@ -767,7 +767,7 @@ impl Job {
                 // There is no need to send to the peer
                 // (the job has already been sent)
                 if job.is_duplicate() {
-                    tracing::info!("Not sending duplicate job: {:?}", job);
+                    tracing::info!("Not sending duplicate job: {}", job.instruction());
                 }
 
                 return Ok(job);

@@ -337,6 +337,10 @@ impl Job {
         self.command.instruction()
     }
 
+    pub fn expires(&self) -> &chrono::DateTime<Utc> {
+        &self.expires
+    }
+
     pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
         Self {
             id: self.id,
@@ -1242,6 +1246,18 @@ pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
         }
     }
 
+    Ok(())
+}
+
+///
+/// Assert that the job with the specified expiry time has not expired
+///
+pub fn assert_not_expired(expiry: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    if Utc::now() > *expiry {
+        return Err(Error::Expired(
+            format!("Job expired at: {}", expiry).to_owned(),
+        ));
+    }
     Ok(())
 }
 

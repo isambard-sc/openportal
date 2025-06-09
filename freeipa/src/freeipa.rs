@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use chrono::Utc;
 use once_cell::sync::Lazy;
 use reqwest::{cookie::Jar, Client};
 use secrecy::{ExposeSecret, SecretString};
@@ -13,6 +14,7 @@ use std::time::Duration;
 use templemeads::grammar::{
     PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
+use templemeads::job::assert_not_expired;
 use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -1603,7 +1605,12 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
 /// Add the project to FreeIPA - this will create the group for the project
 /// if it doesn't already exist. This returns the group
 ///
-pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error> {
+pub async fn add_project(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAGroup, Error> {
+    assert_not_expired(expires)?;
+
     let project_group = get_group_create_if_not_exists(&IPAGroup::new(
         &identifier_to_projectid(project, false)?,
         project,
@@ -1623,7 +1630,10 @@ pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error>
 pub async fn remove_project(
     project: &ProjectIdentifier,
     instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
+    assert_not_expired(expires)?;
+
     let project_group = match get_group(project).await {
         Ok(Some(group)) => group,
         Ok(None) => {
@@ -1651,6 +1661,8 @@ pub async fn remove_project(
             project_group, project)));
     }
 
+    assert_not_expired(expires)?;
+
     // now get all of the users in this project and remove them as well!
     let users = force_get_users_in_group(&project_group).await?;
 
@@ -1661,6 +1673,8 @@ pub async fn remove_project(
     );
 
     for user in users {
+        assert_not_expired(expires)?;
+
         if !user.is_managed() {
             tracing::warn!(
                 "Ignoring user {} as they are not managed by OpenPortal",
@@ -1669,7 +1683,7 @@ pub async fn remove_project(
             continue;
         }
 
-        match remove_user(user.identifier(), instance).await {
+        match remove_user(user.identifier(), instance, expires).await {
             Ok(user) => {
                 tracing::info!("Successfully removed group user: {}", user);
             }
@@ -1748,7 +1762,10 @@ pub async fn add_user(
     user: &UserIdentifier,
     instance: &Peer,
     homedir: &Option<String>,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
+    assert_not_expired(expires)?;
+
     // get a lock for this user, as only a single task should be adding
     // or removing this user at the same time
     let now = chrono::Utc::now();
@@ -1774,8 +1791,12 @@ pub async fn add_user(
         };
     };
 
+    assert_not_expired(expires)?;
+
     // return the up-to-date user if they already exist
     if let Some(mut user) = force_get_user(user).await? {
+        assert_not_expired(expires)?;
+
         if !user.is_managed() {
             tracing::warn!(
                 "Ignoring request to add {} as they are not managed by OpenPortal",
@@ -1831,8 +1852,12 @@ pub async fn add_user(
         // and will try to add the user from scratch
     }
 
+    assert_not_expired(expires)?;
+
     // Get the group that all managed users need to belong to
     let managed_group = get_managed_group()?;
+
+    assert_not_expired(expires)?;
 
     // The user doesn't exist, so try to add
     let mut kwargs = {
@@ -1851,6 +1876,8 @@ pub async fn add_user(
         tracing::info!("Adding user {} with home directory: {}", user, homedir);
     }
 
+    // we need to let the below go to completion, even if expired, as the
+    // user needs to be removed if something goes wrong
     let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs)).await {
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
@@ -2064,7 +2091,13 @@ pub async fn add_user(
 /// something else goes wrong. Note that the user must be managed by
 /// OpenPortal, or an error will be returned
 ///
-pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
+pub async fn remove_user(
+    user: &UserIdentifier,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
+    assert_not_expired(expires)?;
+
     // get and lock a mutex on this user, as we should only have a single
     // task adding or removing this user at once
     let now = chrono::Utc::now();
@@ -2089,6 +2122,8 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
             }
         };
     };
+
+    assert_not_expired(expires)?;
 
     // force get this user, as we need to have up-to-date information from FreeIPA
     let mut user = match force_get_user(user).await {
@@ -2160,6 +2195,10 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
             return Ok(user);
         }
     }
+
+    assert_not_expired(expires)?;
+
+    // don't check for expiry below as this has to run to completion
 
     // now remove the user from all of the instance groups for this peer
     let instance_groups = cache::get_instance_groups(instance).await?;
@@ -2323,7 +2362,13 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
 /// something else goes wrong. Note that the user must be managed by
 /// OpenPortal, or an error will be returned
 ///
-pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<String, Error> {
+pub async fn update_homedir(
+    user: &UserIdentifier,
+    homedir: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<String, Error> {
+    assert_not_expired(expires)?;
+
     let homedir = homedir.trim();
 
     if homedir.is_empty() {
@@ -2335,6 +2380,8 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
         "User {} does not exist in FreeIPA?",
         user
     )))?;
+
+    assert_not_expired(expires)?;
 
     if !user.is_managed() {
         tracing::warn!(
@@ -2353,6 +2400,10 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
         );
         return Ok(user.home().to_string());
     }
+
+    assert_not_expired(expires)?;
+
+    // do not check for expiry below as this has to run to completion
 
     // now update the homedir to the passed string
     let kwargs = {
@@ -2412,12 +2463,17 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
 /// Return all of the groups that are managed by OpenPortal for the
 /// passed portal
 ///
-pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Error> {
+pub async fn get_groups(
+    portal: &PortalIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Vec<IPAGroup>, Error> {
     tracing::debug!("Getting managed groups for portal: {}", portal);
     if is_internal_portal(&portal.portal()) {
         // return an empty set of groups for internal portals
         return Ok(Vec::new());
     }
+
+    assert_not_expired(expires)?;
 
     // calling group_find with no arguments should list all groups
     // I don't like setting a high size limit, but I am unsure how to
@@ -2431,6 +2487,8 @@ pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Erro
     };
 
     let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+
+    assert_not_expired(expires)?;
 
     // construct groups as the combination of both result.groups() and result.legacy_groups()
     let groups = result
@@ -2456,8 +2514,11 @@ pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Erro
 pub async fn get_users(
     project: &ProjectIdentifier,
     instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<Vec<IPAUser>, Error> {
     tracing::debug!("Getting users for project: {}", project);
+
+    assert_not_expired(expires)?;
 
     // don't get the users for project identifiers that use internal portal names
     // as they aren't public
@@ -2483,6 +2544,8 @@ pub async fn get_users(
         }
     };
 
+    assert_not_expired(expires)?;
+
     let instance_group = get_op_instance_group(instance)?;
     let cached_users = cache::get_users_in_group(&project_group).await?;
 
@@ -2502,6 +2565,8 @@ pub async fn get_users(
 
     cache::set_users_in_group(&project_group, &users).await?;
 
+    assert_not_expired(expires)?;
+
     // filter out users who are not in the instance group for this peer
     let users = users
         .into_iter()
@@ -2511,7 +2576,12 @@ pub async fn get_users(
     Ok(users)
 }
 
-pub async fn get_project_mapping(project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
+pub async fn get_project_mapping(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<ProjectMapping, Error> {
+    assert_not_expired(expires)?;
+
     match get_group(project).await? {
         Some(group) => group.mapping(),
         None => Err(Error::MissingProject(format!(
@@ -2521,7 +2591,12 @@ pub async fn get_project_mapping(project: &ProjectIdentifier) -> Result<ProjectM
     }
 }
 
-pub async fn get_user_mapping(user: &UserIdentifier) -> Result<UserMapping, Error> {
+pub async fn get_user_mapping(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<UserMapping, Error> {
+    assert_not_expired(expires)?;
+
     match get_user(user).await? {
         Some(user) => user.mapping(),
         None => Err(Error::MissingUser(format!(
@@ -2531,12 +2606,17 @@ pub async fn get_user_mapping(user: &UserIdentifier) -> Result<UserMapping, Erro
     }
 }
 
-pub async fn is_protected_user(user: &UserIdentifier) -> Result<bool, Error> {
+pub async fn is_protected_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
     // need to get the up-to-date version of the user,
     // in case their details have been changed in FreeIPA
     // behind our back. Important that we don't say a user
     // isn't protected when they have been manually removed from
     // the managed group...
+    assert_not_expired(expires)?;
+
     match force_get_user(user).await? {
         Some(user) => Ok(!user.is_managed()),
         None => Ok(false),

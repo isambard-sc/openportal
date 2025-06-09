@@ -130,8 +130,6 @@ async fn process_command(
         Command::Put { job } => {
             let peer = Peer::new(sender, zone);
 
-            tracing::debug!("Put job: {} to {} from {}", job, recipient, peer,);
-
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
                 Ok(job) => job,

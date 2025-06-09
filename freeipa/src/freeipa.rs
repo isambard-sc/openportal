@@ -16,7 +16,7 @@ use templemeads::grammar::{
 };
 use templemeads::job::assert_not_expired;
 use templemeads::Error;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, Semaphore};
 
 use templemeads::agent::Peer;
 
@@ -1601,6 +1601,8 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
     }
 }
 
+static MAX_CONCURRENT_REQUESTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(10));
+
 ///
 /// Add the project to FreeIPA - this will create the group for the project
 /// if it doesn't already exist. This returns the group
@@ -1609,6 +1611,12 @@ pub async fn add_project(
     project: &ProjectIdentifier,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for adding project".to_string()))?;
+
     assert_not_expired(expires)?;
 
     let project_group = get_group_create_if_not_exists(&IPAGroup::new(
@@ -1632,6 +1640,12 @@ pub async fn remove_project(
     instance: &Peer,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for removing project".to_string()))?;
+
     assert_not_expired(expires)?;
 
     let project_group = match get_group(project).await {
@@ -1671,6 +1685,10 @@ pub async fn remove_project(
         project_group.groupid(),
         project
     );
+
+    // we need to drop the semaphore permit before we remove the users,
+    // as removing users will also try to acquire the semaphore
+    drop(_permit);
 
     for user in users {
         assert_not_expired(expires)?;
@@ -1764,6 +1782,12 @@ pub async fn add_user(
     homedir: &Option<String>,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for adding user".to_string()))?;
+
     assert_not_expired(expires)?;
 
     // get a lock for this user, as only a single task should be adding
@@ -2096,6 +2120,12 @@ pub async fn remove_user(
     instance: &Peer,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for removing a user".to_string()))?;
+
     assert_not_expired(expires)?;
 
     // get and lock a mutex on this user, as we should only have a single
@@ -2367,6 +2397,12 @@ pub async fn update_homedir(
     homedir: &str,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<String, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for removing a user".to_string()))?;
+
     assert_not_expired(expires)?;
 
     let homedir = homedir.trim();
@@ -2473,6 +2509,12 @@ pub async fn get_groups(
         return Ok(Vec::new());
     }
 
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for getting groups".to_string()))?;
+
     assert_not_expired(expires)?;
 
     // calling group_find with no arguments should list all groups
@@ -2517,6 +2559,12 @@ pub async fn get_users(
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Vec<IPAUser>, Error> {
     tracing::debug!("Getting users for project: {}", project);
+
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for getting users".to_string()))?;
 
     assert_not_expired(expires)?;
 
@@ -2580,6 +2628,11 @@ pub async fn get_project_mapping(
     project: &ProjectIdentifier,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<ProjectMapping, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS.acquire().await.map_err(|_| {
+        Error::Call("Failed to acquire semaphore for getting project mapping".to_string())
+    })?;
+
     assert_not_expired(expires)?;
 
     match get_group(project).await? {
@@ -2595,6 +2648,11 @@ pub async fn get_user_mapping(
     user: &UserIdentifier,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS.acquire().await.map_err(|_| {
+        Error::Call("Failed to acquire semaphore for getting user mapping".to_string())
+    })?;
+
     assert_not_expired(expires)?;
 
     match get_user(user).await? {
@@ -2615,6 +2673,11 @@ pub async fn is_protected_user(
     // behind our back. Important that we don't say a user
     // isn't protected when they have been manually removed from
     // the managed group...
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS.acquire().await.map_err(|_| {
+        Error::Call("Failed to acquire semaphore for checking if a user is protected".to_string())
+    })?;
+
     assert_not_expired(expires)?;
 
     match force_get_user(user).await? {

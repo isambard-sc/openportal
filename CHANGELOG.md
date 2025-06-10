@@ -58,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   and resilient to errors and job storms.
 
 ## [0.12.1] - 2025-06-04
+### Added
 - Added a "signal_url" that can be called by the bridge to signal
   the connected web-portal that a new job has been submitted and
   is awaiting processing. The Job ID is submitted as a query

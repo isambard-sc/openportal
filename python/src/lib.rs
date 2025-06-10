@@ -333,6 +333,11 @@ impl Job {
     }
 
     #[getter]
+    fn is_duplicate(&self) -> PyResult<bool> {
+        Ok(self.0.is_duplicate())
+    }
+
+    #[getter]
     fn state(&self) -> PyResult<Status> {
         Ok(self.0.state().into())
     }
@@ -1569,6 +1574,11 @@ impl Status {
     #[staticmethod]
     fn error() -> PyResult<Status> {
         Ok(Status(job::Status::Error))
+    }
+
+    #[staticmethod]
+    fn duplicate() -> PyResult<Status> {
+        Ok(Status(job::Status::Duplicate))
     }
 }
 

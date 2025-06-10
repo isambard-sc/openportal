@@ -11,6 +11,18 @@ use crate::command::Command as ControlCommand;
 use crate::error::Error;
 use crate::job::Job;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum JobAddState {
+    /// The job was added to the board
+    Added,
+    /// The job was already on the board, but it was updated
+    Updated,
+    /// The job was added to the board, but it is a duplicate of an existing job
+    Duplicated,
+    /// The job was not added because it was already on the board
+    Unchanged,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct SyncState {
     jobs: Vec<Job>,
@@ -34,6 +46,10 @@ pub struct Board {
     // do not serialise or clone the waiters
     #[serde(skip)]
     waiters: HashMap<Uuid, Vec<Listener>>,
+
+    // do not serialise the duplicates
+    #[serde(skip)]
+    duplicates: HashMap<Uuid, Vec<Uuid>>,
 }
 
 impl Clone for Board {
@@ -44,6 +60,7 @@ impl Clone for Board {
             jobs: self.jobs.clone(),
             queued_commands: self.queued_commands.clone(),
             waiters: HashMap::new(),
+            duplicates: self.duplicates.clone(),
         }
     }
 }
@@ -55,6 +72,7 @@ impl Board {
             jobs: HashMap::new(),
             queued_commands: Vec::new(),
             waiters: HashMap::new(),
+            duplicates: HashMap::new(),
         }
     }
 
@@ -128,21 +146,21 @@ impl Board {
     ///
     /// The indicated board for the job must match the name of this board
     ///
-    /// This returns whether or not the board has changed
-    /// (i.e. whether the job is not already on the board with this
-    ///  version)
+    /// This returns the state change for the board, i.e.
+    /// if the job was added, updated, duplicated, or unchanged.
     ///
-    pub fn add(&mut self, job: &Job) -> Result<bool, Error> {
+    pub fn add(&mut self, job: &Job) -> Result<(Job, JobAddState), Error> {
         job.assert_is_for_board(&self.peer)?;
 
-        let mut updated = false;
+        let mut state = JobAddState::Unchanged;
+        let mut job = job.clone();
 
         match self.jobs.get_mut(&job.id()) {
             Some(j) => {
                 // only update if newer
                 if job.version() > j.version() {
                     *j = job.clone();
-                    updated = true;
+                    state = JobAddState::Updated;
                 }
                 // else if the job is newer, then automatically create a new version
                 else if job.changed() > j.changed() {
@@ -153,7 +171,8 @@ impl Board {
                         *j = j.increment_version();
                     }
 
-                    updated = true;
+                    job = j.clone();
+                    state = JobAddState::Updated;
                 }
             }
             None => {
@@ -162,21 +181,103 @@ impl Board {
                 // a problem, and job changes are idempotent (i.e.
                 // it doesn't matter if this happens twice)
                 self.jobs.insert(job.id(), job.clone());
-                updated = true;
+                state = JobAddState::Added;
+            }
+        }
+
+        // if this is a new job then check for any duplicates
+        if state == JobAddState::Added && job.is_pending() {
+            // do through all of the existing jobs to see if there are
+            // any others that are pending and have the same destination
+            // and command
+            for (id, existing_job) in &self.jobs.clone() {
+                if *id != job.id() && job.is_duplicate_of(existing_job) {
+                    // change the status of our job to be a duplicate
+                    let duplicate = match job.duplicate(existing_job) {
+                        Ok(dup) => dup,
+                        Err(e) => {
+                            tracing::error!("Failed to create duplicate job: {}", e);
+                            continue;
+                        }
+                    };
+
+                    assert!(duplicate.is_duplicate());
+
+                    // we now need to update this job to be a duplicate
+                    self.jobs.insert(duplicate.id(), duplicate.clone());
+
+                    // now record this as a duplicate for the original's ID
+                    self.duplicates.entry(*id).or_default().push(duplicate.id());
+
+                    tracing::info!(
+                        "Number of duplicates for instruction {}: {}",
+                        duplicate.instruction(),
+                        self.duplicates.get(id).map_or(0, |v| v.len())
+                    );
+
+                    return Ok((duplicate, JobAddState::Duplicated));
+                }
             }
         }
 
         // if we have any waiters for this job then notify them if the
         // job has been updated and it is in a finished state
-        if updated && job.is_finished() {
+        if (state == JobAddState::Added || state == JobAddState::Updated) && job.is_finished() {
             if let Some(listeners) = self.waiters.remove(&job.id()) {
                 for listener in listeners {
                     listener.notify(job.clone());
                 }
             }
+
+            // if we have any duplicates for this job then we also
+            // need to update those duplicates and notify their listeners
+            if let Some(duplicate_ids) = self.duplicates.remove(&job.id()) {
+                tracing::info!(
+                    "Original finished: Updating {} duplicates for job {}",
+                    duplicate_ids.len(),
+                    job.id()
+                );
+
+                for duplicate_id in duplicate_ids {
+                    if let Some(duplicate_job) = self.jobs.get_mut(&duplicate_id) {
+                        // update the duplicate job to be finished
+                        if !duplicate_job.is_finished() {
+                            *duplicate_job = match duplicate_job.copy_result_from(&job) {
+                                Ok(dup) => dup,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to copy result from job {}: {}",
+                                        job.id(),
+                                        e
+                                    );
+                                    match duplicate_job
+                                        .errored("Failed to copy result from original job")
+                                    {
+                                        Ok(dup) => dup,
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to mark duplicate job as errored: {}",
+                                                e
+                                            );
+                                            duplicate_job.clone()
+                                        }
+                                    }
+                                }
+                            };
+                        }
+
+                        // notify any listeners for the duplicate job
+                        if let Some(listeners) = self.waiters.remove(&duplicate_id) {
+                            for listener in listeners {
+                                listener.notify(duplicate_job.clone());
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        Ok(updated)
+        Ok((job, state))
     }
 
     ///
@@ -203,6 +304,52 @@ impl Board {
         }
 
         let removed = self.jobs.remove(&job.id()).is_some();
+
+        // we also need to wake up any waiters for this job and
+        // remove any duplicates
+        if let Some(listeners) = self.waiters.remove(&job.id()) {
+            for listener in listeners {
+                listener.notify(job.clone());
+            }
+        }
+
+        if let Some(duplicate_ids) = self.duplicates.remove(&job.id()) {
+            for duplicate_id in duplicate_ids {
+                if let Some(mut duplicate_job) = self.jobs.remove(&duplicate_id) {
+                    if !duplicate_job.is_finished() {
+                        duplicate_job = match duplicate_job.copy_result_from(job) {
+                            Ok(dup) => dup,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to copy result from job {}: {}",
+                                    job.id(),
+                                    e
+                                );
+                                match duplicate_job
+                                    .errored("Failed to copy result from original job")
+                                {
+                                    Ok(dup) => dup,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to mark duplicate job as errored: {}",
+                                            e
+                                        );
+                                        duplicate_job
+                                    }
+                                }
+                            }
+                        };
+                    }
+
+                    // notify any listeners for the duplicate job
+                    if let Some(listeners) = self.waiters.remove(&duplicate_id) {
+                        for listener in listeners {
+                            listener.notify(duplicate_job.clone());
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(removed)
     }
@@ -283,6 +430,18 @@ impl Board {
             .iter()
             .filter_map(|(id, job)| {
                 if job.is_expired() {
+                    // make sure that the job is in an errored state
+                    let job = match job.is_finished() {
+                        true => job.clone(),
+                        false => match job.errored("Job expired") {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::error!("Failed to mark job as errored: {}", e);
+                                job.clone()
+                            }
+                        },
+                    };
+
                     // remove any listeners for this job
                     if let Some(listeners) = self.waiters.remove(id) {
                         for listener in listeners {

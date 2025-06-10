@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use chrono::Utc;
 use std::collections::HashMap;
 
 // import freeipa directory as a module
@@ -18,7 +19,7 @@ use templemeads::grammar::Instruction::{
     RemoveProject, RemoveUser, UpdateHomeDir,
 };
 use templemeads::grammar::UserMapping;
-use templemeads::job::{Envelope, Job};
+use templemeads::job::{assert_not_expired, Envelope, Job};
 use templemeads::Error;
 
 ///
@@ -107,19 +108,19 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 GetProjects(portal) => {
-                    let groups = freeipa::get_groups(&portal).await?;
+                    let groups = freeipa::get_groups(&portal, job.expires()).await?;
                     job.completed(groups.iter().map(|g| g.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddProject(project) => {
-                    let project = freeipa::add_project(&project).await?;
+                    let project = freeipa::add_project(&project, job.expires()).await?;
                     job.completed(project.mapping()?)
                 },
                 RemoveProject(project) => {
-                    let project = freeipa::remove_project(&project, &sender).await?;
+                    let project = freeipa::remove_project(&project, &sender, job.expires()).await?;
                     job.completed(project.mapping()?)
                 },
                 GetUsers(project) => {
-                    let users = freeipa::get_users(&project, &sender).await?;
+                    let users = freeipa::get_users(&project, &sender, job.expires()).await?;
                     job.completed(users.iter().map(|u| u.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddUser(user) => {
@@ -127,29 +128,29 @@ async fn main() -> Result<()> {
                     let local_group = freeipa::get_primary_group_name(&user).await?;
                     let mapping = UserMapping::new(&user, &local_user, &local_group)?;
 
-                    let homedir = get_home_dir(me.name(), &sender, &mapping).await?;
+                    let homedir = get_home_dir(me.name(), &sender, &mapping, job.expires()).await?;
 
-                    let user = freeipa::add_user(&user, &sender, &Some(homedir)).await?;
+                    let user = freeipa::add_user(&user, &sender, &Some(homedir), job.expires()).await?;
                     job.completed(user.mapping()?)
                 },
                 RemoveUser(user) => {
-                    let user = freeipa::remove_user(&user, &sender).await?;
+                    let user = freeipa::remove_user(&user, &sender, job.expires()).await?;
                     job.completed(user.mapping()?)
                 },
                 UpdateHomeDir(user, homedir) => {
-                    let _ = freeipa::update_homedir(&user, &homedir).await?;
+                    let _ = freeipa::update_homedir(&user, &homedir, job.expires()).await?;
                     job.completed(homedir)
                 },
                 GetProjectMapping(project) => {
-                    let mapping = freeipa::get_project_mapping(&project).await?;
+                    let mapping = freeipa::get_project_mapping(&project, job.expires()).await?;
                     job.completed(mapping)
                 },
                 GetUserMapping(user) => {
-                    let mapping = freeipa::get_user_mapping(&user).await?;
+                    let mapping = freeipa::get_user_mapping(&user, job.expires()).await?;
                     job.completed(mapping)
                 },
                 IsProtectedUser(user) => {
-                    let is_protected = freeipa::is_protected_user(&user).await?;
+                    let is_protected = freeipa::is_protected_user(&user, job.expires()).await?;
                     job.completed(is_protected)
                 }
                 _ => {
@@ -166,7 +167,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn get_home_dir(me: &str, sender: &Peer, mapping: &UserMapping) -> Result<String, Error> {
+async fn get_home_dir(
+    me: &str,
+    sender: &Peer,
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<String, Error> {
+    assert_not_expired(expires)?;
+
     let job = Job::parse(
         &format!("{}.{} get_local_home_dir {}", me, sender.name(), mapping),
         false,
@@ -174,12 +182,17 @@ async fn get_home_dir(me: &str, sender: &Peer, mapping: &UserMapping) -> Result<
 
     let job = job.put(sender).await?;
 
+    assert_not_expired(expires)?;
+
     // wait for the job to complete - get the result
     let mut home_dir = job.wait().await?.result::<String>()?;
+
+    assert_not_expired(expires)?;
 
     while home_dir.is_none() {
         // wait for the job to complete - get the result
         let job = job.wait().await?;
+        assert_not_expired(expires)?;
         home_dir = job.result::<String>()?;
     }
 

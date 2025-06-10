@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use reqwest::Client;
+use std::time::Duration;
 use url::Url;
 
 use templemeads::agent;
@@ -297,6 +298,7 @@ pub async fn signal_web_portal(signal_url: &Option<Url>, job: &Job) -> Result<()
 
         let client = Client::builder()
             .danger_accept_invalid_certs(should_allow_invalid_certs())
+            .timeout(Duration::from_secs(60))
             .build()
             .with_context(|| {
                 format!(

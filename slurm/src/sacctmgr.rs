@@ -3,11 +3,13 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use chrono::Utc;
 use once_cell::sync::Lazy;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
+use templemeads::job::assert_not_expired;
 use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, Semaphore};
 
 use crate::cache;
 use crate::slurm::SlurmJob;
@@ -82,11 +84,21 @@ impl SlurmRunner {
 
         tracing::debug!("Running command: {:?}", processed_cmd);
 
-        let output = match tokio::process::Command::new(&processed_cmd[0])
+        let output = tokio::process::Command::new(&processed_cmd[0])
             .args(&processed_cmd[1..])
-            .output()
-            .await
-        {
+            .kill_on_drop(true)
+            .output();
+
+        // use a tokio timeout to ensure we won't block indefinitely - no job should take more than 60 seconds
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(60), output).await {
+            Ok(output) => output,
+            Err(_) => {
+                tracing::error!("Command '{}' timed out after 30 seconds", cmd);
+                return Err(Error::Call("Command timed out".to_string()));
+            }
+        };
+
+        let output = match output {
             Ok(output) => output,
             Err(e) => {
                 tracing::error!("Could not run command '{}': {}", cmd, e);
@@ -712,7 +724,20 @@ pub async fn find_cluster() -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
+static MAX_CONCURRENT_REQUESTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(10));
+
+pub async fn add_project(
+    project: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for adding project".to_string()))?;
+
+    assert_not_expired(expires)?;
+
     let account = SlurmAccount::from_mapping(project)?;
 
     let account = get_account_create_if_not_exists(&account).await?;
@@ -722,7 +747,15 @@ pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
+pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for adding user".to_string()))?;
+
+    assert_not_expired(expires)?;
+
     let user: SlurmUser = get_user_create_if_not_exists(user).await?;
 
     tracing::info!("Added user: {}", user);
@@ -733,7 +766,16 @@ pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
 pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<ProjectUsageReport, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for getting usage".to_string()))?;
+
+    assert_not_expired(expires)?;
+
     let account = SlurmAccount::from_mapping(project)?;
 
     let account = match get_account(account.name()).await {
@@ -842,7 +884,18 @@ pub async fn get_usage_report(
     Ok(report)
 }
 
-pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
+pub async fn get_limit(
+    project: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Usage, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for getting limit".to_string()))?;
+
+    assert_not_expired(expires)?;
+
     let account = SlurmAccount::from_mapping(project)?;
 
     let account = match get_account(account.name()).await? {
@@ -980,7 +1033,19 @@ pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
     Ok(*account.limit())
 }
 
-pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage, Error> {
+pub async fn set_limit(
+    project: &ProjectMapping,
+    limit: &Usage,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Usage, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for setting limit".to_string()))?;
+
+    assert_not_expired(expires)?;
+
     let account = SlurmAccount::from_mapping(project)?;
 
     match get_account(account.name()).await? {

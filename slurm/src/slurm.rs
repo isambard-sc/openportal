@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use chrono::TimeZone;
+use chrono::{TimeZone, Utc};
 use once_cell::sync::Lazy;
 use reqwest::{Client, Url};
 use secrecy::{ExposeSecret, SecretString};
@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
+use std::time::Duration;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
+use templemeads::job::assert_not_expired;
 use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, Semaphore};
 
 use crate::cache;
 use crate::sacctmgr;
@@ -100,6 +102,7 @@ async fn call_get(
     tracing::debug!("Calling function {}", url);
 
     let client = Client::builder()
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 
@@ -144,6 +147,7 @@ async fn call_get(
 
                 // create a new client with the new cookies
                 let client = Client::builder()
+                    .timeout(Duration::from_secs(60))
                     .build()
                     .context("Could not build client")?;
 
@@ -299,6 +303,7 @@ async fn call_post(
     tracing::debug!("Calling function {} with payload: {:?}", url, payload);
 
     let client = Client::builder()
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 
@@ -344,6 +349,7 @@ async fn call_post(
 
                 // create a new client with the new cookies
                 let client = Client::builder()
+                    .timeout(Duration::from_secs(60))
                     .build()
                     .context("Could not build client")?;
 
@@ -568,6 +574,7 @@ async fn login(
 
     // create a client
     let client = Client::builder()
+        .timeout(Duration::from_secs(60))
         .build()
         .context("Could not build client")?;
 
@@ -2911,7 +2918,17 @@ pub async fn connect(
     }
 }
 
-pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
+static MAX_CONCURRENT_REQUESTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(10));
+
+pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for adding a user".to_string()))?;
+
+    assert_not_expired(expires)?;
+
     // get a lock for this user, as only a single task should be adding
     // or removing this user at the same time
     let now = chrono::Utc::now();
@@ -2944,7 +2961,18 @@ pub async fn add_user(user: &UserMapping) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
+pub async fn add_project(
+    project: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS
+        .acquire()
+        .await
+        .map_err(|_| Error::Call("Failed to acquire semaphore for adding a project".to_string()))?;
+
+    assert_not_expired(expires)?;
+
     // get a lock for this project, as only a single task should be adding
     // or removing this project at the same time
     let now = chrono::Utc::now();
@@ -2985,7 +3013,15 @@ pub async fn add_project(project: &ProjectMapping) -> Result<(), Error> {
 pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<ProjectUsageReport, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS.acquire().await.map_err(|_| {
+        Error::Call("Failed to acquire semaphore for getting the usage report".to_string())
+    })?;
+
+    assert_not_expired(expires)?;
+
     let account = SlurmAccount::from_mapping(project)?;
 
     let account = match get_account(account.name()).await {
@@ -3094,7 +3130,17 @@ pub async fn get_usage_report(
     Ok(report)
 }
 
-pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
+pub async fn get_limit(
+    project: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Usage, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS.acquire().await.map_err(|_| {
+        Error::Call("Failed to acquire semaphore for getting the limit".to_string())
+    })?;
+
+    assert_not_expired(expires)?;
+
     let account = SlurmAccount::from_mapping(project)?;
 
     let account = match get_account(account.name()).await? {
@@ -3232,7 +3278,18 @@ pub async fn get_limit(project: &ProjectMapping) -> Result<Usage, Error> {
     Ok(*account.limit())
 }
 
-pub async fn set_limit(project: &ProjectMapping, limit: &Usage) -> Result<Usage, Error> {
+pub async fn set_limit(
+    project: &ProjectMapping,
+    limit: &Usage,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Usage, Error> {
+    // ensure that we don't have too many concurrent requests
+    let _permit = MAX_CONCURRENT_REQUESTS.acquire().await.map_err(|_| {
+        Error::Call("Failed to acquire semaphore for setting the limit".to_string())
+    })?;
+
+    assert_not_expired(expires)?;
+
     let account = SlurmAccount::from_mapping(project)?;
 
     match get_account(account.name()).await? {

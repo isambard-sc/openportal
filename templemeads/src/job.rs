@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Peer;
-use crate::board::{SyncState, Waiter};
+use crate::board::{JobAddState, SyncState, Waiter};
 use crate::command::Command as ControlCommand;
 use crate::destination::{Destination, Position};
 use crate::error::Error;
@@ -54,6 +54,7 @@ pub enum Status {
     Running,
     Complete,
     Error,
+    Duplicate,
 }
 
 impl Display for Status {
@@ -64,6 +65,7 @@ impl Display for Status {
             Status::Running => write!(f, "running"),
             Status::Complete => write!(f, "complete"),
             Status::Error => write!(f, "error"),
+            Status::Duplicate => write!(f, "duplicate"),
         }
     }
 }
@@ -78,6 +80,7 @@ impl std::str::FromStr for Status {
             "running" => Ok(Status::Running),
             "complete" => Ok(Status::Complete),
             "error" => Ok(Status::Error),
+            "duplicate" => Ok(Status::Duplicate),
             _ => Err(Error::Parse(format!("Unknown status: {}", s))),
         }
     }
@@ -285,6 +288,7 @@ impl std::fmt::Display for Job {
                 Some(result) => write!(f, "{{{}: Error - {}}}", self.command, result),
                 None => write!(f, "{{{}: Unknown Error}}", self.command),
             },
+            Status::Duplicate => write!(f, "{{{}: Duplicate of {:?}}}", self.command, self.result),
         }
     }
 }
@@ -333,6 +337,10 @@ impl Job {
         self.command.instruction()
     }
 
+    pub fn expires(&self) -> &chrono::DateTime<Utc> {
+        &self.expires
+    }
+
     pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
         Self {
             id: self.id,
@@ -352,8 +360,16 @@ impl Job {
         self.expires < Utc::now()
     }
 
+    pub fn is_pending(&self) -> bool {
+        self.state == Status::Pending
+    }
+
     pub fn is_finished(&self) -> bool {
         self.state == Status::Complete || self.state == Status::Error
+    }
+
+    pub fn is_duplicate(&self) -> bool {
+        self.state == Status::Duplicate
     }
 
     pub fn state(&self) -> Status {
@@ -388,6 +404,12 @@ impl Job {
     }
 
     pub fn assert_is_for_board(&self, agent: &Peer) -> Result<(), Error> {
+        if self.is_expired() {
+            return Err(Error::Expired(
+                format!("Job {} has expired", self.id).to_owned(),
+            ));
+        }
+
         match &self.board {
             Some(b) => {
                 if b == agent {
@@ -440,6 +462,46 @@ impl Job {
         }
     }
 
+    pub fn is_duplicate_of(&self, job: &Job) -> bool {
+        self.command.destination().last() == job.command.destination().last()
+            && self.command.instruction() == job.command.instruction()
+            && job.is_pending()
+            && self.is_pending()
+    }
+
+    pub fn duplicate(&self, job: &Job) -> Result<Job, Error> {
+        if !self.is_duplicate_of(job) {
+            return Err(Error::InvalidState(
+                format!("Job {} is not a duplicate of job {}", self, job).to_owned(),
+            ));
+        }
+
+        tracing::debug!(
+            "Setting job {} as a duplicate of job {}. Repeated command: {}",
+            self.id,
+            job.id,
+            job.command
+        );
+
+        match self.state {
+            Status::Pending => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                expires: self.expires,
+                version: self.version + 1,
+                command: job.command.clone(),
+                state: Status::Duplicate,
+                result: job.id.to_string().into(),
+                result_type: None,
+                board: self.board.clone(),
+            }),
+            _ => Err(Error::InvalidState(
+                format!("Cannot set duplicate on job in state: {:?}", self.state).to_owned(),
+            )),
+        }
+    }
+
     pub fn running(&self, progress: Option<String>) -> Result<Job, Error> {
         match self.state {
             Status::Pending | Status::Running => Ok(Job {
@@ -469,7 +531,7 @@ impl Job {
         }
 
         match self.state {
-            Status::Pending | Status::Running => Ok(Job {
+            Status::Duplicate | Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
@@ -533,7 +595,7 @@ impl Job {
 
     pub fn errored(&self, message: &str) -> Result<Job, Error> {
         match self.state {
-            Status::Pending | Status::Running => Ok(Job {
+            Status::Duplicate | Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
@@ -574,6 +636,7 @@ impl Job {
             Status::Created => Some("Created".to_owned()),
             Status::Pending => Some("Pending".to_owned()),
             Status::Complete => Some("Complete".to_owned()),
+            Status::Duplicate => Some("Pending".to_owned()),
             Status::Error => Some("Error".to_owned()),
         }
     }
@@ -582,6 +645,7 @@ impl Job {
         match self.state {
             Status::Created => Ok("None".to_string()),
             Status::Pending => Ok("None".to_string()),
+            Status::Duplicate => Ok("None".to_string()),
             Status::Running => Ok("None".to_string()),
             Status::Error => match &self.result_type {
                 Some(t) => Ok(t.clone()),
@@ -601,6 +665,7 @@ impl Job {
         match self.state {
             Status::Created => Ok(None),
             Status::Pending => Ok(None),
+            Status::Duplicate => Ok(None),
             Status::Running => Ok(None),
             Status::Error => match &self.result {
                 Some(result) => Err(Error::Run(result.clone())),
@@ -660,12 +725,7 @@ impl Job {
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
 
-            if !board.add(&job)? {
-                // The board already contains this version of the job
-                // There is no change, so no need to send to the peer
-                // (the job has already been sent)
-                return Ok(job);
-            }
+            (job, _) = board.add(&job)?;
         }
 
         Ok(job)
@@ -701,10 +761,19 @@ impl Job {
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
 
-            if !board.add(&job)? {
-                // The board already contains this version of the job
-                // There is no change, so no need to send to the peer
+            let state;
+
+            (job, state) = board.add(&job)?;
+
+            if state == JobAddState::Unchanged || state == JobAddState::Duplicated {
+                // The board already contains this version of the job,
+                // or a job which is a duplicate of this one.
+                // There is no need to send to the peer
                 // (the job has already been sent)
+                if job.is_duplicate() {
+                    tracing::info!("Not sending duplicate job: {}", job.instruction());
+                }
+
                 return Ok(job);
             }
         }
@@ -754,13 +823,15 @@ impl Job {
             // blocking operation
             let mut board = board.write().await;
 
+            let (job, state) = board.add(self)?;
+
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
-            if !board.add(self)? {
+            if state != JobAddState::Unchanged {
                 // The board already contains this version of the job
                 // There is no change, so no need to send to the peer
                 // (the job has already been sent)
-                return Ok(self.clone());
+                return Ok(job);
             }
         }
 
@@ -793,7 +864,12 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            if !board.add(&job)? {
+
+            let state;
+
+            (job, state) = board.add(&job)?;
+
+            if state == JobAddState::Unchanged {
                 // The board already contains this version of the job
                 // There is no change, so no need to send to the peer
                 // (the job has already been sent)
@@ -1170,6 +1246,18 @@ pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
         }
     }
 
+    Ok(())
+}
+
+///
+/// Assert that the job with the specified expiry time has not expired
+///
+pub fn assert_not_expired(expiry: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    if Utc::now() > *expiry {
+        return Err(Error::Expired(
+            format!("Job expired at: {}", expiry).to_owned(),
+        ));
+    }
     Ok(())
 }
 

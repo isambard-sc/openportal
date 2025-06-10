@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.14.0] - 2025-06-10
+
 ### Added
+
 - Added automatic de-duplication of jobs. Now, if the board detects
   that a job is added that is the same as one that is already being
   processed, it will automatically mark the new job as a "duplicate",
@@ -58,7 +61,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   and resilient to errors and job storms.
 
 ## [0.12.1] - 2025-06-04
+
 ### Added
+
 - Added a "signal_url" that can be called by the bridge to signal
   the connected web-portal that a new job has been submitted and
   is awaiting processing. The Job ID is submitted as a query
@@ -71,7 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   representation to the `DataRange` object.
 
 ## [0.12.0] - 2025-06-03
+
 ### Added
+
 - Added new commands to support the creation and updating of projects in
   attached portals. These are `create_project`, `update_project`, and
   `get_project`, all of which use new `ProjectDetails` and `ProjectClass`
@@ -103,6 +110,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   project creation and management.
 
 ### Fixed
+
 - Fixed a bug where `job.wait()` could wake up even if the job
   has not yet completed. This left the `result` as empty,
   which was surprising behaviour. Now, `job.wait()` will
@@ -115,7 +123,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   error. This fixes issue #13.
 
 ## [0.11.0] - 2025-05-21
+
 ### Added
+
 - Added support for high availability (HA) for client OpenPortal agents.
   This allows for client agents to be run on multiple nodes, with only
   one node being active at a time, and automatic failover to other nodes
@@ -132,7 +142,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   client via the `server --rotate filename` option.
 
 ## [0.10.0] - 2025-04-01
+
 ### Added
+
 - Added ability to specify the partition used for accounting for a slurm
   account. This is useful if different services use different partitions
   to separate out the accounting.
@@ -143,7 +155,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   "INFO" level, and the flow of jobs through agents is easier to follow.
 
 ## [0.9.6] - 2025-03-05
+
 ### Added
+
 - Added ability to control the parent account of slurm accounts that
   are added via openportal. This defaults to "root" (the default), but
   can be changed by setting the `parent_account` option in the
@@ -151,7 +165,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   exist already - if it doesn't, then the account creation will fail.
 
 ## [0.9.5] - 2025-02-20
+
 ### Added
+
 - Added an environment variable to turn on checking of the user
   class in FreeIPA. This is the double-check that isn't really needed
   and gets in the way now. The default is to not check the user
@@ -159,6 +175,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `OPENPORTAL_REQUIRE_MANAGED_CLASS` to `true` will turn on the check.
 
 ### Fixed
+
 - Made the logic for modifying users in FreeIPA more robust - now always
   re-fetch if the user is in the openportal group so that this info
   is always up to date.
@@ -168,11 +185,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   still active, but openportal would not remove them.
 
 ## [0.9.4] - 2025-02-20
+
 ### Fixed
+
 - Made sure that RUST_LOG_FORMAT is configurable from the helm chart.
 
 ## [0.9.3] - 2025-02-20
+
 ### Added
+
 - Added configurable logging - output now respects the value of the
   `RUST_LOG` environment variable, using the standard `env_logger` crate.
 - Added json logging, which is controlled by the `RUST_LOG_FORMAT` environment
@@ -183,13 +204,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   keepalive messages.
 
 ## [0.9.2] - 2025-02-19
+
 ### Fixed
+
 - Fixed incorrect handling of the `cluster` field in slurm that meant
   that race conditions prevented users and accounts from being properly
   added to multiple clusters within the same slurmd instance.
 
 ## [0.9.1] - 2025-02-18
+
 ### Added
+
 - Added a command to force a disconnect of an open connection. Changed
   the keepalive logic so that, if a keepalive message can't be sent,
   then the connection is automatically disconnected and remade. This
@@ -206,7 +231,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   doesn't impact anything external.
 
 ## [0.9.0] - 2025-02-10
+
 ### Added
+
 - Added instructions to ask for the home and project directories for a
   user and project.
 - Changed the order of creating a user account, so that now `op-freeipa`
@@ -228,19 +255,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   error.
 
 ## [0.8.3] - 2025-02-06
+
 ### Fixed
+
 - Improved logging to reduce chattiness and improve clarity
 - Reduced timeout values so that missing agents won't cause the system
   to get too stuck in loops
 
 ## [0.8.2] - 2025-02-06
+
 ### Fixed
+
 - Extra protections to ensure that agents are connected to the cluster
   before it attempts anything, and to return valid results if existing
   protected users exist
 
 ## [0.8.1] - 2025-02-06
+
 ### Fixed
+
 - Stopped the freeipa agent from removing groups! This can lead to GID
   information being lost, and is not what we want. Instead, we now
   remove the user from the group, and leave the group alone. Now, if the
@@ -248,28 +281,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   GID.
 
 ## [0.8.0] - 2025-02-05
+
 ### Added
+
 - Added a "is_protected_user" instruction, to allow querying for user accounts
   that should not be managed by OpenPortal. This is useful for accounts that
   exist and are managed by other systems, but which need to be seen by
   portals interfacing via OpenPortal
 
 ## [0.7.0] - 2025-02-04
+
 ### Added
+
 - Added in convenience functions to the Python API to make it easier
   to query dates.
 
 ## [0.6.2] - 2025-02-04
+
 ### Fixed
+
 - General bugfixes in how the slurm accounting evaluated job consumption data.
 - General bugfixes related to how agents handle mulitple slurm clusters.
 
 ## [0.6.1] - 2025-02-03
+
 ### Added
+
 - Added support for legacy BriCS accounts and projects
 
 ## [0.6.0] - 2025-01-27
+
 ### Added
+
 - Added commands to get and set usage limits. These are recorded, but
   not yet translated into slurm (that will be for a future release - currently
   they are just used to link with Waldur).
@@ -279,7 +322,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   constructors. Prettier print output too.
 
 ## [0.5.0] - 2025-01-23
+
 ### Added
+
 - Added full accounting support. Can now get accounting data from slurm
   and return this as `UsageReport` and `ProjectUsageReport` objects
   that are also accessible from Python.
@@ -288,7 +333,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   and edge cases.
 
 ## [0.4.0] - 2025-01-03
+
 ### Added
+
 - Added per-message encryption keys, using a per-connection pair of
   random salts and randomly generated additional infos per message.
   This is a breaking change in the communication format, so agents
@@ -307,7 +354,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added a check so we can't query projects from the wrong portal.
 
 ## [0.3.0] - 2024-12-23
+
 ### Added
+
 - Added a `PortalIdentifier` so that we are clean in how we identify
   the three parts; User, Project and Portal
 - Added parse pattern for all identifiers - they can now only
@@ -327,7 +376,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   This triggered the bumped minor version as the API has changed.
 
 ## [0.2.0] - 2024-12-17
+
 ### Added
+
 - Added some extra functions to the Python layer to make it easier to
   integrate OpenPortal with, e.g. Waldur. These include `is_config_loaded`
   to check if the config has been loaded, and `get` to get the
@@ -347,14 +398,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   project to a local unix group.
 
 ## [0.1.1] - 2024-12-02
+
 ### Added
+
 - Added `instance_groups` to the FreeIPA agent, so that is is possible to
   specify additional groups that a user should be added to when they are
   added from a specific instance. This is useful when multiple instances
   share the same freeipa agent, and you want to add them to different groups.
 
 ## [0.1.0] - 2024-11-26
+
 ### Added
+
 - Added full recovery support, so that agents can restore their boards
   after they restart. Also added a queue, so that messages are queued
   if the agent is down. Plus added a wait when looking for agents, so that
@@ -384,24 +439,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   value in the config file.
 
 ### Fixed
+
 - General bug fixes and cleaning of output logging to improve resilience
   and make it easier to debug issues.
 
 ## [0.0.25] - 2024-11-20
+
 ### Fixed
+
 - Fixed attestation issue for slurm container
 
 ## [0.0.24] - 2024-11-20
+
 ### Added
+
 - Added control over the lifetime of the slurm JWT token, plus a check
   to automatically refresh the token before it expires.
 
 ### Fixed
+
 - Fixed the lack of op-slurm containers and helm charts - these are now
   built automatically by GH Actions
 
 ## [0.0.23] - 2024-11-19
+
 ### Added
+
 - Added in a slurm agent as an example of an accounting agent. This can
   now create accounting accounts on slurm when a user is added to
   a cluster. The slurm account is created with the mapped username
@@ -411,7 +474,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   authentication.
 
 ## [0.0.22] - 2024-11-13
+
 ### Added
+
 - Finished the "AddLocalUser" command for the filesystem agent. User home
   dirs and project dirs are now created, following admin settings. This
   includes multiple project dirs, plus links between dirs. Multiple checks
@@ -420,7 +485,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   ensure that they aren't written to anywhere sensitive on the filesystem.
 
 ## [0.0.21] - 2024-11-12
+
 ### Added
+
 - Moved all command and grammar parsing fully over to the parse pattern.
   You cannot now create any commands that aren't valid. Added lots of
   extra tests of validity, e.g. that commands that impact users must
@@ -438,95 +505,134 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   an invisible bridge between the "normal" work and the OpenPortal world.
 
 ## [0.0.20] - 2024-11-08
+
 ### Added
+
 - Added the concept of zones. Agents can now only send messages along chains
   within the same zone. This increases security, and makes it easier to
   segment the agent peer network into different zones (with some agents
   acting as bridges between multiple zones).
 
 ## [0.0.19] - 2024-11-07
+
 ### Fixed
+
 - Made the code more robust to freeipa being cleared / having groups removed
   behind our back. Also better way to handle errors.
 
 ## [0.0.18] - 2024-11-05
+
 ### Fixed
+
 - Specified default TLS provider so that containerised services can run without
   panicing.
 
 ## [0.0.17] - 2024-11-01
+
 ### Fixed
+
 - Fixed issues with attestations that depended on releases. Need to release
   each agent separately, which this release now does.
 
 ## [0.0.16] - 2024-11-01
+
 ### Fixed
+
 - Fixed issue with attestation of OCI images
 
 ## [0.0.15] - 2024-11-01
+
 ### Fixed
+
 - Fixed issues with the helm charts and OCI images (removed `op-platform` as it
   doesn't exist!)
 
 ## [0.0.14] - 2024-11-01
+
 ### Added
+
 - Changed the names of the cluster instance and platform agents to `cluster` and `clusters`,
   as they don't need to be named after slurm (and would cause confusion with the slurm agent).
 - Added OCI images and helm charts for all agents
 - Added instructions on how to configure the freeipa agent
 
 ## [0.0.12] - 2024-10-28
+
 ### Added
+
 - Added support for keepalive messages so that connections are kept open
 
 ## [0.0.11] - 2024-10-28
+
 ### Added
+
 - Fixed bug in handling of client proxy IP - need to use IP not port ;-)
 
 ## [0.0.10] - 2024-10-25
+
 ### Added
+
 - Fixed bug in parsing header proxy IP address
 
 ## [0.0.9] - 2024-10-25
+
 ### Added
+
 - Fixed bug in parsing command line options for bridge
 - Added support for getting the client IP address from a proxy header (e.g. `X-Forwarded-For`)
 - Cleaned up port handling, so URLs with default ports don't have the ports specified
 
 ## [0.0.8] - 2024-10-24
+
 ### Added
+
 - Added names for the ports in the helm charts
 
 ## [0.0.7] - 2024-10-24
+
 ### Added
+
 - Added a healthcheck server to simplify pod healthchecks
 - Updated helm charts to use the healthcheck server, plus expose the bridge server port
 
 ## [0.0.6] - 2024-10-23
+
 ### Added
+
 - Separated out build artefacts so that they can be picked up by the rest of the build
 
 ## [0.0.5] - 2024-10-23
+
 ### Added
+
 - Fixing generation and attestation of SBOMs for container images (finally!)
 
 ## [0.0.4] - 2024-10-23
+
 ### Added
+
 - Fixing release issues, and beginning work on the workflow for the Python module
 
 ## [0.0.3] - 2024-10-23
+
 ### Added
+
 - Fixing the attestations so that SBOMs are correctly generated for container images.
 
 ## [0.0.2] - 2024-10-23
+
 ### Added
+
 - Fixing the helm charts so that they version numbers are correctly set.
 
 ## [0.0.1] - 2024-10-23
+
 ### Changed
+
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.14.0]: https://github.com/isambard-sc/openportal/releases/tag/0.14.0
 [0.12.1]: https://github.com/isambard-sc/openportal/releases/tag/0.12.1
 [0.12.0]: https://github.com/isambard-sc/openportal/releases/tag/0.12.0
 [0.11.0]: https://github.com/isambard-sc/openportal/releases/tag/0.11.0

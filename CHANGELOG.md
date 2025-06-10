@@ -6,7 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-## [0.12.1] - 2025-06-04
 ### Added
 - Added automatic de-duplication of jobs. Now, if the board detects
   that a job is added that is the same as one that is already being
@@ -19,7 +18,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   peers. This makes the system more responsive and robust, as
   now only new jobs are processed downstream, with duplicates
   filtered out at a high level.
-
 - Added passing of the job expiry time to the functions called by
   the slurm and freeipa agents. Now, these agents will abort any
   functions calls that take too long and that whose results would
@@ -27,7 +25,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   resource starvation and denial of service / deadlocks caused
   by floods of long-running jobs blocking the system, and causing
   all new jobs to timeout or run slowly.
-
 - Added a semaphore to the function calls of the slurm and freeipa
   agents. This semaphore ensures that only 10 jobs can be processed
   at the same time. This reduces contention pressure on the
@@ -45,7 +42,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   checking the job expiry time, should prevent flooding
   of the system, and creating of long chains / queues of jobs
   that never complete.
-
 - Added timeouts to REST API calls and for running external
   commands. These timeouts (60 seconds) ensure that if any
   command or REST call takes too long, then they will be terminated
@@ -61,6 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   above should make the whole OpenPortal more robust
   and resilient to errors and job storms.
 
+## [0.12.1] - 2025-06-04
 - Added a "signal_url" that can be called by the bridge to signal
   the connected web-portal that a new job has been submitted and
   is awaiting processing. The Job ID is submitted as a query

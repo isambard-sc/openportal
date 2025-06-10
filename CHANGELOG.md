@@ -8,6 +8,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [0.12.1] - 2025-06-04
 ### Added
+- Added automatic de-duplication of jobs. Now, if the board detects
+  that a job is added that is the same as one that is already being
+  processed, it will automatically mark the new job as a "duplicate",
+  and will not process it. Instead, it will copy the result from the
+  already-running job and return that result once it is ready. In this
+  way, we prevent job storms if a caller continually re-submits the
+  same job without waiting for the result. Duplicate jobs are caught
+  in the communication chain, so will not be sent on to downstream
+  peers. This makes the system more responsive and robust, as
+  now only new jobs are processed downstream, with duplicates
+  filtered out at a high level.
+
+- Added passing of the job expiry time to the functions called by
+  the slurm and freeipa agents. Now, these agents will abort any
+  functions calls that take too long and that whose results would
+  be ignored anyway as the calling job had expired. This prevents
+  resource starvation and denial of service / deadlocks caused
+  by floods of long-running jobs blocking the system, and causing
+  all new jobs to timeout or run slowly.
+
+- Added a semaphore to the function calls of the slurm and freeipa
+  agents. This semaphore ensures that only 10 jobs can be processed
+  at the same time. This reduces contention pressure on the
+  (serialised) access to the freeipa / slurm REST APIs, or to
+  running saact/mgr commands. This prevents a deadlock situation
+  where a single function calls the API or runs the command
+  one after the other, but gets blocked by a storm of new
+  jobs that hold that resource in the first call to the API
+  or command. In this case, all of the jobs would be blocking
+  each other on the first call, preventing any from making
+  subsequent calls, and thus the jobs expire (but the function
+  call would keep going). Now, only 10 function calls can be
+  made in parallel, which will reduce contention and ensure
+  that they can complete before job expiry. This, combined with
+  checking the job expiry time, should prevent flooding
+  of the system, and creating of long chains / queues of jobs
+  that never complete.
+
+- Added timeouts to REST API calls and for running external
+  commands. These timeouts (60 seconds) ensure that if any
+  command or REST call takes too long, then they will be terminated
+  and an error returned. This is important, as calling a REST
+  API or running a command is serialised (held behind a mutex)
+  to ensure that OpenPortal doesn't flood downstream services
+  (OpenPortal only makes one FreeIPA rest call, or one SLURM
+  call at a time). Previously, a failure of, e.g. FreeIPA,
+  could cause the freeipa agent to hang indefinitely, as the
+  REST API call would never return. Now, if the call takes
+  longer than 60 seconds, it will be aborted, and an error
+  returned. This, combined with all of the changes described
+  above should make the whole OpenPortal more robust
+  and resilient to errors and job storms.
+
 - Added a "signal_url" that can be called by the bridge to signal
   the connected web-portal that a new job has been submitted and
   is awaiting processing. The Job ID is submitted as a query

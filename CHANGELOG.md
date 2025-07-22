@@ -6,13 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.15.0] - 2025-07-22
+
 ### Added
 
 - Added an Allocation type that can be used to describe an allocation in
   arbitrary units (e.g. node hours, GPU hours etc.). Also added a Node type
   that can provide metadata about a node, so that we can interconvert between
   different allocation units.
-
 - Updated the ProjectDetails object to use Allocation rather than Usage
   as the allocation type. This is now under the field `allocation`, with
   the `credits` field now not being used.
@@ -643,6 +644,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.15.0]: https://github.com/isambard-sc/openportal/releases/tag/0.15.0
 [0.14.0]: https://github.com/isambard-sc/openportal/releases/tag/0.14.0
 [0.12.1]: https://github.com/isambard-sc/openportal/releases/tag/0.12.1
 [0.12.0]: https://github.com/isambard-sc/openportal/releases/tag/0.12.0

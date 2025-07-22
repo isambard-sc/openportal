@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use crate::error::Error;
 
 use crate::grammar::{
-    Date, NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping,
+    Allocation, Date, NamedType, Node, PortalIdentifier, ProjectIdentifier, UserIdentifier,
+    UserMapping,
 };
 
 impl NamedType for Usage {
@@ -251,6 +252,32 @@ impl std::ops::AddAssign for Usage {
     }
 }
 
+// add the -= operator for Usage
+impl std::ops::SubAssign for Usage {
+    fn sub_assign(&mut self, other: Self) {
+        self.seconds -= other.seconds;
+    }
+}
+
+// add the *= operator for Usage
+impl std::ops::MulAssign<f64> for Usage {
+    fn mul_assign(&mut self, rhs: f64) {
+        self.seconds = (self.seconds as f64 * rhs) as u64;
+    }
+}
+
+// add the /= operator for Usage
+impl std::ops::DivAssign<f64> for Usage {
+    fn div_assign(&mut self, rhs: f64) {
+        if rhs == 0.0 {
+            self.seconds = 0;
+            return;
+        }
+
+        self.seconds = (self.seconds as f64 / rhs) as u64;
+    }
+}
+
 // add the + operator for Usage
 impl std::ops::Add for Usage {
     type Output = Self;
@@ -258,6 +285,48 @@ impl std::ops::Add for Usage {
     fn add(self, other: Self) -> Self {
         Self {
             seconds: self.seconds + other.seconds,
+        }
+    }
+}
+
+// add the - operator for Usage
+impl std::ops::Sub for Usage {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        let mut seconds = self.seconds as i64 - other.seconds as i64;
+        if seconds < 0 {
+            seconds = 0;
+        }
+
+        Self {
+            seconds: seconds as u64,
+        }
+    }
+}
+
+// add the * operator for Usage
+impl std::ops::Mul<f64> for Usage {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        Self {
+            seconds: (self.seconds as f64 * rhs) as u64,
+        }
+    }
+}
+
+// add the / operator for Usage
+impl std::ops::Div<f64> for Usage {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        if rhs == 0.0 {
+            return Self::default();
+        }
+
+        Self {
+            seconds: (self.seconds as f64 / rhs) as u64,
         }
     }
 }
@@ -601,5 +670,88 @@ impl UsageReport {
             .cloned()
             .map(|r| r.total_usage())
             .sum()
+    }
+}
+
+impl Allocation {
+    pub fn to_node_hours(&self, node: &Node) -> Result<Usage, Error> {
+        if let Some(size) = self.size() {
+            if self.is_node_hours() {
+                return Ok(Usage::from_hours(size));
+            } else if self.is_cpu_hours() {
+                if node.cores() == 0 {
+                    return Err(Error::InvalidState(
+                        "Node has no cores, cannot convert CPU hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / node.cores() as f64));
+            } else if self.is_gpu_hours() {
+                if node.gpus() == 0 {
+                    return Err(Error::InvalidState(
+                        "Node has no GPUs, cannot convert GPU hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / node.gpus() as f64));
+            } else if self.is_core_hours() {
+                if node.cores() == 0 {
+                    return Err(Error::InvalidState(
+                        "Node has no cores, cannot convert core hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / node.cores() as f64));
+            } else if self.is_gb_hours() {
+                if node.memory_gb() == 0.0 {
+                    return Err(Error::InvalidState(
+                        "Node has no memory, cannot convert GB hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / (node.memory_gb())));
+            }
+        }
+
+        Err(Error::InvalidState(format!(
+            "Cannot convert allocation '{}' to node hours.",
+            self
+        )))
+    }
+
+    pub fn to_cpu_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.cpus() as f64)
+    }
+
+    pub fn to_gpu_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.gpus() as f64)
+    }
+
+    pub fn to_core_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.cores() as f64)
+    }
+
+    pub fn to_gb_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.memory_gb())
+    }
+
+    pub fn from_node_hours(usage: &Usage) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours(), "NHR")
+    }
+
+    pub fn from_cpu_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.cpus() as f64, "NHR")
+    }
+
+    pub fn from_gpu_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.gpus() as f64, "NHR")
+    }
+
+    pub fn from_core_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.cores() as f64, "NHR")
+    }
+
+    pub fn from_gb_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.memory_gb(), "NHR")
     }
 }

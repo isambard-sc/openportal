@@ -1242,6 +1242,326 @@ impl<'de> Deserialize<'de> for ProjectClass {
 }
 
 ///
+/// Details about a compute node
+///
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Node {
+    /// The number of CPUs in the node
+    cpus: u32,
+
+    /// The number of cores per cpu
+    cores_per_cpu: u32,
+
+    /// The number of GPUs in the node
+    gpus: u32,
+
+    /// The amount of memory in the node in MB
+    memory_mb: u32,
+}
+
+impl std::fmt::Display for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Node(cpus: {}, cores_per_cpu: {}, gpus: {}, memory: {} GB)",
+            self.cpus,
+            self.cores_per_cpu,
+            self.gpus,
+            self.memory_gb()
+        )
+    }
+}
+
+impl Node {
+    pub fn new() -> Self {
+        Self {
+            cpus: 0,
+            cores_per_cpu: 0,
+            gpus: 0,
+            memory_mb: 0,
+        }
+    }
+
+    pub fn construct(cpus: u32, cores_per_cpu: u32, gpus: u32, memory_mb: u32) -> Self {
+        Self {
+            cpus,
+            cores_per_cpu,
+            gpus,
+            memory_mb,
+        }
+    }
+
+    pub fn cpus(&self) -> u32 {
+        self.cpus
+    }
+
+    pub fn cores_per_cpu(&self) -> u32 {
+        self.cores_per_cpu
+    }
+
+    pub fn cores(&self) -> u32 {
+        self.cpus * self.cores_per_cpu
+    }
+
+    pub fn gpus(&self) -> u32 {
+        self.gpus
+    }
+
+    pub fn memory_mb(&self) -> u32 {
+        self.memory_mb
+    }
+
+    pub fn memory_gb(&self) -> f64 {
+        self.memory_mb as f64 / 1024.0
+    }
+
+    pub fn set_cpus(&mut self, cpus: u32) {
+        self.cpus = cpus;
+    }
+
+    pub fn set_cores_per_cpu(&mut self, cores_per_cpu: u32) {
+        self.cores_per_cpu = cores_per_cpu;
+    }
+
+    pub fn set_gpus(&mut self, gpus: u32) {
+        self.gpus = gpus;
+    }
+
+    pub fn set_memory_mb(&mut self, memory_mb: u32) {
+        self.memory_mb = memory_mb;
+    }
+}
+
+impl NamedType for Node {
+    fn type_name() -> &'static str {
+        "Node"
+    }
+}
+
+///
+/// Details about an allocation to a project. This combines the
+/// size of the allocation plus the units of that allocation
+///
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Allocation {
+    /// The size of the allocation, e.g. "1000"
+    size: Option<f64>,
+
+    /// The units of the allocation, e.g. "NHR", "GPUh" etc.
+    units: Option<String>,
+}
+
+impl Allocation {
+    pub fn new() -> Self {
+        Self {
+            size: None,
+            units: None,
+        }
+    }
+
+    pub fn canonicalize(units: &str) -> String {
+        let canonical = units.trim().to_lowercase();
+
+        if canonical == "node hours" || canonical == "node hour" || canonical == "nhr" {
+            return "NHR".to_string();
+        } else if canonical == "gpu hours" || canonical == "gpu hour" || canonical == "gpuhr" {
+            return "GPUHR".to_string();
+        } else if canonical == "cpu hours" || canonical == "cpu hour" || canonical == "cpuhr" {
+            return "CPUHR".to_string();
+        } else if canonical == "core hours" || canonical == "core hour" || canonical == "corehr" {
+            return "COREHR".to_string();
+        } else if canonical == "gb hours" || canonical == "gb hour" || canonical == "gbhr" {
+            return "GBHR".to_string();
+        }
+
+        // Add more canonicalizations as needed
+        canonical
+    }
+
+    pub fn from_size_and_units(size: f64, units: &str) -> Result<Self, Error> {
+        if size < 0.0 {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - size cannot be negative '{}'",
+                size
+            )));
+        }
+
+        let units = units.trim();
+
+        if units.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - units cannot be empty '{}'",
+                units
+            )));
+        }
+
+        Ok(Self {
+            size: Some(size),
+            units: Some(Allocation::canonicalize(units)),
+        })
+    }
+
+    pub fn parse(allocation: &str) -> Result<Self, Error> {
+        let allocation = allocation.trim();
+
+        if allocation.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - cannot be empty '{}'",
+                allocation
+            )));
+        };
+
+        if allocation.to_lowercase() == "none" || allocation.to_lowercase() == "no allocation" {
+            return Ok(Self::default());
+        }
+
+        let parts: Vec<&str> = allocation.split_whitespace().collect();
+
+        if parts.is_empty() || parts.len() < 2 {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - must contain a size and units '{}'",
+                allocation
+            )));
+        }
+
+        let size = parts[0].parse::<f64>().map_err(|_| {
+            Error::Parse(format!(
+                "Invalid Allocation - size must be a number '{}'",
+                parts[0]
+            ))
+        })?;
+
+        if size < 0.0 {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - size cannot be negative '{}'",
+                size
+            )));
+        }
+
+        let units = if parts.len() > 1 {
+            let u = parts[1..].join(" ");
+            let u = u.trim();
+
+            if u.is_empty() {
+                return Err(Error::Parse(format!(
+                    "Invalid Allocation - units cannot be empty '{}'",
+                    allocation
+                )));
+            }
+
+            u.to_string()
+        } else {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - must contain a size and units '{}'",
+                allocation
+            )));
+        };
+
+        Ok(Self {
+            size: Some(size),
+            units: Some(Allocation::canonicalize(&units)),
+        })
+    }
+
+    pub fn size(&self) -> Option<f64> {
+        self.size
+    }
+
+    pub fn units(&self) -> Option<String> {
+        self.units.clone()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size.is_none()
+    }
+
+    pub fn is_node_hours(&self) -> bool {
+        if let Some(units) = &self.units {
+            units == "NHR"
+        } else {
+            false
+        }
+    }
+
+    pub fn is_gpu_hours(&self) -> bool {
+        if let Some(units) = &self.units {
+            units == "GPUHR"
+        } else {
+            false
+        }
+    }
+
+    pub fn is_cpu_hours(&self) -> bool {
+        if let Some(units) = &self.units {
+            units == "CPUHR"
+        } else {
+            false
+        }
+    }
+
+    pub fn is_core_hours(&self) -> bool {
+        if let Some(units) = &self.units {
+            units == "COREHR"
+        } else {
+            false
+        }
+    }
+
+    pub fn is_gb_hours(&self) -> bool {
+        if let Some(units) = &self.units {
+            units == "GBHR"
+        } else {
+            false
+        }
+    }
+}
+
+impl NamedType for Allocation {
+    fn type_name() -> &'static str {
+        "Allocation"
+    }
+}
+
+impl NamedType for Vec<Allocation> {
+    fn type_name() -> &'static str {
+        "Vec<Allocation>"
+    }
+}
+
+impl std::fmt::Display for Allocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(size) = self.size {
+            if let Some(units) = &self.units {
+                write!(f, "{} {}", size, units)
+            } else {
+                write!(f, "{}", size)
+            }
+        } else {
+            write!(f, "No allocation")
+        }
+    }
+}
+
+impl Serialize for Allocation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Allocation {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Allocation::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -1269,8 +1589,8 @@ pub struct ProjectDetails {
     /// Proposed end date of the project
     end_date: Option<Date>,
 
-    /// The number of credit (hours) allocated to the project
-    credit: Option<Usage>,
+    /// The allocation of resource for this project
+    allocation: Option<Allocation>,
 }
 
 impl NamedType for ProjectDetails {
@@ -1288,7 +1608,7 @@ impl ProjectDetails {
             members: None,
             start_date: None,
             end_date: None,
-            credit: None,
+            allocation: None,
         }
     }
 
@@ -1422,16 +1742,20 @@ impl ProjectDetails {
         self.end_date = None;
     }
 
-    pub fn credit(&self) -> Option<Usage> {
-        self.credit
+    pub fn allocation(&self) -> Option<Allocation> {
+        self.allocation.clone()
     }
 
-    pub fn set_credit(&mut self, credit: Usage) {
-        self.credit = Some(credit)
+    pub fn set_allocation(&mut self, allocation: Allocation) {
+        if allocation.is_empty() {
+            self.allocation = None;
+        } else {
+            self.allocation = Some(allocation);
+        }
     }
 
-    pub fn clear_credit(&mut self) {
-        self.credit = None;
+    pub fn clear_allocation(&mut self) {
+        self.allocation = None;
     }
 }
 

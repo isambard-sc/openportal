@@ -1105,6 +1105,289 @@ impl From<grammar::DateRange> for DateRange {
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct Node(grammar::Node);
+
+#[pymethods]
+impl Node {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(grammar::Node::new().into())
+    }
+
+    #[staticmethod]
+    fn construct(cpus: u32, cores_per_cpu: u32, gpus: u32, memory_mb: u32) -> PyResult<Self> {
+        Ok(grammar::Node::construct(cpus, cores_per_cpu, gpus, memory_mb).into())
+    }
+
+    #[getter]
+    fn cpus(&self) -> PyResult<u32> {
+        Ok(self.0.cpus())
+    }
+
+    #[getter]
+    fn cores_per_cpu(&self) -> PyResult<u32> {
+        Ok(self.0.cores_per_cpu())
+    }
+
+    #[getter]
+    fn cores(&self) -> PyResult<u32> {
+        Ok(self.0.cores())
+    }
+
+    #[getter]
+    fn gpus(&self) -> PyResult<u32> {
+        Ok(self.0.gpus())
+    }
+
+    #[getter]
+    fn memory_mb(&self) -> PyResult<u32> {
+        Ok(self.0.memory_mb())
+    }
+
+    #[getter]
+    fn memory_gb(&self) -> PyResult<f64> {
+        Ok(self.0.memory_gb())
+    }
+
+    #[setter]
+    fn set_cpus(&mut self, cpus: u32) -> PyResult<()> {
+        self.0.set_cpus(cpus);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_cores_per_cpu(&mut self, cores_per_cpu: u32) -> PyResult<()> {
+        self.0.set_cores_per_cpu(cores_per_cpu);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_gpus(&mut self, gpus: u32) -> PyResult<()> {
+        self.0.set_gpus(gpus);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_memory_mb(&mut self, memory_mb: u32) -> PyResult<()> {
+        self.0.set_memory_mb(memory_mb);
+        Ok(())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Node> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Node> {
+        Ok(self.clone())
+    }
+}
+
+impl From<grammar::Node> for Node {
+    fn from(node: grammar::Node) -> Self {
+        Node(node)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Allocation(grammar::Allocation);
+
+#[pymethods]
+impl Allocation {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(grammar::Allocation::new().into())
+    }
+
+    #[staticmethod]
+    fn parse(allocation: String) -> PyResult<Self> {
+        match grammar::Allocation::parse(&allocation) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_size_and_units(size: f64, units: &str) -> PyResult<Self> {
+        match grammar::Allocation::from_size_and_units(size, units) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_string(allocation: &str) -> PyResult<Allocation> {
+        match grammar::Allocation::parse(allocation) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_string(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    #[getter]
+    fn size(&self) -> PyResult<Option<f64>> {
+        Ok(self.0.size())
+    }
+
+    #[getter]
+    fn units(&self) -> PyResult<Option<String>> {
+        Ok(self.0.units())
+    }
+
+    #[staticmethod]
+    fn canonicalize(units: &str) -> PyResult<String> {
+        Ok(grammar::Allocation::canonicalize(units))
+    }
+
+    #[getter]
+    fn is_empty(&self) -> PyResult<bool> {
+        Ok(self.0.is_empty())
+    }
+
+    #[getter]
+    fn is_node_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_node_hours())
+    }
+
+    #[getter]
+    fn is_core_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_core_hours())
+    }
+
+    #[getter]
+    fn is_gpu_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_gpu_hours())
+    }
+
+    #[getter]
+    fn is_cpu_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_cpu_hours())
+    }
+
+    #[getter]
+    fn is_gb_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_gb_hours())
+    }
+
+    fn to_node_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_node_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_core_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_core_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_gpu_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_gpu_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_cpu_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_cpu_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_gb_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_gb_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_node_hours(usage: &Usage) -> PyResult<Self> {
+        match grammar::Allocation::from_node_hours(&usage.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_cpu_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_cpu_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_core_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_core_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_gpu_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_gpu_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_gb_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_gb_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Allocation> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Allocation> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Allocation, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+}
+
+impl From<grammar::Allocation> for Allocation {
+    fn from(allocation: grammar::Allocation) -> Self {
+        Allocation(allocation)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Usage(usagereport::Usage);
 
 #[pymethods]
@@ -2081,22 +2364,22 @@ impl ProjectDetails {
     }
 
     #[getter]
-    fn credit(&self) -> PyResult<Option<Usage>> {
-        Ok(self.0.credit().map(|credit| credit.into()))
+    fn allocation(&self) -> PyResult<Option<Allocation>> {
+        Ok(self.0.allocation().map(|allocation| allocation.into()))
     }
 
     #[setter]
-    fn set_credit(&mut self, credit: Option<Usage>) -> PyResult<()> {
-        if let Some(usage) = credit {
-            self.0.set_credit(usage.0);
+    fn set_allocation(&mut self, allocation: Option<Allocation>) -> PyResult<()> {
+        if let Some(allocation) = allocation {
+            self.0.set_allocation(allocation.0);
         } else {
-            self.0.clear_credit();
+            self.0.clear_allocation();
         }
         Ok(())
     }
 
-    fn clear_credit(&mut self) -> PyResult<()> {
-        self.0.clear_credit();
+    fn clear_allocation(&mut self) -> PyResult<()> {
+        self.0.clear_allocation();
         Ok(())
     }
 }
@@ -2246,6 +2529,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Instruction>()?;
     m.add_class::<Status>()?;
     m.add_class::<DateRange>()?;
+    m.add_class::<Node>()?;
+    m.add_class::<Allocation>()?;
     m.add_class::<Usage>()?;
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;

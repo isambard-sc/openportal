@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.15.1] - 2025-08-04
+
 ### Fixed
 
 - Fixed an issue where the order of serialisation of the members field
@@ -651,6 +653,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.15.1]: https://github.com/isambard-sc/openportal/releases/tag/0.15.1
 [0.15.0]: https://github.com/isambard-sc/openportal/releases/tag/0.15.0
 [0.14.0]: https://github.com/isambard-sc/openportal/releases/tag/0.14.0
 [0.12.1]: https://github.com/isambard-sc/openportal/releases/tag/0.12.1

@@ -7,8 +7,8 @@ use crate::usagereport::Usage;
 
 use anyhow::Context;
 use chrono::Datelike;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize, Serializer};
+use std::collections::{BTreeMap, HashMap};
 use std::{hash::Hash, sync::Arc};
 
 pub trait NamedType {
@@ -1561,7 +1561,25 @@ impl<'de> Deserialize<'de> for Allocation {
     }
 }
 
-///
+fn ordered_map<S, K: Ord + Serialize, V: Serialize>(
+    value: &Option<HashMap<K, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if let Some(value) = value {
+        if value.is_empty() {
+            serializer.serialize_none()
+        } else {
+            let ordered: BTreeMap<_, _> = value.iter().collect();
+            ordered.serialize(serializer)
+        }
+    } else {
+        serializer.serialize_none()
+    }
+}
+
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -1581,6 +1599,7 @@ pub struct ProjectDetails {
 
     /// The email address(es) of the members of the project,
     /// (keys) and their roles (values).
+    #[serde(serialize_with = "ordered_map")]
     members: Option<HashMap<String, String>>,
 
     /// Proposed start date of the project

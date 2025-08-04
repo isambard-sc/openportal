@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Fixed an issue where the order of serialisation of the members field
+  in the ProjectDetails object was not deterministic, which led to
+  failed signature validation for the bridge API calls. Now, the
+  members are always serialisaed in a sorted, deterministic order.
+
 ## [0.15.0] - 2025-07-22
 
 ### Added

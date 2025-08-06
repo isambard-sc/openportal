@@ -430,199 +430,54 @@ impl Job {
     }
 
     fn completed(&self, py: Python<'_>, result: Py<PyAny>) -> PyResult<Job> {
-        // this is horrible, but it looks like the only way to do it?
-        match result.extract::<bool>(py) {
-            Ok(result) => {
-                let result = match self.0.completed(result) {
-                    Ok(result) => result,
-                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
-                };
-                Ok(result.into())
-            }
-            Err(_) => match result.extract::<String>(py) {
-                Ok(result) => {
-                    let result = match self.0.completed(result) {
-                        Ok(result) => result,
-                        Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        macro_rules! try_extract {
+            ($type:ty, $transform:expr) => {
+                if let Ok(val) = result.extract::<$type>(py) {
+                    let inner_result = $transform(val);
+                    return match self.0.completed(inner_result) {
+                        Ok(result) => Ok(result.into()),
+                        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                     };
-                    Ok(result.into())
                 }
-                Err(_) => match result.extract::<UserIdentifier>(py) {
-                    Ok(result) => {
-                        let result = match self.0.completed(result.0.clone()) {
-                            Ok(result) => result,
-                            Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
-                        };
-                        Ok(result.into())
-                    }
-                    Err(_) => match result.extract::<ProjectIdentifier>(py) {
-                        Ok(result) => {
-                            let result = match self.0.completed(result.0.clone()) {
-                                Ok(result) => result,
-                                Err(e) => {
-                                    return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e)))
-                                }
-                            };
-                            Ok(result.into())
-                        }
-                        Err(_) => match result.extract::<PortalIdentifier>(py) {
-                            Ok(result) => {
-                                let result = match self.0.completed(result.0.clone()) {
-                                    Ok(result) => result,
-                                    Err(e) => {
-                                        return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e)))
-                                    }
-                                };
-                                Ok(result.into())
-                            }
-                            Err(_) => match result.extract::<UserMapping>(py) {
-                                Ok(result) => {
-                                    let result = match self.0.completed(result.0.clone()) {
-                                        Ok(result) => result,
-                                        Err(e) => {
-                                            return Err(PyErr::new::<PyOSError, _>(format!(
-                                                "{:?}",
-                                                e
-                                            )))
-                                        }
-                                    };
-                                    Ok(result.into())
-                                }
-                                Err(_) => match result.extract::<ProjectMapping>(py) {
-                                    Ok(result) => {
-                                        let result = match self.0.completed(result.0.clone()) {
-                                            Ok(result) => result,
-                                            Err(e) => {
-                                                return Err(PyErr::new::<PyOSError, _>(format!(
-                                                    "{:?}",
-                                                    e
-                                                )))
-                                            }
-                                        };
-                                        Ok(result.into())
-                                    }
-                                    Err(_) => match result.extract::<UsageReport>(py) {
-                                        Ok(result) => {
-                                            let result = match self.0.completed(result.0.clone()) {
-                                                Ok(result) => result,
-                                                Err(e) => {
-                                                    return Err(PyErr::new::<PyOSError, _>(
-                                                        format!("{:?}", e),
-                                                    ))
-                                                }
-                                            };
-                                            Ok(result.into())
-                                        }
-                                        Err(_) => match result.extract::<ProjectUsageReport>(py) {
-                                            Ok(result) => {
-                                                let result =
-                                                    match self.0.completed(result.0.clone()) {
-                                                        Ok(result) => result,
-                                                        Err(e) => {
-                                                            return Err(PyErr::new::<PyOSError, _>(
-                                                                format!("{:?}", e),
-                                                            ))
-                                                        }
-                                                    };
-                                                Ok(result.into())
-                                            }
-                                            Err(_) => match result.extract::<Usage>(py) {
-                                                Ok(result) => {
-                                                    let result = match self.0.completed(result.0) {
-                                                        Ok(result) => result,
-                                                        Err(e) => {
-                                                            return Err(PyErr::new::<PyOSError, _>(
-                                                                format!("{:?}", e),
-                                                            ))
-                                                        }
-                                                    };
-                                                    Ok(result.into())
-                                                }
-                                                Err(_) => match result.extract::<DateRange>(py) {
-                                                    Ok(result) => {
-                                                        let result = match self
-                                                            .0
-                                                            .completed(result.0.clone())
-                                                        {
-                                                            Ok(result) => result,
-                                                            Err(e) => {
-                                                                return Err(PyErr::new::<
-                                                                    PyOSError,
-                                                                    _,
-                                                                >(
-                                                                    format!(
-                                                                    "{:?}",
-                                                                    e
-                                                                )
-                                                                ))
-                                                            }
-                                                        };
-                                                        Ok(result.into())
-                                                    }
-                                                    Err(_) => match result
-                                                        .extract::<ProjectClass>(py)
-                                                    {
-                                                        Ok(result) => {
-                                                            let result = match self
-                                                                .0
-                                                                .completed(result.0.clone())
-                                                            {
-                                                                Ok(result) => result,
-                                                                Err(e) => {
-                                                                    return Err(PyErr::new::<
-                                                                        PyOSError,
-                                                                        _,
-                                                                    >(
-                                                                        format!(
-                                                                        "{:?}",
-                                                                        e
-                                                                    )
-                                                                    ))
-                                                                }
-                                                            };
-                                                            Ok(result.into())
-                                                        }
-                                                        Err(_) => match result
-                                                            .extract::<ProjectDetails>(py)
-                                                        {
-                                                            Ok(result) => {
-                                                                let result = match self
-                                                                    .0
-                                                                    .completed(result.0.clone())
-                                                                {
-                                                                    Ok(result) => result,
-                                                                    Err(e) => {
-                                                                        return Err(PyErr::new::<
-                                                                            PyOSError,
-                                                                            _,
-                                                                        >(
-                                                                            format!(
-                                                                            "{:?}",
-                                                                            e
-                                                                        )
-                                                                        ))
-                                                                    }
-                                                                };
-                                                                Ok(result.into())
-                                                            }
-                                                            Err(_) => {
-                                                                Err(PyErr::new::<PyOSError, _>(
-                                                                    "Could not extract result type",
-                                                                ))
-                                                            }
-                                                        },
-                                                    },
-                                                },
-                                            },
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-            },
+            };
         }
+
+        // Single value extractions
+        try_extract!(bool, |v| v);
+        try_extract!(String, |v| v);
+        try_extract!(UserIdentifier, |v: UserIdentifier| v.0.clone());
+        try_extract!(ProjectIdentifier, |v: ProjectIdentifier| v.0.clone());
+        try_extract!(PortalIdentifier, |v: PortalIdentifier| v.0.clone());
+        try_extract!(UserMapping, |v: UserMapping| v.0.clone());
+        try_extract!(ProjectMapping, |v: ProjectMapping| v.0.clone());
+        try_extract!(UsageReport, |v: UsageReport| v.0.clone());
+        try_extract!(ProjectUsageReport, |v: ProjectUsageReport| v.0.clone());
+        try_extract!(Usage, |v: Usage| v.0);
+        try_extract!(DateRange, |v: DateRange| v.0.clone());
+        try_extract!(ProjectClass, |v: ProjectClass| v.0.clone());
+        try_extract!(ProjectDetails, |v: ProjectDetails| v.0.clone());
+
+        try_extract!(Vec<UserIdentifier>, |v: Vec<UserIdentifier>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<ProjectIdentifier>, |v: Vec<ProjectIdentifier>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<PortalIdentifier>, |v: Vec<PortalIdentifier>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<ProjectMapping>, |v: Vec<ProjectMapping>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<UserMapping>, |v: Vec<UserMapping>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<String>, |v| v);
+        try_extract!(Vec<Usage>, |v: Vec<Usage>| {
+            v.into_iter().map(|item| item.0).collect::<Vec<_>>()
+        });
+
+        Err(PyErr::new::<PyOSError, _>("Could not extract result type"))
     }
 
     fn errored(&self, error: &str) -> PyResult<Job> {

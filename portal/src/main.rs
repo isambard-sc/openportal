@@ -10,9 +10,12 @@ use templemeads::async_runnable;
 
 use templemeads::agent::Type::{Bridge, Portal};
 use templemeads::grammar::Instruction::{
-    CreateProject, GetProject, GetProjectMapping, GetUsageReport, Submit, UpdateProject,
+    CreateProject, GetProject, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
+    RemoveProject, Submit, UpdateProject,
 };
-use templemeads::grammar::{DateRange, ProjectDetails, ProjectIdentifier, ProjectMapping};
+use templemeads::grammar::{
+    DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
+};
 use templemeads::job::{Envelope, Job};
 use templemeads::usagereport::UsageReport;
 use templemeads::Error;
@@ -193,6 +196,15 @@ async fn main() -> Result<()> {
                     job.completed(
                         create_project(me.name(), &project, &details).await?)
                 }
+                RemoveProject(project) => {
+                    tracing::debug!("Removing project {}", project);
+
+                    // This is a special instruction that removes a project
+                    // from the portal, and also removes the project from the
+                    // bridge agent
+                    job.completed(
+                        remove_project(me.name(), &project).await?)
+                }
                 UpdateProject(project, details) => {
                     tracing::debug!("Updating project {} with details {}", project, details);
 
@@ -205,6 +217,14 @@ async fn main() -> Result<()> {
                     job.completed(
                         get_project(me.name(), &project).await?)
                 }
+                GetProjects(portal) => {
+                    tracing::debug!("Getting all projects");
+
+                    // This is a special instruction that returns all projects
+                    // that this portal has access to
+                    job.completed(
+                        get_projects(me.name(), &portal).await?)
+                }
                 GetProjectMapping(project) => {
                     tracing::debug!("Getting project mapping for {}", project);
 
@@ -216,6 +236,14 @@ async fn main() -> Result<()> {
 
                     job.completed(
                         get_usage_report(me.name(), &project, &dates).await?)
+                }
+                GetUsageReports(portal, dates) => {
+                    tracing::debug!("Getting usage reports for portal {}", portal);
+
+                    // This is a special instruction that returns all usage reports
+                    // that this portal has access to
+                    job.completed(
+                        get_usage_reports(me.name(), &portal, &dates).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -362,6 +390,53 @@ pub async fn update_project(
 }
 
 ///
+/// Remove a project
+///
+pub async fn remove_project(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectMapping, Error> {
+    // we need to connect to our bridge agent, so it can be used
+    // to tell the connected portal software to remove the project.
+    // This will return the ProjectIdentifier of the project that was
+    // removed, which we can then return as a ProjectMapping
+
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            // send the remove_project job to the bridge agent
+            let job = Job::parse(
+                &format!("{}.{} remove_project {}", me, bridge.name(), project),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            // Wait for the remove_job to complete
+            let result = job.wait().await?.result::<ProjectMapping>()?;
+
+            match result {
+                Some(project) => {
+                    tracing::debug!("Project removed by bridge agent: {:?}", project);
+                    Ok(project)
+                }
+                None => {
+                    tracing::warn!("No project removed?");
+                    Err(Error::MissingProject(
+                        "No project removed by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
 /// Get an existing project
 ///
 pub async fn get_project(me: &str, project: &ProjectIdentifier) -> Result<ProjectDetails, Error> {
@@ -392,6 +467,53 @@ pub async fn get_project(me: &str, project: &ProjectIdentifier) -> Result<Projec
                     tracing::warn!("No project retrieved?");
                     Err(Error::MissingProject(
                         "No project retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the full set of project mappings for all projects managed
+/// for the remove portal
+///
+pub async fn get_projects(
+    me: &str,
+    portal: &PortalIdentifier,
+) -> Result<Vec<ProjectMapping>, Error> {
+    // we need to connect to our bridge agent, so it can be used
+    // to tell the connected portal software to get the projects.
+
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            // send the get_projects job to the bridge agent
+            let job = Job::parse(
+                &format!("{}.{} get_projects {}", me, bridge.name(), portal),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            // Wait for the get_projects to complete
+            let result = job.wait().await?.result::<Vec<ProjectMapping>>()?;
+
+            match result {
+                Some(projects) => {
+                    tracing::debug!("Projects retrieved by bridge agent: {:?}", projects);
+                    Ok(projects)
+                }
+                None => {
+                    tracing::warn!("No projects retrieved?");
+                    Err(Error::MissingProject(
+                        "No projects retrieved by bridge agent".to_string(),
                     ))
                 }
             }
@@ -495,6 +617,59 @@ pub async fn get_usage_report(
                     tracing::warn!("No usage report retrieved?");
                     Err(Error::MissingProject(
                         "No usage report retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the usage reports for all projects managed by the specified portal
+///
+pub async fn get_usage_reports(
+    me: &str,
+    portal: &PortalIdentifier,
+    dates: &DateRange,
+) -> Result<UsageReport, Error> {
+    // we need to connect to our bridge agent, so it can be used
+    // to tell the connected portal software to get the reports.
+
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            // send the get_usage_report job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} get_usage_reports {} {}",
+                    me,
+                    bridge.name(),
+                    portal,
+                    dates
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            // Wait for the job to complete
+            let result = job.wait().await?.result::<UsageReport>()?;
+
+            match result {
+                Some(report) => {
+                    tracing::debug!("Usage reports retrieved by bridge agent: {:?}", report);
+                    Ok(report)
+                }
+                None => {
+                    tracing::warn!("No usage reports retrieved?");
+                    Err(Error::MissingProject(
+                        "No usage reports retrieved by bridge agent".to_string(),
                     ))
                 }
             }

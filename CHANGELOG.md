@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Added extra commands that can be run by the portal: `get_projects`,
+  `remove_project` and `get_usage_reports`.
+
+- Added ability to combine `UsageReport` and `ProjectUsageReport` objects
+  together using static `combine` functions, plus added in lots of operators
+  to add, multiply and divide usage. This should make manipulation
+  of usage reports much easier.
+
+### Fixed
+
+- Cleaned up the way that python objects are extracted in the `job.completed`
+  function.
+
 ## [0.15.1] - 2025-08-04
 
 ### Fixed

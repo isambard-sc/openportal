@@ -452,6 +452,112 @@ impl std::fmt::Display for ProjectUsageReport {
     }
 }
 
+impl std::ops::Add<ProjectUsageReport> for ProjectUsageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        if self.project != other.project {
+            tracing::warn!(
+                "Cannot add reports for different projects: {} and {}",
+                self.project,
+                other.project
+            );
+            return self;
+        }
+
+        let mut new_report = self.clone();
+
+        for (date, report) in other.reports {
+            match new_report.reports.get_mut(&date) {
+                Some(existing_report) => {
+                    for (user, usage) in report.reports {
+                        existing_report.add_usage(&user, usage);
+                    }
+                }
+                None => {
+                    new_report.reports.insert(date, report);
+                }
+            }
+        }
+
+        new_report
+    }
+}
+
+impl std::ops::AddAssign<ProjectUsageReport> for ProjectUsageReport {
+    fn add_assign(&mut self, other: Self) {
+        if self.project != other.project {
+            tracing::warn!(
+                "Cannot add reports for different projects: {} and {}",
+                self.project,
+                other.project
+            );
+            return;
+        }
+
+        for (date, report) in other.reports {
+            match self.reports.get_mut(&date) {
+                Some(existing_report) => {
+                    for (user, usage) in report.reports {
+                        existing_report.add_usage(&user, usage);
+                    }
+                }
+                None => {
+                    self.reports.insert(date, report);
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Mul<f64> for ProjectUsageReport {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage *= rhs;
+            }
+        }
+        new_report
+    }
+}
+
+impl std::ops::Div<f64> for ProjectUsageReport {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage /= rhs;
+            }
+        }
+        new_report
+    }
+}
+
+impl std::ops::MulAssign<f64> for ProjectUsageReport {
+    fn mul_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage *= rhs;
+            }
+        }
+    }
+}
+
+impl std::ops::DivAssign<f64> for ProjectUsageReport {
+    fn div_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage /= rhs;
+            }
+        }
+    }
+}
+
 impl ProjectUsageReport {
     pub fn new(project: &ProjectIdentifier) -> Self {
         Self {
@@ -594,6 +700,28 @@ impl ProjectUsageReport {
     pub fn is_complete(&self) -> bool {
         self.reports.values().all(|r| r.is_complete())
     }
+
+    pub fn combine(reports: &[ProjectUsageReport]) -> Result<Self, Error> {
+        if reports.is_empty() {
+            return Err(Error::InvalidState("No reports to combine".to_string()));
+        }
+
+        let mut combined = ProjectUsageReport::new(&reports[0].project);
+
+        for report in reports.iter() {
+            if report.portal() != combined.portal() {
+                return Err(Error::Incompatible(format!(
+                    "Cannot combine reports from incompatible portals: {} and {}",
+                    report.portal(),
+                    combined.portal()
+                )));
+            }
+
+            combined += report.clone();
+        }
+
+        Ok(combined)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -616,6 +744,89 @@ impl std::fmt::Display for UsageReport {
         }
 
         writeln!(f, "Total: {}", self.total_usage())
+    }
+}
+
+impl std::ops::Add<UsageReport> for UsageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        if self.portal != other.portal {
+            tracing::warn!(
+                "Cannot add reports for different portals: {} and {}",
+                self.portal,
+                other.portal
+            );
+            return self;
+        }
+
+        let mut new_report = self.clone();
+        new_report += other;
+        new_report
+    }
+}
+
+impl std::ops::AddAssign<UsageReport> for UsageReport {
+    fn add_assign(&mut self, other: Self) {
+        if self.portal != other.portal {
+            tracing::warn!(
+                "Cannot add reports for different portals: {} and {}",
+                self.portal,
+                other.portal
+            );
+            return;
+        }
+
+        for report in other.reports {
+            match self.reports.get_mut(&report.0) {
+                Some(existing_report) => {
+                    *existing_report += report.1;
+                }
+                None => {
+                    self.reports.insert(report.0, report.1);
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Mul<f64> for UsageReport {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            *report = report.clone() * rhs;
+        }
+        new_report
+    }
+}
+
+impl std::ops::Div<f64> for UsageReport {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            *report = report.clone() / rhs;
+        }
+        new_report
+    }
+}
+
+impl std::ops::MulAssign<f64> for UsageReport {
+    fn mul_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            *report *= rhs;
+        }
+    }
+}
+
+impl std::ops::DivAssign<f64> for UsageReport {
+    fn div_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            *report /= rhs;
+        }
     }
 }
 
@@ -670,6 +881,28 @@ impl UsageReport {
             .cloned()
             .map(|r| r.total_usage())
             .sum()
+    }
+
+    pub fn combine(reports: &[UsageReport]) -> Result<Self, Error> {
+        if reports.is_empty() {
+            return Err(Error::InvalidState("No reports to combine".to_string()));
+        }
+
+        let mut combined = UsageReport::new(&reports[0].portal);
+
+        for report in reports.iter() {
+            if report.portal() != combined.portal() {
+                return Err(Error::Incompatible(format!(
+                    "Cannot combine reports from incompatible portals: {} and {}",
+                    report.portal(),
+                    combined.portal()
+                )));
+            }
+
+            combined += report.clone();
+        }
+
+        Ok(combined)
     }
 }
 

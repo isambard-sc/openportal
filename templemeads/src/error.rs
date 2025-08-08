@@ -37,6 +37,9 @@ pub enum Error {
     Delivery(String),
 
     #[error("{0}")]
+    Incompatible(String),
+
+    #[error("{0}")]
     IncompleteCode(String),
 
     #[error("{0}")]

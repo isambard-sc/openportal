@@ -1337,6 +1337,46 @@ impl Usage {
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Usage> {
         Ok(self.clone())
     }
+
+    fn __add__(&self, other: &Usage) -> PyResult<Self> {
+        Ok(Self(self.0 + other.0))
+    }
+
+    fn __sub__(&self, other: &Usage) -> PyResult<Self> {
+        Ok(Self(self.0 - other.0))
+    }
+
+    fn __mul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0 * other))
+    }
+
+    fn __div__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0 / other))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0 * other))
+    }
+
+    fn __iadd__(&mut self, other: &Usage) -> PyResult<()> {
+        self.0 += other.0;
+        Ok(())
+    }
+
+    fn __isub__(&mut self, other: &Usage) -> PyResult<()> {
+        self.0 -= other.0;
+        Ok(())
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
+    }
 }
 
 impl From<usagereport::Usage> for Usage {
@@ -1372,6 +1412,37 @@ impl UsageReport {
         Ok(self.clone())
     }
 
+    fn __add__(&self, other: &UsageReport) -> PyResult<Self> {
+        Ok(Self(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: &UsageReport) -> PyResult<()> {
+        self.0 += other.0.clone();
+        Ok(())
+    }
+
+    fn __mul__(&self, factor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * factor))
+    }
+
+    fn __div__(&self, divisor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() / divisor))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * other))
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
+    }
+
     #[getter]
     fn portal(&self) -> PyResult<PortalIdentifier> {
         Ok(self.0.portal().clone().into())
@@ -1389,6 +1460,18 @@ impl UsageReport {
     #[getter]
     fn total_usage(&self) -> PyResult<Usage> {
         Ok(self.0.total_usage().into())
+    }
+
+    #[staticmethod]
+    fn combine(reports: Py<PyAny>, py: Python) -> PyResult<Self> {
+        let reports: Vec<UsageReport> = reports.extract(py)?;
+
+        let reports: Vec<usagereport::UsageReport> = reports.iter().map(|r| r.0.clone()).collect();
+
+        match usagereport::UsageReport::combine(&reports) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
     }
 }
 
@@ -1423,6 +1506,37 @@ impl ProjectUsageReport {
 
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectUsageReport> {
         Ok(self.clone())
+    }
+
+    fn __add__(&self, other: &ProjectUsageReport) -> PyResult<Self> {
+        Ok(Self(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: &ProjectUsageReport) -> PyResult<()> {
+        self.0 += other.0.clone();
+        Ok(())
+    }
+
+    fn __mul__(&self, factor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * factor))
+    }
+
+    fn __div__(&self, divisor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() / divisor))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * other))
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
     }
 
     #[getter]
@@ -1477,6 +1591,19 @@ impl ProjectUsageReport {
 
     fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectUsageReport> {
         Ok(self.0.get_report(&grammar::Date::from_chrono(&date)).into())
+    }
+
+    #[staticmethod]
+    fn combine(reports: Py<PyAny>, py: Python) -> PyResult<Self> {
+        let reports: Vec<ProjectUsageReport> = reports.extract(py)?;
+
+        let reports: Vec<usagereport::ProjectUsageReport> =
+            reports.iter().map(|r| r.0.clone()).collect();
+
+        match usagereport::ProjectUsageReport::combine(&reports) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
     }
 }
 

@@ -6,11 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-### Added
+## [0.16.0] - 2025-08-08
+
+### Added
 
 - Added extra commands that can be run by the portal: `get_projects`,
   `remove_project` and `get_usage_reports`.
-
 - Added ability to combine `UsageReport` and `ProjectUsageReport` objects
   together using static `combine` functions, plus added in lots of operators
   to add, multiply and divide usage. This should make manipulation
@@ -668,6 +669,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.16.0]: https://github.com/isambard-sc/openportal/releases/tag/0.16.0
 [0.15.1]: https://github.com/isambard-sc/openportal/releases/tag/0.15.1
 [0.15.0]: https://github.com/isambard-sc/openportal/releases/tag/0.15.0
 [0.14.0]: https://github.com/isambard-sc/openportal/releases/tag/0.14.0

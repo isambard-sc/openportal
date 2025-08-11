@@ -400,12 +400,90 @@ impl DailyProjectUsageReport {
         *self.reports.entry(local_user.to_string()).or_default() += usage;
     }
 
+    pub fn set_usage(&mut self, local_user: &str, usage: Usage) {
+        self.reports.insert(local_user.to_string(), usage);
+    }
+
+    pub fn add_unattributed_usage(&mut self, usage: Usage) {
+        self.add_usage("unknown", usage);
+    }
+
+    pub fn set_unattributed_usage(&mut self, usage: Usage) {
+        self.set_usage("unknown", usage);
+    }
+
     pub fn set_complete(&mut self) {
         self.is_complete = true;
     }
 
     pub fn is_complete(&self) -> bool {
         self.is_complete
+    }
+}
+
+impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        let mut new_report = self.clone();
+
+        for (user, usage) in other.reports {
+            new_report.add_usage(&user, usage);
+        }
+
+        new_report.is_complete = false; // combine reports are never complete
+
+        new_report
+    }
+}
+
+impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
+    fn add_assign(&mut self, other: Self) {
+        for (user, usage) in other.reports {
+            self.add_usage(&user, usage);
+        }
+
+        self.is_complete = false; // combine reports are never complete
+    }
+}
+
+impl std::ops::Mul<f64> for DailyProjectUsageReport {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for usage in new_report.reports.values_mut() {
+            *usage *= rhs;
+        }
+        new_report
+    }
+}
+
+impl std::ops::Div<f64> for DailyProjectUsageReport {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for usage in new_report.reports.values_mut() {
+            *usage /= rhs;
+        }
+        new_report
+    }
+}
+
+impl std::ops::MulAssign<f64> for DailyProjectUsageReport {
+    fn mul_assign(&mut self, rhs: f64) {
+        for usage in self.reports.values_mut() {
+            *usage *= rhs;
+        }
+    }
+}
+
+impl std::ops::DivAssign<f64> for DailyProjectUsageReport {
+    fn div_assign(&mut self, rhs: f64) {
+        for usage in self.reports.values_mut() {
+            *usage /= rhs;
+        }
     }
 }
 
@@ -677,6 +755,17 @@ impl ProjectUsageReport {
         self.reports.insert(date.clone(), report.clone());
     }
 
+    pub fn add_report(&mut self, date: &Date, report: &DailyProjectUsageReport) {
+        match self.reports.get_mut(date) {
+            Some(existing_report) => {
+                *existing_report += report.clone();
+            }
+            None => {
+                self.reports.insert(date.clone(), report.clone());
+            }
+        }
+    }
+
     pub fn get_report(&self, date: &Date) -> ProjectUsageReport {
         match self.reports.get(date) {
             Some(report) => {
@@ -721,6 +810,24 @@ impl ProjectUsageReport {
         }
 
         Ok(combined)
+    }
+
+    pub fn set_day_complete(&mut self, date: &Date) {
+        if let Some(report) = self.reports.get_mut(date) {
+            report.set_complete();
+        }
+    }
+
+    pub fn set_complete(&mut self) {
+        for report in self.reports.values_mut() {
+            report.set_complete();
+        }
+    }
+
+    pub fn to_usage_report(&self) -> UsageReport {
+        let mut r = UsageReport::new(&self.project.portal_identifier());
+        r.reports.insert(self.project.clone(), self.clone());
+        r
     }
 }
 

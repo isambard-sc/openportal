@@ -1605,11 +1605,170 @@ impl ProjectUsageReport {
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
     }
+
+    fn add_mapping(&mut self, user: &UserMapping) -> PyResult<()> {
+        match self.0.add_mapping(&user.0) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn add_mappings(&mut self, users: Py<PyAny>, py: Python) -> PyResult<()> {
+        let mappings: Vec<UserMapping> = users.extract(py)?;
+        let mappings: Vec<grammar::UserMapping> = mappings.iter().map(|m| m.0.clone()).collect();
+
+        match self.0.add_mappings(&mappings) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn set_report(
+        &mut self,
+        date: chrono::NaiveDate,
+        report: &DailyProjectUsageReport,
+    ) -> PyResult<()> {
+        self.0
+            .set_report(&grammar::Date::from_chrono(&date), &report.0);
+        Ok(())
+    }
+
+    fn add_report(
+        &mut self,
+        date: chrono::NaiveDate,
+        report: &DailyProjectUsageReport,
+    ) -> PyResult<()> {
+        self.0
+            .add_report(&grammar::Date::from_chrono(&date), &report.0);
+        Ok(())
+    }
+
+    fn set_complete(&mut self) -> PyResult<()> {
+        self.0.set_complete();
+        Ok(())
+    }
+
+    fn set_day_complete(&mut self, date: chrono::NaiveDate) -> PyResult<()> {
+        self.0.set_day_complete(&grammar::Date::from_chrono(&date));
+        Ok(())
+    }
+
+    fn to_usage_report(&self) -> UsageReport {
+        self.0.to_usage_report().into()
+    }
 }
 
 impl From<usagereport::ProjectUsageReport> for ProjectUsageReport {
     fn from(project_usage_report: usagereport::ProjectUsageReport) -> Self {
         ProjectUsageReport(project_usage_report)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DailyProjectUsageReport(usagereport::DailyProjectUsageReport);
+
+#[pymethods]
+impl DailyProjectUsageReport {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(Self(usagereport::DailyProjectUsageReport::default()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<DailyProjectUsageReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<DailyProjectUsageReport> {
+        Ok(self.clone())
+    }
+
+    fn __add__(&self, other: &DailyProjectUsageReport) -> PyResult<Self> {
+        Ok(Self(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: &DailyProjectUsageReport) -> PyResult<()> {
+        self.0 += other.0.clone();
+        Ok(())
+    }
+
+    fn __mul__(&self, factor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * factor))
+    }
+
+    fn __div__(&self, divisor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() / divisor))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * other))
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
+    }
+
+    fn usage(&self, user: &str) -> PyResult<Usage> {
+        Ok(self.0.usage(user).into())
+    }
+
+    fn local_users(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.local_users().clone())
+    }
+
+    #[getter]
+    fn total_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_usage().into())
+    }
+
+    fn add_usage(&mut self, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.add_usage(user, usage.0);
+        Ok(())
+    }
+
+    fn add_unattributed_usage(&mut self, usage: &Usage) -> PyResult<()> {
+        self.0.add_unattributed_usage(usage.0);
+        Ok(())
+    }
+
+    fn set_usage(&mut self, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.set_usage(user, usage.0);
+        Ok(())
+    }
+
+    fn set_unattributed_usage(&mut self, usage: &Usage) -> PyResult<()> {
+        self.0.set_unattributed_usage(usage.0);
+        Ok(())
+    }
+
+    fn set_complete(&mut self) -> PyResult<()> {
+        self.0.set_complete();
+        Ok(())
+    }
+
+    #[getter]
+    fn is_complete(&self) -> PyResult<bool> {
+        Ok(self.0.is_complete())
+    }
+}
+
+impl From<usagereport::DailyProjectUsageReport> for DailyProjectUsageReport {
+    fn from(daily_project_usage_report: usagereport::DailyProjectUsageReport) -> Self {
+        DailyProjectUsageReport(daily_project_usage_report)
     }
 }
 
@@ -2516,6 +2675,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Usage>()?;
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;
+    m.add_class::<DailyProjectUsageReport>()?;
     m.add_class::<ProjectDetails>()?;
     m.add_class::<ProjectClass>()?;
 

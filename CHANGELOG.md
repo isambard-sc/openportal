@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-### Added
+## [0.16.1] - 2025-08-11
+
+### Added
 
 - Added more functions to support UsageReport creation in Python,
   plus exposed the `DailyProjectUsageReport` class.
@@ -674,6 +676,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.16.1]: https://github.com/isambard-sc/openportal/releases/tag/0.16.1
 [0.16.0]: https://github.com/isambard-sc/openportal/releases/tag/0.16.0
 [0.15.1]: https://github.com/isambard-sc/openportal/releases/tag/0.15.1
 [0.15.0]: https://github.com/isambard-sc/openportal/releases/tag/0.15.0

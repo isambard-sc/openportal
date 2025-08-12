@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.16.2] - 2025-08-12
+
 ### Fixed
 
 - Fixed incorrect return type of the portal `get_usage_report` function.
@@ -680,6 +682,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.16.2]: https://github.com/isambard-sc/openportal/releases/tag/0.16.2
 [0.16.1]: https://github.com/isambard-sc/openportal/releases/tag/0.16.1
 [0.16.0]: https://github.com/isambard-sc/openportal/releases/tag/0.16.0
 [0.15.1]: https://github.com/isambard-sc/openportal/releases/tag/0.15.1

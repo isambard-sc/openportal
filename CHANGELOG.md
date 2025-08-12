@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Fixed incorrect return type of the portal `get_usage_report` function.
+
 ## [0.16.1] - 2025-08-11
 
 ### Added

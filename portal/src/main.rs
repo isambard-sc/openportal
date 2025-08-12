@@ -17,7 +17,7 @@ use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
 };
 use templemeads::job::{Envelope, Job};
-use templemeads::usagereport::UsageReport;
+use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
 
 ///
@@ -583,7 +583,7 @@ pub async fn get_usage_report(
     me: &str,
     project: &ProjectIdentifier,
     dates: &DateRange,
-) -> Result<UsageReport, Error> {
+) -> Result<ProjectUsageReport, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
     // This will return the ProjectIdentifier of the project that was
@@ -606,7 +606,7 @@ pub async fn get_usage_report(
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<UsageReport>()?;
+            let result = job.wait().await?.result::<ProjectUsageReport>()?;
 
             match result {
                 Some(report) => {

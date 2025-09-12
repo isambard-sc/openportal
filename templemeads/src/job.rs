@@ -1049,6 +1049,82 @@ impl Job {
 
         Ok(job)
     }
+
+    async fn _try_wait(&self) -> Result<Option<Job>, Error> {
+        if self.is_finished() {
+            return Ok(Some(self.clone()));
+        }
+
+        let agent = match self.board {
+            Some(ref a) => a,
+            None => {
+                return Err(Error::InvalidBoard(
+                    "Job has no board, so cannot waited upon".to_owned(),
+                ))
+            }
+        };
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        let waiter: Waiter;
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // return a waiter for the job constructed from the board
+            waiter = board.get_waiter(self)?;
+        }
+
+        // wait for the job to finish
+        let result = waiter.try_result().await?;
+
+        Ok(result)
+    }
+
+    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job>, Error> {
+        if timeout_ms == 0 {
+            let job = self.wait().await?;
+
+            if job.is_finished() {
+                return Ok(Some(job));
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let now = std::time::Instant::now();
+
+        loop {
+            if now.elapsed().as_millis() > timeout_ms as u128 {
+                return Ok(None);
+            }
+
+            // wait for the job to finish
+            let job = self._try_wait().await?;
+
+            if let Some(j) = job {
+                if j.is_finished() {
+                    return Ok(Some(j));
+                }
+            }
+
+            // sleep for a short time before trying again
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
 }
 
 ///

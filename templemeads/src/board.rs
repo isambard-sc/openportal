@@ -505,6 +505,17 @@ impl Waiter {
         Waiter::Finished(Box::new(job))
     }
 
+    pub async fn try_result(self) -> Result<Option<Job>, Error> {
+        match self {
+            Waiter::Pending(mut rx) => match rx.try_recv() {
+                Ok(job) => Ok(Some(job)),
+                Err(oneshot::error::TryRecvError::Empty) => Ok(None),
+                Err(_) => Err(Error::Unknown("Failed to receive job".to_string())),
+            },
+            Waiter::Finished(job) => Ok(Some(*job)),
+        }
+    }
+
     pub async fn result(self) -> Result<Job, Error> {
         match self {
             Waiter::Pending(rx) => match rx.await {

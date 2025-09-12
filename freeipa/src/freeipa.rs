@@ -5,7 +5,7 @@ use anyhow::Context;
 use anyhow::Result;
 use chrono::Utc;
 use once_cell::sync::Lazy;
-use reqwest::{cookie::Jar, Client};
+use reqwest::{cookie::CookieStore, cookie::Jar, Client};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -16,7 +16,7 @@ use templemeads::grammar::{
 };
 use templemeads::job::assert_not_expired;
 use templemeads::Error;
-use tokio::sync::{Mutex, MutexGuard, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 
 use templemeads::agent::Peer;
 
@@ -49,11 +49,10 @@ where
         kwargs
     );
     tracing::debug!("Awaiting lock for auth...");
-    let mut auth = auth().await?;
+    let mut lock = get_connected_server(Duration::from_secs(30)).await?;
     tracing::debug!("Lock obtained for auth!");
-    auth.num_reconnects = 0;
 
-    let url = format!("{}/ipa/session/json", &auth.server);
+    let url = format!("{}/ipa/session/json", lock.server());
 
     // make id a random integer between 1 and 1000
     let id = rand::random::<u16>() % 1000;
@@ -73,7 +72,7 @@ where
     // no query should take longer than 60 seconds
     // Use a timeout to prevent deadlocks from failed servers
     let client = Client::builder()
-        .cookie_provider(Arc::clone(&auth.jar))
+        .cookie_provider(Arc::clone(lock.jar()))
         .danger_accept_invalid_certs(should_allow_invalid_certs())
         .timeout(Duration::from_secs(60))
         .build()
@@ -81,7 +80,7 @@ where
 
     let mut result = client
         .post(&url)
-        .header("Referer", format!("{}/ipa", &auth.server))
+        .header("Referer", format!("{}/ipa", lock.server()))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .json(&payload)
@@ -92,54 +91,25 @@ where
     // if this is an authorisation error, try to reconnect
     while result.status().as_u16() == 401 {
         tracing::warn!("Login error: 401 - authorisation failed.");
-        auth.num_reconnects += 1;
+        lock.set_login_failed();
 
-        if auth.num_reconnects > 3 {
-            return Err(Error::Call(format!(
-                "Authorisation (401) error: Could not get response for function: {}. Status: {}. Response: {:?}",
-                payload,
-                result.status(),
-                    result
-                )));
-        }
+        // try to get another lock
+        drop(lock);
 
         tracing::error!("Authorisation (401) error. Reconnecting.");
+        lock = get_connected_server(Duration::from_secs(30)).await?;
 
-        match login(&auth.server, &auth.user, &auth.password).await {
-            Ok(jar) => {
-                auth.jar = jar;
-
-                // create a new client with the new cookies
-                let client = Client::builder()
-                    .cookie_provider(Arc::clone(&auth.jar))
-                    .danger_accept_invalid_certs(should_allow_invalid_certs())
-                    .timeout(Duration::from_secs(60))
-                    .build()
-                    .context("Could not build client")?;
-
-                // retry the call
-                result = client
-                    .post(&url)
-                    .header("Referer", format!("{}/ipa", &auth.server))
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await
-                    .with_context(|| format!("Could not call function: {}", payload))?;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Could not login to FreeIPA server: {}. Error: {}",
-                    auth.server,
-                    e
-                );
-            }
-        }
+        // retry the call
+        result = client
+            .post(&url)
+            .header("Referer", format!("{}/ipa", lock.server()))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| format!("Could not call function: {}", payload))?;
     }
-
-    // reset the number of reconnects, as we have clearly been successful
-    auth.num_reconnects = 0;
 
     if result.status().is_success() {
         let result = result
@@ -245,27 +215,199 @@ impl IPAResponse {
 }
 
 #[derive(Debug, Clone)]
-struct FreeAuth {
+struct IPAServer {
     server: String,
     jar: Arc<Jar>,
     user: String,
     password: SecretString,
-    num_reconnects: u32,
+    num_failed_reconnects: u32,
+    last_failed_reconnect: Option<chrono::DateTime<Utc>>,
 }
 
-impl FreeAuth {
-    fn default() -> Self {
-        FreeAuth {
-            server: "".to_string(),
+impl IPAServer {
+    fn new(server: &str, user: &str, password: &SecretString) -> Self {
+        IPAServer {
+            server: server.to_string(),
             jar: Arc::new(Jar::default()),
-            user: "".to_string(),
-            password: SecretString::default(),
-            num_reconnects: 0,
+            user: user.to_string(),
+            password: password.clone(),
+            num_failed_reconnects: 0,
+            last_failed_reconnect: None,
+        }
+    }
+
+    fn is_logged_in(&self) -> bool {
+        // check if the jar has a session cookie for this server
+        let url = format!("{}/ipa", &self.server);
+
+        match url.parse() {
+            Ok(url) => {
+                let cookies = self.jar.cookies(&url);
+                match cookies {
+                    Some(cookies) => cookies.to_str().unwrap_or_default().contains("ipa_session"),
+                    None => false,
+                }
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn set_login_failed(&mut self) {
+        self.num_failed_reconnects += 1;
+        self.last_failed_reconnect = Some(Utc::now());
+        self.jar = Arc::new(Jar::default());
+    }
+
+    fn set_login_success(&mut self, jar: Arc<Jar>) {
+        self.jar = jar;
+        self.num_failed_reconnects = 0;
+        self.last_failed_reconnect = None;
+    }
+
+    fn should_backoff(&self) -> bool {
+        if self.num_failed_reconnects < 3 {
+            return false;
+        }
+
+        if let Some(last_failed) = self.last_failed_reconnect {
+            let backoff_duration =
+                chrono::Duration::seconds(20 * self.num_failed_reconnects as i64);
+            Utc::now() < last_failed + backoff_duration
+        } else {
+            false
         }
     }
 }
 
-static FREEIPA_AUTH: Lazy<Mutex<FreeAuth>> = Lazy::new(|| Mutex::new(FreeAuth::default()));
+#[derive(Debug)]
+struct LockedIPAServer {
+    server: tokio::sync::OwnedMutexGuard<IPAServer>,
+}
+
+impl LockedIPAServer {
+    fn server(&self) -> &str {
+        &self.server.server
+    }
+
+    fn jar(&self) -> &Arc<Jar> {
+        &self.server.jar
+    }
+
+    fn set_login_failed(&mut self) {
+        self.server.set_login_failed();
+    }
+}
+
+static FREEIPA_SERVERS: Lazy<Mutex<Vec<Arc<Mutex<IPAServer>>>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
+pub async fn initialise_servers(
+    servers: &[String],
+    user: &str,
+    password: &SecretString,
+) -> Result<(), Error> {
+    let mut freeipa_servers = FREEIPA_SERVERS.lock().await;
+
+    // clear any existing servers
+    freeipa_servers.clear();
+
+    // now add each server
+    for server in servers {
+        let server = server.trim();
+
+        if server.is_empty() {
+            continue;
+        }
+
+        freeipa_servers.push(Arc::new(Mutex::new(IPAServer::new(server, user, password))));
+    }
+
+    Ok(())
+}
+
+async fn get_connected_server(timeout: Duration) -> Result<LockedIPAServer, Error> {
+    // get a copy of the servers, so that we don't hold the lock while we
+    // try to connect
+    let freeipa_servers = FREEIPA_SERVERS.lock().await.clone();
+
+    if freeipa_servers.is_empty() {
+        return Err(Error::Call(
+            "No FreeIPA servers have been initialised".to_string(),
+        ));
+    }
+
+    // keep looping up to the timeout duration to get a lock on a server
+    let start = Utc::now();
+
+    loop {
+        let mut should_all_backoff: bool = true;
+
+        for server in freeipa_servers.iter() {
+            match server.clone().try_lock_owned() {
+                Ok(mut server) => {
+                    if server.is_logged_in() {
+                        tracing::info!("Already logged in to FreeIPA server: {}", server.server);
+                        return Ok(LockedIPAServer { server });
+                    }
+
+                    if server.should_backoff() {
+                        tracing::warn!(
+                            "Backing off from trying to login to FreeIPA server: {}",
+                            server.server
+                        );
+                        continue;
+                    }
+
+                    should_all_backoff = false;
+
+                    tracing::info!("Logging in to FreeIPA server: {}", server.server);
+                    match login(&server.server, &server.user, &server.password).await {
+                        Ok(jar) => {
+                            // update the jar in the server
+                            tracing::info!("Login successful to FreeIPA server: {}", server.server);
+                            server.set_login_success(jar);
+                            return Ok(LockedIPAServer { server });
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Could not login to FreeIPA server: {}. Error: {}",
+                                server.server,
+                                e
+                            );
+                            server.set_login_failed();
+
+                            // release the lock and try the next server
+                            continue;
+                        }
+                    }
+                }
+                Err(_) => {
+                    // could not get the lock - try the next server if there is time
+                    if Utc::now().signed_duration_since(start).num_seconds()
+                        > timeout.as_secs() as i64
+                    {
+                        return Err(Error::Call(
+                            "Could not acquire lock on any logged-in FreeIPA server".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if should_all_backoff {
+            tracing::error!(
+                "All FreeIPA servers are backing off because of repeated login failures."
+            );
+            return Err(Error::Call(
+                "All FreeIPA servers are backing off because of repeated login failures."
+                    .to_string(),
+            ));
+        }
+
+        // wait a bit before trying again
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
 fn should_allow_invalid_certs() -> bool {
     match std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS") {
@@ -285,7 +427,7 @@ async fn login(server: &str, user: &str, password: &SecretString) -> Result<Arc<
     let client = Client::builder()
         .cookie_provider(Arc::clone(&jar))
         .danger_accept_invalid_certs(should_allow_invalid_certs())
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(5))
         .build()
         .context("Could not build client")?;
 
@@ -314,11 +456,6 @@ async fn login(server: &str, user: &str, password: &SecretString) -> Result<Arc<
             result
         ))),
     }
-}
-
-// function to return the client protected by a MutexGuard
-async fn auth<'mg>() -> Result<MutexGuard<'mg, FreeAuth>, Error> {
-    Ok(FREEIPA_AUTH.lock().await)
 }
 
 ///
@@ -1018,46 +1155,6 @@ impl IPAGroup {
 
     pub fn is_project_group(&self) -> bool {
         !(self.is_system_group() || self.is_instance_group())
-    }
-}
-
-pub async fn connect(server: &str, user: &str, password: &SecretString) -> Result<(), Error> {
-    // overwrite the global FreeIPA client with a new one
-    let mut auth = FREEIPA_AUTH.lock().await;
-
-    auth.server = server.to_string();
-    auth.user = user.to_string();
-    auth.password = password.clone();
-    auth.num_reconnects = 0;
-
-    const MAX_RECONNECTS: u32 = 3;
-    const RECONNECT_WAIT: u64 = 100;
-
-    loop {
-        match login(&auth.server, &auth.user, &auth.password).await {
-            Ok(jar) => {
-                auth.jar = jar;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Could not login to FreeIPA server: {}. Error: {}",
-                    server,
-                    e
-                );
-
-                auth.num_reconnects += 1;
-
-                if auth.num_reconnects > MAX_RECONNECTS {
-                    return Err(Error::Login(format!(
-                        "Could not login to FreeIPA server: {}. Error: {}",
-                        server, e
-                    )));
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_WAIT)).await;
-            }
-        }
     }
 }
 

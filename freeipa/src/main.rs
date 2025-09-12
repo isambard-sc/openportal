@@ -77,6 +77,15 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // there can be multiple servers specified, separated by commas. A user
+    // can also specify the same server multiple times, to allow multiple
+    // concurrent connections to the same server.
+    let freeipa_servers: Vec<String> = freeipa_server
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .collect();
+
+    // the username and password for all FreeIPA servers must be the same
     let freeipa_password = match config.secret("freeipa-password") {
         Some(password) => password,
         None => {
@@ -92,7 +101,7 @@ async fn main() -> Result<()> {
     // connect the single shared FreeIPA client - this will be used in the
     // async function (we can't bind variables to async functions, or else
     // we would just pass the client with the environment)
-    freeipa::connect(&freeipa_server, &freeipa_user, &freeipa_password).await?;
+    freeipa::initialise_servers(&freeipa_servers, &freeipa_user, &freeipa_password).await?;
 
     // we need to bind the FreeIPA client into the freeipa_runner
     async_runnable! {

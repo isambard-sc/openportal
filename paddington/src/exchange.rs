@@ -178,7 +178,7 @@ impl Drop for StandbyWaiter {
 async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
     let mut workers = JoinSet::new();
 
-    static MAX_WORKERS: usize = 10;
+    static MAX_WORKERS: usize = 1024;
 
     while let Some(mut message) = rx.recv().await {
         // make sure we don't exceed the requested number of workers

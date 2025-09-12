@@ -157,7 +157,25 @@ async fn main() -> Result<()> {
                     job = job.update(&sender).await?;
 
                     // Wait for the submitted job to complete
-                    let southbound_job = southbound_job.wait().await?;
+                    let now = chrono::Utc::now();
+
+                    let southbound_job = loop {
+                        match southbound_job.try_wait(500).await? {
+                            Some(job) => {
+                                if job.is_finished() || job.is_expired() {
+                                    break job;
+                                }
+                            }
+                            None => {
+                                let elapsed_secs = (chrono::Utc::now() - now).num_seconds();
+                                tracing::debug!("{} : {} : still waiting... ({} seconds)", destination, instruction, elapsed_secs);
+                            }
+                        }
+
+                        if southbound_job.is_expired() {
+                            break southbound_job;
+                        }
+                    };
 
                     if southbound_job.is_expired() {
                         tracing::error!("{} : {} : Error - job expired!", destination, instruction);

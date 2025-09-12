@@ -983,7 +983,7 @@ impl Job {
     }
 
     async fn _wait(&self) -> Result<Job, Error> {
-        if self.is_finished() {
+        if self.is_finished() || self.is_expired() {
             return Ok(self.clone());
         }
 
@@ -1050,9 +1050,11 @@ impl Job {
         Ok(job)
     }
 
-    async fn _try_wait(&self) -> Result<Option<Job>, Error> {
-        if self.is_finished() {
+    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job>, Error> {
+        if self.is_finished() || self.is_expired() {
             return Ok(Some(self.clone()));
+        } else if timeout_ms == 0 {
+            return Ok(Some(self.wait().await?));
         }
 
         let agent = match self.board {
@@ -1089,41 +1091,7 @@ impl Job {
         }
 
         // wait for the job to finish
-        let result = waiter.try_result().await?;
-
-        Ok(result)
-    }
-
-    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job>, Error> {
-        if timeout_ms == 0 {
-            let job = self.wait().await?;
-
-            if job.is_finished() {
-                return Ok(Some(job));
-            } else {
-                return Ok(None);
-            }
-        }
-
-        let now = std::time::Instant::now();
-
-        loop {
-            if now.elapsed().as_millis() > timeout_ms as u128 {
-                return Ok(None);
-            }
-
-            // wait for the job to finish
-            let job = self._try_wait().await?;
-
-            if let Some(j) = job {
-                if j.is_finished() {
-                    return Ok(Some(j));
-                }
-            }
-
-            // sleep for a short time before trying again
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        waiter.try_result(timeout_ms).await
     }
 }
 

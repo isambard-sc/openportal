@@ -505,12 +505,25 @@ impl Waiter {
         Waiter::Finished(Box::new(job))
     }
 
-    pub async fn try_result(self) -> Result<Option<Job>, Error> {
+    pub async fn try_result(self, timeout_ms: u64) -> Result<Option<Job>, Error> {
+        let now = chrono::Utc::now();
+
         match self {
-            Waiter::Pending(mut rx) => match rx.try_recv() {
-                Ok(job) => Ok(Some(job)),
-                Err(oneshot::error::TryRecvError::Empty) => Ok(None),
-                Err(_) => Err(Error::Unknown("Failed to receive job".to_string())),
+            Waiter::Pending(mut rx) => loop {
+                match rx.try_recv() {
+                    Ok(job) => return Ok(Some(job)),
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        if timeout_ms > 0 {
+                            let elapsed = chrono::Utc::now().signed_duration_since(now);
+                            if elapsed.num_milliseconds() >= timeout_ms as i64 {
+                                return Ok(None);
+                            }
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
+                    }
+                    Err(_) => return Err(Error::Unknown("Failed to receive job".to_string())),
+                }
             },
             Waiter::Finished(job) => Ok(Some(*job)),
         }

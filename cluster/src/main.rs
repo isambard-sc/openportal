@@ -543,8 +543,32 @@ async fn get_accounts(me: &str, project: &ProjectIdentifier) -> Result<Vec<UserM
             .put(&account)
             .await?;
 
-            // Wait for the add_job to complete
-            let result = job.wait().await?.result::<Vec<UserMapping>>()?;
+            let now = chrono::Utc::now();
+
+            let result = loop {
+                match job.try_wait(100).await? {
+                    Some(job) => {
+                        if job.is_finished() || job.is_expired() {
+                            break job.result::<Vec<UserMapping>>()?;
+                        }
+                    }
+                    None => {
+                        let elapsed_secs = (chrono::Utc::now() - now).num_seconds();
+                        tracing::debug!(
+                            "get_accounts : {} : still waiting... ({} seconds)",
+                            project,
+                            elapsed_secs
+                        );
+                    }
+                }
+
+                if job.is_expired() {
+                    return Err(Error::Expired(format!(
+                        "Timeout waiting for get_users job for project {}",
+                        project
+                    )));
+                }
+            };
 
             match result {
                 Some(users) => {

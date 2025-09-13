@@ -3,7 +3,7 @@
 
 [package]
 name = "op-portal"
-version = "0.16.2"
+version = "0.16.3"
 description = "An example of an OpenPortal portal interface service"
 edition = "2021"
 license = "MIT"

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Added support for connecting to multiple redundant FreeIPA servers,
+  and allowed parallelising requests across multiple servers (
+  including multiple requests to the same server). This should improve
+  the overall reliability and performance of the system.
+
+### Fixed
+
+- Optimised the algorithm for increasing and decreasing the number of
+  tokio workers to make the agents more responsive to changes in load.
+  The number of workers can grow and shrink more quickly, and are no
+  longer capped to 10 parallel workers. This removes the bottlenecks
+  observed when the message load is high.
+
 ## [0.16.2] - 2025-08-12
 
 ### Fixed

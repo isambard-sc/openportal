@@ -178,28 +178,16 @@ impl Drop for StandbyWaiter {
 async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
     let mut workers = JoinSet::new();
 
-    static MAX_WORKERS: usize = 1024;
+    let mut last_logged_update = chrono::Utc::now();
+    let mut last_logged_count: i64 = 0;
 
     while let Some(mut message) = rx.recv().await {
-        // make sure we don't exceed the requested number of workers
-        if workers.len() >= MAX_WORKERS {
-            let result = workers.join_next().await;
-
-            match result {
-                Some(Ok(())) => {}
-                Some(Err(e)) => {
-                    tracing::error!("Error processing message: {}", e);
-                }
-                None => {
-                    tracing::error!("Error processing message: None");
-                }
-            }
-        }
-
+        // process and spawn a new task to handle the message first...
         let (handler, name) = match SINGLETON_EXCHANGE.read() {
             Ok(exchange) => (exchange.handler, exchange.name.clone()),
             Err(e) => {
-                return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+                tracing::error!("Error getting read lock: {}", e);
+                continue;
             }
         };
 
@@ -213,6 +201,86 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                 tracing::error!("Error processing message: {}", e);
             });
         });
+
+        // now take the opportunity to try to join any finished workers
+        while let Some(result) = workers.try_join_next() {
+            match result {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::error!("Error processing message: {}", e);
+                }
+            }
+        }
+
+        if (last_logged_count - workers.len() as i64).abs() >= 10
+            || last_logged_update
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                >= 60
+        {
+            last_logged_count = workers.len() as i64;
+            last_logged_update = chrono::Utc::now();
+            tracing::info!("Number of workers: {}", workers.len());
+        }
+
+        if workers.len() > 1024 {
+            tracing::warn!(
+                "High number of workers: {}. Attempting to reduce...",
+                workers.len()
+            );
+
+            let start_reaping = chrono::Utc::now();
+            let mut last_update = start_reaping;
+
+            while workers.len() > 768 {
+                if let Some(result) = workers.try_join_next() {
+                    match result {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!("Error processing message: {}", e);
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                    // log a message every 10 seconds
+                    if last_update
+                        .signed_duration_since(chrono::Utc::now())
+                        .num_seconds()
+                        >= 10
+                    {
+                        let count = workers.len();
+                        tracing::warn!(
+                            "It has been {} seconds and there are still a high number of workers: {}. Attempting to reduce...",
+                            start_reaping.signed_duration_since(last_update).num_seconds(),
+                            count
+                        );
+                        last_update = chrono::Utc::now();
+                    }
+                }
+
+                if start_reaping
+                    .signed_duration_since(chrono::Utc::now())
+                    .num_seconds()
+                    >= 300
+                {
+                    tracing::error!(
+                        "It has been {} seconds since the last log message and there are still a high number of workers: {}.",
+                        start_reaping.signed_duration_since(last_logged_update).num_seconds(),
+                        workers.len()
+                    );
+                    tracing::error!("Something has gone wrong, so we will now abort all tasks and restart event processing.");
+
+                    workers.abort_all();
+                    workers.detach_all();
+
+                    tracing::error!(
+                        "Aborted all tasks. Number of workers is now: {}",
+                        workers.len()
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

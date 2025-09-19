@@ -273,6 +273,14 @@ async fn main() -> Result<()> {
         }
     };
 
+    agent::register_peer(
+        &agent::Peer::new("isambard-ai", "ukri>brics"),
+        &agent::Type::Virtual,
+        "virtual",
+        "virtual",
+    )
+    .await;
+
     // run the portal agent
     run(config, portal_runner).await?;
 

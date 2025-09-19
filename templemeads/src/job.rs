@@ -778,6 +778,8 @@ impl Job {
             }
         }
 
+        tracing::info!("SHOULD CHECK HERE IF PEER IS VIRTUAL!!! {}", peer);
+
         // now send it to the agent for processing
         match ControlCommand::put(&job).send_to(peer).await {
             Ok(_) => (),

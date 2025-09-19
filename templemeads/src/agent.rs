@@ -19,6 +19,7 @@ pub enum Type {
     Account,
     Filesystem,
     Scheduler,
+    Virtual,
 }
 
 impl std::fmt::Display for Type {
@@ -32,6 +33,7 @@ impl std::fmt::Display for Type {
             Type::Account => write!(f, "account"),
             Type::Filesystem => write!(f, "filesystem"),
             Type::Scheduler => write!(f, "scheduler"),
+            Type::Virtual => write!(f, "virtual"),
         }
     }
 }
@@ -250,14 +252,14 @@ impl Registrar {
     }
 }
 
-static REGISTAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
+static REGISTRAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
 
 ///
 /// Register that the peer agent called 'name' is of type 'agent_type'
 /// and is connecting from zone `zone`
 ///
 pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version: &str) {
-    REGISTAR
+    REGISTRAR
         .write()
         .await
         .register_peer(peer, agent_type, engine, version)
@@ -268,28 +270,28 @@ pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version
 /// is of type `agent_type`
 ///
 pub async fn register_self(name: &str, agent_type: &Type) {
-    REGISTAR.write().await.register_self(name, agent_type);
+    REGISTRAR.write().await.register_self(name, agent_type);
 }
 
 ///
 /// Remove the agent called 'name' in the zone `zone` from the registry
 ///
 pub async fn remove(peer: &Peer) {
-    REGISTAR.write().await.remove(peer)
+    REGISTRAR.write().await.remove(peer)
 }
 
 ///
 /// Return the names of all agents of a specified type
 ///
 pub async fn get_all(agent_type: &Type) -> Vec<Peer> {
-    REGISTAR.read().await.agents(agent_type)
+    REGISTRAR.read().await.agents(agent_type)
 }
 
 ///
 /// Return the name of this agent
 ///
 pub async fn name() -> String {
-    REGISTAR.read().await.name.clone()
+    REGISTRAR.read().await.name.clone()
 }
 
 ///
@@ -302,7 +304,7 @@ pub async fn portal(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.portal() {
+        match REGISTRAR.read().await.portal() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -328,7 +330,7 @@ pub async fn bridge(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.bridge() {
+        match REGISTRAR.read().await.bridge() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -354,7 +356,7 @@ pub async fn account(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.account() {
+        match REGISTRAR.read().await.account() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -380,7 +382,7 @@ pub async fn filesystem(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.filesystem() {
+        match REGISTRAR.read().await.filesystem() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -406,7 +408,7 @@ pub async fn scheduler(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.scheduler() {
+        match REGISTRAR.read().await.scheduler() {
             Some(peer) => return Some(peer.clone()),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -432,7 +434,7 @@ pub async fn wait_for(peer: &Peer, wait: u64) -> Result<(), Error> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        if REGISTAR.read().await.peers.contains_key(peer) {
+        if REGISTRAR.read().await.peers.contains_key(peer) {
             return Ok(());
         }
 
@@ -461,7 +463,7 @@ pub async fn wait_for(peer: &Peer, wait: u64) -> Result<(), Error> {
 /// Return the type of the specified agent
 ///
 pub async fn agent_type(peer: &Peer) -> Option<Type> {
-    REGISTAR.read().await.peers.get(peer).cloned()
+    REGISTRAR.read().await.peers.get(peer).cloned()
 }
 
 ///
@@ -475,7 +477,7 @@ pub async fn find(name: &str, wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        let registrar = REGISTAR.read().await;
+        let registrar = REGISTRAR.read().await;
 
         for (peer, _) in registrar.peers.iter() {
             if peer.name() == name {
@@ -504,7 +506,7 @@ mod tests {
     /// Only used by testing to clear out the registry
     ///
     async fn clear() {
-        let mut registrar = REGISTAR.write().await;
+        let mut registrar = REGISTRAR.write().await;
 
         registrar.peers.clear();
         registrar.peers_by_type.clear();

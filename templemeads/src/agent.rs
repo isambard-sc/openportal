@@ -463,7 +463,15 @@ pub async fn wait_for(peer: &Peer, wait: u64) -> Result<(), Error> {
 /// Return the type of the specified agent
 ///
 pub async fn agent_type(peer: &Peer) -> Option<Type> {
-    REGISTRAR.read().await.peers.get(peer).cloned()
+    let registrar = REGISTRAR.read().await;
+
+    match registrar.peers.get(peer) {
+        Some(agent_type) => Some(agent_type.clone()),
+        None => match peer.name() == registrar.name {
+            true => Some(registrar.typ.clone()),
+            false => None,
+        },
+    }
 }
 
 ///

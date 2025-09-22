@@ -209,6 +209,12 @@ async fn process_command(
                     }
                     Position::Error => {
                         tracing::error!("Job has got into an errored position: {}", job);
+                        tracing::error!(
+                            "Recipient: {}, Sender: {}, Destination: {}",
+                            recipient,
+                            sender,
+                            job.destination()
+                        );
                         job = job.errored("Job has got into an errored position")?;
                     }
                     _ => {
@@ -275,7 +281,7 @@ async fn process_command(
 
 async_message_handler! {
     ///
-    /// Message handler for the Provider Agent.
+    /// Message handler for most templemeads agents
     ///
     pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
         let service_info: ServiceDetails = SERVICE_DETAILS.read().await.to_owned();
@@ -348,7 +354,10 @@ async_message_handler! {
                 let command: Command = message.into();
 
                 if (recipient != service_info.service) {
-                    return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                    // check to see if this is a virtual agent
+                    if !agent::is_virtual(&Peer::new(&recipient, &zone)).await {
+                        return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                    }
                 }
 
                 process_command(&recipient, &sender, &zone, &command, &service_info.runner).await?;

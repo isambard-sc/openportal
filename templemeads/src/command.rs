@@ -3,8 +3,10 @@
 
 use crate::agent::{self, Peer, Type as AgentType};
 use crate::board::SyncState;
+use crate::destination::Destination;
 use crate::error::Error;
 use crate::job::Job;
+use crate::virtual_agent::send as send_to_virtual;
 
 use anyhow::Result;
 use paddington::message::Message;
@@ -12,8 +14,6 @@ use paddington::received as received_from_peer;
 use paddington::send as send_to_peer;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::virtual_agent::send as send_to_virtual;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {
@@ -97,11 +97,10 @@ impl Command {
         if agent::is_virtual(peer).await {
             tracing::info!("Sending command to virtual peer {} locally", peer);
 
-            Ok(send_to_virtual(Message::send_to(
-                peer.name(),
-                peer.zone(),
-                &serde_json::to_string(self)?,
-            ))
+            Ok(send_to_virtual(
+                &self.destination(),
+                Message::send_to(peer.name(), peer.zone(), &serde_json::to_string(self)?),
+            )
             .await?)
         } else {
             Ok(send_to_peer(Message::send_to(
@@ -144,6 +143,21 @@ impl Command {
             Command::Put { job } => Some(job.id()),
             Command::Update { job } => Some(job.id()),
             Command::Delete { job } => Some(job.id()),
+            Command::Sync { state: _ } => None,
+            Command::Register {
+                agent: _,
+                engine: _,
+                version: _,
+            } => None,
+            Command::Error { error: _ } => None,
+        }
+    }
+
+    pub fn destination(&self) -> Option<Destination> {
+        match self {
+            Command::Put { job } => Some(job.destination().to_owned()),
+            Command::Update { job } => Some(job.destination().to_owned()),
+            Command::Delete { job } => Some(job.destination().to_owned()),
             Command::Sync { state: _ } => None,
             Command::Register {
                 agent: _,

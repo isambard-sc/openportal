@@ -4,14 +4,40 @@
 use paddington::message::Message;
 
 use crate::agent;
+use crate::destination::Destination;
 use crate::error::Error;
 use crate::handler::process_message;
 
-pub async fn send(message: Message) -> Result<(), Error> {
-    tracing::info!("Virtual agent sending message: {:?}", message);
+pub async fn send(destination: &Option<Destination>, message: Message) -> Result<(), Error> {
+    tracing::info!(
+        "Virtual agent sending message: {:?} to destination: {}",
+        message,
+        destination
+            .as_ref()
+            .map_or("None".to_string(), |d| d.to_string())
+    );
+
+    let my_name = agent::name().await;
 
     let mut message = message;
-    message.set_sender(&agent::name().await);
+
+    if message.recipient() == my_name {
+        if let Some(dest) = destination {
+            // the sender is the last agent in the destination path,
+            // as we must be on the return journey of the message,
+            // and virtual agents are always the last agent in the path
+            message.set_sender(&dest.last());
+        } else {
+            tracing::error!(
+                "Virtual agent cannot send message to itself without a different destination"
+            );
+            return Err(Error::Run(
+                "Virtual agent cannot send message to itself".to_string(),
+            ));
+        }
+    } else {
+        message.set_sender(&my_name);
+    }
 
     match process_message(message).await {
         Ok(_) => Ok(()),

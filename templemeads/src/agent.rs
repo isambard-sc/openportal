@@ -430,6 +430,11 @@ pub async fn scheduler(wait: u64) -> Option<Peer> {
 /// this time.
 ///
 pub async fn wait_for(peer: &Peer, wait: u64) -> Result<(), Error> {
+    if peer.name() == name().await {
+        // we don't need to wait for ourselves
+        return Ok(());
+    }
+
     let now = std::time::SystemTime::now();
     let wait = std::time::Duration::from_secs(wait);
 
@@ -475,15 +480,21 @@ pub async fn agent_type(peer: &Peer) -> Option<Type> {
 }
 
 ///
-/// Return whether or not the passed agent is virtual
+/// Return whether or not the passed agent is virtual. Virtual
+/// agents are either specifically added agents, or when we
+/// send a message to ourselves (a virtual agent is created
+/// per zone)
 ///
 pub async fn is_virtual(peer: &Peer) -> bool {
-    REGISTRAR
-        .read()
-        .await
-        .peers_by_type
-        .get(&Type::Virtual)
-        .is_some_and(|v| v.contains(peer))
+    let registrar = REGISTRAR.read().await;
+
+    match peer.name() {
+        n if n == registrar.name => true,
+        _ => registrar
+            .peers_by_type
+            .get(&Type::Virtual)
+            .is_some_and(|v| v.contains(peer)),
+    }
 }
 
 ///

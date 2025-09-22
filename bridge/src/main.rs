@@ -8,7 +8,6 @@ use url::Url;
 
 use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
-use templemeads::agent::Type::Portal;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     CreateProject, GetProject, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
@@ -83,19 +82,14 @@ async fn main() -> Result<()> {
         {
             let job = envelope.job();
 
-            // Get information about the agent that sent this job
-            // The only agents that can send jobs to a portal are
-            // bridge agents, and other portal agents that have
-            // expressly be configured to be given permission.
-            // This permission is based on the zone of the portal to portal
-            // connection
-            match agent::agent_type(&envelope.sender()).await {
-                Some(Portal) => {}
-                _ => {
-                    return Err(Error::InvalidInstruction(
-                        format!("Invalid instruction: {}. Only portal agents can submit instructions to a bridge", job.instruction()),
-                    ));
-                }
+            // only virtual agents (either ourselves or other virtuals)
+            // can submit instructions to the bridge. These virtual agents
+            // are dynamically configured based on requests from the
+            // portal agent
+            if !agent::is_virtual(&envelope.sender()).await {
+                return Err(Error::InvalidInstruction(
+                    format!("Invalid instruction: {}. Only virtual agents can submit instructions to a bridge", job.instruction()),
+                ));
             }
 
             match job.instruction() {
@@ -371,6 +365,14 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    agent::register_peer(
+        &agent::Peer::new("isambard-ai", "bridge"),
+        &agent::Type::Virtual,
+        "virtual",
+        "virtual",
+    )
+    .await;
 
     // run the Bridge agent
     run(config, bridge_runner).await?;

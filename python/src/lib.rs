@@ -2633,6 +2633,25 @@ fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
     }
 }
 
+#[pyfunction]
+fn create_resource(resource: &str, zone: &str) -> PyResult<()> {
+    match call_post::<Health>(
+        "create_resource",
+        serde_json::json!({"resource": resource, "zone": zone}),
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn list_resources() -> PyResult<Vec<String>> {
+    match call_get::<Vec<String>>("list_resources") {
+        Ok(response) => Ok(response),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 ///
 /// Send back the result of us running a job that was passed to us by
 /// OpenPortal.
@@ -2647,16 +2666,18 @@ fn send_result(job: Job) -> PyResult<()> {
 
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(create_resource, m)?)?;
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
-    m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
-    m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
-    m.add_function(wrap_pyfunction!(health, m)?)?;
-    m.add_function(wrap_pyfunction!(run, m)?)?;
-    m.add_function(wrap_pyfunction!(status, m)?)?;
-    m.add_function(wrap_pyfunction!(get, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_job, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_jobs, m)?)?;
+    m.add_function(wrap_pyfunction!(get, m)?)?;
+    m.add_function(wrap_pyfunction!(health, m)?)?;
+    m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
+    m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
+    m.add_function(wrap_pyfunction!(list_resources, m)?)?;
+    m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(send_result, m)?)?;
+    m.add_function(wrap_pyfunction!(status, m)?)?;
 
     m.add_class::<Health>()?;
     m.add_class::<Job>()?;

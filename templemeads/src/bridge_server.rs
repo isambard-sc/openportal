@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent::{self, Peer};
 use crate::bridge::{run as bridge_run, status as bridge_status};
 use crate::bridgestate::get as get_board;
 use crate::error::Error;
@@ -525,6 +526,115 @@ async fn send_result(
         Err(e) => {
             tracing::error!("Error getting jobs: {:?}", e);
             Err(AppError(e.into(), None))
+        }
+    }
+}
+
+const PORTAL_WAIT_TIME: u64 = 5; // seconds
+
+#[tracing::instrument(skip_all)]
+async fn create_resource(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(resource): Json<Peer>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "create_resource",
+        Some(serde_json::json!(resource)),
+    )?;
+
+    tracing::info!("Creating resource: {}", resource);
+
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the update_project job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} create_resource {}",
+                    agent::name().await,
+                    portal.name(),
+                    resource
+                ),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+
+            // Wait for the create_resource job to complete
+            let result = job.wait().await?.result::<Peer>();
+
+            match result {
+                Ok(peer) => {
+                    if let Some(peer) = peer {
+                        tracing::info!("Created resource: {:?}", peer);
+                        Ok(Json(serde_json::json!(peer)))
+                    } else {
+                        tracing::error!("No resource created");
+                        Err(AppError(
+                            anyhow::anyhow!("No resource created"),
+                            Some(StatusCode::INTERNAL_SERVER_ERROR),
+                        ))
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error creating resource: {:?}", e);
+                    Err(AppError(e.into(), None))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("No portal agent found"),
+                Some(StatusCode::INTERNAL_SERVER_ERROR),
+            ))
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
+async fn list_resources() -> Result<Json<Vec<Peer>>, AppError> {
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the list_resources job to the bridge agent
+            let job = Job::parse(
+                &format!("{}.{} list_resources", agent::name().await, portal.name()),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+
+            // Wait for the list_resources job to complete
+            let result = job.wait().await?.result::<Vec<Peer>>();
+
+            match result {
+                Ok(peers) => {
+                    if let Some(peers) = peers {
+                        tracing::info!("Listed resources: {:?}", peers);
+                        Ok(Json(peers))
+                    } else {
+                        tracing::error!("No resources found");
+                        Err(AppError(
+                            anyhow::anyhow!("No resources found"),
+                            Some(StatusCode::INTERNAL_SERVER_ERROR),
+                        ))
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error listing resources: {:?}", e);
+                    Err(AppError(e.into(), None))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("No portal agent found"),
+                Some(StatusCode::INTERNAL_SERVER_ERROR),
+            ))
         }
     }
 }

@@ -467,6 +467,18 @@ pub async fn agent_type(peer: &Peer) -> Option<Type> {
 }
 
 ///
+/// Return whether or not the passed agent is virtual
+///
+pub async fn is_virtual(peer: &Peer) -> bool {
+    REGISTRAR
+        .read()
+        .await
+        .peers_by_type
+        .get(&Type::Virtual)
+        .is_some_and(|v| v.contains(peer))
+}
+
+///
 /// Return the first agent called 'name' - note that this
 /// will return the first agent with this name, even if there
 /// are multiple agents with the same name, but in different

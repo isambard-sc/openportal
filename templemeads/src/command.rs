@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::agent::{Peer, Type as AgentType};
+use crate::agent::{self, Peer, Type as AgentType};
 use crate::board::SyncState;
 use crate::error::Error;
 use crate::job::Job;
@@ -12,6 +12,8 @@ use paddington::received as received_from_peer;
 use paddington::send as send_to_peer;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::virtual_agent::send as send_to_virtual;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {
@@ -92,12 +94,23 @@ impl Command {
     }
 
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
-        Ok(send_to_peer(Message::send_to(
-            peer.name(),
-            peer.zone(),
-            &serde_json::to_string(self)?,
-        ))
-        .await?)
+        if agent::is_virtual(peer).await {
+            tracing::info!("Sending command to virtual peer {} locally", peer);
+
+            Ok(send_to_virtual(Message::send_to(
+                peer.name(),
+                peer.zone(),
+                &serde_json::to_string(self)?,
+            ))
+            .await?)
+        } else {
+            Ok(send_to_peer(Message::send_to(
+                peer.name(),
+                peer.zone(),
+                &serde_json::to_string(self)?,
+            ))
+            .await?)
+        }
     }
 
     pub fn received_from(&self, peer: &Peer) -> Result<(), Error> {

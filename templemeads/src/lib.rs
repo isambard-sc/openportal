@@ -18,6 +18,7 @@ mod platform;
 mod portal;
 mod provider;
 mod scheduler;
+mod virtual_agent;
 
 // public API
 pub mod agent;

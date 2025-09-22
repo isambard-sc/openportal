@@ -69,13 +69,17 @@ async fn main() -> Result<()> {
             let me = agent::name().await;
             let job = envelope.job();
 
+            // the target resource is the last element in the destination path
+            // this is the virtual resource that this portal manages
+            let resource = job.destination().last().clone();
+
             // match instructions that can be sent to virtual resources
             match job.instruction() {
                 CreateProject(project, details) => {
                     tracing::debug!("Creating project {} with details {}", project, details);
 
                     job.completed(
-                        create_project(&me, &project, &details).await?)
+                        create_project(&me, &resource, &project, &details).await?)
                 }
                 RemoveProject(project) => {
                     tracing::debug!("Removing project {}", project);
@@ -84,19 +88,19 @@ async fn main() -> Result<()> {
                     // from the portal, and also removes the project from the
                     // bridge agent
                     job.completed(
-                        remove_project(&me, &project).await?)
+                        remove_project(&me, &resource, &project).await?)
                 }
                 UpdateProject(project, details) => {
                     tracing::debug!("Updating project {} with details {}", project, details);
 
                     job.completed(
-                        update_project(&me, &project, &details).await?)
+                        update_project(&me, &resource, &project, &details).await?)
                 }
                 GetProject(project) => {
                     tracing::debug!("Getting project {}", project);
 
                     job.completed(
-                        get_project(&me, &project).await?)
+                        get_project(&me, &resource, &project).await?)
                 }
                 GetProjects(portal) => {
                     tracing::debug!("Getting all projects");
@@ -104,19 +108,19 @@ async fn main() -> Result<()> {
                     // This is a special instruction that returns all projects
                     // that this portal has access to
                     job.completed(
-                        get_projects(&me, &portal).await?)
+                        get_projects(&me, &resource, &portal).await?)
                 }
                 GetProjectMapping(project) => {
                     tracing::debug!("Getting project mapping for {}", project);
 
                     job.completed(
-                        get_project_mapping(&me, &project).await?)
+                        get_project_mapping(&me, &resource, &project).await?)
                 }
                 GetUsageReport(project, dates) => {
                     tracing::debug!("Getting usage report for {} for dates {}", project, dates);
 
                     job.completed(
-                        get_usage_report(&me, &project, &dates).await?)
+                        get_usage_report(&me, &resource, &project, &dates).await?)
                 }
                 GetUsageReports(portal, dates) => {
                     tracing::debug!("Getting usage reports for portal {}", portal);
@@ -124,7 +128,7 @@ async fn main() -> Result<()> {
                     // This is a special instruction that returns all usage reports
                     // that this portal has access to
                     job.completed(
-                        get_usage_reports(&me, &portal, &dates).await?)
+                        get_usage_reports(&me, &resource, &portal, &dates).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -278,6 +282,7 @@ const BRIDGE_WAIT_TIME: u64 = 5;
 ///
 pub async fn create_project(
     me: &str,
+    resource: &str,
     project: &ProjectIdentifier,
     details: &ProjectDetails,
 ) -> Result<ProjectMapping, Error> {
@@ -291,9 +296,10 @@ pub async fn create_project(
             // send the create_project job to the bridge agent
             let job = Job::parse(
                 &format!(
-                    "{}.{} create_project {} {}",
+                    "{}.{}.{} create_project {} {}",
                     me,
                     bridge.name(),
+                    resource,
                     project,
                     details
                 ),
@@ -332,6 +338,7 @@ pub async fn create_project(
 ///
 pub async fn update_project(
     me: &str,
+    resource: &str,
     project: &ProjectIdentifier,
     details: &ProjectDetails,
 ) -> Result<ProjectMapping, Error> {
@@ -345,9 +352,10 @@ pub async fn update_project(
             // send the update_project job to the bridge agent
             let job = Job::parse(
                 &format!(
-                    "{}.{} update_project {} {}",
+                    "{}.{}.{} update_project {} {}",
                     me,
                     bridge.name(),
+                    resource,
                     project,
                     details
                 ),
@@ -386,6 +394,7 @@ pub async fn update_project(
 ///
 pub async fn remove_project(
     me: &str,
+    resource: &str,
     project: &ProjectIdentifier,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
@@ -397,7 +406,13 @@ pub async fn remove_project(
         Some(bridge) => {
             // send the remove_project job to the bridge agent
             let job = Job::parse(
-                &format!("{}.{} remove_project {}", me, bridge.name(), project),
+                &format!(
+                    "{}.{}.{} remove_project {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
                 false,
             )?
             .put(&bridge)
@@ -431,7 +446,11 @@ pub async fn remove_project(
 ///
 /// Get an existing project
 ///
-pub async fn get_project(me: &str, project: &ProjectIdentifier) -> Result<ProjectDetails, Error> {
+pub async fn get_project(
+    me: &str,
+    resource: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectDetails, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
     // This will return the ProjectIdentifier of the project that was
@@ -441,7 +460,13 @@ pub async fn get_project(me: &str, project: &ProjectIdentifier) -> Result<Projec
         Some(bridge) => {
             // send the get_project job to the bridge agent
             let job = Job::parse(
-                &format!("{}.{} get_project {}", me, bridge.name(), project),
+                &format!(
+                    "{}.{}.{} get_project {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
                 false,
             )?
             .put(&bridge)
@@ -479,6 +504,7 @@ pub async fn get_project(me: &str, project: &ProjectIdentifier) -> Result<Projec
 ///
 pub async fn get_projects(
     me: &str,
+    resource: &str,
     portal: &PortalIdentifier,
 ) -> Result<Vec<ProjectMapping>, Error> {
     // we need to connect to our bridge agent, so it can be used
@@ -488,7 +514,13 @@ pub async fn get_projects(
         Some(bridge) => {
             // send the get_projects job to the bridge agent
             let job = Job::parse(
-                &format!("{}.{} get_projects {}", me, bridge.name(), portal),
+                &format!(
+                    "{}.{}.{} get_projects {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    portal
+                ),
                 false,
             )?
             .put(&bridge)
@@ -525,6 +557,7 @@ pub async fn get_projects(
 ///
 pub async fn get_project_mapping(
     me: &str,
+    resource: &str,
     project: &ProjectIdentifier,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
@@ -536,7 +569,13 @@ pub async fn get_project_mapping(
         Some(bridge) => {
             // send the get_project_mapping job to the bridge agent
             let job = Job::parse(
-                &format!("{}.{} get_project_mapping {}", me, bridge.name(), project),
+                &format!(
+                    "{}.{}.{} get_project_mapping {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
                 false,
             )?
             .put(&bridge)
@@ -573,6 +612,7 @@ pub async fn get_project_mapping(
 ///
 pub async fn get_usage_report(
     me: &str,
+    resource: &str,
     project: &ProjectIdentifier,
     dates: &DateRange,
 ) -> Result<ProjectUsageReport, Error> {
@@ -586,9 +626,10 @@ pub async fn get_usage_report(
             // send the get_usage_report job to the bridge agent
             let job = Job::parse(
                 &format!(
-                    "{}.{} get_usage_report {} {}",
+                    "{}.{}.{} get_usage_report {} {}",
                     me,
                     bridge.name(),
+                    resource,
                     project,
                     dates
                 ),
@@ -628,6 +669,7 @@ pub async fn get_usage_report(
 ///
 pub async fn get_usage_reports(
     me: &str,
+    resource: &str,
     portal: &PortalIdentifier,
     dates: &DateRange,
 ) -> Result<UsageReport, Error> {
@@ -639,9 +681,10 @@ pub async fn get_usage_reports(
             // send the get_usage_report job to the bridge agent
             let job = Job::parse(
                 &format!(
-                    "{}.{} get_usage_reports {} {}",
+                    "{}.{}.{} get_usage_reports {} {}",
                     me,
                     bridge.name(),
+                    resource,
                     portal,
                     dates
                 ),

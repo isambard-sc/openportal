@@ -95,8 +95,7 @@ impl Command {
 
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
         if agent::is_virtual(peer).await {
-            tracing::info!("Sending command to virtual peer {} locally", peer);
-
+            tracing::debug!("Sending command to virtual peer {} locally", peer);
             Ok(send_to_virtual(
                 &self.destination(),
                 Message::send_to(peer.name(), peer.zone(), &serde_json::to_string(self)?),

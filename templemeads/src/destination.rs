@@ -186,8 +186,17 @@ pub struct Destinations {
 
 impl Destinations {
     pub fn new(destinations: &[Destination]) -> Self {
+        let mut unique_destinations: Vec<Destination> = Vec::new();
+
+        // messy, but avoids the need to implement Hash and Eq for Destination
+        for dest in destinations {
+            if !unique_destinations.contains(dest) {
+                unique_destinations.push(dest.clone());
+            }
+        }
+
         Self {
-            destinations: destinations.to_vec(),
+            destinations: unique_destinations,
         }
     }
 
@@ -215,9 +224,31 @@ impl Destinations {
                 Err(e) => return Err(e),
             }
         }
-        Ok(Destinations {
-            destinations: destination_vec,
-        })
+        Ok(Destinations::new(&destination_vec))
+    }
+
+    pub fn add(&self, destinations: Destinations) -> Destinations {
+        let mut new_destinations = self.destinations.clone();
+        for dest in destinations.destinations {
+            if !self.destinations.contains(&dest) {
+                new_destinations.push(dest);
+            }
+        }
+        Destinations {
+            destinations: new_destinations,
+        }
+    }
+
+    pub fn remove(&self, destinations: Destinations) -> Destinations {
+        let mut new_destinations = self.destinations.clone();
+        for dest in destinations.destinations {
+            if let Some(pos) = new_destinations.iter().position(|x| *x == dest) {
+                new_destinations.remove(pos);
+            }
+        }
+        Destinations {
+            destinations: new_destinations,
+        }
     }
 }
 

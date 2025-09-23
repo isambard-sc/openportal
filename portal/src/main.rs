@@ -247,27 +247,31 @@ async fn main() -> Result<()> {
                             // This is a special instruction that returns the
                             // set of offerings that this portal manages
                             tracing::info!("Getting offerings");
-
-                            job.completed(Destinations::default())
+                            job.completed(get_offerings().await?)
                         }
                         SyncOfferings(offerings) => {
                             // This is a special instruction that updates the
                             // set of offerings that this portal manages
                             tracing::info!("Syncing offerings to: {:?}", offerings);
-
                             job.completed(sync_offerings(&offerings).await?)
                         }
                         AddOfferings(offerings) => {
                             // This is a special instruction that adds to the
                             // set of offerings that this portal manages
                             tracing::info!("Adding offerings: {:?}", offerings);
-                            job.completed(offerings)
+
+                            let existing_offerings = get_offerings().await?;
+
+                            job.completed(sync_offerings(&existing_offerings.add(offerings)).await?)
                         }
                         RemoveOfferings(offerings) => {
                             // This is a special instruction that removes from the
                             // set of offerings that this portal manages
                             tracing::info!("Removing offerings: {:?}", offerings);
-                            job.completed(offerings)
+
+                            let existing_offerings = get_offerings().await?;
+
+                            job.completed(sync_offerings(&existing_offerings.remove(offerings)).await?)
                         }
                         _ => {
                             Err(Error::InvalidInstruction(
@@ -298,6 +302,45 @@ async fn main() -> Result<()> {
 }
 
 const BRIDGE_WAIT_TIME: u64 = 5;
+
+///
+/// Return all of the currently configured offerings
+///
+pub async fn get_offerings() -> Result<Destinations, Error> {
+    let me = agent::name().await;
+
+    let offerings: Vec<Destination> = agent::get_all(&agent::Type::Virtual)
+        .await
+        .iter()
+        .filter_map(|virtual_agent| {
+            // convert this back to a destination
+            let zone = virtual_agent.zone().split('>').collect::<Vec<&str>>();
+
+            if zone.len() == 2 {
+                Some(Destination::parse(&format!(
+                    "{}.{}.{}",
+                    virtual_agent.name(),
+                    zone[1],
+                    zone[0]
+                )))
+            } else {
+                None
+            }
+        })
+        .filter_map(|result| match result {
+            Ok(destination) => {
+                if destination.agents().len() == 3 && destination.agents()[1] == me {
+                    Some(destination)
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        })
+        .collect();
+
+    Ok(Destinations::new(&offerings))
+}
 
 ///
 /// Synchronise the offerings to the passed set

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::destination::Destination;
+use crate::destination::{Destination, Destinations};
 use crate::error::Error;
 use crate::usagereport::Usage;
 
@@ -1883,6 +1883,19 @@ pub enum Instruction {
 
     /// An instruction to get the usage limit for a project
     GetLimit(ProjectIdentifier),
+
+    /// An instruction to sync the list of offerings provided
+    /// by an agent
+    SyncOfferings(Destinations),
+
+    /// An instruction to add new offering(s) to an agent
+    AddOfferings(Destinations),
+
+    /// An instruction to remove offering(s) from an agent
+    RemoveOfferings(Destinations),
+
+    /// An instruction to get the list of offerings from an agent
+    GetOfferings(),
 }
 
 impl Instruction {
@@ -2507,6 +2520,10 @@ impl Instruction {
             Instruction::SetLimit(_, _) => "set_limit".to_string(),
             Instruction::GetLimit(_) => "get_limit".to_string(),
             Instruction::IsProtectedUser(_) => "is_protected_user".to_string(),
+            Instruction::SyncOfferings(_) => "sync_offerings".to_string(),
+            Instruction::AddOfferings(_) => "add_offerings".to_string(),
+            Instruction::RemoveOfferings(_) => "remove_offerings".to_string(),
+            Instruction::GetOfferings() => "get_offerings".to_string(),
         }
     }
 
@@ -2559,6 +2576,10 @@ impl Instruction {
             }
             Instruction::GetLimit(project) => vec![project.to_string()],
             Instruction::IsProtectedUser(user) => vec![user.to_string()],
+            Instruction::SyncOfferings(offerings) => vec![offerings.to_string()],
+            Instruction::AddOfferings(offerings) => vec![offerings.to_string()],
+            Instruction::RemoveOfferings(offerings) => vec![offerings.to_string()],
+            Instruction::GetOfferings() => vec![],
         }
     }
 }
@@ -2617,6 +2638,10 @@ impl std::fmt::Display for Instruction {
             Instruction::GetLocalProjectDirs(mapping) => {
                 write!(f, "get_local_project_dirs {}", mapping)
             }
+            Instruction::SyncOfferings(offerings) => write!(f, "sync_offerings {}", offerings),
+            Instruction::AddOfferings(offerings) => write!(f, "add_offerings {}", offerings),
+            Instruction::RemoveOfferings(offerings) => write!(f, "remove_offerings {}", offerings),
+            Instruction::GetOfferings() => write!(f, "get_offerings"),
         }
     }
 }

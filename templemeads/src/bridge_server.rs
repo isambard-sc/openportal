@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::agent::{self, Peer};
+use crate::agent;
 use crate::bridge::{run as bridge_run, status as bridge_status};
 use crate::bridgestate::get as get_board;
+use crate::destination::Destinations;
 use crate::error::Error;
 use crate::job::Job;
 
@@ -530,110 +531,167 @@ async fn send_result(
     }
 }
 
+#[allow(dead_code)]
 const PORTAL_WAIT_TIME: u64 = 5; // seconds
 
 #[tracing::instrument(skip_all)]
-async fn create_resource(
-    headers: HeaderMap,
-    State(state): State<AppState>,
-    Json(resource): Json<Peer>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "create_resource",
-        Some(serde_json::json!(resource)),
-    )?;
-
-    tracing::info!("Creating resource: {}", resource);
-
+async fn sync_offerings(offerings: &Destinations) -> Result<Json<Destinations>, AppError> {
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
-            // send the update_project job to the bridge agent
+            // send the create_project job to the bridge agent
             let job = Job::parse(
                 &format!(
-                    "{}.{} create_resource {}",
+                    "{}.{} sync_offerings {}",
                     agent::name().await,
                     portal.name(),
-                    resource
+                    offerings
                 ),
                 false,
             )?
             .put(&portal)
             .await?;
 
-            // Wait for the create_resource job to complete
-            let result = job.wait().await?.result::<Peer>();
+            // Wait for the sync_offerings job to complete
+            let result = job.wait().await?.result::<Destinations>()?;
 
             match result {
-                Ok(peer) => {
-                    if let Some(peer) = peer {
-                        tracing::info!("Created resource: {:?}", peer);
-                        Ok(Json(serde_json::json!(peer)))
-                    } else {
-                        tracing::error!("No resource created");
-                        Err(AppError(
-                            anyhow::anyhow!("No resource created"),
-                            Some(StatusCode::INTERNAL_SERVER_ERROR),
-                        ))
-                    }
+                Some(offerings) => {
+                    tracing::info!("Synchronized offerings: {:?}", offerings);
+                    Ok(Json(offerings))
                 }
-                Err(e) => {
-                    tracing::error!("Error creating resource: {:?}", e);
-                    Err(AppError(e.into(), None))
+                None => {
+                    tracing::warn!("No offerings synchronized?");
+                    Err(AppError(anyhow::anyhow!("No offerings synchronized"), None))
                 }
             }
         }
         None => {
             tracing::error!("No portal agent found");
             Err(AppError(
-                anyhow::anyhow!("No portal agent found"),
-                Some(StatusCode::INTERNAL_SERVER_ERROR),
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
             ))
         }
     }
 }
 
 #[tracing::instrument(skip_all)]
-async fn list_resources() -> Result<Json<Vec<Peer>>, AppError> {
+async fn add_offerings(offerings: &Destinations) -> Result<Json<Destinations>, AppError> {
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
-            // send the list_resources job to the bridge agent
+            // send the create_project job to the bridge agent
             let job = Job::parse(
-                &format!("{}.{} list_resources", agent::name().await, portal.name()),
+                &format!(
+                    "{}.{} add_offerings {}",
+                    agent::name().await,
+                    portal.name(),
+                    offerings
+                ),
                 false,
             )?
             .put(&portal)
             .await?;
 
-            // Wait for the list_resources job to complete
-            let result = job.wait().await?.result::<Vec<Peer>>();
+            // Wait for the add_offerings job to complete
+            let result = job.wait().await?.result::<Destinations>()?;
 
             match result {
-                Ok(peers) => {
-                    if let Some(peers) = peers {
-                        tracing::info!("Listed resources: {:?}", peers);
-                        Ok(Json(peers))
-                    } else {
-                        tracing::error!("No resources found");
-                        Err(AppError(
-                            anyhow::anyhow!("No resources found"),
-                            Some(StatusCode::INTERNAL_SERVER_ERROR),
-                        ))
-                    }
+                Some(offerings) => {
+                    tracing::info!("Added offerings: {:?}", offerings);
+                    Ok(Json(offerings))
                 }
-                Err(e) => {
-                    tracing::error!("Error listing resources: {:?}", e);
-                    Err(AppError(e.into(), None))
+                None => {
+                    tracing::warn!("No offerings added?");
+                    Err(AppError(anyhow::anyhow!("No offerings added"), None))
                 }
             }
         }
         None => {
             tracing::error!("No portal agent found");
             Err(AppError(
-                anyhow::anyhow!("No portal agent found"),
-                Some(StatusCode::INTERNAL_SERVER_ERROR),
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
+            ))
+        }
+    }
+}
+
+///
+/// Function to list offerings in the portal
+///
+#[tracing::instrument(skip_all)]
+async fn get_offerings() -> Result<Json<Destinations>, AppError> {
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the create_project job to the bridge agent
+            let job = Job::parse(
+                &format!("{}.{} get_offerings", agent::name().await, portal.name(),),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+
+            // Wait for the get_offerings job to complete
+            let result = job.wait().await?.result::<Destinations>()?;
+
+            match result {
+                Some(offerings) => {
+                    tracing::info!("Offerings: {:?}", offerings);
+                    Ok(Json(offerings))
+                }
+                None => {
+                    tracing::warn!("No offerings found?");
+                    Err(AppError(anyhow::anyhow!("No offerings found"), None))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
+            ))
+        }
+    }
+}
+
+///
+/// Remove offerings from the portal
+///
+#[tracing::instrument(skip_all)]
+async fn remove_offerings(offerings: &Destinations) -> Result<Json<Destinations>, AppError> {
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the create_project job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} remove_offerings {}",
+                    agent::name().await,
+                    portal.name(),
+                    offerings
+                ),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+            // Wait for the remove_offerings job to complete
+            let result = job.wait().await?.result::<Destinations>()?;
+            match result {
+                Some(offerings) => {
+                    tracing::info!("Removed offerings: {:?}", offerings);
+                    Ok(Json(offerings))
+                }
+                None => {
+                    tracing::warn!("No offerings removed?");
+                    Err(AppError(anyhow::anyhow!("No offerings removed"), None))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
             ))
         }
     }

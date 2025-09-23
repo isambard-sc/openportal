@@ -6,14 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-### Added
+## [0.17.0] - 2025-09-23
+
+### Added
 
 - Added support for "virtual agents" which can be used to provide
   additional agents that represent extra resources offered by a portal,
   without the need to create full agents for those resources. This is
   particularly useful when using remote portals that offer
   classes of offerings under a single virtual identifier.
-
 - Added commands related to creation of new offerings, e.g.
   `add_offerings`, `sync_offerings`, `remove_offerings`, and
   `get_offerings`. Made these accessible to Python, and connected
@@ -716,6 +717,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.17.0]: https://github.com/isambard-sc/openportal/releases/tag/0.17.0
 [0.16.3]: https://github.com/isambard-sc/openportal/releases/tag/0.16.3
 [0.16.2]: https://github.com/isambard-sc/openportal/releases/tag/0.16.2
 [0.16.1]: https://github.com/isambard-sc/openportal/releases/tag/0.16.1

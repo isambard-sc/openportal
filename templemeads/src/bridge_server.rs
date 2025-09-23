@@ -535,7 +535,23 @@ async fn send_result(
 const PORTAL_WAIT_TIME: u64 = 5; // seconds
 
 #[tracing::instrument(skip_all)]
-async fn sync_offerings(offerings: &Destinations) -> Result<Json<Destinations>, AppError> {
+async fn sync_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(offerings): Json<Destinations>,
+) -> Result<Json<Destinations>, AppError> {
+    tracing::debug!("sync_offerings: {:?}", offerings);
+
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "sync_offerings",
+        Some(serde_json::json!(offerings)),
+    )?;
+
+    tracing::debug!("sync_offerings: {:?}", offerings);
+
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
@@ -552,7 +568,13 @@ async fn sync_offerings(offerings: &Destinations) -> Result<Json<Destinations>, 
             .await?;
 
             // Wait for the sync_offerings job to complete
-            let result = job.wait().await?.result::<Destinations>()?;
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error synchronizing offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
 
             match result {
                 Some(offerings) => {
@@ -561,7 +583,7 @@ async fn sync_offerings(offerings: &Destinations) -> Result<Json<Destinations>, 
                 }
                 None => {
                     tracing::warn!("No offerings synchronized?");
-                    Err(AppError(anyhow::anyhow!("No offerings synchronized"), None))
+                    Ok(Json(Destinations::default()))
                 }
             }
         }
@@ -576,7 +598,23 @@ async fn sync_offerings(offerings: &Destinations) -> Result<Json<Destinations>, 
 }
 
 #[tracing::instrument(skip_all)]
-async fn add_offerings(offerings: &Destinations) -> Result<Json<Destinations>, AppError> {
+async fn add_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(offerings): Json<Destinations>,
+) -> Result<Json<Destinations>, AppError> {
+    tracing::debug!("add_offerings: {:?}", offerings);
+
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "add_offerings",
+        Some(serde_json::json!(offerings)),
+    )?;
+
+    tracing::debug!("add_offerings: {:?}", offerings);
+
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
@@ -593,7 +631,13 @@ async fn add_offerings(offerings: &Destinations) -> Result<Json<Destinations>, A
             .await?;
 
             // Wait for the add_offerings job to complete
-            let result = job.wait().await?.result::<Destinations>()?;
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error adding offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
 
             match result {
                 Some(offerings) => {
@@ -602,7 +646,7 @@ async fn add_offerings(offerings: &Destinations) -> Result<Json<Destinations>, A
                 }
                 None => {
                     tracing::warn!("No offerings added?");
-                    Err(AppError(anyhow::anyhow!("No offerings added"), None))
+                    Ok(Json(Destinations::default()))
                 }
             }
         }
@@ -620,7 +664,13 @@ async fn add_offerings(offerings: &Destinations) -> Result<Json<Destinations>, A
 /// Function to list offerings in the portal
 ///
 #[tracing::instrument(skip_all)]
-async fn get_offerings() -> Result<Json<Destinations>, AppError> {
+async fn get_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Destinations>, AppError> {
+    tracing::debug!("get_offerings");
+    verify_headers(&state, &headers, "get", "get_offerings", None)?;
+
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
@@ -632,7 +682,13 @@ async fn get_offerings() -> Result<Json<Destinations>, AppError> {
             .await?;
 
             // Wait for the get_offerings job to complete
-            let result = job.wait().await?.result::<Destinations>()?;
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error getting offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
 
             match result {
                 Some(offerings) => {
@@ -641,7 +697,7 @@ async fn get_offerings() -> Result<Json<Destinations>, AppError> {
                 }
                 None => {
                     tracing::warn!("No offerings found?");
-                    Err(AppError(anyhow::anyhow!("No offerings found"), None))
+                    Ok(Json(Destinations::default()))
                 }
             }
         }
@@ -659,7 +715,23 @@ async fn get_offerings() -> Result<Json<Destinations>, AppError> {
 /// Remove offerings from the portal
 ///
 #[tracing::instrument(skip_all)]
-async fn remove_offerings(offerings: &Destinations) -> Result<Json<Destinations>, AppError> {
+async fn remove_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(offerings): Json<Destinations>,
+) -> Result<Json<Destinations>, AppError> {
+    tracing::debug!("remove_offerings: {:?}", offerings);
+
+    verify_headers(
+        &state,
+        &headers,
+        "post",
+        "remove_offerings",
+        Some(serde_json::json!(offerings)),
+    )?;
+
+    tracing::debug!("remove_offerings: {:?}", offerings);
+
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
@@ -674,8 +746,16 @@ async fn remove_offerings(offerings: &Destinations) -> Result<Json<Destinations>
             )?
             .put(&portal)
             .await?;
+
             // Wait for the remove_offerings job to complete
-            let result = job.wait().await?.result::<Destinations>()?;
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error removing offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
+
             match result {
                 Some(offerings) => {
                     tracing::info!("Removed offerings: {:?}", offerings);
@@ -683,7 +763,7 @@ async fn remove_offerings(offerings: &Destinations) -> Result<Json<Destinations>
                 }
                 None => {
                     tracing::warn!("No offerings removed?");
-                    Err(AppError(anyhow::anyhow!("No offerings removed"), None))
+                    Ok(Json(Destinations::default()))
                 }
             }
         }
@@ -729,6 +809,10 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
         .route("/fetch_job", post(fetch_job))
         .route("/fetch_jobs", get(fetch_jobs))
         .route("/send_result", post(send_result))
+        .route("/sync_offerings", post(sync_offerings))
+        .route("/add_offerings", post(add_offerings))
+        .route("/get_offerings", get(get_offerings))
+        .route("/remove_offerings", post(remove_offerings))
         .with_state(state);
 
     // create a TCP listener on the specified port

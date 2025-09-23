@@ -2634,20 +2634,48 @@ fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
 }
 
 #[pyfunction]
-fn create_resource(resource: &str, zone: &str) -> PyResult<()> {
-    match call_post::<Health>(
-        "create_resource",
-        serde_json::json!({"resource": resource, "zone": zone}),
+fn add_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
+    let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
+
+    match call_post::<destination::Destinations>(
+        "add_offerings",
+        serde_json::json!(destination::Destinations::new(&offerings)),
     ) {
-        Ok(_) => Ok(()),
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }
 
 #[pyfunction]
-fn list_resources() -> PyResult<Vec<String>> {
-    match call_get::<Vec<String>>("list_resources") {
-        Ok(response) => Ok(response),
+fn remove_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
+    let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
+
+    match call_post::<destination::Destinations>(
+        "remove_offerings",
+        serde_json::json!(destination::Destinations::new(&offerings)),
+    ) {
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn get_offerings() -> PyResult<Vec<Destination>> {
+    match call_get::<Vec<destination::Destination>>("get_offerings") {
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn sync_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
+    let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
+
+    match call_post::<destination::Destinations>(
+        "sync_offerings",
+        serde_json::json!(destination::Destinations::new(&offerings)),
+    ) {
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
 }
@@ -2666,18 +2694,20 @@ fn send_result(job: Job) -> PyResult<()> {
 
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(create_resource, m)?)?;
+    m.add_function(wrap_pyfunction!(add_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_job, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_jobs, m)?)?;
     m.add_function(wrap_pyfunction!(get, m)?)?;
+    m.add_function(wrap_pyfunction!(get_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
     m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
-    m.add_function(wrap_pyfunction!(list_resources, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(send_result, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
+    m.add_function(wrap_pyfunction!(sync_offerings, m)?)?;
 
     m.add_class::<Health>()?;
     m.add_class::<Job>()?;

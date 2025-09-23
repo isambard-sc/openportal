@@ -2,9 +2,28 @@
 // SPDX-License-Identifier: MIT
 
 use crate::error::Error;
+use crate::grammar::NamedType;
 
 use serde::{Deserialize, Serialize};
 use std::cmp::{Ord, Ordering};
+
+impl NamedType for Destination {
+    fn type_name() -> &'static str {
+        "Destination"
+    }
+}
+
+impl NamedType for Destinations {
+    fn type_name() -> &'static str {
+        "Destinations"
+    }
+}
+
+impl NamedType for Vec<Destination> {
+    fn type_name() -> &'static str {
+        "Vec<Destination>"
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub struct Destination {
@@ -236,7 +255,7 @@ impl Serialize for Destinations {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        self.destinations.serialize(serializer)
     }
 }
 
@@ -245,11 +264,8 @@ impl<'de> Deserialize<'de> for Destinations {
     where
         D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        match Destinations::parse(&s) {
-            Ok(destinations) => Ok(destinations),
-            Err(e) => Err(serde::de::Error::custom(e.to_string())),
-        }
+        let destinations = Vec::deserialize(deserializer)?;
+        Ok(Destinations { destinations })
     }
 }
 

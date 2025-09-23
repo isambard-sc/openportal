@@ -2482,6 +2482,40 @@ impl Instruction {
                     )))
                 }
             },
+            "add_offerings" => match Destinations::parse(&parts[1..].join(" ")) {
+                Ok(offerings) => Ok(Instruction::AddOfferings(offerings)),
+                Err(_) => {
+                    tracing::error!("add_offerings failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "add_offerings failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "remove_offerings" => match Destinations::parse(&parts[1..].join(" ")) {
+                Ok(offerings) => Ok(Instruction::RemoveOfferings(offerings)),
+                Err(_) => {
+                    tracing::error!(
+                        "remove_offerings failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "remove_offerings failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "sync_offerings" => match Destinations::parse(&parts[1..].join(" ")) {
+                Ok(offerings) => Ok(Instruction::SyncOfferings(offerings)),
+                Err(_) => {
+                    tracing::error!("sync_offerings failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "sync_offerings failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_offerings" => Ok(Instruction::GetOfferings()),
             _ => {
                 tracing::error!("Invalid instruction: {}", s);
                 Err(Error::Parse(format!("Invalid instruction: {}", s)))

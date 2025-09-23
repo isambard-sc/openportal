@@ -9,9 +9,11 @@ use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 
 use templemeads::agent::Type::Bridge;
+use templemeads::destination::Destinations;
 use templemeads::grammar::Instruction::{
-    CreateProject, GetProject, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
-    RemoveProject, Submit, UpdateProject,
+    AddOfferings, CreateProject, GetOfferings, GetProject, GetProjectMapping, GetProjects,
+    GetUsageReport, GetUsageReports, RemoveOfferings, RemoveProject, Submit, SyncOfferings,
+    UpdateProject,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
@@ -150,18 +152,14 @@ async fn main() -> Result<()> {
         /// which connects to the graphical portal user interface.
         ///
         pub async fn portal_runner(envelope: Envelope) -> Result<Job, Error> {
-            if agent::is_virtual(&envelope.recipient()).await {
-                // this is a request to send commands to a virtual resource
-                // managed by this portal
-                return virtual_resource_runner(envelope).await;
-            }
-
             let mut job = envelope.job();
             let sender = envelope.sender();
 
             // match instructions that can only be sent by bridge agents
             match agent::agent_type(&envelope.sender()).await {
                 Some(Bridge) => {
+                    tracing::debug!("Received job from bridge agent: {}", job.instruction());
+
                     match job.instruction() {
                         Submit(destination, instruction) => {
                             // This is a job that should have been received from
@@ -245,6 +243,32 @@ async fn main() -> Result<()> {
 
                             Ok(job)
                         }
+                        GetOfferings() => {
+                            // This is a special instruction that returns the
+                            // set of offerings that this portal manages
+                            tracing::info!("Getting offerings");
+
+                            job.completed(Destinations::default())
+                        }
+                        SyncOfferings(offerings) => {
+                            // This is a special instruction that updates the
+                            // set of offerings that this portal manages
+                            tracing::info!("Syncing offerings to: {:?}", offerings);
+
+                            job.completed(offerings)
+                        }
+                        AddOfferings(offerings) => {
+                            // This is a special instruction that adds to the
+                            // set of offerings that this portal manages
+                            tracing::info!("Adding offerings: {:?}", offerings);
+                            job.completed(offerings)
+                        }
+                        RemoveOfferings(offerings) => {
+                            // This is a special instruction that removes from the
+                            // set of offerings that this portal manages
+                            tracing::info!("Removing offerings: {:?}", offerings);
+                            job.completed(offerings)
+                        }
                         _ => {
                             Err(Error::InvalidInstruction(
                                 format!("Invalid instruction: {}. Only bridge agents can send instructions to the portal", job.instruction()),
@@ -253,6 +277,12 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ => {
+                    if agent::is_virtual(&envelope.recipient()).await {
+                        // this is a request to send commands to a virtual resource
+                        // managed by this portal
+                        return virtual_resource_runner(envelope).await;
+                    }
+
                     Err(Error::MissingAgent(
                         "Cannot run the job because the sender is not a bridge agent".to_string(),
                     ))

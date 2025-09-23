@@ -3,7 +3,7 @@
 
 [package]
 name = "paddington"
-version = "0.16.3"
+version = "0.17.0"
 description = "A library for implementing the OpenPortal communication protocol"
 edition = "2021"
 license = "MIT"

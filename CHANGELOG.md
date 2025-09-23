@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Added support for "virtual agents" which can be used to provide
+  additional agents that represent extra resources offered by a portal,
+  without the need to create full agents for those resources. This is
+  particularly useful when using remote portals that offer
+  classes of offerings under a single virtual identifier.
+
+- Added commands related to creation of new offerings, e.g.
+  `add_offerings`, `sync_offerings`, `remove_offerings`, and
+  `get_offerings`. Made these accessible to Python, and connected
+  them to the virtual agent model. This allows Python-based portals
+  to communicate new offerings to OpenPortal, which are spun up
+  as virtual agents. This should make it easier to manage
+  offerings that are provided by portals for portal-to-portal
+  requests, without needing to spin up full agents.
+
 ## [0.16.3] - 2025-09-13
 
 ### Added

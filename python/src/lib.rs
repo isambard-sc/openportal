@@ -454,7 +454,7 @@ impl Job {
         try_extract!(ProjectUsageReport, |v: ProjectUsageReport| v.0.clone());
         try_extract!(Usage, |v: Usage| v.0);
         try_extract!(DateRange, |v: DateRange| v.0.clone());
-        try_extract!(ProjectClass, |v: ProjectClass| v.0.clone());
+        try_extract!(ProjectTemplate, |v: ProjectTemplate| v.0.clone());
         try_extract!(ProjectDetails, |v: ProjectDetails| v.0.clone());
 
         try_extract!(Vec<UserIdentifier>, |v: Vec<UserIdentifier>| {
@@ -644,14 +644,14 @@ impl Job {
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }
-            "ProjectClass" => {
-                let result = match self.0.result::<grammar::ProjectClass>() {
+            "ProjectTemplate" => {
+                let result = match self.0.result::<grammar::ProjectTemplate>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
 
                 match result {
-                    Some(result) => Ok(ProjectClass::from(result).into_pyobject(py)?.into_any()),
+                    Some(result) => Ok(ProjectTemplate::from(result).into_pyobject(py)?.into_any()),
                     None => Ok(PyNone::get(py).as_ref().clone()),
                 }
             }
@@ -2309,13 +2309,13 @@ impl From<grammar::ProjectMapping> for ProjectMapping {
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectClass(grammar::ProjectClass);
+struct ProjectTemplate(grammar::ProjectTemplate);
 
 #[pymethods]
-impl ProjectClass {
+impl ProjectTemplate {
     #[new]
     fn new(class: &str) -> PyResult<Self> {
-        match grammar::ProjectClass::parse(class) {
+        match grammar::ProjectTemplate::parse(class) {
             Ok(project_class) => Ok(Self(project_class)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -2329,15 +2329,15 @@ impl ProjectClass {
         self.__str__()
     }
 
-    fn __copy__(&self) -> PyResult<ProjectClass> {
+    fn __copy__(&self) -> PyResult<ProjectTemplate> {
         Ok(self.clone())
     }
 
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectClass> {
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectTemplate> {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &ProjectClass, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &ProjectTemplate, op: CompareOp) -> PyResult<bool> {
         match op {
             CompareOp::Eq => Ok(self.0 == other.0),
             CompareOp::Ne => Ok(self.0 != other.0),
@@ -2346,9 +2346,9 @@ impl ProjectClass {
     }
 }
 
-impl From<grammar::ProjectClass> for ProjectClass {
-    fn from(project_class: grammar::ProjectClass) -> Self {
-        ProjectClass(project_class)
+impl From<grammar::ProjectTemplate> for ProjectTemplate {
+    fn from(project_class: grammar::ProjectTemplate) -> Self {
+        ProjectTemplate(project_class)
     }
 }
 
@@ -2407,18 +2407,34 @@ impl ProjectDetails {
     }
 
     #[getter]
-    fn project_class(&self) -> PyResult<Option<ProjectClass>> {
-        Ok(self.0.class().map(|pc| pc.into()))
+    fn project_template(&self) -> PyResult<Option<ProjectTemplate>> {
+        Ok(self.0.template().map(|pc| pc.into()))
     }
 
     #[setter]
-    fn set_project_class(&mut self, class: &ProjectClass) -> PyResult<()> {
-        self.0.set_class(class.0.clone());
+    fn set_project_template(&mut self, template: &ProjectTemplate) -> PyResult<()> {
+        self.0.set_template(template.0.clone());
         Ok(())
     }
 
-    fn clear_project_class(&mut self) -> PyResult<()> {
-        self.0.clear_class();
+    fn clear_project_template(&mut self) -> PyResult<()> {
+        self.0.clear_template();
+        Ok(())
+    }
+
+    #[getter]
+    fn key(&self) -> PyResult<Option<String>> {
+        Ok(self.0.key())
+    }
+
+    #[setter]
+    fn set_key(&mut self, key: &str) -> PyResult<()> {
+        self.0.set_key(key);
+        Ok(())
+    }
+
+    fn clear_key(&mut self) -> PyResult<()> {
+        self.0.clear_key();
         Ok(())
     }
 
@@ -2728,7 +2744,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ProjectUsageReport>()?;
     m.add_class::<DailyProjectUsageReport>()?;
     m.add_class::<ProjectDetails>()?;
-    m.add_class::<ProjectClass>()?;
+    m.add_class::<ProjectTemplate>()?;
 
     Ok(())
 }

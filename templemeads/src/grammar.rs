@@ -1156,35 +1156,35 @@ impl<'de> Deserialize<'de> for DateRange {
 }
 
 ///
-/// The class of Project to create in a portal. This can be used
-/// e.g. to specify that a project is for a particular class of
+/// The template used by the portal to create the Project. This can be used
+/// e.g. to specify that a project is for a particular type of
 /// infrastructure (e.g. "cpu-cluster", "gpu-cluster" etc.).
-/// The classes available on a portal are controlled by the
+/// The types available on a portal are controlled by the
 /// portal administrator, and can be arbitrarily defined. Note
-/// however that once a project has been created in a class,
+/// however that once a project has been created in a type,
 /// it cannot be changed.
 ///
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProjectClass {
-    /// The name of the class - this must not have any spaces
+pub struct ProjectTemplate {
+    /// The name of the template - this must not have any spaces
     /// or special characters
     name: String,
 }
 
-impl ProjectClass {
+impl ProjectTemplate {
     pub fn parse(name: &str) -> Result<Self, Error> {
         let name = name.trim();
 
         if name.is_empty() {
             return Err(Error::Parse(format!(
-                "Invalid ProjectClass - cannot be empty '{}'",
+                "Invalid ProjectTemplate - cannot be empty '{}'",
                 name
             )));
         };
 
         if name.contains(' ') {
             return Err(Error::Parse(format!(
-                "Invalid ProjectClass - cannot contain spaces '{}'",
+                "Invalid ProjectTemplate - cannot contain spaces '{}'",
                 name
             )));
         };
@@ -1195,7 +1195,7 @@ impl ProjectClass {
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
         {
             return Err(Error::Parse(format!(
-                "Invalid ProjectClass - can only contain alphanumeric characters, underscores and dashes '{}'",
+                "Invalid ProjectTemplate - can only contain alphanumeric characters, underscores and dashes '{}'",
                 name
             )));
         };
@@ -1210,19 +1210,19 @@ impl ProjectClass {
     }
 }
 
-impl NamedType for ProjectClass {
+impl NamedType for ProjectTemplate {
     fn type_name() -> &'static str {
-        "ProjectClass"
+        "ProjectTemplate"
     }
 }
 
-impl std::fmt::Display for ProjectClass {
+impl std::fmt::Display for ProjectTemplate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name)
     }
 }
 
-impl Serialize for ProjectClass {
+impl Serialize for ProjectTemplate {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -1231,13 +1231,13 @@ impl Serialize for ProjectClass {
     }
 }
 
-impl<'de> Deserialize<'de> for ProjectClass {
+impl<'de> Deserialize<'de> for ProjectTemplate {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        ProjectClass::parse(&s).map_err(serde::de::Error::custom)
+        ProjectTemplate::parse(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1591,8 +1591,12 @@ pub struct ProjectDetails {
     /// The name of the project
     name: Option<String>,
 
-    /// The class of the project
-    class: Option<ProjectClass>,
+    /// The template used for the project
+    template: Option<ProjectTemplate>,
+
+    /// The key that may need to be provided to show that the
+    /// project belongs to a particular type of project
+    key: Option<String>,
 
     /// The description of the project
     description: Option<String>,
@@ -1622,7 +1626,8 @@ impl ProjectDetails {
     pub fn new() -> Self {
         Self {
             name: None,
-            class: None,
+            template: None,
+            key: None,
             description: None,
             members: None,
             start_date: None,
@@ -1661,16 +1666,34 @@ impl ProjectDetails {
         self.name = None;
     }
 
-    pub fn class(&self) -> Option<ProjectClass> {
-        self.class.clone()
+    pub fn template(&self) -> Option<ProjectTemplate> {
+        self.template.clone()
     }
 
-    pub fn set_class(&mut self, class: ProjectClass) {
-        self.class = Some(class);
+    pub fn set_template(&mut self, template: ProjectTemplate) {
+        self.template = Some(template);
     }
 
-    pub fn clear_class(&mut self) {
-        self.class = None;
+    pub fn clear_template(&mut self) {
+        self.template = None;
+    }
+
+    pub fn key(&self) -> Option<String> {
+        self.key.clone()
+    }
+
+    pub fn set_key(&mut self, key: &str) {
+        let key = key.trim();
+
+        if key.is_empty() {
+            self.key = None;
+        } else {
+            self.key = Some(key.to_string());
+        }
+    }
+
+    pub fn clear_key(&mut self) {
+        self.key = None;
     }
 
     pub fn description(&self) -> Option<String> {

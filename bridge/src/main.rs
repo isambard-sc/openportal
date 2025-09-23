@@ -9,9 +9,10 @@ use url::Url;
 use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
 use templemeads::async_runnable;
+use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
     CreateProject, GetProject, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
-    RemoveProject, UpdateProject,
+    RemoveProject, SyncOfferings, UpdateProject,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::server;
@@ -81,6 +82,25 @@ async fn main() -> Result<()> {
         pub async fn bridge_runner(envelope: Envelope) -> Result<Job, Error>
         {
             let job = envelope.job();
+
+            // look for commands that come direct from the portal agent
+            match agent::agent_type(&envelope.sender()).await {
+                Some(agent::Type::Portal) => {
+                    match job.instruction() {
+                        SyncOfferings(offerings) => {
+                            tracing::info!("Syncing offerings to: {:?}", offerings);
+                            return job.completed(sync_offerings(&offerings).await?);
+                        }
+                        _ => {
+                            return Err(Error::InvalidInstruction(
+                                format!("Invalid instruction: {}. Only sync_offerings instructions can be sent from a portal agent to a bridge", job.instruction()),
+                            ));
+                        }
+                    }
+                }
+                Some(_) => {}
+                None => {}
+            }
 
             // only virtual agents (either ourselves or other virtuals)
             // can submit instructions to the bridge. These virtual agents
@@ -377,6 +397,91 @@ fn should_allow_invalid_certs() -> bool {
         Ok(value) => value.to_lowercase() == "true",
         Err(_) => false,
     }
+}
+
+const PORTAL_WAIT_TIME: u64 = 5;
+
+///
+/// Synchronise the offerings to the passed set
+///
+pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Error> {
+    // get our portal agent so that we can find out the zone name for this connection
+    let portal = match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => portal,
+        None => {
+            return Err(Error::Unknown(
+                format!(
+                    "Could not find portal agent after waiting {} seconds",
+                    PORTAL_WAIT_TIME
+                )
+                .to_string(),
+            ));
+        }
+    };
+
+    let mut synched_offerings = Vec::<Destination>::new();
+
+    // first, make sure that we have virtual agents for each
+    // of the offerings
+    for offering in offerings.iter() {
+        if offering.agents().len() != 3 {
+            tracing::error!(
+                "Invalid offering: {}. Offerings must have exactly three agents",
+                offering
+            );
+            continue;
+        }
+
+        // The offering's destination should be of the form
+        // offering-name.local-portal.remote-portal
+        if offering.agents()[1] != portal.name() {
+            tracing::error!(
+                "Invalid offering: {}. The second agent in the offering must be the portal ({})",
+                offering,
+                portal.name()
+            );
+            continue;
+        }
+
+        // the offering-name should be the name of the virtual resource,
+        // while the zone should the same as the portal's zone.
+        let peer = agent::Peer::new(offering.agents()[0].as_str(), portal.zone());
+
+        if !agent::has_virtual(&peer).await {
+            tracing::info!(
+                "Registering virtual agent {} for offering {}",
+                peer,
+                offering.first()
+            );
+
+            agent::register_peer(&peer, &agent::Type::Virtual, "virtual", "virtual").await;
+        }
+
+        synched_offerings.push(offering.clone());
+    }
+
+    // now go through the virtual agents and remove any that
+    // are not in the synched offerings
+    let virtual_agents = agent::get_all(&agent::Type::Virtual).await;
+
+    for virtual_agent in virtual_agents {
+        // the agent should have teh same zone as the portal, and have
+        // a name that matches the first offering name
+        if !(virtual_agent.zone() == portal.zone()
+            && synched_offerings
+                .iter()
+                .any(|offering| offering.first() == virtual_agent.name()))
+        {
+            tracing::info!(
+                "Removing virtual agent {} in zone {}",
+                virtual_agent.name(),
+                virtual_agent.zone()
+            );
+            agent::remove(&virtual_agent).await;
+        }
+    }
+
+    Ok(Destinations::new(&synched_offerings))
 }
 
 ///

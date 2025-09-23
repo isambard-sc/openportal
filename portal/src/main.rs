@@ -9,7 +9,7 @@ use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 
 use templemeads::agent::Type::Bridge;
-use templemeads::destination::Destinations;
+use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
     AddOfferings, CreateProject, GetOfferings, GetProject, GetProjectMapping, GetProjects,
     GetUsageReport, GetUsageReports, RemoveOfferings, RemoveProject, Submit, SyncOfferings,
@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
                             // set of offerings that this portal manages
                             tracing::info!("Syncing offerings to: {:?}", offerings);
 
-                            job.completed(offerings)
+                            job.completed(sync_offerings(&offerings).await?)
                         }
                         AddOfferings(offerings) => {
                             // This is a special instruction that adds to the
@@ -291,14 +291,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    agent::register_peer(
-        &agent::Peer::new("isambard-ai", "ukri>brics"),
-        &agent::Type::Virtual,
-        "virtual",
-        "virtual",
-    )
-    .await;
-
     // run the portal agent
     run(config, portal_runner).await?;
 
@@ -306,6 +298,132 @@ async fn main() -> Result<()> {
 }
 
 const BRIDGE_WAIT_TIME: u64 = 5;
+
+///
+/// Synchronise the offerings to the passed set
+///
+pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Error> {
+    let me = agent::name().await;
+
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let mut synched_offerings = Vec::<Destination>::new();
+
+            // first, make sure that we have virtual agents for each
+            // of the offerings
+            for offering in offerings.iter() {
+                if offering.agents().len() != 3 {
+                    tracing::error!(
+                        "Invalid offering: {}. Offerings must have exactly three agents",
+                        offering
+                    );
+                    continue;
+                }
+
+                // The offering's destination should be of the form
+                // offering-name.local-portal.remote-portal
+                if offering.agents()[1] != me {
+                    tracing::error!(
+                        "Invalid offering: {}. The second agent in the offering must be this portal ({})",
+                        offering,
+                        me
+                    );
+                    continue;
+                }
+
+                // the offering-name should be the name of the virtual resource,
+                // while the zone should be remote-portal>local-portal, to
+                // indicate that the remote portal can send instructions to
+                // the virtual resource via this portal
+                let resource = offering.agents()[0].clone();
+                let zone = format!("{}>{}", offering.agents()[2], me);
+
+                let peer = agent::Peer::new(&resource, &zone);
+
+                if !agent::has_virtual(&peer).await {
+                    tracing::info!(
+                        "Registering virtual agent for offering {}. Agent {} in zone {}",
+                        offering,
+                        resource,
+                        zone
+                    );
+
+                    agent::register_peer(
+                        &agent::Peer::new(&resource, &zone),
+                        &agent::Type::Virtual,
+                        "virtual",
+                        "virtual",
+                    )
+                    .await;
+                }
+
+                synched_offerings.push(offering.clone());
+            }
+
+            // now go through the virtual agents and remove any that
+            // are not in the synched offerings
+            let virtual_agents = agent::get_all(&agent::Type::Virtual).await;
+
+            for virtual_agent in virtual_agents {
+                // convert this back to a destination
+                let zone = virtual_agent.zone().split('>').collect::<Vec<&str>>();
+
+                let mut found = false;
+
+                if zone.len() == 2 {
+                    let destination = Destination::parse(&format!(
+                        "{}.{}.{}",
+                        virtual_agent.name(),
+                        zone[1],
+                        zone[0]
+                    ))?;
+
+                    found = synched_offerings.contains(&destination);
+                }
+
+                if !found {
+                    tracing::info!(
+                        "Removing virtual agent {} in zone {}",
+                        virtual_agent.name(),
+                        virtual_agent.zone()
+                    );
+                    agent::remove(&virtual_agent).await;
+                }
+            }
+
+            // now sync the offerings with the bridge agent, so it
+            // creates virtual agents to return results
+            let sync_job = Job::parse(
+                &format!(
+                    "{}.{} sync_offerings {}",
+                    me,
+                    bridge.name(),
+                    Destinations::new(&synched_offerings)
+                ),
+                false,
+            )?;
+
+            let sync_job = sync_job.put(&bridge).await?;
+
+            // Wait for the sync_offerings to complete
+            let result = sync_job.wait().await?.result::<Destinations>()?;
+
+            if let Some(offerings) = result {
+                tracing::info!("Offerings synched by bridge agent: {:?}", offerings);
+            } else {
+                tracing::warn!("No offerings synched?");
+            }
+
+            Ok(Destinations::new(&synched_offerings))
+        }
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
 
 ///
 /// Create a new project

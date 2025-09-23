@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use tokio::sync::RwLock;
 
+use crate::agent;
 use crate::error::Error;
 
 #[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize)]
@@ -170,6 +171,16 @@ impl Registrar {
     }
 
     fn register_peer(&mut self, peer: &Peer, agent_type: &Type, _engine: &str, _version: &str) {
+        if self.peers.contains_key(peer) {
+            // we cannot register a virtual agent that overwrites an existing agent
+            if agent_type == &Type::Virtual {
+                return;
+            }
+
+            // remove the old entry
+            self.remove(peer);
+        }
+
         self.peers.insert(peer.clone(), agent_type.clone());
         self.peers_by_type
             .entry(agent_type.clone())
@@ -285,6 +296,19 @@ pub async fn remove(peer: &Peer) {
 ///
 pub async fn get_all(agent_type: &Type) -> Vec<Peer> {
     REGISTRAR.read().await.agents(agent_type)
+}
+
+///
+/// Return whether or not there is a virtual agent registered
+/// with the specified name
+///
+pub async fn has_virtual(peer: &Peer) -> bool {
+    let registrar = REGISTRAR.read().await;
+
+    match registrar.peers_by_type.get(&Type::Virtual) {
+        Some(v) => v.contains(peer),
+        None => false,
+    }
 }
 
 ///

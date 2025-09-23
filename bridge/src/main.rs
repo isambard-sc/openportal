@@ -366,14 +366,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    agent::register_peer(
-        &agent::Peer::new("isambard-ai", "bridge"),
-        &agent::Type::Virtual,
-        "virtual",
-        "virtual",
-    )
-    .await;
-
     // run the Bridge agent
     run(config, bridge_runner).await?;
 

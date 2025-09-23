@@ -1595,7 +1595,10 @@ pub struct ProjectDetails {
     template: Option<ProjectTemplate>,
 
     /// The key that may need to be provided to show that the
-    /// project belongs to a particular type of project
+    /// project is really allowed to access a particular type
+    /// of project (i.e. it may be very easy to guess an allowed
+    /// template name, but it would not be easy to guess the
+    /// associated key)
     key: Option<String>,
 
     /// The description of the project

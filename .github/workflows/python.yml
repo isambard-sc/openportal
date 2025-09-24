@@ -42,33 +42,6 @@ jobs:
           name: wheels-linux-${{ matrix.platform.target }}
           path: python/dist
 
-  aarch64:
-    runs-on: ${{ matrix.platform.runner }}
-    strategy:
-      matrix:
-        platform:
-          - runner: ubuntu-latest
-            target: aarch64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: 3.x
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
-          docker-options: -e UNSAFE_PYO3_BUILD_FREE_THREADED=1
-          sccache: 'true'
-          manylinux: 2_24
-          working-directory: python
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.platform.target }}
-          path: python/dist
-
   musl:
     runs-on: ubuntu-latest
     strategy:

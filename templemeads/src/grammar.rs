@@ -1802,6 +1802,67 @@ impl ProjectDetails {
     pub fn clear_allocation(&mut self) {
         self.allocation = None;
     }
+
+    pub fn merge(&self, other: &ProjectDetails) -> Result<ProjectDetails, Error> {
+        let mut merged = self.clone();
+
+        // convert the above python into rust
+        if merged.template.is_none() {
+            merged.template = other.template.clone();
+        } else if other.template.is_some() && merged.template != other.template {
+            let this_template: String = merged
+                .template
+                .as_ref()
+                .map(|t| t.name().to_string())
+                .unwrap_or_default();
+            let other_template: String = other
+                .template
+                .as_ref()
+                .map(|t| t.name().to_string())
+                .unwrap_or_default();
+
+            tracing::error!(
+                "Cannot merge project details with different project templates: '{}' != '{}'",
+                this_template,
+                other_template
+            );
+
+            return Err(Error::Parse(format!(
+                "Cannot merge project details with different project templates: '{}' != '{}'",
+                this_template, other_template
+            )));
+        }
+
+        if other.name.is_some() {
+            merged.name = other.name.clone();
+        }
+
+        if other.description.is_some() {
+            merged.description = other.description.clone();
+        }
+
+        if other.start_date.is_some() {
+            merged.start_date = other.start_date.clone();
+        }
+
+        if other.end_date.is_some() {
+            merged.end_date = other.end_date.clone();
+        }
+
+        if other.allocation.is_some() {
+            merged.allocation = other.allocation.clone();
+        }
+
+        if other.members.is_some() {
+            merged.members = other.members.clone();
+        }
+
+        if other.key.is_some() {
+            merged.key = other.key.clone();
+        }
+
+        Ok(merged)
+    }
 }
 
 impl std::fmt::Display for ProjectDetails {

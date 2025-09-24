@@ -2539,6 +2539,13 @@ impl ProjectDetails {
         self.0.clear_allocation();
         Ok(())
     }
+
+    fn merge(&self, other: &ProjectDetails) -> PyResult<ProjectDetails> {
+        match self.0.merge(&other.0) {
+            Ok(merged) => Ok(merged.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
 }
 
 impl From<grammar::ProjectDetails> for ProjectDetails {

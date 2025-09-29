@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
 - Added a `merge` function to `ProjectDetails` to simplify merges.
 - Added a `get_portal` function so that it is easier for the portal
   connected to a python bridge to be determined.

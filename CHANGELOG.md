@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.18.0] - 2025-09-29
+
 ### Added
 
 - Added a `merge` function to `ProjectDetails` to simplify merges.
@@ -723,6 +725,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.18.0]: https://github.com/isambard-sc/openportal/releases/tag/0.18.0
 [0.17.0]: https://github.com/isambard-sc/openportal/releases/tag/0.17.0
 [0.16.3]: https://github.com/isambard-sc/openportal/releases/tag/0.16.3
 [0.16.2]: https://github.com/isambard-sc/openportal/releases/tag/0.16.2

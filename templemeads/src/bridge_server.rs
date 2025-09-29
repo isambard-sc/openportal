@@ -6,6 +6,7 @@ use crate::bridge::{run as bridge_run, status as bridge_status};
 use crate::bridgestate::get as get_board;
 use crate::destination::Destinations;
 use crate::error::Error;
+use crate::grammar::PortalIdentifier;
 use crate::job::Job;
 
 use anyhow::{Context, Result};
@@ -535,6 +536,32 @@ async fn send_result(
 const PORTAL_WAIT_TIME: u64 = 5; // seconds
 
 #[tracing::instrument(skip_all)]
+async fn get_portal(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<PortalIdentifier>, AppError> {
+    tracing::debug!("get_portal");
+    verify_headers(&state, &headers, "get", "get_portal", None)?;
+
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => match PortalIdentifier::parse(portal.name()) {
+            Ok(portal) => Ok(Json(portal)),
+            Err(e) => {
+                tracing::error!("Error getting portal: {:?}", e);
+                Err(AppError(e.into(), None))
+            }
+        },
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot get portal because there is no portal agent"),
+                None,
+            ))
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
 async fn sync_offerings(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -808,6 +835,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
         .route("/status", post(status))
         .route("/fetch_job", post(fetch_job))
         .route("/fetch_jobs", get(fetch_jobs))
+        .route("/get_portal", get(get_portal))
         .route("/send_result", post(send_result))
         .route("/sync_offerings", post(sync_offerings))
         .route("/add_offerings", post(add_offerings))

@@ -2703,6 +2703,14 @@ fn sync_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
     }
 }
 
+#[pyfunction]
+fn get_portal() -> PyResult<PortalIdentifier> {
+    match call_get::<grammar::PortalIdentifier>("get_portal") {
+        Ok(portal) => Ok(portal.into()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 ///
 /// Send back the result of us running a job that was passed to us by
 /// OpenPortal.
@@ -2723,6 +2731,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_jobs, m)?)?;
     m.add_function(wrap_pyfunction!(get, m)?)?;
     m.add_function(wrap_pyfunction!(get_offerings, m)?)?;
+    m.add_function(wrap_pyfunction!(get_portal, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
     m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;

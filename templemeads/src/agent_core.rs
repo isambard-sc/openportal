@@ -26,6 +26,9 @@ pub struct Config {
 
     #[serde(default)]
     extras: HashMap<String, String>,
+
+    #[serde(skip)]
+    one_shot_commands: Option<Vec<String>>,
 }
 
 impl Config {
@@ -34,6 +37,7 @@ impl Config {
             service,
             agent,
             extras: HashMap::new(),
+            one_shot_commands: None,
         }
     }
 
@@ -63,6 +67,10 @@ impl Config {
             },
             None => None,
         }
+    }
+
+    pub fn one_shot_commands(&self) -> &Option<Vec<String>> {
+        &self.one_shot_commands
     }
 }
 
@@ -169,6 +177,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 },
                 agent: defaults.agent.clone(),
                 extras: defaults.extras.clone(),
+                one_shot_commands: None,
             };
 
             if config_file.try_exists()? {
@@ -352,9 +361,24 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             save_config(&config, &config_file)?;
             return Ok(None);
         }
-        Some(Commands::Run {}) => {
-            let config = load_config::<Config>(&config_file)?;
+        Some(Commands::Run {
+            one_shot_commands,
+            repeat,
+        }) => {
+            let mut config = load_config::<Config>(&config_file)?;
             tracing::info!("Loaded config from {}", &config_file.display());
+
+            if let Some(one_shot_commands) = one_shot_commands {
+                let repeat = repeat.unwrap_or(1);
+                let mut one_shot_commands = one_shot_commands.clone();
+                one_shot_commands = one_shot_commands
+                    .into_iter()
+                    .flat_map(|cmd| std::iter::repeat(cmd).take(repeat as usize))
+                    .collect();
+
+                config.one_shot_commands = Some(one_shot_commands.clone());
+            }
+
             return Ok(Some(config));
         }
         _ => {
@@ -529,5 +553,18 @@ enum Commands {
     },
 
     /// Run the service
-    Run {},
+    Run {
+        #[arg(
+            long = "one-shot",
+            short = 'o',
+            help = "One-shot command - run the service once, execute these command(s), then exit."
+        )]
+        one_shot_commands: Option<Vec<String>>,
+        #[arg(
+            long = "repeat",
+            short = 'r',
+            help = "Repeat the one-shot command(s) this number of times (default: 1)."
+        )]
+        repeat: Option<u32>,
+    },
 }

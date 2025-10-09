@@ -641,6 +641,23 @@ impl Job {
         }
     }
 
+    pub fn result_json(&self) -> Result<String, Error> {
+        match self.state {
+            Status::Created => Ok("null".to_string()),
+            Status::Pending => Ok("null".to_string()),
+            Status::Duplicate => Ok("null".to_string()),
+            Status::Running => Ok("null".to_string()),
+            Status::Error => match &self.result {
+                Some(result) => Err(Error::Run(result.clone())),
+                None => Err(Error::InvalidState("Unknown error".to_owned())),
+            },
+            Status::Complete => match &self.result {
+                Some(result) => Ok(result.clone()),
+                None => Ok("{}".to_string()),
+            },
+        }
+    }
+
     pub fn result_type(&self) -> Result<String, Error> {
         match self.state {
             Status::Created => Ok("None".to_string()),

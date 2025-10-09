@@ -1396,6 +1396,21 @@ impl UsageReport {
         Ok(Self(usagereport::UsageReport::new(&portal.0)))
     }
 
+    fn to_json(&self) -> PyResult<String> {
+        match self.0.to_json() {
+            Ok(json) => Ok(json),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match usagereport::UsageReport::from_json(json) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -1490,6 +1505,21 @@ impl ProjectUsageReport {
     #[new]
     fn new(project: &ProjectIdentifier) -> PyResult<Self> {
         Ok(Self(usagereport::ProjectUsageReport::new(&project.0)))
+    }
+
+    fn to_json(&self) -> PyResult<String> {
+        match self.0.to_json() {
+            Ok(json) => Ok(json),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match usagereport::ProjectUsageReport::from_json(json) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
     }
 
     fn __str__(&self) -> PyResult<String> {

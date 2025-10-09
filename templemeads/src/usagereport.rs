@@ -645,6 +645,18 @@ impl ProjectUsageReport {
         }
     }
 
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self)
+            .with_context(|| "Failed to serialize ProjectUsageReport to JSON".to_string())
+            .map_err(Error::from)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json)
+            .with_context(|| "Failed to deserialize ProjectUsageReport from JSON".to_string())
+            .map_err(Error::from)
+    }
+
     pub fn dates(&self) -> Vec<Date> {
         let mut dates: Vec<Date> = self.reports.keys().cloned().collect();
 
@@ -943,6 +955,18 @@ impl UsageReport {
             portal: portal.clone(),
             reports: HashMap::new(),
         }
+    }
+
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self)
+            .with_context(|| "Failed to serialize UsageReport to JSON".to_string())
+            .map_err(Error::from)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json)
+            .with_context(|| "Failed to deserialize UsageReport from JSON".to_string())
+            .map_err(Error::from)
     }
 
     pub fn portal(&self) -> &PortalIdentifier {

@@ -5,11 +5,14 @@ use anyhow::Context;
 use anyhow::Result;
 use chrono::Utc;
 use once_cell::sync::Lazy;
+use rand::seq::IteratorRandom;
+use rand::SeedableRng;
+use std::sync::Arc;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
 use templemeads::job::assert_not_expired;
 use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
-use tokio::sync::{Mutex, MutexGuard, Semaphore};
+use tokio::sync::Mutex;
 
 use crate::cache;
 use crate::slurm::{
@@ -19,7 +22,7 @@ use crate::slurm::{
 use crate::slurm::{SlurmJob, SlurmNodes};
 
 #[derive(Debug, Clone)]
-pub struct SlurmRunner {
+struct SlurmRunner {
     sacct: String,
     sacctmgr: String,
     scontrol: String,
@@ -35,17 +38,26 @@ impl Default for SlurmRunner {
     }
 }
 
-impl SlurmRunner {
+/// A mutex to ensure that only one command is run at a time
+static SLURM_RUNNERS: Lazy<Mutex<Vec<Arc<Mutex<SlurmRunner>>>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
+#[derive(Debug)]
+pub struct LockedRunner {
+    runner: tokio::sync::OwnedMutexGuard<SlurmRunner>,
+}
+
+impl LockedRunner {
     pub fn sacct(&self) -> &str {
-        &self.sacct
+        &self.runner.sacct
     }
 
     pub fn sacctmgr(&self) -> &str {
-        &self.sacctmgr
+        &self.runner.sacctmgr
     }
 
     pub fn scontrol(&self) -> &str {
-        &self.scontrol
+        &self.runner.scontrol
     }
 
     pub fn process(&self, cmd: &str) -> Result<Vec<String>, Error> {
@@ -180,20 +192,49 @@ impl SlurmRunner {
     }
 }
 
-/// A mutex to ensure that only one command is run at a time
-static SLURM_RUNNER: Lazy<Mutex<SlurmRunner>> = Lazy::new(|| Mutex::new(SlurmRunner::default()));
-
 /// The default timeout (30 seconds)
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // function to return the runner protected by a MutexGuard - this ensures
 // that we can only run a single slurm command at a time, thereby not
 // overloading the server
-pub async fn runner<'mg>() -> Result<MutexGuard<'mg, SlurmRunner>, Error> {
-    Ok(SLURM_RUNNER.lock().await)
+pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
+    let runners = SLURM_RUNNERS.lock().await;
+
+    if runners.is_empty() {
+        return Err(Error::Call(
+            "No Slurm runners have been configured".to_string(),
+        ));
+    }
+
+    let mut rng = rand::rngs::StdRng::from_os_rng();
+
+    loop {
+        // try all the runners in a random order
+        for runner in runners.iter().choose_multiple(&mut rng, runners.len()) {
+            assert_not_expired(expires)?;
+
+            match runner.clone().try_lock_owned() {
+                Ok(guard) => {
+                    return Ok(LockedRunner { runner: guard });
+                }
+                Err(_) => {
+                    // the runner is already locked, so try the next one
+                    continue;
+                }
+            }
+        }
+
+        // wait a bit before trying again
+        assert_not_expired(expires)?;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
-async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
+async fn force_add_slurm_account(
+    account: &SlurmAccount,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<SlurmAccount, Error> {
     if account.organization() != get_managed_organization() {
         tracing::warn!(
             "Account {} is not managed by the openportal organization - we cannot manage it.",
@@ -211,7 +252,7 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     // get the parent account name from the cache
     let parent_account = cache::get_parent_account().await?;
 
-    runner()
+    runner(expires)
         .await?
         .run(&format!(
             "SACCTMGR --immediate add account name=\"{}\" cluster=\"{}\" parent=\"{}\" organization=\"{}\" description=\"{}\"",
@@ -227,12 +268,15 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
     Ok(account.clone())
 }
 
-async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
+async fn get_account_from_slurm(
+    account: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
     let cluster = cache::get_cluster().await?;
 
-    let response = match runner()
+    let response = match runner(expires)
         .await?
         .run_json(
             &format!(
@@ -295,14 +339,17 @@ async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, E
     }
 }
 
-async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
+async fn get_account(
+    account: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<SlurmAccount>, Error> {
     // need to GET /slurm/vX.Y.Z/accounts/{account.name}
     // and return the account if it exists
     let cached_account = cache::get_account(account).await?;
 
     if let Some(cached_account) = cached_account {
         // double-check that the account actually exists...
-        let existing_account = match get_account_from_slurm(cached_account.name()).await {
+        let existing_account = match get_account_from_slurm(cached_account.name(), expires).await {
             Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
@@ -345,7 +392,7 @@ async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
     }
 
     // see if we can read the account from slurm
-    let account = match get_account_from_slurm(account).await {
+    let account = match get_account_from_slurm(account, expires).await {
         Ok(account) => account,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -361,8 +408,11 @@ async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
     }
 }
 
-async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
-    let existing_account = get_account(account.name()).await?;
+async fn get_account_create_if_not_exists(
+    account: &SlurmAccount,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<SlurmAccount, Error> {
+    let existing_account = get_account(account.name(), expires).await?;
 
     let cluster = cache::get_cluster().await?;
 
@@ -382,10 +432,10 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
 
     // it doesn't, so create it
     tracing::info!("Creating new slurm account: {}", account.name());
-    let account = force_add_slurm_account(account).await?;
+    let account = force_add_slurm_account(account, expires).await?;
 
     // get the account as created
-    match get_account(account.name()).await {
+    match get_account(account.name(), expires).await {
         Ok(Some(account)) => Ok(account),
         Ok(None) => {
             tracing::error!("Could not get account {}", account.name());
@@ -398,11 +448,14 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
     }
 }
 
-async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
+async fn get_user_from_slurm(
+    user: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<SlurmUser>, Error> {
     let user = clean_user_name(user)?;
     let cluster = cache::get_cluster().await?;
 
-    let response = runner()
+    let response = runner(expires)
         .await?
         .run_json(
             &format!(
@@ -454,12 +507,12 @@ async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
     }
 }
 
-async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
+async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<SlurmUser>, Error> {
     let cached_user = cache::get_user(user).await?;
 
     if let Some(cached_user) = cached_user {
         // double-check that the user actually exists...
-        let existing_user = match get_user_from_slurm(cached_user.name()).await {
+        let existing_user = match get_user_from_slurm(cached_user.name(), expires).await {
             Ok(user) => user,
             Err(e) => {
                 tracing::warn!("Could not get user {}: {}", cached_user.name(), e);
@@ -498,7 +551,7 @@ async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
     }
 
     // see if we can read the user from slurm
-    let user = match get_user_from_slurm(user).await {
+    let user = match get_user_from_slurm(user, expires).await {
         Ok(user) => user,
         Err(e) => {
             tracing::warn!("Could not get user {}: {}", user, e);
@@ -514,7 +567,10 @@ async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
     }
 }
 
-async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
+async fn add_account_association(
+    account: &SlurmAccount,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
     // eventually should check to see if this association already exists,
     // and if so, not to do anything else
 
@@ -535,7 +591,7 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
     // get the parent account name from the cache
     let parent_account = cache::get_parent_account().await?;
 
-    runner().await?.run(
+    runner(expires).await?.run(
         &format!(
             "SACCTMGR --immediate add account name=\"{}\" Clusters=\"{}\" parent=\"{}\" Associations=\"{}\" Comment=\"Created by OpenPortal\"",
             account.name(),
@@ -552,6 +608,7 @@ async fn add_user_association(
     user: &SlurmUser,
     account: &SlurmAccount,
     make_default: bool,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<SlurmUser, Error> {
     if !account.is_managed() {
         tracing::error!(
@@ -578,10 +635,10 @@ async fn add_user_association(
         );
     } else {
         // create the account association first
-        add_account_association(account).await?;
+        add_account_association(account, expires).await?;
 
         // add the association
-        runner()
+        runner(expires)
             .await?
             .run(
                 &format!(
@@ -594,7 +651,7 @@ async fn add_user_association(
             .await?;
 
         // update the user
-        user = match get_user_from_slurm(user.name()).await? {
+        user = match get_user_from_slurm(user.name(), expires).await? {
             Some(user) => user,
             None => {
                 return Err(Error::Call(format!(
@@ -612,7 +669,7 @@ async fn add_user_association(
     if make_default && *user.default_account() != Some(account.name().to_string()) {
         tracing::debug!("Will set user default account here");
 
-        runner()
+        runner(expires)
             .await?
             .run(&format!(
                 "SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\"",
@@ -625,7 +682,7 @@ async fn add_user_association(
             .await?;
 
         // update the user
-        user = match get_user_from_slurm(user.name()).await? {
+        user = match get_user_from_slurm(user.name(), expires).await? {
             Some(user) => user,
             None => {
                 return Err(Error::Call(format!(
@@ -648,16 +705,21 @@ async fn add_user_association(
     Ok(user)
 }
 
-async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, Error> {
+async fn get_user_create_if_not_exists(
+    user: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<SlurmUser, Error> {
     // first, make sure that the account exists
-    let slurm_account =
-        get_account_create_if_not_exists(&SlurmAccount::from_mapping(&user.clone().into())?)
-            .await?;
+    let slurm_account = get_account_create_if_not_exists(
+        &SlurmAccount::from_mapping(&user.clone().into())?,
+        expires,
+    )
+    .await?;
 
     let cluster = cache::get_cluster().await?;
 
     // now get the user from slurm
-    let slurm_user = get_user(user.local_user()).await?;
+    let slurm_user = get_user(user.local_user(), expires).await?;
 
     if let Some(slurm_user) = slurm_user {
         // the user exists - check that the account is associated with the user
@@ -685,13 +747,13 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 
     let cluster = cache::get_cluster().await?;
 
-    runner().await?.run(
+    runner(expires).await?.run(
         &format!("SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\" Comment=\"Created by OpenPortal\"",
                     username, cluster, account, account), DEFAULT_TIMEOUT
     ).await?;
 
     // now load the user from slurm to make sure it exists
-    let slurm_user = match get_user(user.local_user()).await? {
+    let slurm_user = match get_user(user.local_user(), expires).await? {
         Some(user) => user,
         None => {
             return Err(Error::Call(format!(
@@ -702,7 +764,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
     };
 
     // now add the association to the account, making it the default
-    let slurm_user = add_user_association(&slurm_user, &slurm_account, true).await?;
+    let slurm_user = add_user_association(&slurm_user, &slurm_account, true, expires).await?;
 
     let user = SlurmUser::from_mapping(user)?;
 
@@ -715,25 +777,38 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
     Ok(slurm_user)
 }
 
-pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str) {
+pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str, max_slurm_runners: u64) {
     tracing::debug!(
-        "Using command line slurmd commands: sacctmgr: {}, scontrol: {}",
+        "Using command line slurmd commands: sacctmgr: {}, scontrol: {}, max_slurm_runners: {}",
         sacctmgr,
-        scontrol
+        scontrol,
+        max_slurm_runners
     );
 
-    let mut runner = SLURM_RUNNER.lock().await;
-    runner.sacct = sacct.to_string();
-    runner.sacctmgr = sacctmgr.to_string();
-    runner.scontrol = scontrol.to_string();
+    // make sure we have at least one runner
+    let max_slurm_runners = max_slurm_runners.max(1);
+
+    let mut runners = SLURM_RUNNERS.lock().await;
+
+    runners.clear();
+
+    for _ in 0..max_slurm_runners {
+        runners.push(Arc::new(Mutex::new(SlurmRunner {
+            sacct: sacct.to_string(),
+            sacctmgr: sacctmgr.to_string(),
+            scontrol: scontrol.to_string(),
+        })));
+    }
 }
 
 pub async fn find_cluster() -> Result<(), Error> {
     // now get the requested cluster from the cache
     let requested_cluster = cache::get_option_cluster().await?;
 
+    let expires = chrono::Utc::now() + chrono::Duration::minutes(1);
+
     // ask slurm for all of the clusters
-    let clusters = runner()
+    let clusters = runner(&expires)
         .await?
         .run(
             "SACCTMGR --noheader --parsable2 list clusters",
@@ -772,23 +847,15 @@ pub async fn find_cluster() -> Result<(), Error> {
     Ok(())
 }
 
-static MAX_CONCURRENT_REQUESTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(10));
-
 pub async fn add_project(
     project: &ProjectMapping,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
-    // ensure that we don't have too many concurrent requests
-    let _permit = MAX_CONCURRENT_REQUESTS
-        .acquire()
-        .await
-        .map_err(|_| Error::Call("Failed to acquire semaphore for adding project".to_string()))?;
-
     assert_not_expired(expires)?;
 
     let account = SlurmAccount::from_mapping(project)?;
 
-    let account = get_account_create_if_not_exists(&account).await?;
+    let account = get_account_create_if_not_exists(&account, expires).await?;
 
     tracing::info!("Added account: {}", account);
 
@@ -796,15 +863,9 @@ pub async fn add_project(
 }
 
 pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
-    // ensure that we don't have too many concurrent requests
-    let _permit = MAX_CONCURRENT_REQUESTS
-        .acquire()
-        .await
-        .map_err(|_| Error::Call("Failed to acquire semaphore for adding user".to_string()))?;
-
     assert_not_expired(expires)?;
 
-    let user: SlurmUser = get_user_create_if_not_exists(user).await?;
+    let user: SlurmUser = get_user_create_if_not_exists(user, expires).await?;
 
     tracing::info!("Added user: {}", user);
 
@@ -873,7 +934,7 @@ async fn get_hourly_report(
 
         // now try to get the report for this hour - we use a much longer
         // timeout here as we may be getting a lot of jobs
-        let response = runner()
+        let response = runner(expires)
         .await?
         .run_json(&format!(
             "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
@@ -999,7 +1060,7 @@ async fn get_daily_report(
 
     // try to get the daily report from slurm - use a shorter 20 second
     // timeout as we will fall back to hourly reports if this fails
-    let response = runner()
+    let response = runner(expires)
             .await?
             .run_json(&format!(
                 "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
@@ -1091,17 +1152,11 @@ pub async fn get_usage_report(
     dates: &DateRange,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<ProjectUsageReport, Error> {
-    // ensure that we don't have too many concurrent requests
-    let _permit = MAX_CONCURRENT_REQUESTS
-        .acquire()
-        .await
-        .map_err(|_| Error::Call("Failed to acquire semaphore for getting usage".to_string()))?;
-
     assert_not_expired(expires)?;
 
     let account = SlurmAccount::from_mapping(project)?;
 
-    let account = match get_account(account.name()).await {
+    let account = match get_account(account.name(), expires).await {
         Ok(Some(account)) => account,
         Ok(None) => {
             tracing::warn!("Could not get account {}", account.name());
@@ -1124,32 +1179,53 @@ pub async fn get_usage_report(
         None => "".to_string(),
     };
 
-    // we now request the data day by day
+    // we now request the data day by day - do this in parallel
+    let mut tasks = Vec::new();
+
     for day in dates.days() {
         if day.day().start_time().and_utc() > now {
             // we can't get the usage for this day yet as it is in the future
             continue;
         }
 
-        let daily_report = match get_daily_report(
-            expires,
-            project,
-            &day,
-            &account,
-            &slurm_nodes,
-            &cluster,
-            &partition_command,
-        )
-        .await
-        {
-            Ok(report) => report,
+        let expires = *expires;
+        let project = project.clone();
+        let account = account.clone();
+        let slurm_nodes = slurm_nodes.clone();
+        let cluster = cluster.clone();
+        let partition_command = partition_command.clone();
+        let day = day.clone();
+        let day2 = day.clone();
+
+        tasks.push((
+            tokio::spawn(async move {
+                get_daily_report(
+                    &expires,
+                    &project,
+                    &day,
+                    &account,
+                    &slurm_nodes,
+                    &cluster,
+                    &partition_command,
+                )
+                .await
+            }),
+            day2,
+        ));
+    }
+
+    for (task, day) in tasks {
+        let daily_report = match task.await {
+            Ok(report) => match report {
+                Ok(report) => report,
+                Err(e) => {
+                    tracing::warn!("Could not get daily report: {}", e);
+                    // we will return an empty report for this day
+                    DailyProjectUsageReport::default()
+                }
+            },
             Err(e) => {
-                tracing::warn!(
-                    "Could not get usage for project {} on {}: {}",
-                    project.project(),
-                    day,
-                    e
-                );
+                tracing::warn!("Could not get daily report: {}", e);
                 // we will return an empty report for this day
                 DailyProjectUsageReport::default()
             }
@@ -1166,17 +1242,11 @@ pub async fn get_limit(
     project: &ProjectMapping,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Usage, Error> {
-    // ensure that we don't have too many concurrent requests
-    let _permit = MAX_CONCURRENT_REQUESTS
-        .acquire()
-        .await
-        .map_err(|_| Error::Call("Failed to acquire semaphore for getting limit".to_string()))?;
-
     assert_not_expired(expires)?;
 
     let account = SlurmAccount::from_mapping(project)?;
 
-    let account = match get_account(account.name()).await? {
+    let account = match get_account(account.name(), expires).await? {
         Some(account) => account,
         None => {
             tracing::warn!("Could not get account {}", account.name());
@@ -1185,7 +1255,7 @@ pub async fn get_limit(
     };
 
     // check that the limits in slurm match up...
-    let response = runner()
+    let response = runner(expires)
         .await?
         .run_json(
             &format!(
@@ -1319,17 +1389,11 @@ pub async fn set_limit(
     limit: &Usage,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Usage, Error> {
-    // ensure that we don't have too many concurrent requests
-    let _permit = MAX_CONCURRENT_REQUESTS
-        .acquire()
-        .await
-        .map_err(|_| Error::Call("Failed to acquire semaphore for setting limit".to_string()))?;
-
     assert_not_expired(expires)?;
 
     let account = SlurmAccount::from_mapping(project)?;
 
-    match get_account(account.name()).await? {
+    match get_account(account.name(), expires).await? {
         Some(account) => {
             let mut account = account.clone();
 
@@ -1364,7 +1428,7 @@ pub async fn set_limit(
             }
 
             if !tres.is_empty() {
-                runner()
+                runner(expires)
                     .await?
                     .run(&format!(
                         "SACCTMGR --immediate modify account {} set GrpTRESMins={} where cluster={}",

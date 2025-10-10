@@ -106,8 +106,15 @@ async fn main() -> Result<()> {
     let sacct_command = config.option("sacct", "sacct");
     let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
     let scontrol_command = config.option("scontrol", "scontrol");
+    let max_slurm_runners: u64 = config.option("max-slurm-runners", "5").parse().unwrap_or(5);
 
-    sacctmgr::set_commands(&sacct_command, &sacctmgr_command, &scontrol_command).await;
+    sacctmgr::set_commands(
+        &sacct_command,
+        &sacctmgr_command,
+        &scontrol_command,
+        max_slurm_runners,
+    )
+    .await;
 
     if slurm_server.is_empty() {
         // we are using sacctmgr and the commandline to interact

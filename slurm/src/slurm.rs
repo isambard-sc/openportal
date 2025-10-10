@@ -3072,7 +3072,7 @@ pub async fn get_usage_report(
         }
 
         // it is not cached, so get from slurm
-        let response = sacctmgr::runner()
+        let response = sacctmgr::runner(expires)
             .await?
             .run_json(&format!(
                 "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
@@ -3145,7 +3145,7 @@ pub async fn get_limit(
     };
 
     // check that the limits in slurm match up...
-    let response = sacctmgr::runner()
+    let response = sacctmgr::runner(expires)
         .await?
         .run_json(
             &format!(
@@ -3323,7 +3323,7 @@ pub async fn set_limit(
             }
 
             if !tres.is_empty() {
-                sacctmgr::runner()
+                sacctmgr::runner(expires)
                     .await?
                     .run(&format!(
                         "SACCTMGR --immediate modify account {} set GrpTRESMins={} where cluster={}",

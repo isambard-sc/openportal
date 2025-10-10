@@ -119,7 +119,7 @@ impl LockedRunner {
 
         let duration_ms = (end_time - start_time).num_milliseconds();
 
-        if duration_ms > 2500 {
+        if duration_ms > 5000 {
             tracing::warn!(
                 "Running command '{}' took {} seconds",
                 cmd,
@@ -174,7 +174,7 @@ impl LockedRunner {
                 let end_time = chrono::Utc::now();
                 let duration_ms = (end_time - start_time).num_milliseconds();
 
-                if duration_ms > 2500 {
+                if duration_ms > 5000 {
                     tracing::warn!(
                         "Parsing JSON output of command '{}' took {} seconds",
                         cmd,

@@ -12,11 +12,11 @@ use templemeads::Error;
 use tokio::sync::{Mutex, MutexGuard, Semaphore};
 
 use crate::cache;
-use crate::slurm::SlurmJob;
 use crate::slurm::{
     clean_account_name, clean_user_name, get_managed_organization, SlurmAccount, SlurmLimit,
     SlurmUser,
 };
+use crate::slurm::{SlurmJob, SlurmNodes};
 
 #[derive(Debug, Clone)]
 pub struct SlurmRunner {
@@ -79,24 +79,41 @@ impl SlurmRunner {
         }
     }
 
-    pub async fn run(&self, cmd: &str) -> Result<String, Error> {
+    pub async fn run(&self, cmd: &str, timeout: std::time::Duration) -> Result<String, Error> {
         let processed_cmd = self.process(cmd)?;
 
         tracing::debug!("Running command: {:?}", processed_cmd);
 
+        let start_time = chrono::Utc::now();
         let output = tokio::process::Command::new(&processed_cmd[0])
             .args(&processed_cmd[1..])
             .kill_on_drop(true)
             .output();
 
         // use a tokio timeout to ensure we won't block indefinitely - no job should take more than 60 seconds
-        let output = match tokio::time::timeout(std::time::Duration::from_secs(60), output).await {
+        let output = match tokio::time::timeout(timeout, output).await {
             Ok(output) => output,
             Err(_) => {
-                tracing::error!("Command '{}' timed out after 30 seconds", cmd);
-                return Err(Error::Call("Command timed out".to_string()));
+                tracing::error!(
+                    "Command '{}' timed out after {:?} seconds",
+                    cmd,
+                    timeout.as_secs()
+                );
+                return Err(Error::Timeout("Command timed out".to_string()));
             }
         };
+
+        let end_time = chrono::Utc::now();
+
+        let duration_ms = (end_time - start_time).num_milliseconds();
+
+        if duration_ms > 2500 {
+            tracing::warn!(
+                "Running command '{}' took {} seconds",
+                cmd,
+                duration_ms / 1000
+            );
+        }
 
         let output = match output {
             Ok(output) => output,
@@ -132,11 +149,28 @@ impl SlurmRunner {
         }
     }
 
-    pub async fn run_json(&self, cmd: &str) -> Result<serde_json::Value, Error> {
-        let output = self.run(cmd).await?;
+    pub async fn run_json(
+        &self,
+        cmd: &str,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, Error> {
+        let output = self.run(cmd, timeout).await?;
 
+        let start_time = chrono::Utc::now();
         match serde_json::from_str(&output) {
-            Ok(output) => Ok(output),
+            Ok(output) => {
+                let end_time = chrono::Utc::now();
+                let duration_ms = (end_time - start_time).num_milliseconds();
+
+                if duration_ms > 2500 {
+                    tracing::warn!(
+                        "Parsing JSON output of command '{}' took {} seconds",
+                        cmd,
+                        duration_ms / 1000
+                    );
+                }
+                Ok(output)
+            }
             Err(e) => {
                 tracing::error!("Could not parse json: {}", e);
                 tracing::error!("Output: {:?}", output);
@@ -148,6 +182,9 @@ impl SlurmRunner {
 
 /// A mutex to ensure that only one command is run at a time
 static SLURM_RUNNER: Lazy<Mutex<SlurmRunner>> = Lazy::new(|| Mutex::new(SlurmRunner::default()));
+
+/// The default timeout (30 seconds)
+pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // function to return the runner protected by a MutexGuard - this ensures
 // that we can only run a single slurm command at a time, thereby not
@@ -183,7 +220,8 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
             parent_account,
             account.organization(),
             account.description()
-        ))
+        ), DEFAULT_TIMEOUT
+        )
         .await?;
 
     Ok(account.clone())
@@ -196,10 +234,13 @@ async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, E
 
     let response = match runner()
         .await?
-        .run_json(&format!(
-            "SACCTMGR --json list accounts withassoc name={} cluster={}",
-            account, cluster
-        ))
+        .run_json(
+            &format!(
+                "SACCTMGR --json list accounts withassoc name={} cluster={}",
+                account, cluster
+            ),
+            DEFAULT_TIMEOUT,
+        )
         .await
     {
         Ok(response) => response,
@@ -363,10 +404,13 @@ async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
 
     let response = runner()
         .await?
-        .run_json(&format!(
-            "SACCTMGR --json list users name={} cluster={} WithAssoc",
-            user, cluster
-        ))
+        .run_json(
+            &format!(
+                "SACCTMGR --json list users name={} cluster={} WithAssoc",
+                user, cluster
+            ),
+            DEFAULT_TIMEOUT,
+        )
         .await?;
 
     // there should be a users list, with a single entry for this user
@@ -498,7 +542,7 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
             cluster,
             parent_account,
             account.name()
-        )
+        ), DEFAULT_TIMEOUT
     ).await?;
 
     Ok(())
@@ -545,7 +589,7 @@ async fn add_user_association(
                     user.name(),
                     cluster,
                     account.name()
-                )
+                ), DEFAULT_TIMEOUT
             )
             .await?;
 
@@ -576,7 +620,8 @@ async fn add_user_association(
                 cluster,
                 account.name(),
                 account.name()
-            ))
+            ), DEFAULT_TIMEOUT
+            )
             .await?;
 
         // update the user
@@ -642,7 +687,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 
     runner().await?.run(
         &format!("SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\" Comment=\"Created by OpenPortal\"",
-                    username, cluster, account, account)
+                    username, cluster, account, account), DEFAULT_TIMEOUT
     ).await?;
 
     // now load the user from slurm to make sure it exists
@@ -690,7 +735,10 @@ pub async fn find_cluster() -> Result<(), Error> {
     // ask slurm for all of the clusters
     let clusters = runner()
         .await?
-        .run("SACCTMGR --noheader --parsable2 list clusters")
+        .run(
+            "SACCTMGR --noheader --parsable2 list clusters",
+            DEFAULT_TIMEOUT,
+        )
         .await?;
 
     // the output is the list of clusters, one per line, separated by '|', where
@@ -763,6 +811,281 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
     Ok(())
 }
 
+async fn get_hourly_report(
+    expires: &chrono::DateTime<Utc>,
+    project: &ProjectMapping,
+    day: &templemeads::grammar::Date,
+    account: &SlurmAccount,
+    slurm_nodes: &SlurmNodes,
+    cluster: &str,
+    partition_command: &str,
+) -> Result<DailyProjectUsageReport, Error> {
+    let now = chrono::Utc::now();
+    let mut daily_report = DailyProjectUsageReport::default();
+    let mut total_usage: u64 = 0;
+    let mut num_jobs: u64 = 0;
+
+    // we need to get the report hour by hour from slurm, as users may have
+    // run very large numbers of jobs in a day, and sacct may time out
+    for hour in day.hours() {
+        if let Some(hourly_report) = cache::get_hourly_report(project.project(), &hour).await? {
+            // we have this hour in the cache, so use it
+            tracing::debug!(
+                "Using cached hourly report for {}. Number of jobs = {}",
+                hour,
+                hourly_report.len()
+            );
+
+            num_jobs += hourly_report.len() as u64;
+
+            for job in hourly_report {
+                total_usage += job.billed_node_seconds();
+                daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+            }
+
+            continue;
+        }
+
+        assert_not_expired(expires)?;
+
+        let start_time = hour.start_time().and_utc();
+        let end_time = hour.end_time().and_utc();
+
+        if start_time > now {
+            // we can't get the usage for this hour yet as it is in the future
+            continue;
+        }
+
+        let end_time = match now < end_time {
+            true => now,
+            false => end_time,
+        };
+
+        // check that the hour contains <= 3600 seconds
+        if end_time.timestamp() - start_time.timestamp() > 3600 {
+            tracing::warn!(
+                "Hour {} contains more than 1 hour - check this! {} : {}",
+                hour,
+                start_time,
+                end_time
+            );
+        }
+
+        // now try to get the report for this hour - we use a much longer
+        // timeout here as we may be getting a lot of jobs
+        let response = runner()
+        .await?
+        .run_json(&format!(
+            "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
+            start_time.format("%Y-%m-%dT%H:%M:%S"),
+            end_time.format("%Y-%m-%dT%H:%M:%S"),
+            account.name(),
+            cluster,
+            partition_command
+        ), std::time::Duration::from_secs(120))
+        .await?;
+
+        let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
+
+        tracing::debug!(
+            "Got {} jobs for project {} on {}",
+            jobs.len(),
+            project.project(),
+            hour
+        );
+
+        // cache this hourly report if it is in the past
+        if hour.end_time().and_utc() < now {
+            match cache::set_hourly_report(project.project(), &hour, &jobs).await {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Could not cache hourly report for {}: {}", hour, e);
+                }
+            }
+        }
+
+        num_jobs += jobs.len() as u64;
+
+        for job in jobs {
+            total_usage += job.billed_node_seconds();
+            daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+        }
+    }
+
+    tracing::debug!(
+        "Got {} jobs consuming {} seconds for project {} on {}",
+        num_jobs,
+        total_usage,
+        project.project(),
+        day
+    );
+
+    // check that the total usage in the daily report matches the total usage calculated manually
+    if daily_report.total_usage().seconds() != total_usage {
+        // it doesn't - we don't want to mark this as complete or cache it, because
+        // this points to some error when generating the values...
+        tracing::error!(
+            "Total usage in daily report does not match total usage calculated manually: {} != {}",
+            daily_report.total_usage().seconds(),
+            total_usage
+        );
+    } else if day.day().end_time().and_utc() < now {
+        // we can set this day as completed if it is in the past
+        daily_report.set_complete();
+
+        match cache::set_report(project.project(), day, &daily_report).await {
+            Ok(_) => (),
+            Err(e) => {
+                tracing::error!("Could not cache report for {}: {}", day, e);
+            }
+        }
+    }
+
+    Ok(daily_report)
+}
+
+async fn get_daily_report(
+    expires: &chrono::DateTime<Utc>,
+    project: &ProjectMapping,
+    day: &templemeads::grammar::Date,
+    account: &SlurmAccount,
+    slurm_nodes: &SlurmNodes,
+    cluster: &str,
+    partition_command: &str,
+) -> Result<DailyProjectUsageReport, Error> {
+    // see if we have this report in the cache
+    if let Some(report) = cache::get_report(project.project(), day).await? {
+        return Ok(report);
+    }
+
+    assert_not_expired(expires)?;
+
+    if cache::compute_via_hourly_reports(project.project(), day).await? {
+        return get_hourly_report(
+            expires,
+            project,
+            day,
+            account,
+            slurm_nodes,
+            cluster,
+            partition_command,
+        )
+        .await;
+    }
+
+    let now = chrono::Utc::now();
+    let start_time = day.day().start_time().and_utc();
+    let end_time = day.day().end_time().and_utc();
+
+    if start_time > now {
+        // we can't get the usage for this day yet as it is in the future
+        return Ok(DailyProjectUsageReport::default());
+    }
+
+    let end_time = match now < end_time {
+        true => now,
+        false => end_time,
+    };
+
+    // check that the day contains <= 24 hours (86400 seconds)
+    if end_time.timestamp() - start_time.timestamp() > 86400 {
+        tracing::warn!(
+            "Day {} contains more than 24 hours - check this! {} : {}",
+            day,
+            start_time,
+            end_time
+        );
+    }
+
+    // try to get the daily report from slurm - use a shorter 20 second
+    // timeout as we will fall back to hourly reports if this fails
+    let response = runner()
+            .await?
+            .run_json(&format!(
+                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
+                start_time.format("%Y-%m-%dT%H:%M:%S"),
+                end_time.format("%Y-%m-%dT%H:%M:%S"),
+                account.name(),
+                cluster,
+                partition_command
+            ), std::time::Duration::from_secs(20))
+            .await;
+
+    match response {
+        Ok(response) => {
+            let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
+
+            tracing::debug!(
+                "Got {} jobs for project {} on {}",
+                jobs.len(),
+                project.project(),
+                day
+            );
+
+            let mut daily_report = DailyProjectUsageReport::default();
+            let mut total_usage: u64 = 0;
+
+            for job in jobs {
+                total_usage += job.billed_node_seconds();
+                daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+            }
+
+            // check that the total usage in the daily report matches the total usage calculated manually
+            if daily_report.total_usage().seconds() != total_usage {
+                // it doesn't - we don't want to mark this as complete or cache it, because
+                // this points to some error when generating the values...
+                tracing::error!(
+                    "Total usage in daily report does not match total usage calculated manually: {} != {}",
+                    daily_report.total_usage().seconds(),
+                    total_usage
+                );
+            } else if day.day().end_time().and_utc() < now {
+                // we can set this day as completed if it is in the past
+                daily_report.set_complete();
+
+                match cache::set_report(project.project(), day, &daily_report).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        tracing::error!("Could not cache report for {}: {}", day, e);
+                    }
+                }
+            }
+            Ok(daily_report)
+        }
+        Err(Error::Timeout(_)) => {
+            tracing::warn!(
+                "Timed out getting usage for project {} on {}. Switching to hourly reporting.",
+                project.project(),
+                day
+            );
+
+            // we need to switch to getting an hourly report for this date
+            return get_hourly_report(
+                expires,
+                project,
+                day,
+                account,
+                slurm_nodes,
+                cluster,
+                partition_command,
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Could not get usage for project {} on {}: {}",
+                project.project(),
+                day,
+                e
+            );
+
+            // we will return an empty report - this will not be complete
+            // and will not be cached
+            Ok(DailyProjectUsageReport::default())
+        }
+    }
+}
+
 pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,
@@ -803,79 +1126,34 @@ pub async fn get_usage_report(
 
     // we now request the data day by day
     for day in dates.days() {
-        let start_time = day.day().start_time().and_utc();
-        let end_time = day.day().end_time().and_utc();
-
-        if start_time > now {
+        if day.day().start_time().and_utc() > now {
             // we can't get the usage for this day yet as it is in the future
             continue;
         }
 
-        let end_time = match now < end_time {
-            true => now,
-            false => end_time,
-        };
-
-        // check that the day contains <= 24 hours (86400 seconds)
-        if end_time.timestamp() - start_time.timestamp() > 86400 {
-            tracing::warn!(
-                "Day {} contains more than 24 hours - check this! {} : {}",
-                day,
-                start_time,
-                end_time
-            );
-        }
-
-        // have we got this report in the cache?
-        if let Some(daily_report) = cache::get_report(project.project(), &day).await? {
-            report.set_report(&day, &daily_report);
-            continue;
-        }
-
-        // it is not cached, so get from slurm
-        let response = runner()
-            .await?
-            .run_json(&format!(
-                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
-                day,
-                day.next(),
-                account.name(),
-                cluster,
-                partition_command
-            ))
-            .await?;
-
-        let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)?;
-
-        let mut daily_report = DailyProjectUsageReport::default();
-
-        let mut total_usage: u64 = 0;
-
-        for job in jobs {
-            total_usage += job.billed_node_seconds();
-            daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
-        }
-
-        // check that the total usage in the daily report matches the total usage calculated manually
-        if daily_report.total_usage().seconds() != total_usage {
-            // it doesn't - we don't want to mark this as complete or cache it, because
-            // this points to some error when generating the values...
-            tracing::error!(
-                "Total usage in daily report does not match total usage calculated manually: {} != {}",
-                daily_report.total_usage().seconds(),
-                total_usage
-            );
-        } else if day.day().end_time().and_utc() < now {
-            // we can set this day as completed if it is in the past
-            daily_report.set_complete();
-
-            match cache::set_report(project.project(), &day, &daily_report).await {
-                Ok(_) => (),
-                Err(e) => {
-                    tracing::error!("Could not cache report for {}: {}", day, e);
-                }
+        let daily_report = match get_daily_report(
+            expires,
+            project,
+            &day,
+            &account,
+            &slurm_nodes,
+            &cluster,
+            &partition_command,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not get usage for project {} on {}: {}",
+                    project.project(),
+                    day,
+                    e
+                );
+                // we will return an empty report for this day
+                DailyProjectUsageReport::default()
             }
-        }
+        };
 
         // now save this to the overall report
         report.set_report(&day, &daily_report);
@@ -909,11 +1187,14 @@ pub async fn get_limit(
     // check that the limits in slurm match up...
     let response = runner()
         .await?
-        .run_json(&format!(
-            "SACCTMGR --json show association where account={} cluster={}",
-            account.name(),
-            cache::get_cluster().await?
-        ))
+        .run_json(
+            &format!(
+                "SACCTMGR --json show association where account={} cluster={}",
+                account.name(),
+                cache::get_cluster().await?
+            ),
+            DEFAULT_TIMEOUT,
+        )
         .await?;
 
     let limits = match response.get("associations") {
@@ -1090,7 +1371,8 @@ pub async fn set_limit(
                         account.name(),
                         tres.join(","),
                         cluster,
-                    ))
+                    ), DEFAULT_TIMEOUT
+                    )
                     .await?;
             }
 

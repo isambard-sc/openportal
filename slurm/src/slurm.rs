@@ -21,13 +21,6 @@ use tokio::sync::{Mutex, MutexGuard, Semaphore};
 use crate::cache;
 use crate::sacctmgr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FreeResponse {
-    meta: serde_json::Value,
-    errors: serde_json::Value,
-    warnings: serde_json::Value,
-}
-
 ///
 /// Call a get URL on the slurmrestd server described in 'auth'.
 ///
@@ -3088,7 +3081,7 @@ pub async fn get_usage_report(
                 account.name(),
                 cluster,
                 partition_command
-            ))
+            ), sacctmgr::DEFAULT_TIMEOUT)
             .await?;
 
         let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)?;
@@ -3154,11 +3147,14 @@ pub async fn get_limit(
     // check that the limits in slurm match up...
     let response = sacctmgr::runner()
         .await?
-        .run_json(&format!(
-            "SACCTMGR --json show association where account={} cluster={}",
-            account.name(),
-            cache::get_cluster().await?
-        ))
+        .run_json(
+            &format!(
+                "SACCTMGR --json show association where account={} cluster={}",
+                account.name(),
+                cache::get_cluster().await?
+            ),
+            sacctmgr::DEFAULT_TIMEOUT,
+        )
         .await?;
 
     let limits = match response.get("associations") {
@@ -3334,7 +3330,7 @@ pub async fn set_limit(
                         account.name(),
                         tres.join(","),
                         cluster,
-                    ))
+                    ), sacctmgr::DEFAULT_TIMEOUT)
                     .await?;
             }
 

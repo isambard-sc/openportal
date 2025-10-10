@@ -5,16 +5,17 @@ use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
-use templemeads::grammar::{Date, ProjectIdentifier, UserIdentifier};
+use templemeads::grammar::{Date, Hour, ProjectIdentifier, UserIdentifier};
 use templemeads::usagereport::DailyProjectUsageReport;
 use templemeads::Error;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::slurm::{SlurmAccount, SlurmNode, SlurmNodes, SlurmUser};
+use crate::slurm::{SlurmAccount, SlurmJob, SlurmNode, SlurmNodes, SlurmUser};
 
 #[derive(Debug, Clone, Default)]
 struct UsageDatabase {
     reports: HashMap<Date, DailyProjectUsageReport>,
+    hourly_reports: HashMap<Date, HashMap<Hour, Vec<SlurmJob>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -264,10 +265,10 @@ pub async fn set_report(
 
     match cache.reports.get_mut(project) {
         Some(usage) => {
-            // delete the oldest reports while there are >= 30 reports cached
-            // This ensures we only cache a maximum of 30 days of reports
+            // delete the oldest reports while there are >= 80 reports cached
+            // This ensures we only cache a maximum of 80 days of reports
             // per project
-            while usage.reports.len() >= 30 {
+            while usage.reports.len() >= 80 {
                 let mut oldest = today.clone();
 
                 for date in usage.reports.keys() {
@@ -280,6 +281,9 @@ pub async fn set_report(
             }
 
             usage.reports.insert(date.clone(), report.clone());
+
+            // also remove any hourly report for this date
+            usage.hourly_reports.remove(date);
         }
         None => {
             let mut usage = UsageDatabase::default();
@@ -289,6 +293,91 @@ pub async fn set_report(
     }
 
     Ok(())
+}
+
+///
+/// Return whether or not we need to get the report hourly for this
+/// project and date
+///
+pub async fn compute_via_hourly_reports(
+    project: &ProjectIdentifier,
+    date: &Date,
+) -> Result<bool, Error> {
+    let cache = CACHE.read().await;
+
+    match cache.reports.get(project) {
+        Some(usage) => Ok(usage.hourly_reports.contains_key(date)),
+        None => Ok(false),
+    }
+}
+
+///
+/// Set the hourly reports collected so far for this project and date
+/// (they should be in hour order)
+///
+pub async fn set_hourly_report(
+    project: &ProjectIdentifier,
+    hour: &Hour,
+    reports: &[SlurmJob],
+) -> Result<(), Error> {
+    let date = hour.day();
+    let today = Date::today();
+
+    if date > today {
+        return Err(Error::Bug(format!(
+            "Cannot cache hourly reports for project '{}' for future date: {} - {} reports",
+            project,
+            date,
+            reports.len()
+        )));
+    }
+
+    let mut cache = CACHE.write().await;
+
+    match cache.reports.get_mut(project) {
+        Some(usage) => match usage.hourly_reports.get_mut(&date) {
+            Some(date_reports) => {
+                date_reports.insert(hour.clone(), reports.to_vec());
+            }
+            None => {
+                let mut date_reports = HashMap::new();
+                date_reports.insert(hour.clone(), reports.to_vec());
+                usage.hourly_reports.insert(date.clone(), date_reports);
+            }
+        },
+        None => {
+            let mut usage = UsageDatabase::default();
+            let mut date_reports = HashMap::new();
+            date_reports.insert(hour.clone(), reports.to_vec());
+            usage.hourly_reports.insert(date.clone(), date_reports);
+            cache.reports.insert(project.clone(), usage);
+        }
+    }
+
+    Ok(())
+}
+
+///
+/// Get the hourly reports collected so far for this project and date.
+/// They are returned in hour order
+///
+pub async fn get_hourly_report(
+    project: &ProjectIdentifier,
+    hour: &Hour,
+) -> Result<Option<Vec<SlurmJob>>, Error> {
+    let date = hour.day();
+    let cache = CACHE.read().await;
+
+    match cache.reports.get(project) {
+        Some(usage) => match usage.hourly_reports.get(&date) {
+            Some(date_reports) => match date_reports.get(hour) {
+                Some(reports) => Ok(Some(reports.clone())),
+                None => Ok(None),
+            },
+            None => Ok(None),
+        },
+        None => Ok(None),
+    }
 }
 
 ///

@@ -6,7 +6,7 @@ use crate::error::Error;
 use crate::usagereport::Usage;
 
 use anyhow::Context;
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::{hash::Hash, sync::Arc};
@@ -576,6 +576,173 @@ impl<'de> Deserialize<'de> for UserMapping {
 }
 
 ///
+/// Struct used to represent a single hour
+///
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct Hour {
+    hour: chrono::NaiveDateTime,
+}
+
+impl NamedType for Hour {
+    fn type_name() -> &'static str {
+        "Hour"
+    }
+}
+
+impl NamedType for Vec<Hour> {
+    fn type_name() -> &'static str {
+        "Vec<Hour>"
+    }
+}
+
+impl Hour {
+    pub fn to_chrono(&self) -> chrono::NaiveDateTime {
+        self.hour
+    }
+
+    pub fn from_chrono(hour: &chrono::NaiveDateTime) -> Result<Self, Error> {
+        // make sure that this is a valid hour (i.e. minutes and seconds are zero)
+        if hour.minute() != 0 || hour.second() != 0 {
+            return Err(Error::Parse(format!(
+                "Invalid Hour - minutes and seconds must be zero '{}'",
+                hour
+            )));
+        }
+
+        Ok(Self { hour: *hour })
+    }
+
+    pub fn from_timestamp(timestamp: i64) -> Result<Self, Error> {
+        let hour = chrono::DateTime::from_timestamp(timestamp, 0)
+            .with_context(|| {
+                format!(
+                    "Invalid Hour - cannot convert timestamp '{}' to a valid hour",
+                    timestamp
+                )
+            })?
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .with_context(|| {
+                format!(
+                    "Invalid Hour - cannot convert timestamp '{}' to a valid hour",
+                    timestamp
+                )
+            })?;
+
+        Self::from_chrono(&hour)
+    }
+
+    pub fn parse(hour: &str) -> Result<Self, Error> {
+        let hour = hour.trim();
+
+        if hour.is_empty() {
+            return Err(Error::Parse(format!(
+                "Invalid Hour - cannot be empty '{}'",
+                hour
+            )));
+        };
+
+        let hour = chrono::NaiveDateTime::parse_from_str(hour, "%Y-%m-%d %H")
+            .with_context(|| format!("Invalid Hour - hour cannot be parsed from '{}'", hour))?;
+
+        Self::from_chrono(&hour)
+    }
+
+    pub fn timestamp(&self) -> i64 {
+        self.hour.and_utc().timestamp()
+    }
+
+    pub fn now() -> Result<Self, Error> {
+        let now = chrono::Local::now().naive_local();
+        let hour = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), now.day())
+            .unwrap_or_else(|| {
+                tracing::error!("Invalid date '{}' - cannot convert to an hour", now);
+                chrono::NaiveDate::default()
+            })
+            .and_hms_opt(now.hour(), 0, 0)
+            .unwrap_or_else(|| {
+                tracing::error!("Invalid time '{}' - cannot convert to an hour", now);
+                chrono::NaiveDateTime::default()
+            });
+
+        Self::from_chrono(&hour)
+    }
+
+    pub fn prev(self: &Hour) -> Result<Self, Error> {
+        let hour = self.hour - chrono::Duration::hours(1);
+        Self::from_chrono(&hour)
+    }
+
+    pub fn next(self: &Hour) -> Result<Self, Error> {
+        let hour = self.hour + chrono::Duration::hours(1);
+        Self::from_chrono(&hour)
+    }
+
+    pub fn day(self: &Hour) -> Date {
+        Date {
+            date: self.hour.date(),
+        }
+    }
+
+    pub fn hour(&self) -> &chrono::NaiveDateTime {
+        &self.hour
+    }
+
+    pub fn start_time(&self) -> chrono::NaiveDateTime {
+        self.hour
+    }
+
+    pub fn end_time(&self) -> chrono::NaiveDateTime {
+        self.hour + chrono::Duration::hours(1)
+    }
+
+    pub fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.hour.partial_cmp(&other.hour)
+    }
+
+    pub fn is_in(&self, date: &Date) -> bool {
+        self.hour.date() == date.date
+    }
+}
+
+impl std::fmt::Display for Hour {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.hour.format("%Y-%m-%d %H"))
+    }
+}
+
+impl Serialize for Hour {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Hour {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<chrono::NaiveDateTime> for Hour {
+    fn from(hour: chrono::NaiveDateTime) -> Self {
+        Self { hour }
+    }
+}
+
+impl From<Hour> for chrono::NaiveDateTime {
+    fn from(hour: Hour) -> Self {
+        hour.hour
+    }
+}
+
+///
 /// Struct used to represent a single date
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -640,6 +807,22 @@ impl Date {
             })
             .and_utc()
             .timestamp()
+    }
+
+    pub fn hours(&self) -> Vec<Hour> {
+        let mut hours = Vec::new();
+
+        for hour in 0..24 {
+            let hour = self.date.and_hms_opt(hour, 0, 0).unwrap_or_else(|| {
+                tracing::error!("Invalid date '{}' - cannot convert to an hour", self.date);
+                chrono::NaiveDateTime::default()
+            });
+            if let Ok(hour) = Hour::from_chrono(&hour) {
+                hours.push(hour);
+            }
+        }
+
+        hours
     }
 
     pub fn yesterday() -> Self {

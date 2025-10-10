@@ -111,7 +111,7 @@ impl SlurmRunner {
             tracing::warn!(
                 "Running command '{}' took {} seconds",
                 cmd,
-                duration_ms / 1000
+                duration_ms as f64 / 1000.0
             );
         }
 
@@ -166,7 +166,7 @@ impl SlurmRunner {
                     tracing::warn!(
                         "Parsing JSON output of command '{}' took {} seconds",
                         cmd,
-                        duration_ms / 1000
+                        duration_ms as f64 / 1000.0
                     );
                 }
                 Ok(output)

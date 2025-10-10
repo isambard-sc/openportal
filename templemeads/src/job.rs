@@ -303,11 +303,11 @@ impl Job {
             id: Uuid::new_v4(),
             created: now,
             changed: now,
-            // settled on 1 minute as this makes the interface with the
+            // settled on 2 minutes as this makes the interface with the
             // user portal more responsive - any task that takes longer
-            // than a minute can have its lifetime changed using the
+            // than 2 minutes can have its lifetime changed using the
             // set_lifetime method
-            expires: now + chrono::Duration::minutes(1),
+            expires: now + chrono::Duration::minutes(2),
             version: 1,
             command: Command::parse(command, check_portal)?,
             state: Status::Created,

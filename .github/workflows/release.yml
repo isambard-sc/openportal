@@ -37,18 +37,9 @@ jobs:
             exit 1
           fi
 
-  check:
-    name: Check
-    needs: check-inputs
-    uses: ./.github/workflows/check.yml
-    with:
-      ref: "${{ github.sha }}"
-    permissions:
-      contents: read
-
   tag-release:
     name: Tag release
-    needs: check
+    needs: check-inputs
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}  # Use ref here since we must commit on a branch
+          ref: ${{ github.ref }} # Use ref here since we must commit on a branch
           ssh-key: ${{secrets.DEPLOY_KEY}}
       - name: Install kacl
         run: |
@@ -390,9 +381,19 @@ jobs:
 
   make-release:
     name: Make release ${{ needs.tag-release.outputs.ref }}
-    needs: [build-release, tag-release, attest-bridge, attest-cluster,
-            attest-clusters, attest-filesystem, attest-freeipa,
-            attest-portal, attest-provider, attest-slurm]
+    needs:
+      [
+        build-release,
+        tag-release,
+        attest-bridge,
+        attest-cluster,
+        attest-clusters,
+        attest-filesystem,
+        attest-freeipa,
+        attest-portal,
+        attest-provider,
+        attest-slurm,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: write

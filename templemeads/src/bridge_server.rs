@@ -23,15 +23,14 @@ use paddington::{Key, SecretKey};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::net::IpAddr;
-use std::path;
-use tokio::net::TcpListener;
+use std::{collections::HashMap, net::IpAddr, path, sync::Arc};
+use tokio::{net::TcpListener, sync::Mutex};
 use url::Url;
 use uuid::Uuid;
 
 ///
 /// Return the OpenPortal authorisation header for the passed datetime,
-/// protocol, function and (optional) arguments, signed with the passed
+/// protocol, function, (optional) arguments, and nonce, signed with the passed
 /// key.
 ///
 pub fn sign_api_call(
@@ -40,15 +39,24 @@ pub fn sign_api_call(
     protocol: &str,
     function: &str,
     arguments: &Option<serde_json::Value>,
+    nonce: Option<&str>,
 ) -> Result<String, anyhow::Error> {
     let date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
 
-    let call_string = match arguments {
-        Some(args) => format!(
+    let call_string = match (arguments, nonce) {
+        (Some(args), Some(n)) => format!(
+            "{}\napplication/json\n{}\n{}\n{}\n{}",
+            protocol, date, function, args, n
+        ),
+        (Some(args), None) => format!(
             "{}\napplication/json\n{}\n{}\n{}",
             protocol, date, function, args
         ),
-        None => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
+        (None, Some(n)) => format!(
+            "{}\napplication/json\n{}\n{}\n{}",
+            protocol, date, function, n
+        ),
+        (None, None) => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
     };
 
     let signature = key.expose_secret().sign(call_string)?;
@@ -237,19 +245,61 @@ pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
 }
 
 ///
-/// Verify the headers for the request - this checks the API key
+/// Extract client IP from headers (X-Forwarded-For or X-Real-IP), with fallback
 ///
-fn verify_headers(
+fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
+    // Try X-Forwarded-For first
+    if let Some(forwarded) = headers.get("X-Forwarded-For") {
+        if let Ok(forwarded_str) = forwarded.to_str() {
+            if let Some(first_ip) = forwarded_str.split(',').next() {
+                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                    return ip;
+                }
+            }
+        }
+    }
+
+    // Try X-Real-IP
+    if let Some(real_ip) = headers.get("X-Real-IP") {
+        if let Ok(ip_str) = real_ip.to_str() {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+
+    // Fallback to localhost (not ideal, but safe default)
+    "127.0.0.1".parse::<IpAddr>().unwrap_or_else(|_| {
+        // This should never fail, but handle it anyway
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+    })
+}
+
+///
+/// Verify the headers for the request - this checks the API key, rate limiting, and nonce
+///
+async fn verify_headers(
     state: &AppState,
     headers: &HeaderMap,
     protocol: &str,
     function: &str,
     arguments: Option<serde_json::Value>,
 ) -> Result<(), AppError> {
+    // Extract client IP for rate limiting
+    let client_ip = extract_client_ip(headers);
+
+    // Check rate limit first (before expensive crypto operations)
+    state.rate_limiter.check_rate_limit(client_ip).await?;
+
+    // randomly clean up old rate limit entries (1% chance)
+    if rand::random::<u8>() < 3 {
+        state.rate_limiter.cleanup_old_entries().await;
+    }
+
     let key = match headers.get("Authorization") {
         Some(key) => key,
         None => {
-            tracing::error!("No API key in headers {:?}", headers);
+            tracing::error!("No API key in headers");
             return Err(AppError(
                 anyhow::anyhow!("No API key in headers"),
                 Some(StatusCode::UNAUTHORIZED),
@@ -263,7 +313,7 @@ fn verify_headers(
     let date = match headers.get("Date") {
         Some(date) => date,
         None => {
-            tracing::error!("No date in headers {:?}", headers);
+            tracing::error!("No date in headers");
             return Err(AppError(
                 anyhow::anyhow!("No date in headers"),
                 Some(StatusCode::UNAUTHORIZED),
@@ -279,6 +329,12 @@ fn verify_headers(
         )
     })?;
 
+    // Extract nonce (optional but recommended)
+    let nonce = headers
+        .get("X-Nonce")
+        .and_then(|n| n.to_str().ok())
+        .map(|s| s.to_string());
+
     let date = DateTime::parse_from_rfc2822(date)
         .map_err(|e| {
             tracing::error!("Could not parse date: {:?}", e);
@@ -289,28 +345,75 @@ fn verify_headers(
         })?
         .with_timezone(&Utc);
 
-    // make sure that this date is within the last 5 minutes
+    // make sure that this date is within the last 5 seconds
     let now = Utc::now();
 
-    if now - date > Duration::minutes(5) || date - now > Duration::minutes(5) {
-        tracing::error!("Date is too old");
+    if now - date > Duration::seconds(5) || date - now > Duration::seconds(5) {
+        tracing::error!("Date is too old or too far in the future");
         return Err(AppError(
-            anyhow::anyhow!("Date is too old"),
+            anyhow::anyhow!("Date is outside acceptable time window"),
             Some(StatusCode::UNAUTHORIZED),
         ));
     }
 
-    // now generate the expected key
-    let expected_key = sign_api_call(&state.config.key, &date, protocol, function, &arguments)?;
+    // Check nonce for replay attack prevention
+    if let Some(ref nonce_value) = nonce {
+        let mut nonce_store = state.nonce_store.lock().await;
 
-    if key != expected_key {
-        tracing::error!("API key does not match the expected key");
-        tracing::error!("Expected: {}", expected_key);
-        tracing::error!("Got: {}", key);
-        tracing::error!("Signed for date: {:?}", date);
-        tracing::error!("Protocol: {}", protocol);
-        tracing::error!("Function: {}", function);
-        tracing::error!("Arguments: {:?}", arguments);
+        // Check if nonce has been used before
+        if let Some(last_used) = nonce_store.get(nonce_value) {
+            // If nonce was used recently, reject as replay attack
+            if now - *last_used < Duration::seconds(30) {
+                tracing::warn!("Replay attack detected: nonce {} already used", nonce_value);
+                return Err(AppError(
+                    anyhow::anyhow!("Nonce has already been used (replay attack)"),
+                    Some(StatusCode::UNAUTHORIZED),
+                ));
+            }
+        }
+
+        // Store nonce with current timestamp
+        nonce_store.insert(nonce_value.clone(), now);
+
+        // Clean up old nonces (older than 30 seconds)
+        let cutoff = now - Duration::seconds(30);
+        nonce_store.retain(|_, timestamp| *timestamp > cutoff);
+    }
+
+    // now generate the expected key
+    let expected_key = sign_api_call(
+        &state.config.key,
+        &date,
+        protocol,
+        function,
+        &arguments,
+        nonce.as_deref(),
+    )?;
+
+    // Use constant-time comparison to prevent timing attacks
+    let key_bytes = key.as_bytes();
+    let expected_bytes = expected_key.as_bytes();
+
+    // Constant-time comparison: always compare all bytes
+    let mut matches = key_bytes.len() == expected_bytes.len();
+    let compare_len = key_bytes.len().min(expected_bytes.len());
+
+    for i in 0..compare_len {
+        matches &= key_bytes[i] == expected_bytes[i];
+    }
+
+    // If lengths differ, still compare something to maintain constant time
+    if key_bytes.len() != expected_bytes.len() {
+        for i in compare_len..key_bytes.len().max(expected_bytes.len()) {
+            let _ = i; // Ensure compiler doesn't optimize this away
+        }
+    }
+
+    if !matches {
+        tracing::error!("API key is invalid");
+        // Don't log the actual keys in production to prevent leakage
+        tracing::debug!("Expected key length: {}", expected_key.len());
+        tracing::debug!("Received key length: {}", key.len());
         return Err(AppError(
             anyhow::anyhow!("API key is invalid!"),
             Some(StatusCode::UNAUTHORIZED),
@@ -321,12 +424,69 @@ fn verify_headers(
 }
 
 //
+// Rate limiter to track request attempts per IP address
+//
+#[derive(Clone, Debug)]
+struct RateLimiter {
+    // Map of IP address to (attempt count, window start time)
+    attempts: Arc<Mutex<HashMap<IpAddr, (u32, DateTime<Utc>)>>>,
+    max_attempts: u32,
+    window_seconds: i64,
+}
+
+impl RateLimiter {
+    fn new(max_attempts: u32, window_seconds: i64) -> Self {
+        Self {
+            attempts: Arc::new(Mutex::new(HashMap::new())),
+            max_attempts,
+            window_seconds,
+        }
+    }
+
+    async fn check_rate_limit(&self, ip: IpAddr) -> Result<(), AppError> {
+        let mut attempts = self.attempts.lock().await;
+        let now = Utc::now();
+
+        let entry = attempts.entry(ip).or_insert((0, now));
+
+        // Check if we're in a new time window
+        if now - entry.1 > Duration::seconds(self.window_seconds) {
+            // Reset the window
+            entry.0 = 1;
+            entry.1 = now;
+            Ok(())
+        } else if entry.0 >= self.max_attempts {
+            tracing::warn!("Rate limit exceeded for IP: {}", ip);
+            Err(AppError(
+                anyhow::anyhow!("Rate limit exceeded"),
+                Some(StatusCode::TOO_MANY_REQUESTS),
+            ))
+        } else {
+            entry.0 += 1;
+            Ok(())
+        }
+    }
+
+    // Periodic cleanup of old entries (optional, can be called periodically)
+    #[allow(dead_code)]
+    async fn cleanup_old_entries(&self) {
+        let mut attempts = self.attempts.lock().await;
+        let now = Utc::now();
+        let cutoff = now - Duration::seconds(self.window_seconds * 2);
+
+        attempts.retain(|_, (_, timestamp)| *timestamp > cutoff);
+    }
+}
+
+//
 // Shared state for the web API - simple key-value store protected
 // by a tokio Mutex.
 //
 #[derive(Clone, Debug)]
 struct AppState {
     config: Config,
+    rate_limiter: RateLimiter,
+    nonce_store: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     // data: Arc<Mutex<HashMap<String, String>>>, <- this is how to have shared state
 }
 
@@ -338,7 +498,7 @@ async fn health(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    verify_headers(&state, &headers, "get", "health", None)?;
+    verify_headers(&state, &headers, "get", "health", None).await?;
     tracing::debug!("Health check");
     Ok(Json(json!({"status": "ok"})))
 }
@@ -369,7 +529,8 @@ async fn run(
         "post",
         "run",
         Some(serde_json::json!({"command": payload.command})),
-    )?;
+    )
+    .await?;
 
     tracing::debug!("Running command: {}", payload.command);
 
@@ -407,7 +568,8 @@ async fn status(
         "post",
         "status",
         Some(serde_json::json!({"job": payload.job})),
-    )?;
+    )
+    .await?;
 
     tracing::debug!("Status request for job: {:?}", payload);
 
@@ -430,7 +592,7 @@ async fn fetch_jobs(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Job>>, AppError> {
-    verify_headers(&state, &headers, "get", "fetch_jobs", None)?;
+    verify_headers(&state, &headers, "get", "fetch_jobs", None).await?;
 
     tracing::debug!("Fetching jobs");
 
@@ -464,7 +626,8 @@ async fn fetch_job(
         "post",
         "fetch_job",
         Some(serde_json::json!(uid)),
-    )?;
+    )
+    .await?;
 
     tracing::debug!("fetch_job: {:?}", uid);
 
@@ -512,7 +675,8 @@ async fn send_result(
         "post",
         "send_result",
         Some(serde_json::json!(job)),
-    )?;
+    )
+    .await?;
 
     tracing::debug!("Sending result: {:?}", job);
 
@@ -541,7 +705,7 @@ async fn get_portal(
     State(state): State<AppState>,
 ) -> Result<Json<PortalIdentifier>, AppError> {
     tracing::debug!("get_portal");
-    verify_headers(&state, &headers, "get", "get_portal", None)?;
+    verify_headers(&state, &headers, "get", "get_portal", None).await?;
 
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => match PortalIdentifier::parse(portal.name()) {
@@ -575,7 +739,8 @@ async fn sync_offerings(
         "post",
         "sync_offerings",
         Some(serde_json::json!(offerings)),
-    )?;
+    )
+    .await?;
 
     tracing::debug!("sync_offerings: {:?}", offerings);
 
@@ -638,7 +803,8 @@ async fn add_offerings(
         "post",
         "add_offerings",
         Some(serde_json::json!(offerings)),
-    )?;
+    )
+    .await?;
 
     tracing::debug!("add_offerings: {:?}", offerings);
 
@@ -696,7 +862,7 @@ async fn get_offerings(
     State(state): State<AppState>,
 ) -> Result<Json<Destinations>, AppError> {
     tracing::debug!("get_offerings");
-    verify_headers(&state, &headers, "get", "get_offerings", None)?;
+    verify_headers(&state, &headers, "get", "get_offerings", None).await?;
 
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
@@ -755,7 +921,8 @@ async fn remove_offerings(
         "post",
         "remove_offerings",
         Some(serde_json::json!(offerings)),
-    )?;
+    )
+    .await?;
 
     tracing::debug!("remove_offerings: {:?}", offerings);
 
@@ -824,6 +991,8 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
     // create a global state object for the web API
     let state = AppState {
         config: config.clone(),
+        rate_limiter: RateLimiter::new(1000, 10), // 1000 requests per 10 seconds
+        nonce_store: Arc::new(Mutex::new(HashMap::new())),
         // data: Arc::new(Mutex::new(HashMap::new())),
     };
 
@@ -888,8 +1057,10 @@ mod tests {
         let protocol = "get";
         let function = "health";
         let arguments = None;
+        let nonce = None;
 
-        let signed = sign_api_call(&key, &date, protocol, function, &arguments).unwrap_or_default();
+        let signed =
+            sign_api_call(&key, &date, protocol, function, &arguments, nonce).unwrap_or_default();
 
         #[allow(clippy::unwrap_used)] // safe to do this in a test
         {

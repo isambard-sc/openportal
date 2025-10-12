@@ -101,7 +101,9 @@ where
 
     let url = config.url.join(function).context("Could not join URL")?;
 
-    let auth_token = sign_api_call(&config.key, &date, "get", function, &None)?;
+    // Generate a unique nonce for replay attack prevention
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let auth_token = sign_api_call(&config.key, &date, "get", function, &None, Some(&nonce))?;
 
     let result = reqwest::blocking::Client::new()
         .get(url)
@@ -109,6 +111,7 @@ where
         .header("Accept", "application/json")
         .header("Authorization", auth_token)
         .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+        .header("X-Nonce", nonce)
         .send()
         .with_context(|| format!("Could not call function: {}", function))?;
 
@@ -137,12 +140,15 @@ where
 
     let url = config.url.join(function).context("Could not join URL")?;
 
+    // Generate a unique nonce for replay attack prevention
+    let nonce = uuid::Uuid::new_v4().to_string();
     let auth_token = sign_api_call(
         &config.key,
         &date,
         "post",
         function,
         &Some(arguments.to_owned()),
+        Some(&nonce),
     )?;
 
     let result = reqwest::blocking::Client::new()
@@ -151,6 +157,7 @@ where
         .header("Accept", "application/json")
         .header("Authorization", auth_token)
         .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+        .header("X-Nonce", nonce)
         .json(&arguments)
         .send()
         .with_context(|| format!("Could not call function: {}", function))?;

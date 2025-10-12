@@ -363,6 +363,7 @@ impl UserUsageReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyProjectUsageReport {
     reports: HashMap<String, Usage>,
+    num_jobs: u64,
     is_complete: bool,
 }
 
@@ -374,6 +375,11 @@ impl std::fmt::Display for DailyProjectUsageReport {
 
         for user in users {
             writeln!(f, "{}: {}", user, self.reports[user])?;
+        }
+
+        match self.num_jobs() {
+            0 => (),
+            n => writeln!(f, "Number of jobs: {}", n)?,
         }
 
         match self.is_complete() {
@@ -396,12 +402,20 @@ impl DailyProjectUsageReport {
         self.reports.values().cloned().sum()
     }
 
+    pub fn num_jobs(&self) -> u64 {
+        self.num_jobs
+    }
+
     pub fn add_usage(&mut self, local_user: &str, usage: Usage) {
         *self.reports.entry(local_user.to_string()).or_default() += usage;
     }
 
     pub fn set_usage(&mut self, local_user: &str, usage: Usage) {
         self.reports.insert(local_user.to_string(), usage);
+    }
+
+    pub fn set_num_jobs(&mut self, num_jobs: u64) {
+        self.num_jobs = num_jobs;
     }
 
     pub fn add_unattributed_usage(&mut self, usage: Usage) {
@@ -509,9 +523,14 @@ impl std::fmt::Display for ProjectUsageReport {
         }
 
         for date in dates {
-            writeln!(f, "{}", date)?;
-
             let report = self.reports.get(date).cloned().unwrap_or_default();
+
+            if report.total_usage() == Usage::default() {
+                // skip days with no usage
+                continue;
+            }
+
+            writeln!(f, "{}", date)?;
 
             for user in report.local_users() {
                 if let Some(userid) = users.get(&user) {
@@ -521,11 +540,13 @@ impl std::fmt::Display for ProjectUsageReport {
                 }
             }
 
+            writeln!(f, "Number of jobs: {}", report.num_jobs())?;
             writeln!(f, "Daily total: {}", report.total_usage())?;
             writeln!(f, "----------------------------------------")?;
         }
 
         writeln!(f, "========================================")?;
+        writeln!(f, "Number of jobs: {}", self.num_jobs())?;
         writeln!(f, "Total: {}", self.total_usage())
     }
 }
@@ -705,6 +726,10 @@ impl ProjectUsageReport {
             .cloned()
             .map(|r| r.total_usage())
             .sum()
+    }
+
+    pub fn num_jobs(&self) -> u64 {
+        self.reports.values().map(|r| r.num_jobs()).sum()
     }
 
     pub fn unmapped_usage(&self) -> Usage {

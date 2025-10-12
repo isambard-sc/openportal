@@ -1613,6 +1613,11 @@ impl ProjectUsageReport {
     }
 
     #[getter]
+    fn num_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.num_jobs())
+    }
+
+    #[getter]
     fn unmapped_usage(&self) -> PyResult<Usage> {
         Ok(self.0.unmapped_usage().into())
     }
@@ -1761,6 +1766,11 @@ impl DailyProjectUsageReport {
 
     fn usage(&self, user: &str) -> PyResult<Usage> {
         Ok(self.0.usage(user).into())
+    }
+
+    #[getter]
+    fn num_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.num_jobs())
     }
 
     fn local_users(&self) -> PyResult<Vec<String>> {

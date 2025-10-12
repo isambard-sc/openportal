@@ -1032,6 +1032,8 @@ async fn get_hourly_report(
         }
     }
 
+    daily_report.set_num_jobs(num_jobs);
+
     tracing::debug!(
         "Got {} jobs consuming {} seconds for project {} on {}",
         num_jobs,
@@ -1152,6 +1154,8 @@ async fn get_daily_report(
 
             let mut daily_report = DailyProjectUsageReport::default();
             let mut total_usage: u64 = 0;
+
+            daily_report.set_num_jobs(jobs.len() as u64);
 
             for job in jobs {
                 total_usage += job.billed_node_seconds();

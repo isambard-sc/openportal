@@ -688,10 +688,12 @@ impl Hour {
         &self.hour
     }
 
+    // the start time is inclusive, i.e. [start_time, end_time)
     pub fn start_time(&self) -> chrono::NaiveDateTime {
         self.hour
     }
 
+    // the end time is exclusive, i.e. [start_time, end_time)
     pub fn end_time(&self) -> chrono::NaiveDateTime {
         self.hour + chrono::Duration::hours(1)
     }
@@ -1190,6 +1192,7 @@ impl DateRange {
         &self.end_date
     }
 
+    // the start time is inclusive, i.e. [start_time, end_time)
     pub fn start_time(&self) -> chrono::NaiveDateTime {
         self.start_date
             .date
@@ -1203,17 +1206,17 @@ impl DateRange {
             })
     }
 
+    // the end time is exclusive, i.e. [start_time, end_time)
     pub fn end_time(&self) -> chrono::NaiveDateTime {
-        self.end_date
-            .date
-            .and_hms_opt(23, 59, 59)
-            .unwrap_or_else(|| {
-                tracing::error!(
-                    "Invalid end date '{}' - cannot convert to a end_time",
-                    self.end_date
-                );
-                chrono::NaiveDateTime::default()
-            })
+        // this will finish at midnight on the day after the end date,
+        // as we have a half-open interval [start_time, end_time)
+        self.end_date.date.and_hms_opt(0, 0, 0).unwrap_or_else(|| {
+            tracing::error!(
+                "Invalid end date '{}' - cannot convert to an end_time",
+                self.end_date
+            );
+            chrono::NaiveDateTime::default()
+        }) + chrono::Duration::days(1)
     }
 
     pub fn days(&self) -> Vec<Date> {

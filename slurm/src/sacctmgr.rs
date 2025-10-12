@@ -60,54 +60,68 @@ impl LockedRunner {
         &self.runner.scontrol
     }
 
-    pub fn process(&self, cmd: &str) -> Result<Vec<String>, Error> {
-        // replace all instances of SACCTMGR with the value of sacctmgr
-        // and all instances of SCONTROL with the value of scontrol,
-        // and then split into a vector using shlex
-
-        // the command should start with SACCTMGR or SCONTROL
-        if !cmd.starts_with("SACCTMGR") && !cmd.starts_with("SCONTROL") && !cmd.starts_with("SACCT")
-        {
-            tracing::error!(
-                "Slurm command '{}' does not start with SACCT, SACCTMGR or SCONTROL",
-                cmd
-            );
-            return Err(Error::Call(format!(
-                "Command does not start with SACCT, SACCTMGR or SCONTROL: {}",
-                cmd
-            )));
-        }
-
-        match shlex::split(
-            &cmd.replace("SACCTMGR", self.sacctmgr())
-                .replace("SCONTROL", self.scontrol())
-                .replace("SACCT", self.sacct()),
-        ) {
-            Some(cmd) => Ok(cmd),
-            None => {
-                tracing::error!("Unable to parse slurm command '{}'", cmd);
-                Err(Error::Call(format!("Could not parse command: {}", cmd)))
+    /// Build a command safely from a vector of arguments
+    /// This is the preferred method to avoid command injection
+    ///
+    /// Handles composite commands (e.g., "docker exec slurmctld sacctmgr") by splitting
+    /// the binary string and treating each part as a separate argument
+    pub fn build_command(&self, cmd_type: &str, args: Vec<String>) -> Result<Vec<String>, Error> {
+        let binary_str = match cmd_type {
+            "SACCTMGR" => self.sacctmgr(),
+            "SCONTROL" => self.scontrol(),
+            "SACCT" => self.sacct(),
+            _ => {
+                return Err(Error::Call(format!(
+                    "Unknown command type: {}. Must be SACCTMGR, SCONTROL, or SACCT",
+                    cmd_type
+                )));
             }
-        }
+        };
+
+        // Split the binary string to handle composite commands like "docker exec slurmctld sacctmgr"
+        // Use shlex to properly handle quoted arguments in the command
+        let binary_parts = match shlex::split(binary_str) {
+            Some(parts) if !parts.is_empty() => parts,
+            _ => {
+                return Err(Error::Call(format!(
+                    "Could not parse command binary: {}",
+                    binary_str
+                )));
+            }
+        };
+
+        let mut command = binary_parts;
+        command.extend(args);
+
+        // remove any empty arguments
+        command.retain(|arg| !arg.trim().is_empty());
+
+        Ok(command)
     }
 
-    pub async fn run(&self, cmd: &str, timeout: std::time::Duration) -> Result<String, Error> {
-        let processed_cmd = self.process(cmd)?;
+    pub async fn run(
+        &self,
+        cmd: &Vec<String>,
+        timeout: std::time::Duration,
+    ) -> Result<String, Error> {
+        if cmd.is_empty() {
+            return Err(Error::Call("Empty command vector".to_string()));
+        }
 
-        tracing::debug!("Running command: {:?}", processed_cmd);
+        tracing::debug!("Running command: {:?}", cmd);
 
         let start_time = chrono::Utc::now();
-        let output = tokio::process::Command::new(&processed_cmd[0])
-            .args(&processed_cmd[1..])
+        let output = tokio::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
             .kill_on_drop(true)
             .output();
 
-        // use a tokio timeout to ensure we won't block indefinitely - no job should take more than 60 seconds
+        // use a tokio timeout to ensure we won't block indefinitely
         let output = match tokio::time::timeout(timeout, output).await {
             Ok(output) => output,
             Err(_) => {
                 tracing::error!(
-                    "Command '{}' timed out after {:?} seconds",
+                    "Command {:?} timed out after {:?} seconds",
                     cmd,
                     timeout.as_secs()
                 );
@@ -121,7 +135,7 @@ impl LockedRunner {
 
         if duration_ms > 5000 {
             tracing::warn!(
-                "Running command '{}' took {} seconds",
+                "Running command {:?} took {} seconds",
                 cmd,
                 duration_ms as f64 / 1000.0
             );
@@ -130,8 +144,7 @@ impl LockedRunner {
         let output = match output {
             Ok(output) => output,
             Err(e) => {
-                tracing::error!("Could not run command '{}': {}", cmd, e);
-                tracing::error!("Processed command: {:?}", processed_cmd);
+                tracing::error!("Could not run command {:?}: {}", cmd, e);
                 return Err(Error::Call("Could not run command".to_string()));
             }
         };
@@ -149,12 +162,12 @@ impl LockedRunner {
             Ok(output)
         } else {
             tracing::error!(
-                "Command '{}' failed: {}",
+                "Command {:?} failed: {}",
                 cmd,
                 String::from_utf8(output.stderr.clone()).context("Could not parse error")?
             );
             Err(Error::Call(format!(
-                "Command '{}' failed: {}",
+                "Command {:?} failed: {}",
                 cmd,
                 String::from_utf8(output.stderr).context("Could not parse error")?
             )))
@@ -163,7 +176,7 @@ impl LockedRunner {
 
     pub async fn run_json(
         &self,
-        cmd: &str,
+        cmd: &Vec<String>,
         timeout: std::time::Duration,
     ) -> Result<serde_json::Value, Error> {
         let output = self.run(cmd, timeout).await?;
@@ -176,7 +189,7 @@ impl LockedRunner {
 
                 if duration_ms > 5000 {
                     tracing::warn!(
-                        "Parsing JSON output of command '{}' took {} seconds",
+                        "Parsing JSON output of command '{:?}' took {} seconds",
                         cmd,
                         duration_ms as f64 / 1000.0
                     );
@@ -252,18 +265,21 @@ async fn force_add_slurm_account(
     // get the parent account name from the cache
     let parent_account = cache::get_parent_account().await?;
 
-    runner(expires)
-        .await?
-        .run(&format!(
-            "SACCTMGR --immediate add account name=\"{}\" cluster=\"{}\" parent=\"{}\" organization=\"{}\" description=\"{}\"",
-            account.name(),
-            cluster,
-            parent_account,
-            account.organization(),
-            account.description()
-        ), DEFAULT_TIMEOUT
-        )
-        .await?;
+    let cmd = runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--immediate".to_string(),
+            "add".to_string(),
+            "account".to_string(),
+            format!("name={}", account.name()),
+            format!("cluster={}", cluster),
+            format!("parent={}", parent_account),
+            format!("organization={}", account.organization()),
+            format!("description={}", account.description()),
+        ],
+    )?;
+
+    runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
 
     Ok(account.clone())
 }
@@ -276,17 +292,19 @@ async fn get_account_from_slurm(
 
     let cluster = cache::get_cluster().await?;
 
-    let response = match runner(expires)
-        .await?
-        .run_json(
-            &format!(
-                "SACCTMGR --json list accounts withassoc name={} cluster={}",
-                account, cluster
-            ),
-            DEFAULT_TIMEOUT,
-        )
-        .await
-    {
+    let cmd = runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--json".to_string(),
+            "list".to_string(),
+            "accounts".to_string(),
+            "withassoc".to_string(),
+            format!("name={}", account),
+            format!("cluster={}", cluster),
+        ],
+    )?;
+
+    let response = match runner(expires).await?.run_json(&cmd, DEFAULT_TIMEOUT).await {
         Ok(response) => response,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -455,15 +473,21 @@ async fn get_user_from_slurm(
     let user = clean_user_name(user)?;
     let cluster = cache::get_cluster().await?;
 
+    let cmd = runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--json".to_string(),
+            "list".to_string(),
+            "users".to_string(),
+            "WithAssoc".to_string(),
+            format!("name={}", user),
+            format!("cluster={}", cluster),
+        ],
+    )?;
+
     let response = runner(expires)
         .await?
-        .run_json(
-            &format!(
-                "SACCTMGR --json list users name={} cluster={} WithAssoc",
-                user, cluster
-            ),
-            DEFAULT_TIMEOUT,
-        )
+        .run_json(&cmd, DEFAULT_TIMEOUT)
         .await?;
 
     // there should be a users list, with a single entry for this user
@@ -591,15 +615,21 @@ async fn add_account_association(
     // get the parent account name from the cache
     let parent_account = cache::get_parent_account().await?;
 
-    runner(expires).await?.run(
-        &format!(
-            "SACCTMGR --immediate add account name=\"{}\" Clusters=\"{}\" parent=\"{}\" Associations=\"{}\" Comment=\"Created by OpenPortal\"",
-            account.name(),
-            cluster,
-            parent_account,
-            account.name()
-        ), DEFAULT_TIMEOUT
-    ).await?;
+    let cmd = runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--immediate".to_string(),
+            "add".to_string(),
+            "account".to_string(),
+            format!("name={}", account.name()),
+            format!("Clusters={}", cluster),
+            format!("parent={}", parent_account),
+            format!("Associations={}", account.name()),
+            "Comment=Created by OpenPortal".to_string(),
+        ],
+    )?;
+
+    runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
 
     Ok(())
 }
@@ -638,17 +668,20 @@ async fn add_user_association(
         add_account_association(account, expires).await?;
 
         // add the association
-        runner(expires)
-            .await?
-            .run(
-                &format!(
-                    "SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" Comment=\"Created by OpenPortal\"",
-                    user.name(),
-                    cluster,
-                    account.name()
-                ), DEFAULT_TIMEOUT
-            )
-            .await?;
+        let cmd = runner(expires).await?.build_command(
+            "SACCTMGR",
+            vec![
+                "--immediate".to_string(),
+                "add".to_string(),
+                "user".to_string(),
+                format!("name={}", user.name()),
+                format!("Clusters={}", cluster),
+                format!("Accounts={}", account.name()),
+                "Comment=Created by OpenPortal".to_string(),
+            ],
+        )?;
+
+        runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
 
         // update the user
         user = match get_user_from_slurm(user.name(), expires).await? {
@@ -669,17 +702,20 @@ async fn add_user_association(
     if make_default && *user.default_account() != Some(account.name().to_string()) {
         tracing::debug!("Will set user default account here");
 
-        runner(expires)
-            .await?
-            .run(&format!(
-                "SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\"",
-                user.name(),
-                cluster,
-                account.name(),
-                account.name()
-            ), DEFAULT_TIMEOUT
-            )
-            .await?;
+        let cmd = runner(expires).await?.build_command(
+            "SACCTMGR",
+            vec![
+                "--immediate".to_string(),
+                "add".to_string(),
+                "user".to_string(),
+                format!("name={}", user.name()),
+                format!("Clusters={}", cluster),
+                format!("DefaultAccount={}", account.name()),
+                "Comment=Updated by OpenPortal".to_string(),
+            ],
+        )?;
+
+        runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
 
         // update the user
         user = match get_user_from_slurm(user.name(), expires).await? {
@@ -747,10 +783,21 @@ async fn get_user_create_if_not_exists(
 
     let cluster = cache::get_cluster().await?;
 
-    runner(expires).await?.run(
-        &format!("SACCTMGR --immediate add user name=\"{}\" Clusters=\"{}\" Accounts=\"{}\" DefaultAccount=\"{}\" Comment=\"Created by OpenPortal\"",
-                    username, cluster, account, account), DEFAULT_TIMEOUT
-    ).await?;
+    let cmd = runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--immediate".to_string(),
+            "add".to_string(),
+            "user".to_string(),
+            format!("name={}", username),
+            format!("Clusters={}", cluster),
+            format!("Accounts={}", account),
+            format!("DefaultAccount={}", account),
+            "Comment=Created by OpenPortal".to_string(),
+        ],
+    )?;
+
+    runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
 
     // now load the user from slurm to make sure it exists
     let slurm_user = match get_user(user.local_user(), expires).await? {
@@ -808,13 +855,17 @@ pub async fn find_cluster() -> Result<(), Error> {
     let expires = chrono::Utc::now() + chrono::Duration::minutes(1);
 
     // ask slurm for all of the clusters
-    let clusters = runner(&expires)
-        .await?
-        .run(
-            "SACCTMGR --noheader --parsable2 list clusters",
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+    let cmd = runner(&expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--noheader".to_string(),
+            "--parsable2".to_string(),
+            "list".to_string(),
+            "clusters".to_string(),
+        ],
+    )?;
+
+    let clusters = runner(&expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
 
     // the output is the list of clusters, one per line, separated by '|', where
     // the cluster name is the first column
@@ -934,17 +985,25 @@ async fn get_hourly_report(
 
         // now try to get the report for this hour - we use a much longer
         // timeout here as we may be getting a lot of jobs
+        let cmd = runner(expires).await?.build_command(
+            "SACCT",
+            vec![
+                "--noconvert".to_string(),
+                "--allocations".to_string(),
+                "--allusers".to_string(),
+                format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
+                format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
+                format!("--account={}", account.name()),
+                format!("--cluster={}", cluster),
+                partition_command.to_string(),
+                "--json".to_string(),
+            ],
+        )?;
+
         let response = runner(expires)
-        .await?
-        .run_json(&format!(
-            "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
-            start_time.format("%Y-%m-%dT%H:%M:%S"),
-            end_time.format("%Y-%m-%dT%H:%M:%S"),
-            account.name(),
-            cluster,
-            partition_command
-        ), std::time::Duration::from_secs(120))
-        .await?;
+            .await?
+            .run_json(&cmd, std::time::Duration::from_secs(120))
+            .await?;
 
         let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
 
@@ -1060,17 +1119,25 @@ async fn get_daily_report(
 
     // try to get the daily report from slurm - use a shorter 20 second
     // timeout as we will fall back to hourly reports if this fails
+    let cmd = runner(expires).await?.build_command(
+        "SACCT",
+        vec![
+            "--noconvert".to_string(),
+            "--allocations".to_string(),
+            "--allusers".to_string(),
+            format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
+            format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
+            format!("--account={}", account.name()),
+            format!("--cluster={}", cluster),
+            partition_command.to_string(),
+            "--json".to_string(),
+        ],
+    )?;
+
     let response = runner(expires)
-            .await?
-            .run_json(&format!(
-                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
-                start_time.format("%Y-%m-%dT%H:%M:%S"),
-                end_time.format("%Y-%m-%dT%H:%M:%S"),
-                account.name(),
-                cluster,
-                partition_command
-            ), std::time::Duration::from_secs(20))
-            .await;
+        .await?
+        .run_json(&cmd, std::time::Duration::from_secs(20))
+        .await;
 
     match response {
         Ok(response) => {
@@ -1255,16 +1322,21 @@ pub async fn get_limit(
     };
 
     // check that the limits in slurm match up...
+    let cmd = runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--json".to_string(),
+            "show".to_string(),
+            "association".to_string(),
+            "where".to_string(),
+            format!("account={}", account.name()),
+            format!("cluster={}", cache::get_cluster().await?),
+        ],
+    )?;
+
     let response = runner(expires)
         .await?
-        .run_json(
-            &format!(
-                "SACCTMGR --json show association where account={} cluster={}",
-                account.name(),
-                cache::get_cluster().await?
-            ),
-            DEFAULT_TIMEOUT,
-        )
+        .run_json(&cmd, DEFAULT_TIMEOUT)
         .await?;
 
     let limits = match response.get("associations") {
@@ -1428,16 +1500,18 @@ pub async fn set_limit(
             }
 
             if !tres.is_empty() {
-                runner(expires)
-                    .await?
-                    .run(&format!(
-                        "SACCTMGR --immediate modify account {} set GrpTRESMins={} where cluster={}",
-                        account.name(),
-                        tres.join(","),
-                        cluster,
-                    ), DEFAULT_TIMEOUT
-                    )
-                    .await?;
+                let cmd = runner(expires).await?.build_command(
+                    "SACCTMGR",
+                    vec![
+                        "--immediate".to_string(),
+                        "modify".to_string(),
+                        "account".to_string(),
+                        format!("set GrpTRESMins={}", tres.join(",")),
+                        format!("where cluster={}", cluster),
+                    ],
+                )?;
+
+                runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
             }
 
             // now we've made the change, save the account to the cache

@@ -3072,16 +3072,24 @@ pub async fn get_usage_report(
         }
 
         // it is not cached, so get from slurm
+        let cmd = sacctmgr::runner(expires).await?.build_command(
+            "SACCT",
+            vec![
+                "--noconvert".to_string(),
+                "--allocations".to_string(),
+                "--allusers".to_string(),
+                format!("--starttime={}", day),
+                format!("--endtime={}", day.next()),
+                format!("--account={}", account.name()),
+                format!("--cluster={}", cluster),
+                partition_command.clone(),
+                "--json".to_string(),
+            ],
+        )?;
+
         let response = sacctmgr::runner(expires)
             .await?
-            .run_json(&format!(
-                "SACCT --noconvert --allocations --allusers --starttime={} --endtime={} --account={} --cluster={} {} --json",
-                day,
-                day.next(),
-                account.name(),
-                cluster,
-                partition_command
-            ), sacctmgr::DEFAULT_TIMEOUT)
+            .run_json(&cmd, sacctmgr::DEFAULT_TIMEOUT)
             .await?;
 
         let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)?;
@@ -3145,16 +3153,21 @@ pub async fn get_limit(
     };
 
     // check that the limits in slurm match up...
+    let cmd = sacctmgr::runner(expires).await?.build_command(
+        "SACCTMGR",
+        vec![
+            "--json".to_string(),
+            "show".to_string(),
+            "association".to_string(),
+            "where".to_string(),
+            format!("account={}", account.name()),
+            format!("cluster={}", cache::get_cluster().await?),
+        ],
+    )?;
+
     let response = sacctmgr::runner(expires)
         .await?
-        .run_json(
-            &format!(
-                "SACCTMGR --json show association where account={} cluster={}",
-                account.name(),
-                cache::get_cluster().await?
-            ),
-            sacctmgr::DEFAULT_TIMEOUT,
-        )
+        .run_json(&cmd, sacctmgr::DEFAULT_TIMEOUT)
         .await?;
 
     let limits = match response.get("associations") {
@@ -3323,14 +3336,22 @@ pub async fn set_limit(
             }
 
             if !tres.is_empty() {
+                let cmd = sacctmgr::runner(expires).await?.build_command(
+                    "SACCTMGR",
+                    vec![
+                        "--immediate".to_string(),
+                        "modify".to_string(),
+                        "account".to_string(),
+                        account.name().to_string(),
+                        "set".to_string(),
+                        format!("GrpTRESMins={}", tres.join(",")),
+                        format!("where cluster={}", cluster),
+                    ],
+                )?;
+
                 sacctmgr::runner(expires)
                     .await?
-                    .run(&format!(
-                        "SACCTMGR --immediate modify account {} set GrpTRESMins={} where cluster={}",
-                        account.name(),
-                        tres.join(","),
-                        cluster,
-                    ), sacctmgr::DEFAULT_TIMEOUT)
+                    .run(&cmd, sacctmgr::DEFAULT_TIMEOUT)
                     .await?;
             }
 

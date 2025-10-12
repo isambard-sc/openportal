@@ -28,6 +28,9 @@ use tokio::{net::TcpListener, sync::Mutex};
 use url::Url;
 use uuid::Uuid;
 
+type RateLimitMap = HashMap<IpAddr, (u32, DateTime<Utc>)>;
+type SharedRateLimitMap = Arc<Mutex<RateLimitMap>>;
+
 ///
 /// Return the OpenPortal authorisation header for the passed datetime,
 /// protocol, function, (optional) arguments, and nonce, signed with the passed
@@ -429,7 +432,7 @@ async fn verify_headers(
 #[derive(Clone, Debug)]
 struct RateLimiter {
     // Map of IP address to (attempt count, window start time)
-    attempts: Arc<Mutex<HashMap<IpAddr, (u32, DateTime<Utc>)>>>,
+    attempts: SharedRateLimitMap,
     max_attempts: u32,
     window_seconds: i64,
 }

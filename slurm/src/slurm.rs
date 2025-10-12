@@ -5,449 +5,27 @@ use anyhow::Context;
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use once_cell::sync::Lazy;
+use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 use reqwest::{Client, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
+use std::sync::Arc;
 use std::time::Duration;
 use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
 use templemeads::job::assert_not_expired;
 use templemeads::usagereport::{ProjectUsageReport, Usage};
 use templemeads::Error;
-use tokio::sync::{Mutex, MutexGuard, Semaphore};
+use tokio::sync::Mutex;
 
 use crate::cache;
 use crate::sacctmgr;
 
-///
-/// Call a get URL on the slurmrestd server described in 'auth'.
-///
-async fn call_get(
-    backend: &str,
-    function: &str,
-    query_params: &Vec<(&str, &str)>,
-) -> Result<serde_json::Value, Error> {
-    // get the auth details from the global Slurm client
-    let mut auth = auth().await?;
-    auth.num_reconnects = 0;
-
-    // has the token expired?
-    if auth.token_expired()? {
-        tracing::warn!("Token has expired. Reconnecting.");
-
-        // try to reconnect to the server
-        loop {
-            match login(
-                &auth.server,
-                &auth.user,
-                &auth.token_command,
-                auth.token_lifespan,
-            )
-            .await
-            {
-                Ok(session) => {
-                    auth.jwt = session.jwt;
-                    auth.jwt_creation_time = session.start_time;
-                    auth.version = session.version;
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Could not login to FreeIPA server: {}. Error: {}",
-                        auth.server,
-                        e
-                    );
-
-                    auth.num_reconnects += 1;
-
-                    if auth.num_reconnects > 3 {
-                        auth.num_reconnects = 0;
-                        return Err(Error::Call(
-                            "Failed multiple reconnection attempts!".to_string(),
-                        ));
-                    }
-                }
-            }
-
-            // sleep for 100 ms before trying again
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        auth.num_reconnects = 0;
-    }
-
-    let url = match Url::parse_with_params(
-        &format!(
-            "{}/{}/v{}/{}",
-            &auth.server, backend, &auth.version, function
-        ),
-        query_params,
-    ) {
-        Ok(url) => url,
-        Err(e) => {
-            tracing::error!("Could not parse URL: {}", e);
-            return Err(Error::Call("Could not parse URL".to_string()));
-        }
-    };
-
-    tracing::debug!("Calling function {}", url);
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("Could not build client")?;
-
-    let mut result = client
-        .get(url.clone())
-        .header("Referer", format!("{}/ipa", &auth.server))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("X-SLURM-USER-NAME", &auth.user)
-        .header("X-SLURM-USER-TOKEN", auth.jwt.expose_secret().to_string())
-        .send()
-        .await
-        .with_context(|| format!("Could not call function: {}", url))?;
-
-    // if this is an authorisation error, try to reconnect
-    while result.status().as_u16() == 401 {
-        auth.num_reconnects += 1;
-
-        if auth.num_reconnects > 3 {
-            return Err(Error::Call(format!(
-                "Authorisation (401) error: Could not get response for function: {}. Status: {}. Response: {:?}",
-                url,
-                result.status(),
-                    result
-                )));
-        }
-
-        tracing::error!("Authorisation (401) error. Reconnecting.");
-
-        match login(
-            &auth.server,
-            &auth.user,
-            &auth.token_command,
-            auth.token_lifespan,
-        )
-        .await
-        {
-            Ok(session) => {
-                auth.jwt = session.jwt;
-                auth.jwt_creation_time = session.start_time;
-                auth.version = session.version;
-
-                // create a new client with the new cookies
-                let client = Client::builder()
-                    .timeout(Duration::from_secs(60))
-                    .build()
-                    .context("Could not build client")?;
-
-                // retry the call
-                result = client
-                    .get(url.clone())
-                    .header("Referer", format!("{}/ipa", &auth.server))
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .send()
-                    .await
-                    .with_context(|| format!("Could not call function: {}", url))?;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Could not login to FreeIPA server: {}. Error: {}",
-                    auth.server,
-                    e
-                );
-            }
-        }
-    }
-
-    if result.status().as_u16() == 500 {
-        tracing::error!(
-            "500 error - slurmrestd error when calling {} as user {}.",
-            url,
-            auth.user
-        );
-
-        match result.json::<serde_json::Value>().await {
-            Ok(json) => tracing::error!("Server response: {}", json),
-            Err(_) => tracing::error!("Could not decode the server's response."),
-        };
-
-        return Err(Error::Call(format!(
-            "500 error - slurmrestd error when calling {} as user {}.",
-            url, auth.user
-        )));
-    }
-
-    // reset the number of reconnects, as we have clearly been successful
-    auth.num_reconnects = 0;
-
-    if result.status().is_success() {
-        let response: serde_json::Value = result
-            .json()
-            .await
-            .with_context(|| "Could not decode json from response".to_owned())?;
-
-        // are there any warnings - print them out if there are
-        if let Some(warnings) = response
-            .get("warnings")
-            .unwrap_or(&serde_json::Value::Null)
-            .as_array()
-        {
-            if !warnings.is_empty() {
-                tracing::warn!("Warnings: {:?}", warnings);
-            }
-        }
-
-        // are there any errors - raise these as errors if there are
-        if let Some(errors) = response
-            .get("errors")
-            .unwrap_or(&serde_json::Value::Null)
-            .as_array()
-        {
-            if !errors.is_empty() {
-                tracing::error!("Errors: {:?}", errors);
-                return Err(Error::Call(format!("Slurmrestd errors: {:?}", errors)));
-            }
-        }
-
-        Ok(response)
-    } else {
-        tracing::error!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
-            result.status(),
-            result
-        );
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
-            result.status(),
-            result
-        )))
-    }
-}
-
-///
-/// Call a post URL on the slurmrestd server described in 'auth'.
-///
-async fn call_post(
-    backend: &str,
-    function: &str,
-    payload: &serde_json::Value,
-) -> Result<(), Error> {
-    // get the auth details from the global Slurm client
-    let mut auth = auth().await?;
-    auth.num_reconnects = 0;
-
-    // has the token expired?
-    if auth.token_expired()? {
-        tracing::warn!("Token has expired. Reconnecting.");
-
-        // try to reconnect to the server
-        loop {
-            match login(
-                &auth.server,
-                &auth.user,
-                &auth.token_command,
-                auth.token_lifespan,
-            )
-            .await
-            {
-                Ok(session) => {
-                    auth.jwt = session.jwt;
-                    auth.jwt_creation_time = session.start_time;
-                    auth.version = session.version;
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Could not login to FreeIPA server: {}. Error: {}",
-                        auth.server,
-                        e
-                    );
-
-                    auth.num_reconnects += 1;
-
-                    if auth.num_reconnects > 3 {
-                        auth.num_reconnects = 0;
-                        return Err(Error::Call(
-                            "Failed multiple reconnection attempts!".to_string(),
-                        ));
-                    }
-                }
-            }
-
-            // sleep for 100 ms before trying again
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        auth.num_reconnects = 0;
-    }
-
-    let url = format!(
-        "{}/{}/v{}/{}",
-        &auth.server, backend, &auth.version, function
-    );
-
-    tracing::debug!("Calling function {} with payload: {:?}", url, payload);
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("Could not build client")?;
-
-    let mut result = client
-        .post(&url)
-        .header("Referer", format!("{}/ipa", &auth.server))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("X-SLURM-USER-NAME", &auth.user)
-        .header("X-SLURM-USER-TOKEN", auth.jwt.expose_secret().to_string())
-        .json(&payload)
-        .send()
-        .await
-        .with_context(|| format!("Could not call function: {}", url))?;
-
-    // if this is an authorisation error, try to reconnect
-    while result.status().as_u16() == 401 {
-        auth.num_reconnects += 1;
-
-        if auth.num_reconnects > 3 {
-            return Err(Error::Call(format!(
-                "Authorisation (401) error: Could not get response for function: {}. Status: {}. Response: {:?}",
-                url,
-                result.status(),
-                    result
-                )));
-        }
-
-        tracing::error!("Authorisation (401) error. Reconnecting.");
-
-        match login(
-            &auth.server,
-            &auth.user,
-            &auth.token_command,
-            auth.token_lifespan,
-        )
-        .await
-        {
-            Ok(session) => {
-                auth.jwt = session.jwt;
-                auth.jwt_creation_time = session.start_time;
-                auth.version = session.version;
-
-                // create a new client with the new cookies
-                let client = Client::builder()
-                    .timeout(Duration::from_secs(60))
-                    .build()
-                    .context("Could not build client")?;
-
-                // retry the call
-                result = client
-                    .post(&url)
-                    .header("Referer", format!("{}/ipa", &auth.server))
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await
-                    .with_context(|| format!("Could not call function: {}", url))?;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Could not login to FreeIPA server: {}. Error: {}",
-                    auth.server,
-                    e
-                );
-            }
-        }
-    }
-
-    if result.status().as_u16() == 500 {
-        tracing::error!(
-            "500 error - slurmrestd error when calling {} with payload {} as user {}.",
-            url,
-            payload,
-            auth.user
-        );
-
-        match result.json::<serde_json::Value>().await {
-            Ok(json) => tracing::error!("Server response: {}", json),
-            Err(_) => tracing::error!("Could not decode the server's response."),
-        };
-
-        return Err(Error::Call(format!(
-            "500 error - slurmrestd error when calling {} with payload {} as user {}.",
-            url, payload, auth.user
-        )));
-    }
-
-    if result.status().as_u16() == 304 {
-        // this is returned when the post causes no change on the server
-        tracing::warn!(
-            "Server returned '304'. No change for function: {} with payload {:?}",
-            url,
-            payload
-        );
-
-        return Ok(());
-    }
-
-    // reset the number of reconnects, as we have clearly been successful
-    auth.num_reconnects = 0;
-
-    if result.status().is_success() {
-        let response: serde_json::Value = result
-            .json()
-            .await
-            .with_context(|| "Could not decode json from response".to_owned())?;
-
-        // are there any warnings - print them out if there are
-        if let Some(warnings) = response
-            .get("warnings")
-            .unwrap_or(&serde_json::Value::Null)
-            .as_array()
-        {
-            if !warnings.is_empty() {
-                tracing::warn!("Warnings: {:?}", warnings);
-            }
-        }
-
-        // are there any errors - raise these as errors if there are
-        if let Some(errors) = response
-            .get("errors")
-            .unwrap_or(&serde_json::Value::Null)
-            .as_array()
-        {
-            if !errors.is_empty() {
-                tracing::error!("Errors: {:?}", errors);
-                return Err(Error::Call(format!("Slurmrestd errors: {:?}", errors)));
-            }
-        }
-
-        Ok(())
-    } else {
-        tracing::error!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
-            result.status(),
-            result
-        );
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            url,
-            result.status(),
-            result
-        )))
-    }
-}
-
 #[derive(Debug, Clone)]
-struct SlurmAuth {
+struct SlurmServer {
     server: String,
     token_command: String,
     token_lifespan: u32,
@@ -455,24 +33,34 @@ struct SlurmAuth {
     jwt: SecretString,
     jwt_creation_time: u64,
     version: String,
-    num_reconnects: u32,
+    num_failed_reconnects: u32,
+    last_failed_reconnect: Option<chrono::DateTime<Utc>>,
 }
 
-impl SlurmAuth {
-    fn default() -> Self {
-        SlurmAuth {
-            server: "".to_string(),
-            token_command: "".to_string(),
-            token_lifespan: 1800,
-            user: "".to_string(),
+impl SlurmServer {
+    fn new(server: &str, user: &str, token_command: &str, token_lifespan: u32) -> Self {
+        SlurmServer {
+            server: server.to_string(),
+            token_command: token_command.to_string(),
+            token_lifespan,
+            user: user.to_string(),
             jwt: SecretString::default(),
             jwt_creation_time: 0,
-            version: "".to_string(),
-            num_reconnects: 0,
+            version: String::new(),
+            num_failed_reconnects: 0,
+            last_failed_reconnect: None,
         }
     }
 
+    fn is_logged_in(&self) -> bool {
+        !self.jwt.expose_secret().is_empty() && !self.token_expired().unwrap_or(true)
+    }
+
     fn token_expired(&self) -> Result<bool, Error> {
+        if self.jwt.expose_secret().is_empty() {
+            return Ok(true);
+        }
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .context("Could not get current time")?;
@@ -480,9 +68,65 @@ impl SlurmAuth {
         // we give ourselves a 10 second margin of error
         Ok(10 + now.as_secs() - self.jwt_creation_time > self.token_lifespan as u64)
     }
+
+    fn set_login_failed(&mut self) {
+        self.num_failed_reconnects += 1;
+        self.last_failed_reconnect = Some(Utc::now());
+        self.jwt = SecretString::default();
+    }
+
+    fn set_login_success(&mut self, session: SlurmSession) {
+        self.jwt = session.jwt;
+        self.jwt_creation_time = session.start_time;
+        self.version = session.version;
+        self.num_failed_reconnects = 0;
+        self.last_failed_reconnect = None;
+    }
+
+    fn should_backoff(&self) -> bool {
+        if self.num_failed_reconnects < 3 {
+            return false;
+        }
+
+        if let Some(last_failed) = self.last_failed_reconnect {
+            let backoff_duration =
+                chrono::Duration::seconds(20 * self.num_failed_reconnects as i64);
+            Utc::now() < last_failed + backoff_duration
+        } else {
+            false
+        }
+    }
 }
 
-static SLURM_AUTH: Lazy<Mutex<SlurmAuth>> = Lazy::new(|| Mutex::new(SlurmAuth::default()));
+#[derive(Debug)]
+struct LockedSlurmServer {
+    server: tokio::sync::OwnedMutexGuard<SlurmServer>,
+}
+
+impl LockedSlurmServer {
+    fn server(&self) -> &str {
+        &self.server.server
+    }
+
+    fn user(&self) -> &str {
+        &self.server.user
+    }
+
+    fn version(&self) -> &str {
+        &self.server.version
+    }
+
+    fn jwt(&self) -> &SecretString {
+        &self.server.jwt
+    }
+
+    fn set_login_failed(&mut self) {
+        self.server.set_login_failed();
+    }
+}
+
+static SLURM_SERVERS: Lazy<Mutex<Vec<Arc<Mutex<SlurmServer>>>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
 
 struct SlurmSession {
     jwt: SecretString,
@@ -500,7 +144,10 @@ async fn login(
     user: &str,
     token_command: &str,
     token_lifespan: u32,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<SlurmSession, Error> {
+    assert_not_expired(expires)?;
+
     tracing::info!("Logging into Slurm server: {} using user {}", server, user);
 
     let mut token_command = token_command.to_string();
@@ -536,6 +183,8 @@ async fn login(
         .duration_since(std::time::UNIX_EPOCH)
         .context("Could not get current time")?;
 
+    assert_not_expired(expires)?;
+
     // get the JWT token via a tokio process
     let jwt = match tokio::process::Command::new(token_exe)
         .args(token_args)
@@ -564,6 +213,8 @@ async fn login(
         .nth(1)
         .context(format!("Could not extract JWT token from '{}'", jwt))?
         .to_string();
+
+    assert_not_expired(expires)?;
 
     // create a client
     let client = Client::builder()
@@ -638,6 +289,8 @@ async fn login(
     // lowest version - see how many higher versions we can use
     tracing::info!("Auto detecting maximum version of the Slurm API...");
     loop {
+        assert_not_expired(expires)?;
+
         // create a test version by joining together the version numbers as strings
         let test_version: String = version_numbers
             .iter()
@@ -693,6 +346,8 @@ async fn login(
     };
 
     tracing::info!("Using version {} of the Slurm API", version);
+
+    assert_not_expired(expires)?;
 
     // now we have connected, we need to find the cluster that we
     // should be working on
@@ -779,14 +434,522 @@ async fn login(
     })
 }
 
-// function to return the client protected by a MutexGuard - this ensures
-// that only a single slurm command can be run at a time, thereby
-// preventing overloading the server.
-async fn auth<'mg>() -> Result<MutexGuard<'mg, SlurmAuth>, Error> {
-    Ok(SLURM_AUTH.lock().await)
+async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedSlurmServer, Error> {
+    // get a copy of the servers, so that we don't hold the lock while we
+    // try to connect
+    assert_not_expired(expires)?;
+
+    let slurm_servers = SLURM_SERVERS.lock().await.clone();
+
+    if slurm_servers.is_empty() {
+        return Err(Error::Call(
+            "No Slurm servers have been initialised".to_string(),
+        ));
+    }
+
+    let mut rng = rand::rngs::StdRng::from_os_rng();
+
+    loop {
+        let mut should_all_backoff: bool = true;
+
+        // randomise the order of the servers for each loop
+        for server in slurm_servers
+            .iter()
+            .choose_multiple(&mut rng, slurm_servers.len())
+        {
+            assert_not_expired(expires)?;
+
+            match server.clone().try_lock_owned() {
+                Ok(mut server) => {
+                    if server.is_logged_in() {
+                        tracing::debug!("Already logged in to Slurm server: {}", server.server);
+                        return Ok(LockedSlurmServer { server });
+                    }
+
+                    if server.should_backoff() {
+                        tracing::warn!(
+                            "Backing off from trying to login to Slurm server: {}",
+                            server.server
+                        );
+                        continue;
+                    }
+
+                    should_all_backoff = false;
+
+                    tracing::info!("Logging in to Slurm server: {}", server.server);
+                    match login(
+                        &server.server,
+                        &server.user,
+                        &server.token_command,
+                        server.token_lifespan,
+                        expires,
+                    )
+                    .await
+                    {
+                        Ok(session) => {
+                            // update the server with the new session
+                            tracing::info!("Login successful to Slurm server: {}", server.server);
+                            server.set_login_success(session);
+                            return Ok(LockedSlurmServer { server });
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Could not login to Slurm server: {}. Error: {}",
+                                server.server,
+                                e
+                            );
+                            server.set_login_failed();
+
+                            // release the lock and try the next server
+                        }
+                    }
+                }
+                Err(_) => {
+                    // could not get the lock - this implies the server is in use
+                    should_all_backoff = false;
+                }
+            }
+        }
+
+        if should_all_backoff {
+            tracing::error!(
+                "All Slurm servers are backing off because of repeated login failures."
+            );
+            return Err(Error::Call(
+                "All Slurm servers are backing off because of repeated login failures.".to_string(),
+            ));
+        }
+
+        // wait a bit before trying again
+        assert_not_expired(expires)?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
-async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
+///
+/// Call a get URL on the slurmrestd server described in 'auth'.
+///
+async fn call_get(
+    backend: &str,
+    function: &str,
+    query_params: &Vec<(&str, &str)>,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<serde_json::Value, Error> {
+    // get a connected server
+    tracing::debug!("Getting a connected server...");
+    let start_time = Utc::now();
+    let mut lock = get_connected_server(expires).await?;
+    tracing::debug!(
+        "Connected server obtained! Took {} ms",
+        (Utc::now() - start_time).num_milliseconds()
+    );
+
+    // how much time is left before we expire?
+    let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
+
+    if time_left < 5 {
+        return Err(Error::Call(
+            "Not enough time left to call Slurm server".to_string(),
+        ));
+    }
+
+    tracing::debug!(
+        "Calling Slurm function: {} - we have {} seconds left before we expire",
+        function,
+        time_left
+    );
+
+    let url = match Url::parse_with_params(
+        &format!(
+            "{}/{}/v{}/{}",
+            lock.server(),
+            backend,
+            lock.version(),
+            function
+        ),
+        query_params,
+    ) {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::error!("Could not parse URL: {}", e);
+            return Err(Error::Call("Could not parse URL".to_string()));
+        }
+    };
+
+    tracing::debug!("Calling function {}", url);
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(time_left.min(60) as u64))
+        .build()
+        .context("Could not build client")?;
+
+    let mut result = client
+        .get(url.clone())
+        .header("Referer", format!("{}/ipa", lock.server()))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("X-SLURM-USER-NAME", lock.user())
+        .header("X-SLURM-USER-TOKEN", lock.jwt().expose_secret().to_string())
+        .send()
+        .await
+        .with_context(|| format!("Could not call function: {}", url))?;
+
+    // write a warning if this took a long time
+    if (Utc::now() - start_time).num_seconds() > 5 {
+        tracing::warn!(
+            "Slurm call for server {} to function {} took {} seconds",
+            lock.server(),
+            function,
+            (Utc::now() - start_time).num_seconds()
+        );
+    } else {
+        tracing::debug!(
+            "Slurm call for server {} to function {} took {} ms",
+            lock.server(),
+            function,
+            (Utc::now() - start_time).num_milliseconds()
+        );
+    }
+
+    // if this is an authorisation error, try to reconnect
+    while result.status().as_u16() == 401 {
+        tracing::warn!("Login error: 401 - authorisation failed.");
+        lock.set_login_failed();
+
+        // try to get another lock
+        drop(lock);
+
+        assert_not_expired(expires)?;
+
+        tracing::error!("Authorisation (401) error. Reconnecting.");
+        lock = get_connected_server(expires).await?;
+
+        if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
+            tracing::info!(
+                "Call to server {} for function {} is still running... {} seconds elapsed so far.",
+                lock.server(),
+                function,
+                (Utc::now() - start_time).num_seconds()
+            );
+        }
+
+        let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
+
+        if time_left < 5 {
+            return Err(Error::Call(
+                "Not enough time left to call Slurm server".to_string(),
+            ));
+        }
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(time_left.min(60) as u64))
+            .build()
+            .context("Could not build client")?;
+
+        // retry the call
+        result = client
+            .get(url.clone())
+            .header("Referer", format!("{}/ipa", lock.server()))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("X-SLURM-USER-NAME", lock.user())
+            .header("X-SLURM-USER-TOKEN", lock.jwt().expose_secret().to_string())
+            .send()
+            .await
+            .with_context(|| format!("Could not call function: {}", url))?;
+
+        if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
+            tracing::error!(
+                "Call to server {} for function {} has completed... {} seconds elapsed so far.",
+                lock.server(),
+                function,
+                (Utc::now() - start_time).num_seconds()
+            );
+        }
+    }
+
+    if result.status().as_u16() == 500 {
+        tracing::error!(
+            "500 error - slurmrestd error when calling {} as user {}.",
+            url,
+            lock.user()
+        );
+
+        match result.json::<serde_json::Value>().await {
+            Ok(json) => tracing::error!("Server response: {}", json),
+            Err(_) => tracing::error!("Could not decode the server's response."),
+        };
+
+        return Err(Error::Call(format!(
+            "500 error - slurmrestd error when calling {} as user {}.",
+            url,
+            lock.user()
+        )));
+    }
+
+    if result.status().is_success() {
+        let response: serde_json::Value = result
+            .json()
+            .await
+            .with_context(|| "Could not decode json from response".to_owned())?;
+
+        // are there any warnings - print them out if there are
+        if let Some(warnings) = response
+            .get("warnings")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !warnings.is_empty() {
+                tracing::warn!("Warnings: {:?}", warnings);
+            }
+        }
+
+        // are there any errors - raise these as errors if there are
+        if let Some(errors) = response
+            .get("errors")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !errors.is_empty() {
+                tracing::error!("Errors: {:?}", errors);
+                return Err(Error::Call(format!("Slurmrestd errors: {:?}", errors)));
+            }
+        }
+
+        Ok(response)
+    } else {
+        tracing::error!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            url,
+            result.status(),
+            result
+        );
+        Err(Error::Call(format!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            url,
+            result.status(),
+            result
+        )))
+    }
+}
+
+///
+/// Call a post URL on the slurmrestd server described in 'auth'.
+///
+async fn call_post(
+    backend: &str,
+    function: &str,
+    payload: &serde_json::Value,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    // get a connected server
+    tracing::debug!("Getting a connected server...");
+    let start_time = Utc::now();
+    let mut lock = get_connected_server(expires).await?;
+    tracing::debug!(
+        "Connected server obtained! Took {} ms",
+        (Utc::now() - start_time).num_milliseconds()
+    );
+
+    // how much time is left before we expire?
+    let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
+
+    if time_left < 5 {
+        return Err(Error::Call(
+            "Not enough time left to call Slurm server".to_string(),
+        ));
+    }
+
+    tracing::debug!(
+        "Calling Slurm function: {} - we have {} seconds left before we expire",
+        function,
+        time_left
+    );
+
+    let url = format!(
+        "{}/{}/v{}/{}",
+        lock.server(),
+        backend,
+        lock.version(),
+        function
+    );
+
+    tracing::debug!("Calling function {} with payload: {:?}", url, payload);
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(time_left.min(60) as u64))
+        .build()
+        .context("Could not build client")?;
+
+    let mut result = client
+        .post(&url)
+        .header("Referer", format!("{}/ipa", lock.server()))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("X-SLURM-USER-NAME", lock.user())
+        .header("X-SLURM-USER-TOKEN", lock.jwt().expose_secret().to_string())
+        .json(&payload)
+        .send()
+        .await
+        .with_context(|| format!("Could not call function: {}", url))?;
+
+    // write a warning if this took a long time
+    if (Utc::now() - start_time).num_seconds() > 5 {
+        tracing::warn!(
+            "Slurm call for server {} to function {} took {} seconds",
+            lock.server(),
+            function,
+            (Utc::now() - start_time).num_seconds()
+        );
+    } else {
+        tracing::debug!(
+            "Slurm call for server {} to function {} took {} ms",
+            lock.server(),
+            function,
+            (Utc::now() - start_time).num_milliseconds()
+        );
+    }
+
+    // if this is an authorisation error, try to reconnect
+    while result.status().as_u16() == 401 {
+        tracing::warn!("Login error: 401 - authorisation failed.");
+        lock.set_login_failed();
+
+        // try to get another lock
+        drop(lock);
+
+        assert_not_expired(expires)?;
+
+        tracing::error!("Authorisation (401) error. Reconnecting.");
+        lock = get_connected_server(expires).await?;
+
+        if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
+            tracing::info!(
+                "Call to server {} for function {} is still running... {} seconds elapsed so far.",
+                lock.server(),
+                function,
+                (Utc::now() - start_time).num_seconds()
+            );
+        }
+
+        let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
+
+        if time_left < 5 {
+            return Err(Error::Call(
+                "Not enough time left to call Slurm server".to_string(),
+            ));
+        }
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(time_left.min(60) as u64))
+            .build()
+            .context("Could not build client")?;
+
+        // retry the call
+        result = client
+            .post(&url)
+            .header("Referer", format!("{}/ipa", lock.server()))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("X-SLURM-USER-NAME", lock.user())
+            .header("X-SLURM-USER-TOKEN", lock.jwt().expose_secret().to_string())
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| format!("Could not call function: {}", url))?;
+
+        if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
+            tracing::error!(
+                "Call to server {} for function {} has completed... {} seconds elapsed so far.",
+                lock.server(),
+                function,
+                (Utc::now() - start_time).num_seconds()
+            );
+        }
+    }
+
+    if result.status().as_u16() == 500 {
+        tracing::error!(
+            "500 error - slurmrestd error when calling {} with payload {} as user {}.",
+            url,
+            payload,
+            lock.user()
+        );
+
+        match result.json::<serde_json::Value>().await {
+            Ok(json) => tracing::error!("Server response: {}", json),
+            Err(_) => tracing::error!("Could not decode the server's response."),
+        };
+
+        return Err(Error::Call(format!(
+            "500 error - slurmrestd error when calling {} with payload {} as user {}.",
+            url,
+            payload,
+            lock.user()
+        )));
+    }
+
+    if result.status().as_u16() == 304 {
+        // this is returned when the post causes no change on the server
+        tracing::warn!(
+            "Server returned '304'. No change for function: {} with payload {:?}",
+            url,
+            payload
+        );
+
+        return Ok(());
+    }
+
+    if result.status().is_success() {
+        let response: serde_json::Value = result
+            .json()
+            .await
+            .with_context(|| "Could not decode json from response".to_owned())?;
+
+        // are there any warnings - print them out if there are
+        if let Some(warnings) = response
+            .get("warnings")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !warnings.is_empty() {
+                tracing::warn!("Warnings: {:?}", warnings);
+            }
+        }
+
+        // are there any errors - raise these as errors if there are
+        if let Some(errors) = response
+            .get("errors")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_array()
+        {
+            if !errors.is_empty() {
+                tracing::error!("Errors: {:?}", errors);
+                return Err(Error::Call(format!("Slurmrestd errors: {:?}", errors)));
+            }
+        }
+
+        Ok(())
+    } else {
+        tracing::error!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            url,
+            result.status(),
+            result
+        );
+        Err(Error::Call(format!(
+            "Could not get response for function: {}. Status: {}. Response: {:?}",
+            url,
+            result.status(),
+            result
+        )))
+    }
+}
+
+async fn force_add_slurm_account(
+    account: &SlurmAccount,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<SlurmAccount, Error> {
     // need to POST to /slurm/vX.Y.Z/accounts, using a JSON content
     // with
     // {
@@ -810,6 +973,8 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
         )));
     }
 
+    assert_not_expired(expires)?;
+
     let cluster = cache::get_cluster().await?;
     let parent_account = cache::get_parent_account().await?;
 
@@ -825,15 +990,25 @@ async fn force_add_slurm_account(account: &SlurmAccount) -> Result<SlurmAccount,
         ]
     });
 
-    call_post("slurmdb", "accounts", &payload).await?;
+    call_post("slurmdb", "accounts", &payload, expires).await?;
 
     Ok(account.clone())
 }
 
-async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, Error> {
+async fn get_account_from_slurm(
+    account: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<SlurmAccount>, Error> {
     let account = clean_account_name(account)?;
 
-    let response = match call_get("slurmdb", &format!("account/{}", account), &Vec::new()).await {
+    let response = match call_get(
+        "slurmdb",
+        &format!("account/{}", account),
+        &vec![("with_assocs", "true")],
+        expires,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -902,14 +1077,17 @@ async fn get_account_from_slurm(account: &str) -> Result<Option<SlurmAccount>, E
     }
 }
 
-async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
+async fn get_account(
+    account: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<SlurmAccount>, Error> {
     // need to GET /slurm/vX.Y.Z/accounts/{account.name}
     // and return the account if it exists
     let cached_account = cache::get_account(account).await?;
 
     if let Some(cached_account) = cached_account {
         // double-check that the account actually exists...
-        let existing_account = match get_account_from_slurm(cached_account.name()).await {
+        let existing_account = match get_account_from_slurm(cached_account.name(), expires).await {
             Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
@@ -952,7 +1130,7 @@ async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
     }
 
     // see if we can read the account from slurm
-    let account = match get_account_from_slurm(account).await {
+    let account = match get_account_from_slurm(account, expires).await {
         Ok(account) => account,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -968,8 +1146,11 @@ async fn get_account(account: &str) -> Result<Option<SlurmAccount>, Error> {
     }
 }
 
-async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<SlurmAccount, Error> {
-    let existing_account = get_account(account.name()).await?;
+async fn get_account_create_if_not_exists(
+    account: &SlurmAccount,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<SlurmAccount, Error> {
+    let existing_account = get_account(account.name(), expires).await?;
 
     let cluster = cache::get_cluster().await?;
 
@@ -1004,10 +1185,10 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
 
     // it doesn't, so create it
     tracing::info!("Creating new slurm account: {}", account.name());
-    let account = force_add_slurm_account(account).await?;
+    let account = force_add_slurm_account(account, expires).await?;
 
     // get the account as created
-    match get_account(account.name()).await {
+    match get_account(account.name(), expires).await {
         Ok(Some(account)) => Ok(account),
         Ok(None) => {
             tracing::error!("Could not get account {}", account.name());
@@ -1020,18 +1201,22 @@ async fn get_account_create_if_not_exists(account: &SlurmAccount) -> Result<Slur
     }
 }
 
-async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
+async fn get_user_from_slurm(
+    user: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<SlurmUser>, Error> {
     let user = clean_user_name(user)?;
 
     let query_params = vec![("with_assocs", "true"), ("default_account", "true")];
 
-    let response = match call_get("slurmdb", &format!("user/{}", user), &query_params).await {
-        Ok(response) => response,
-        Err(e) => {
-            tracing::warn!("Could not get user {}: {}", user, e);
-            return Ok(None);
-        }
-    };
+    let response =
+        match call_get("slurmdb", &format!("user/{}", user), &query_params, expires).await {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::warn!("Could not get user {}: {}", user, e);
+                return Ok(None);
+            }
+        };
 
     // there should be a users list, with a single entry for this user
     let users = match response.get("users") {
@@ -1074,12 +1259,12 @@ async fn get_user_from_slurm(user: &str) -> Result<Option<SlurmUser>, Error> {
     }
 }
 
-async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
+async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<SlurmUser>, Error> {
     let cached_user = cache::get_user(user).await?;
 
     if let Some(cached_user) = cached_user {
         // double-check that the user actually exists...
-        let existing_user = match get_user_from_slurm(cached_user.name()).await {
+        let existing_user = match get_user_from_slurm(cached_user.name(), expires).await {
             Ok(user) => user,
             Err(e) => {
                 tracing::warn!("Could not get user {}: {}", cached_user.name(), e);
@@ -1118,7 +1303,7 @@ async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
     }
 
     // see if we can read the user from slurm
-    let user = match get_user_from_slurm(user).await {
+    let user = match get_user_from_slurm(user, expires).await {
         Ok(user) => user,
         Err(e) => {
             tracing::warn!("Could not get user {}: {}", user, e);
@@ -1134,7 +1319,10 @@ async fn get_user(user: &str) -> Result<Option<SlurmUser>, Error> {
     }
 }
 
-async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
+async fn add_account_association(
+    account: &SlurmAccount,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
     // eventually should check to see if this association already exists,
     // and if so, not to do anything else
 
@@ -1148,6 +1336,8 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
             account
         )));
     }
+
+    assert_not_expired(expires)?;
 
     // get the cluster name from the cache
     let cluster = cache::get_cluster().await?;
@@ -1168,7 +1358,7 @@ async fn add_account_association(account: &SlurmAccount) -> Result<(), Error> {
         }
     });
 
-    call_post("slurmdb", "accounts_association", &payload).await?;
+    call_post("slurmdb", "accounts_association", &payload, expires).await?;
 
     Ok(())
 }
@@ -1177,6 +1367,7 @@ async fn add_user_association(
     user: &SlurmUser,
     account: &SlurmAccount,
     make_default: bool,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<SlurmUser, Error> {
     if account.organization() != get_managed_organization() {
         tracing::warn!(
@@ -1200,7 +1391,7 @@ async fn add_user_association(
         .any(|a| a.account() == account.name() && a.cluster() == cluster)
     {
         // make sure that we have this association on the account
-        add_account_association(account).await?;
+        add_account_association(account, expires).await?;
 
         // now add the association to the user
         let payload = serde_json::json!({
@@ -1216,10 +1407,10 @@ async fn add_user_association(
             ]
         });
 
-        call_post("slurmdb", "associations", &payload).await?;
+        call_post("slurmdb", "associations", &payload, expires).await?;
 
         // update the user
-        user = match get_user_from_slurm(user.name()).await? {
+        user = match get_user_from_slurm(user.name(), expires).await? {
             Some(user) => user,
             None => {
                 return Err(Error::Call(format!(
@@ -1246,10 +1437,10 @@ async fn add_user_association(
             ]
         });
 
-        call_post("slurmdb", "users", &payload).await?;
+        call_post("slurmdb", "users", &payload, expires).await?;
 
         // update the user
-        user = match get_user_from_slurm(user.name()).await? {
+        user = match get_user_from_slurm(user.name(), expires).await? {
             Some(user) => user,
             None => {
                 return Err(Error::Call(format!(
@@ -1272,14 +1463,18 @@ async fn add_user_association(
     Ok(user)
 }
 
-async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, Error> {
+async fn get_user_create_if_not_exists(
+    user: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<SlurmUser, Error> {
     // first, make sure that the account exists
-    let slurm_account =
-        get_account_create_if_not_exists(&SlurmAccount::from_mapping(&user.clone().into())?)
-            .await?;
+    let slurm_account = get_account_create_if_not_exists(
+        &SlurmAccount::from_mapping(&user.clone().into())?,
+        expires,
+    )
+    .await?;
 
-    // now get the user from slurm
-    let slurm_user = get_user(user.local_user()).await?;
+    let slurm_user = get_user(user.local_user(), expires).await?;
     let cluster = cache::get_cluster().await?;
 
     if let Some(slurm_user) = slurm_user {
@@ -1302,6 +1497,8 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
         }
     }
 
+    assert_not_expired(expires)?;
+
     // first, create the user
     let username = clean_user_name(user.local_user())?;
 
@@ -1313,10 +1510,10 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
         ]
     });
 
-    call_post("slurmdb", "users", &payload).await?;
+    call_post("slurmdb", "users", &payload, expires).await?;
 
     // now load the user from slurm to make sure it exists
-    let slurm_user = match get_user(user.local_user()).await? {
+    let slurm_user = match get_user(user.local_user(), expires).await? {
         Some(user) => user,
         None => {
             return Err(Error::Call(format!(
@@ -1327,7 +1524,7 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
     };
 
     // now add the association to the account, making it the default
-    let slurm_user = add_user_association(&slurm_user, &slurm_account, true).await?;
+    let slurm_user = add_user_association(&slurm_user, &slurm_account, true, expires).await?;
 
     let user = SlurmUser::from_mapping(user)?;
 
@@ -1345,6 +1542,50 @@ async fn get_user_create_if_not_exists(user: &UserMapping) -> Result<SlurmUser, 
 ///
 pub fn get_managed_organization() -> String {
     "openportal".to_string()
+}
+
+pub async fn initialise_servers(
+    servers: &[String],
+    users: &[String],
+    token_commands: &[String],
+    token_lifespans: &[u32],
+) -> Result<(), Error> {
+    let mut slurm_servers = SLURM_SERVERS.lock().await;
+
+    // clear any existing servers
+    slurm_servers.clear();
+
+    // make sure all vectors have the same length
+    if servers.len() != users.len()
+        || servers.len() != token_commands.len()
+        || servers.len() != token_lifespans.len()
+    {
+        return Err(Error::Call(
+            "All server configuration vectors must have the same length".to_string(),
+        ));
+    }
+
+    // now add each server
+    for (i, server) in servers.iter().enumerate() {
+        let server = server.trim();
+
+        if server.is_empty() {
+            continue;
+        }
+
+        let user = users[i].trim();
+        let token_command = token_commands[i].trim();
+        let token_lifespan = token_lifespans[i].max(10);
+
+        slurm_servers.push(Arc::new(Mutex::new(SlurmServer::new(
+            server,
+            user,
+            token_command,
+            token_lifespan,
+        ))));
+    }
+
+    Ok(())
 }
 
 pub fn clean_account_name(account: &str) -> Result<String, Error> {
@@ -2858,6 +3099,7 @@ pub async fn connect(
     user: &str,
     token_command: &str,
     token_lifespan: u32,
+    num_servers: u64,
 ) -> Result<(), Error> {
     // make sure that the token lifespan is at least 10 seconds
     let token_lifespan = match token_lifespan < 10 {
@@ -2865,63 +3107,34 @@ pub async fn connect(
         false => token_lifespan,
     };
 
-    // overwrite the global FreeIPA client with a new one
-    let mut auth = auth().await?;
+    // make sure that the number of servers is at least 1
+    let num_servers = match num_servers < 1 {
+        true => 1,
+        false => num_servers,
+    };
 
-    auth.server = server.to_string();
-    auth.user = user.to_string();
-    auth.token_command = token_command.to_string();
-    auth.jwt = SecretString::default();
-    auth.token_lifespan = token_lifespan;
-    auth.num_reconnects = 0;
+    let servers = vec![server.to_string(); num_servers as usize];
+    let users = vec![user.to_string(); num_servers as usize];
+    let token_commands = vec![token_command.to_string(); num_servers as usize];
+    let token_lifespans = vec![token_lifespan; num_servers as usize];
 
-    const MAX_RECONNECTS: u32 = 3;
-    const RECONNECT_WAIT: u64 = 100;
+    // initialise with a single server
+    initialise_servers(
+        &servers,
+        &users,
+        &token_commands,
+        &token_lifespans,
+    )
+    .await?;
 
-    loop {
-        match login(
-            &auth.server,
-            &auth.user,
-            &auth.token_command,
-            auth.token_lifespan,
-        )
-        .await
-        {
-            Ok(session) => {
-                auth.jwt = session.jwt;
-                auth.jwt_creation_time = session.start_time;
-                auth.version = session.version;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::error!("Could not login to Slurm server: {}. Error: {}", server, e);
+    // try to login to make sure we can connect
+    let expires = Utc::now() + chrono::Duration::minutes(1);
+    get_connected_server(&expires).await?;
 
-                auth.num_reconnects += 1;
-
-                if auth.num_reconnects > MAX_RECONNECTS {
-                    return Err(Error::Login(format!(
-                        "Could not login to Slurm server: {}. Error: {}",
-                        server, e
-                    )));
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_WAIT)).await;
-            }
-        }
-    }
+    Ok(())
 }
 
-static MAX_CONCURRENT_REQUESTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(10));
-
 pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
-    // ensure that we don't have too many concurrent requests
-    let _permit = MAX_CONCURRENT_REQUESTS
-        .acquire()
-        .await
-        .map_err(|_| Error::Call("Failed to acquire semaphore for adding a user".to_string()))?;
-
-    assert_not_expired(expires)?;
-
     // get a lock for this user, as only a single task should be adding
     // or removing this user at the same time
     let now = chrono::Utc::now();
@@ -2942,12 +3155,13 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
                     )));
                 }
 
+                assert_not_expired(expires)?;
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         };
     };
 
-    let user: SlurmUser = get_user_create_if_not_exists(user).await?;
+    let user: SlurmUser = get_user_create_if_not_exists(user, expires).await?;
 
     tracing::info!("Added user: {}", user);
 
@@ -2958,12 +3172,6 @@ pub async fn add_project(
     project: &ProjectMapping,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
-    // ensure that we don't have too many concurrent requests
-    let _permit = MAX_CONCURRENT_REQUESTS
-        .acquire()
-        .await
-        .map_err(|_| Error::Call("Failed to acquire semaphore for adding a project".to_string()))?;
-
     assert_not_expired(expires)?;
 
     // get a lock for this project, as only a single task should be adding
@@ -2996,7 +3204,7 @@ pub async fn add_project(
 
     let account = SlurmAccount::from_mapping(project)?;
 
-    let account = get_account_create_if_not_exists(&account).await?;
+    let account = get_account_create_if_not_exists(&account, expires).await?;
 
     tracing::info!("Added account: {}", account);
 
@@ -3008,6 +3216,9 @@ pub async fn get_usage_report(
     dates: &DateRange,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<ProjectUsageReport, Error> {
+    assert_not_expired(expires)?;
+
+    // Call the sacctmgr version
     sacctmgr::get_usage_report(project, dates, expires).await
 }
 
@@ -3015,6 +3226,9 @@ pub async fn get_limit(
     project: &ProjectMapping,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Usage, Error> {
+    assert_not_expired(expires)?;
+
+    // Call the sacctmgr version
     sacctmgr::get_limit(project, expires).await
 }
 
@@ -3023,5 +3237,8 @@ pub async fn set_limit(
     limit: &Usage,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Usage, Error> {
+    assert_not_expired(expires)?;
+
+    // Call the sacctmgr version
     sacctmgr::set_limit(project, limit, expires).await
 }

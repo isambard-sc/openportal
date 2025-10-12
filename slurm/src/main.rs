@@ -210,7 +210,14 @@ async fn main() -> Result<()> {
         // connect the single shared Slurm client - this will be used in the
         // async function (we can't bind variables to async functions, or else
         // we would just pass the client with the environment)
-        slurm::connect(&slurm_server, &slurm_user, &token_command, token_lifespan).await?;
+        slurm::connect(
+            &slurm_server,
+            &slurm_user,
+            &token_command,
+            token_lifespan,
+            max_slurm_runners,
+        )
+        .await?;
 
         tracing::info!("Connected to slurm server at {}", slurm_server);
 

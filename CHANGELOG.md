@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Added support for multiple connections to the slurm REST API server,
+  matching the behaviour and code of the freeipa agent, and similar
+  to the sacctmgr connection.
+
 ## [0.19.0] - 2025-10-12
 
 ### Added

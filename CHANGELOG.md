@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Fixed timeouts of slurm accounting when large numbers of jobs are
+  run per project per day. The code automatically switches over to
+  doing houly accounting if the daily accounting takes too long.
+  In addition, accounting is now done in parallel, with multiple
+  sacct calls now allowed to be made (controlled by the
+  `max-slurm-runners` config option, default 5).
+- Added counting of the number of jobs run per day for slurm accounting,
+  and exposed the number of jobs (`num_jobs`) in `UsageReport` and
+  `ProjectUsageReport` for better tracking.
+- Added an `Hour` object that can be used to represents a specific hour
+  in a day, to make it easier to request hourly accounting data.
+  The start and end times of an hour form a half-open interval,
+  i.e. the start time is included, but the end time is not. This
+  matches the expected behaviour of the slurm `sacct` command.
+- Added the ability to run commands directly from the command line,
+  simplifying debugging and testing. This can be done using the
+  new `--one-shot` command line option, which takes an OpenPortal
+  command without a destination. For example,
+  `op-slurm run --one-shot "get_local_usage_report brics.aiproject:brics.aiproject this_month"`
+  would get the usage report for the `brics.aiproject` project for
+  the current month. Note that multiple `--one-shot` commands can
+  be added, and they will be run in sequence. There is also
+  a `--repeat N` option that can be used to repeat the
+  commands N times.
+- Added in a Claude.md file that is used by Claude code to help
+  maintain and improve the codebase.
+
+### Fixed
+
+- Fixed the `Date` start and end time to also use the same half-open
+  interval as the `Hour` object. This means that the start time
+  is included, but the end time is not. This matches the expected
+  behaviour of the slurm `sacct` command.
+- Fixed a number of minor cybersecurity issues discovered by Claude code.
+  These are adding a counter/nonce to the Bridge API server, reducing
+  the time tolerance for the API server signed time check to 5 seconds,
+  adding in rate limiting for calls to the Bridge server API,
+  adding constant-time comparison of keys to prevent timing attacks,
+  and using a command builder pattern to construct slurm commands
+  to prevent any possible injection attacks. Note that none of these
+  issues are exploitable in practice, but these changes make the
+  system more robust and secure.
+- Reduced logging verbosity when the system is under load to make logs
+  more readable.
+
 ## [0.18.0] - 2025-09-29
 
 ### Added

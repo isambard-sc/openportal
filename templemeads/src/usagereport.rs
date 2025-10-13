@@ -363,6 +363,7 @@ impl UserUsageReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyProjectUsageReport {
     reports: HashMap<String, Usage>,
+    #[serde(default)]
     num_jobs: u64,
     is_complete: bool,
 }

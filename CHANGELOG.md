@@ -12,6 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   matching the behaviour and code of the freeipa agent, and similar
   to the sacctmgr connection.
 
+### Fixed
+
+- Made the number of jobs optional in the JSON (defaults to zero) so
+  that this doesn't break backwards compatibility with agents that
+  don't send this field.
+
 ## [0.19.0] - 2025-10-12
 
 ### Added

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.19.1] - 2025-10-13
+
 ### Added
 
 - Added support for multiple connections to the slurm REST API server,
@@ -786,6 +788,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.19.1]: https://github.com/isambard-sc/openportal/releases/tag/0.19.1
 [0.19.0]: https://github.com/isambard-sc/openportal/releases/tag/0.19.0
 [0.18.0]: https://github.com/isambard-sc/openportal/releases/tag/0.18.0
 [0.17.0]: https://github.com/isambard-sc/openportal/releases/tag/0.17.0

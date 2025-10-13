@@ -1510,9 +1510,11 @@ pub async fn set_limit(
                         "--immediate".to_string(),
                         "modify".to_string(),
                         "account".to_string(),
+                        account.name().to_string(),
                         "set".to_string(),
                         format!("GrpTRESMins={}", tres.join(",")),
-                        format!("where cluster={} account={}", cluster, account.name()),
+                        "where".to_string(),
+                        format!("cluster={}", cluster),
                     ],
                 )?;
 

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Fixed error in `sacctmgr` command related to setting limits.
+
 ## [0.19.1] - 2025-10-13
 
 ### Added

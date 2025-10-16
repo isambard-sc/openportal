@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
 
     cache::set_home_roots(
         &config
-            .option("home-roots", "/home")
+            .option("home-root", "/home")
             .split(":")
             .map(|s| s.to_owned())
             .collect(),

@@ -1879,9 +1879,14 @@ pub async fn remove_project(
     let users = force_get_users_in_group(&project_group, expires).await?;
 
     tracing::info!(
-        "Removing group {} for project {}",
+        "Removing group {} for project {}. Users to remove: {}",
         project_group.groupid(),
-        project
+        project,
+        users
+            .iter()
+            .map(|u| u.userid())
+            .collect::<Vec<&str>>()
+            .join(", ")
     );
 
     for user in users {

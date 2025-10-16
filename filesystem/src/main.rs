@@ -59,8 +59,23 @@ async fn main() -> Result<()> {
         }
     };
 
-    cache::set_home_root(&config.option("home-root", "/home")).await?;
-    cache::set_home_permissions(&config.option("home-permissions", "0755")).await?;
+    cache::set_home_roots(
+        &config
+            .option("home-roots", "/home")
+            .split(":")
+            .map(|s| s.to_owned())
+            .collect(),
+    )
+    .await?;
+
+    cache::set_home_permissions(
+        &config
+            .option("home-permissions", "0755")
+            .split(":")
+            .map(|s| s.to_owned())
+            .collect(),
+    )
+    .await?;
 
     cache::set_project_roots(
         &config
@@ -100,8 +115,8 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 AddLocalProject(mapping) => {
-                    let home_root = create_project_dirs_and_links(&mapping).await?;
-                    job.completed(home_root)
+                    let home_roots = create_project_dirs_and_links(&mapping).await?;
+                    job.completed(home_roots.get(0).cloned().unwrap_or_default())
                 },
                 RemoveLocalProject(mapping) => {
                     tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", mapping);
@@ -109,27 +124,43 @@ async fn main() -> Result<()> {
                 },
                 AddLocalUser(mapping) => {
                     // make sure all project dirs are created, and get back the
-                    // project home root
-                    let home_root = create_project_dirs_and_links(&mapping.clone().into()).await?;
-
-                    // create the home directory is, e.g. /home_root/user
-                    let home_dir = format!("{}/{}", home_root, mapping.local_user());
+                    // project home roots
+                    let home_roots = create_project_dirs_and_links(&mapping.clone().into()).await?;
                     let home_permissions = cache::get_home_permissions().await?;
 
-                    filesystem::create_home_dir(&home_dir, mapping.local_user(),
-                                                mapping.local_group(),
-                                                &home_permissions).await?;
+                    if home_roots.len() != home_permissions.len() {
+                        return Err(Error::Misconfigured(
+                            "Number of home roots does not match number of home permissions".to_owned(),
+                        ));
+                    }
 
-                    // update the job with the user's home directory
-                    job.completed(home_dir)
+                    // create the home directories, e.g. /home/project/user and /scratch/project/user
+                    let mut home_dirs = Vec::new();
+                    for i in 0..home_roots.len() {
+                        let home_dir = format!("{}/{}", home_roots[i], mapping.local_user());
+                        filesystem::create_home_dir(&home_dir, mapping.local_user(),
+                                                    mapping.local_group(),
+                                                    &home_permissions[i]).await?;
+                        home_dirs.push(home_dir);
+                    }
+
+                    // update the job with the user's home directories
+                    job.completed(home_dirs.get(0).cloned().unwrap_or_default())
                 },
                 RemoveLocalUser(mapping) => {
                     tracing::info!("Will remove user files of {} when the project is removed", mapping);
                     job.completed_none()
                 },
                 GetLocalHomeDir(mapping) => {
-                    let home_root = get_home_root(&mapping.clone().into()).await?;
-                    let home_dir = format!("{}/{}", home_root, mapping.local_user());
+                    let home_roots = get_home_roots(&mapping.clone().into()).await?;
+
+                    if home_roots.is_empty() {
+                        return Err(Error::Misconfigured(
+                            "No home roots configured".to_owned(),
+                        ));
+                    }
+
+                    let home_dir = format!("{}/{}", home_roots[0], mapping.local_user());
                     job.completed(home_dir)
                 },
                 GetLocalProjectDirs(mapping) => {
@@ -138,7 +169,7 @@ async fn main() -> Result<()> {
                 },
                 _ => {
                     Err(Error::InvalidInstruction(
-                        format!("Invalid instruction: {}. Filesystem only supports add_local_user and remove_local_user", job.instruction()),
+                        format!("Invalid instruction: {}", job.instruction()),
                     ))
                 }
             }
@@ -151,16 +182,21 @@ async fn main() -> Result<()> {
 }
 
 ///
-/// Return the root directory for all users in the passed project
+/// Return the root directories for all users in the passed project
 ///
-async fn get_home_root(mapping: &ProjectMapping) -> Result<String, Error> {
+async fn get_home_roots(mapping: &ProjectMapping) -> Result<Vec<String>, Error> {
     // The name of the project directory comes from the project part of the ProjectIdentifier
     // Eventually we would need to encode the portal into this...
     let project_dir_name = mapping.project().project();
 
-    let home_root = cache::get_home_root().await?;
+    let home_roots = cache::get_home_roots().await?;
 
-    Ok(format!("{}/{}", home_root, project_dir_name))
+    let mut roots = Vec::new();
+    for home_root in home_roots {
+        roots.push(format!("{}/{}", home_root, project_dir_name));
+    }
+
+    Ok(roots)
 }
 
 ///
@@ -198,9 +234,9 @@ async fn get_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Vec<Stri
 
 ///
 /// Create the project directories and links for a given ProjectMapping,
-/// returning the home root directory for the project
+/// returning the home root directories for the project
 ///
-async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<String, Error> {
+async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Vec<String>, Error> {
     // The name of the project directory comes from the project part of the ProjectIdentifier
     // Eventually we would need to encode the portal into this...
     let project_dir_name = mapping.project().project();
@@ -208,8 +244,12 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Strin
     // The group name for any project dirs are the mapping local group IDs
     let group_name = mapping.local_group();
 
-    // home directory is, e.g. /home/project/user
-    let home_root = format!("{}/{}", cache::get_home_root().await?, project_dir_name);
+    // home directories are, e.g. /home/project and /scratch/project
+    let home_roots_base = cache::get_home_roots().await?;
+    let mut home_roots = Vec::new();
+    for home_root_base in &home_roots_base {
+        home_roots.push(format!("{}/{}", home_root_base, project_dir_name));
+    }
 
     let project_dirs = cache::get_project_roots().await?;
     let project_permissions = cache::get_project_permissions().await?;
@@ -227,8 +267,10 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Strin
         ));
     }
 
-    // create the root in which the user's home directory will be created - this is /{home_root}/{project}
-    filesystem::create_project_dir(&home_root, group_name, "0755").await?;
+    // create the roots in which the user's home directories will be created - these are /{home_root}/{project}
+    for home_root in &home_roots {
+        filesystem::create_project_dir(home_root, group_name, "0755").await?;
+    }
 
     // create the project directories
     for i in 0..project_dirs.len() {
@@ -248,6 +290,6 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Strin
         }
     }
 
-    // return the home root
-    Ok(home_root)
+    // return the home roots
+    Ok(home_roots)
 }

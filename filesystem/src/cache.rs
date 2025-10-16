@@ -10,8 +10,8 @@ use crate::filesystem;
 
 #[derive(Debug, Clone, Default)]
 struct Database {
-    home_root: String,
-    home_permissions: String,
+    home_roots: Vec<String>,
+    home_permissions: Vec<String>,
 
     project_roots: Vec<String>,
     project_permissions: Vec<String>,
@@ -24,8 +24,8 @@ impl Database {
     ///
     fn new() -> Self {
         Self {
-            home_root: "/home".to_owned(),
-            home_permissions: "0755".to_owned(),
+            home_roots: vec!["/home".to_owned()],
+            home_permissions: vec!["0755".to_owned()],
             project_roots: vec!["/project".to_owned()],
             project_permissions: vec!["2770".to_owned()],
             project_links: vec![None],
@@ -36,25 +36,32 @@ impl Database {
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::new()));
 
 ///
-/// Return the root for all home directories
+/// Return the roots for all home directories
 ///
-pub async fn get_home_root() -> Result<String, Error> {
+pub async fn get_home_roots() -> Result<Vec<String>, Error> {
     let cache = CACHE.read().await;
-    Ok(cache.home_root.clone())
+    Ok(cache.home_roots.clone())
 }
 
 ///
-/// Set the root for all home directories
+/// Set the roots for all home directories
 ///
-pub async fn set_home_root(root: &str) -> Result<(), Error> {
-    let check_root = filesystem::clean_and_check_path(root, true).await?;
+pub async fn set_home_roots(roots: &Vec<String>) -> Result<(), Error> {
+    let mut cache = CACHE.write().await;
 
-    if check_root != root {
-        tracing::info!("Home {} was checked, and maps to {}", root, check_root);
+    cache.home_roots.clear();
+
+    for root in roots {
+        let check_root = filesystem::clean_and_check_path(root, true).await?;
+
+        if check_root != *root {
+            tracing::info!("Home {} was checked, and maps to {}", root, check_root);
+        }
+
+        tracing::info!("Adding home root {}", root);
+        cache.home_roots.push(root.clone());
     }
 
-    let mut cache = CACHE.write().await;
-    cache.home_root = root.to_owned();
     Ok(())
 }
 
@@ -91,7 +98,7 @@ pub async fn set_project_roots(roots: &Vec<String>) -> Result<(), Error> {
 ///
 /// Return the permissions for all home directories
 ///
-pub async fn get_home_permissions() -> Result<String, Error> {
+pub async fn get_home_permissions() -> Result<Vec<String>, Error> {
     let cache = CACHE.read().await;
     Ok(cache.home_permissions.clone())
 }
@@ -99,13 +106,18 @@ pub async fn get_home_permissions() -> Result<String, Error> {
 ///
 /// Set the permissions for all home directories
 ///
-pub async fn set_home_permissions(permissions: &str) -> Result<(), Error> {
-    // ensure this is a valid permission string
-    let _ = filesystem::clean_and_check_permissions(permissions).await?;
-    tracing::info!("Setting home permissions to {}", permissions);
-
+pub async fn set_home_permissions(permissions: &Vec<String>) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
-    cache.home_permissions = permissions.to_owned();
+
+    cache.home_permissions.clear();
+
+    for permission in permissions {
+        // ensure this is a valid permission string
+        let _ = filesystem::clean_and_check_permissions(permission).await?;
+        tracing::info!("Adding home permissions {}", permission);
+        cache.home_permissions.push(permission.to_owned());
+    }
+
     Ok(())
 }
 

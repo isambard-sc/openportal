@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
                     job.completed(home_roots.get(0).cloned().unwrap_or_default())
                 },
                 RemoveLocalProject(mapping) => {
-                    tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", mapping);
+                    remove_project_dirs_and_links(&mapping).await?;
                     job.completed_none()
                 },
                 AddLocalUser(mapping) => {
@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
                     job.completed(home_dirs.get(0).cloned().unwrap_or_default())
                 },
                 RemoveLocalUser(mapping) => {
-                    tracing::info!("Will remove user files of {} when the project is removed", mapping);
+                    remove_user_dirs(&mapping).await?;
                     job.completed_none()
                 },
                 GetLocalHomeDir(mapping) => {
@@ -292,4 +292,65 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Vec<S
 
     // return the home roots
     Ok(home_roots)
+}
+
+///
+/// Remove (recycle) the project directories, links, and home roots for a given ProjectMapping.
+/// This is non-destructive - directories are moved to .recycle subdirectories.
+///
+async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), Error> {
+    // The name of the project directory comes from the project part of the ProjectIdentifier
+    let project_dir_name = mapping.project().project();
+
+    // Get all the paths that need to be recycled
+    let home_roots_base = cache::get_home_roots().await?;
+    let project_dirs = cache::get_project_roots().await?;
+    let project_links = cache::get_project_links().await?;
+
+    // First, recycle any project links
+    for i in 0..project_links.len() {
+        if let Some(link) = project_links[i].as_ref() {
+            let link_path = filesystem::get_project_link(link, &project_dir_name).await?;
+            // For symlinks, we just remove them rather than recycling
+            let path = std::path::Path::new(&link_path);
+            if path.exists() && path.is_symlink() {
+                tracing::info!("Removing symlink '{}'", link_path);
+                match std::fs::remove_file(path) {
+                    Ok(_) => tracing::info!("Successfully removed symlink"),
+                    Err(e) => tracing::warn!("Could not remove symlink '{}': {}", link_path, e),
+                }
+            }
+        }
+    }
+
+    // Recycle project directories
+    for project_root in project_dirs {
+        let project_dir = format!("{}/{}", project_root, project_dir_name);
+        filesystem::recycle_dir(&project_dir).await?;
+    }
+
+    // Recycle home roots (e.g., /home/projectname, /scratch/projectname)
+    for home_root_base in home_roots_base {
+        let home_root = format!("{}/{}", home_root_base, project_dir_name);
+        filesystem::recycle_dir(&home_root).await?;
+    }
+
+    Ok(())
+}
+
+///
+/// Remove (recycle) the user's home directories in all home roots.
+/// This is non-destructive - directories are moved to .recycle subdirectories.
+///
+async fn remove_user_dirs(mapping: &templemeads::grammar::UserMapping) -> Result<(), Error> {
+    let home_roots = get_home_roots(&mapping.clone().into()).await?;
+    let username = mapping.local_user();
+
+    // Recycle the user's home directory in each home root
+    for home_root in home_roots {
+        let home_dir = format!("{}/{}", home_root, username);
+        filesystem::recycle_dir(&home_dir).await?;
+    }
+
+    Ok(())
 }

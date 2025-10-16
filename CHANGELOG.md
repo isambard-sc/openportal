@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Added support for multiple home roots in the filesystem agent. The `home-roots`
+  configuration option now accepts colon-separated paths (e.g., `/home:/scratch`),
+  and the `home-permissions` option accepts corresponding colon-separated permissions
+  (e.g., `0755:0755`). When a user is added, home directories are created in all
+  configured home roots at `{home-root}/{project}/{user}` with the appropriate
+  permissions. The `GetLocalHomeDir` instruction returns the first home directory.
+- Implemented non-destructive removal for filesystem operations. The `RemoveLocalUser`
+  and `RemoveLocalProject` instructions now move directories to `.recycle` subdirectories
+  instead of deleting them. Directory timestamps are updated to the current time when
+  recycled, enabling external cleanup processes to remove old recycled directories
+  (e.g., after 7 days).
+- Added automatic restoration from `.recycle` when creating directories. If a directory
+  exists in `.recycle`, it is restored to its original location instead of creating
+  a new directory, making the removal and recreation process fully reversible.
+
 ### Fixed
 
 - Fixed error in `sacctmgr` command related to setting limits.

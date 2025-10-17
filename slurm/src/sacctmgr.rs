@@ -26,6 +26,7 @@ struct SlurmRunner {
     sacct: String,
     sacctmgr: String,
     scontrol: String,
+    scancel: String,
 }
 
 impl Default for SlurmRunner {
@@ -34,6 +35,7 @@ impl Default for SlurmRunner {
             sacct: "sacct".to_string(),
             sacctmgr: "sacctmgr".to_string(),
             scontrol: "scontrol".to_string(),
+            scancel: "scancel".to_string(),
         }
     }
 }
@@ -60,6 +62,10 @@ impl LockedRunner {
         &self.runner.scontrol
     }
 
+    pub fn scancel(&self) -> &str {
+        &self.runner.scancel
+    }
+
     /// Build a command safely from a vector of arguments
     /// This is the preferred method to avoid command injection
     ///
@@ -70,9 +76,10 @@ impl LockedRunner {
             "SACCTMGR" => self.sacctmgr(),
             "SCONTROL" => self.scontrol(),
             "SACCT" => self.sacct(),
+            "SCANCEL" => self.scancel(),
             _ => {
                 return Err(Error::Call(format!(
-                    "Unknown command type: {}. Must be SACCTMGR, SCONTROL, or SACCT",
+                    "Unknown command type: {}. Must be SACCTMGR, SCONTROL, SACCT, or SCANCEL",
                     cmd_type
                 )));
             }
@@ -824,11 +831,12 @@ async fn get_user_create_if_not_exists(
     Ok(slurm_user)
 }
 
-pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str, max_slurm_runners: u64) {
+pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str, scancel: &str, max_slurm_runners: u64) {
     tracing::debug!(
-        "Using command line slurmd commands: sacctmgr: {}, scontrol: {}, max_slurm_runners: {}",
+        "Using command line slurmd commands: sacctmgr: {}, scontrol: {}, scancel: {}, max_slurm_runners: {}",
         sacctmgr,
         scontrol,
+        scancel,
         max_slurm_runners
     );
 
@@ -844,6 +852,7 @@ pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str, max_slurm
             sacct: sacct.to_string(),
             sacctmgr: sacctmgr.to_string(),
             scontrol: scontrol.to_string(),
+            scancel: scancel.to_string(),
         })));
     }
 }
@@ -1529,6 +1538,90 @@ pub async fn set_limit(
         None => {
             tracing::warn!("Could not get account {}", account.name());
             Err(Error::NotFound(account.name().to_string()))
+        }
+    }
+}
+
+pub async fn cancel_pending_user_jobs(
+    user: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    assert_not_expired(expires)?;
+
+    let user = clean_user_name(user)?;
+    let cluster = cache::get_cluster().await?;
+
+    tracing::info!(
+        "Cancelling all pending jobs for user {} in cluster {}",
+        user,
+        cluster
+    );
+
+    let cmd = runner(expires).await?.build_command(
+        "SCANCEL",
+        vec![
+            "--verbose".to_string(),
+            format!("--user={}", user),
+            "--state=PENDING".to_string(),
+            format!("--cluster={}", cluster),
+        ],
+    )?;
+
+    match runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await {
+        Ok(output) => {
+            if !output.is_empty() {
+                tracing::info!("scancel output: {}", output);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!("Could not cancel pending jobs for user {}: {}", user, e);
+            // Don't fail the whole operation if scancel fails - log the error and continue
+            Ok(())
+        }
+    }
+}
+
+pub async fn cancel_pending_project_jobs(
+    account: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    assert_not_expired(expires)?;
+
+    let account = clean_account_name(account)?;
+    let cluster = cache::get_cluster().await?;
+
+    tracing::info!(
+        "Cancelling all pending jobs for account {} in cluster {}",
+        account,
+        cluster
+    );
+
+    let cmd = runner(expires).await?.build_command(
+        "SCANCEL",
+        vec![
+            "--verbose".to_string(),
+            format!("--account={}", account),
+            "--state=PENDING".to_string(),
+            format!("--cluster={}", cluster),
+        ],
+    )?;
+
+    match runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await {
+        Ok(output) => {
+            if !output.is_empty() {
+                tracing::info!("scancel output: {}", output);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Could not cancel pending jobs for account {}: {}",
+                account,
+                e
+            );
+            // Don't fail the whole operation if scancel fails - log the error and continue
+            Ok(())
         }
     }
 }

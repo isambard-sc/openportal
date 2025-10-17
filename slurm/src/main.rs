@@ -101,17 +101,19 @@ async fn main() -> Result<()> {
 
     let slurm_server = config.option("slurm-server", "");
 
-    // get the sacct, sacctmgr and scontrol commands - we may need these even if
+    // get the sacct, sacctmgr, scontrol and scancel commands - we may need these even if
     // we are using the REST API
     let sacct_command = config.option("sacct", "sacct");
     let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
     let scontrol_command = config.option("scontrol", "scontrol");
+    let scancel_command = config.option("scancel", "scancel");
     let max_slurm_runners: u64 = config.option("max-slurm-runners", "5").parse().unwrap_or(5);
 
     sacctmgr::set_commands(
         &sacct_command,
         &sacctmgr_command,
         &scontrol_command,
+        &scancel_command,
         max_slurm_runners,
     )
     .await;
@@ -138,8 +140,11 @@ async fn main() -> Result<()> {
                     RemoveLocalProject(project) => {
                         // we won't remove the project for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
-                        // disable the project instead.
-                        tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", project);
+                        // disable the project instead. However, we do want to cancel
+                        // all pending jobs associated with this project.
+                        let mapping = templemeads::grammar::ProjectMapping::from(project.clone());
+                        sacctmgr::cancel_pending_project_jobs(mapping.local_group(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for project {}", project);
                         job.completed_none()
                     },
                     AddLocalUser(user) => {
@@ -150,8 +155,10 @@ async fn main() -> Result<()> {
                         // we won't remove the user for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
                         // disable the user instead. Note that they are already
-                        // disabled in FreeIPA, so cannot submit jobs to this account
-                        tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                        // disabled in FreeIPA, so cannot submit jobs to this account.
+                        // However, we do want to cancel all pending jobs for this user.
+                        sacctmgr::cancel_pending_user_jobs(mapping.local_user(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
                     },
                     GetLocalUsageReport(mapping, dates) => {
@@ -238,8 +245,11 @@ async fn main() -> Result<()> {
                     RemoveLocalProject(project) => {
                         // we won't remove the project for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
-                        // disable the project instead.
-                        tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", project);
+                        // disable the project instead. However, we do want to cancel
+                        // all pending jobs associated with this project.
+                        let mapping = templemeads::grammar::ProjectMapping::from(project.clone());
+                        sacctmgr::cancel_pending_project_jobs(mapping.local_group(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for project {}", project);
                         job.completed_none()
                     },
                     AddLocalUser(user) => {
@@ -250,8 +260,10 @@ async fn main() -> Result<()> {
                         // we won't remove the user for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
                         // disable the user instead. Note that they are already
-                        // disabled in FreeIPA, so cannot submit jobs to this account
-                        tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                        // disabled in FreeIPA, so cannot submit jobs to this account.
+                        // However, we do want to cancel all pending jobs for this user.
+                        sacctmgr::cancel_pending_user_jobs(mapping.local_user(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
                     },
                     GetLocalUsageReport(mapping, dates) => {

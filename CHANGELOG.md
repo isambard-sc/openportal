@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added automatic restoration from `.recycle` when creating directories. If a directory
   exists in `.recycle`, it is restored to its original location instead of creating
   a new directory, making the removal and recreation process fully reversible.
+- Implemented automatic cancellation of pending Slurm jobs when removing users or projects.
+  The `RemoveLocalUser` and `RemoveLocalProject` instructions now use `scancel` to cancel
+  all queued (PENDING state) jobs while leaving running jobs to complete. This ensures
+  that removed users cannot submit new jobs while preserving historical accounting data.
+  The `scancel` command is configurable via the `scancel` configuration option (default:
+  `scancel`)
 
 ### Fixed
 

@@ -142,8 +142,7 @@ async fn main() -> Result<()> {
                         // make sure that the statistics are preserved. Will eventually
                         // disable the project instead. However, we do want to cancel
                         // all pending jobs associated with this project.
-                        let mapping = templemeads::grammar::ProjectMapping::from(project.clone());
-                        sacctmgr::cancel_pending_project_jobs(mapping.local_group(), job.expires()).await?;
+                        sacctmgr::cancel_pending_project_jobs(project.local_group(), job.expires()).await?;
                         tracing::info!("Cancelled pending jobs for project {}", project);
                         job.completed_none()
                     },
@@ -247,8 +246,7 @@ async fn main() -> Result<()> {
                         // make sure that the statistics are preserved. Will eventually
                         // disable the project instead. However, we do want to cancel
                         // all pending jobs associated with this project.
-                        let mapping = templemeads::grammar::ProjectMapping::from(project.clone());
-                        sacctmgr::cancel_pending_project_jobs(mapping.local_group(), job.expires()).await?;
+                        sacctmgr::cancel_pending_project_jobs(project.local_group(), job.expires()).await?;
                         tracing::info!("Cancelled pending jobs for project {}", project);
                         job.completed_none()
                     },

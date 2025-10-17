@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.20.0] - 2025-10-17
+
 ### Added
 
 - Added support for multiple home roots in the filesystem agent. The `home-roots`
@@ -815,6 +817,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.20.0]: https://github.com/isambard-sc/openportal/releases/tag/0.20.0
 [0.19.1]: https://github.com/isambard-sc/openportal/releases/tag/0.19.1
 [0.19.0]: https://github.com/isambard-sc/openportal/releases/tag/0.19.0
 [0.18.0]: https://github.com/isambard-sc/openportal/releases/tag/0.18.0

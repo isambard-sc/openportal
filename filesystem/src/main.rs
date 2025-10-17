@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
             match job.instruction() {
                 AddLocalProject(mapping) => {
                     let home_roots = create_project_dirs_and_links(&mapping).await?;
-                    job.completed(home_roots.get(0).cloned().unwrap_or_default())
+                    job.completed(home_roots.first().cloned().unwrap_or_default())
                 },
                 RemoveLocalProject(mapping) => {
                     remove_project_dirs_and_links(&mapping).await?;
@@ -145,7 +145,7 @@ async fn main() -> Result<()> {
                     }
 
                     // update the job with the user's home directories
-                    job.completed(home_dirs.get(0).cloned().unwrap_or_default())
+                    job.completed(home_dirs.first().cloned().unwrap_or_default())
                 },
                 RemoveLocalUser(mapping) => {
                     remove_user_dirs(&mapping).await?;
@@ -308,8 +308,8 @@ async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
     let project_links = cache::get_project_links().await?;
 
     // First, recycle any project links
-    for i in 0..project_links.len() {
-        if let Some(link) = project_links[i].as_ref() {
+    for project_link in project_links.iter() {
+        if let Some(link) = project_link.as_ref() {
             let link_path = filesystem::get_project_link(link, &project_dir_name).await?;
             // For symlinks, we just remove them rather than recycling
             let path = std::path::Path::new(&link_path);

@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Added automatic retry logic with exponential backoff to the Python bridge client
+  (`call_get` and `call_post` functions in `python/src/lib.rs`) to handle rate
+  limiting from the bridge server. The client now detects HTTP 429 (Too Many Requests)
+  responses and automatically retries with exponential backoff (100ms, 200ms, 400ms,
+  800ms, 1600ms) up to 5 times before failing. This prevents the Python client from
+  being blocked when calling the bridge server too frequently.
+
 ## [0.20.0] - 2025-10-17
 
 ### Added

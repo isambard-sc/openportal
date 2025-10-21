@@ -3,7 +3,7 @@
 
 [package]
 name = "openportal"
-version = "0.20.0"
+version = "0.20.1"
 description = "Python wrappers for OpenPortal"
 edition = "2021"
 license = "MIT"

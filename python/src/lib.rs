@@ -97,36 +97,59 @@ where
     tracing::debug!("Calling get /{}", function);
 
     let config = get_config()?;
-    let date = Utc::now();
 
-    let url = config.url.join(function).context("Could not join URL")?;
+    // Retry logic with exponential backoff for rate limiting
+    const MAX_RETRIES: u32 = 5;
+    const INITIAL_BACKOFF_MS: u64 = 100;
 
-    // Generate a unique nonce for replay attack prevention
-    let nonce = uuid::Uuid::new_v4().to_string();
-    let auth_token = sign_api_call(&config.key, &date, "get", function, &None, Some(&nonce))?;
+    for attempt in 0..=MAX_RETRIES {
+        let date = Utc::now();
+        let url = config.url.join(function).context("Could not join URL")?;
 
-    let result = reqwest::blocking::Client::new()
-        .get(url)
-        .query(&[("openportal-version", "0.1")])
-        .header("Accept", "application/json")
-        .header("Authorization", auth_token)
-        .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-        .header("X-Nonce", nonce)
-        .send()
-        .with_context(|| format!("Could not call function: {}", function))?;
+        // Generate a unique nonce for replay attack prevention
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let auth_token = sign_api_call(&config.key, &date, "get", function, &None, Some(&nonce))?;
 
-    tracing::debug!("Response: {:?}", result);
+        let result = reqwest::blocking::Client::new()
+            .get(url)
+            .query(&[("openportal-version", "0.1")])
+            .header("Accept", "application/json")
+            .header("Authorization", auth_token)
+            .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+            .header("X-Nonce", nonce)
+            .send()
+            .with_context(|| format!("Could not call function: {}", function))?;
 
-    if result.status().is_success() {
-        Ok(result.json::<T>().context("Could not decode from json")?)
-    } else {
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            function,
-            result.status(),
-            result
-        )))
+        tracing::debug!("Response: {:?}", result);
+
+        if result.status().is_success() {
+            return Ok(result.json::<T>().context("Could not decode from json")?);
+        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
+            // Rate limited - backoff and retry
+            let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+            tracing::warn!(
+                "Rate limited on attempt {} for function: {}. Backing off for {}ms",
+                attempt + 1,
+                function,
+                backoff_ms
+            );
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        } else {
+            return Err(Error::Call(format!(
+                "Could not get response for function: {}. Status: {}. Response: {:?}",
+                function,
+                result.status(),
+                result
+            )));
+        }
     }
+
+    // If we exhausted all retries
+    Err(Error::Call(format!(
+        "Exceeded maximum retries ({}) for function: {} due to rate limiting",
+        MAX_RETRIES,
+        function
+    )))
 }
 
 fn call_post<T>(function: &str, arguments: serde_json::Value) -> Result<T, Error>
@@ -136,44 +159,67 @@ where
     tracing::debug!("Calling post /{} with arguments: {:?}", function, arguments);
 
     let config = get_config()?;
-    let date = Utc::now();
 
-    let url = config.url.join(function).context("Could not join URL")?;
+    // Retry logic with exponential backoff for rate limiting
+    const MAX_RETRIES: u32 = 5;
+    const INITIAL_BACKOFF_MS: u64 = 100;
 
-    // Generate a unique nonce for replay attack prevention
-    let nonce = uuid::Uuid::new_v4().to_string();
-    let auth_token = sign_api_call(
-        &config.key,
-        &date,
-        "post",
-        function,
-        &Some(arguments.to_owned()),
-        Some(&nonce),
-    )?;
+    for attempt in 0..=MAX_RETRIES {
+        let date = Utc::now();
+        let url = config.url.join(function).context("Could not join URL")?;
 
-    let result = reqwest::blocking::Client::new()
-        .post(url)
-        .query(&[("openportal-version", "0.1")])
-        .header("Accept", "application/json")
-        .header("Authorization", auth_token)
-        .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-        .header("X-Nonce", nonce)
-        .json(&arguments)
-        .send()
-        .with_context(|| format!("Could not call function: {}", function))?;
-
-    tracing::debug!("Response: {:?}", result);
-
-    if result.status().is_success() {
-        Ok(result.json::<T>().context("Could not decode from json")?)
-    } else {
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
+        // Generate a unique nonce for replay attack prevention
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let auth_token = sign_api_call(
+            &config.key,
+            &date,
+            "post",
             function,
-            result.status(),
-            result
-        )))
+            &Some(arguments.to_owned()),
+            Some(&nonce),
+        )?;
+
+        let result = reqwest::blocking::Client::new()
+            .post(url)
+            .query(&[("openportal-version", "0.1")])
+            .header("Accept", "application/json")
+            .header("Authorization", auth_token)
+            .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+            .header("X-Nonce", nonce)
+            .json(&arguments)
+            .send()
+            .with_context(|| format!("Could not call function: {}", function))?;
+
+        tracing::debug!("Response: {:?}", result);
+
+        if result.status().is_success() {
+            return Ok(result.json::<T>().context("Could not decode from json")?);
+        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
+            // Rate limited - backoff and retry
+            let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+            tracing::warn!(
+                "Rate limited on attempt {} for function: {}. Backing off for {}ms",
+                attempt + 1,
+                function,
+                backoff_ms
+            );
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        } else {
+            return Err(Error::Call(format!(
+                "Could not get response for function: {}. Status: {}. Response: {:?}",
+                function,
+                result.status(),
+                result
+            )));
+        }
     }
+
+    // If we exhausted all retries
+    Err(Error::Call(format!(
+        "Exceeded maximum retries ({}) for function: {} due to rate limiting",
+        MAX_RETRIES,
+        function
+    )))
 }
 
 ///

@@ -994,7 +994,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
     // create a global state object for the web API
     let state = AppState {
         config: config.clone(),
-        rate_limiter: RateLimiter::new(1000, 10), // 1000 requests per 10 seconds
+        rate_limiter: RateLimiter::new(10000, 10), // 10000 requests per 10 seconds
         nonce_store: Arc::new(Mutex::new(HashMap::new())),
         // data: Arc::new(Mutex::new(HashMap::new())),
     };

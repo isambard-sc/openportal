@@ -366,7 +366,11 @@ async fn check_recycle(dir: &str) -> Result<Option<String>, Error> {
 /// This is used when recreating a directory that was previously recycled.
 ///
 async fn restore_from_recycle(recycle_path: &str, target_path: &str) -> Result<(), Error> {
-    tracing::info!("Restoring '{}' from recycle to '{}'", recycle_path, target_path);
+    tracing::info!(
+        "Restoring '{}' from recycle to '{}'",
+        recycle_path,
+        target_path
+    );
 
     let recycle = Path::new(recycle_path);
     let target = Path::new(target_path);
@@ -386,8 +390,12 @@ async fn restore_from_recycle(recycle_path: &str, target_path: &str) -> Result<(
     }
 
     // Move the directory from recycle back to its original location
-    std::fs::rename(recycle, target)
-        .with_context(|| format!("Could not restore '{}' from recycle to '{}'", recycle_path, target_path))?;
+    std::fs::rename(recycle, target).with_context(|| {
+        format!(
+            "Could not restore '{}' from recycle to '{}'",
+            recycle_path, target_path
+        )
+    })?;
 
     tracing::info!("Successfully restored directory from recycle");
     Ok(())
@@ -431,9 +439,16 @@ pub async fn recycle_dir(dir: &str) -> Result<(), Error> {
     // Create .recycle directory if it doesn't exist
     let recycle_parent = parent.join(".recycle");
     if !recycle_parent.exists() {
-        tracing::info!("Creating recycle directory '{}'", recycle_parent.to_string_lossy());
-        std::fs::create_dir(&recycle_parent)
-            .with_context(|| format!("Could not create recycle directory '{}'", recycle_parent.to_string_lossy()))?;
+        tracing::info!(
+            "Creating recycle directory '{}'",
+            recycle_parent.to_string_lossy()
+        );
+        std::fs::create_dir(&recycle_parent).with_context(|| {
+            format!(
+                "Could not create recycle directory '{}'",
+                recycle_parent.to_string_lossy()
+            )
+        })?;
     }
 
     let recycle_path = recycle_parent.join(dir_name);
@@ -444,15 +459,28 @@ pub async fn recycle_dir(dir: &str) -> Result<(), Error> {
             "Recycle path '{}' already exists. Removing old recycled directory.",
             recycle_path.to_string_lossy()
         );
-        std::fs::remove_dir_all(&recycle_path)
-            .with_context(|| format!("Could not remove old recycled directory '{}'", recycle_path.to_string_lossy()))?;
+        std::fs::remove_dir_all(&recycle_path).with_context(|| {
+            format!(
+                "Could not remove old recycled directory '{}'",
+                recycle_path.to_string_lossy()
+            )
+        })?;
     }
 
-    tracing::info!("Moving '{}' to recycle '{}'", dir, recycle_path.to_string_lossy());
+    tracing::info!(
+        "Moving '{}' to recycle '{}'",
+        dir,
+        recycle_path.to_string_lossy()
+    );
 
     // Move the directory to recycle
-    std::fs::rename(path, &recycle_path)
-        .with_context(|| format!("Could not move '{}' to recycle '{}'", dir, recycle_path.to_string_lossy()))?;
+    std::fs::rename(path, &recycle_path).with_context(|| {
+        format!(
+            "Could not move '{}' to recycle '{}'",
+            dir,
+            recycle_path.to_string_lossy()
+        )
+    })?;
 
     // Update the timestamp to current time using filetime crate
     // This sets both access and modification times to current time

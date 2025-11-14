@@ -831,7 +831,13 @@ async fn get_user_create_if_not_exists(
     Ok(slurm_user)
 }
 
-pub async fn set_commands(sacct: &str, sacctmgr: &str, scontrol: &str, scancel: &str, max_slurm_runners: u64) {
+pub async fn set_commands(
+    sacct: &str,
+    sacctmgr: &str,
+    scontrol: &str,
+    scancel: &str,
+    max_slurm_runners: u64,
+) {
     tracing::debug!(
         "Using command line slurmd commands: sacctmgr: {}, scontrol: {}, scancel: {}, max_slurm_runners: {}",
         sacctmgr,

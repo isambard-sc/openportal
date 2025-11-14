@@ -3119,13 +3119,7 @@ pub async fn connect(
     let token_lifespans = vec![token_lifespan; num_servers as usize];
 
     // initialise with a single server
-    initialise_servers(
-        &servers,
-        &users,
-        &token_commands,
-        &token_lifespans,
-    )
-    .await?;
+    initialise_servers(&servers, &users, &token_commands, &token_lifespans).await?;
 
     // try to login to make sure we can connect
     let expires = Utc::now() + chrono::Duration::minutes(1);

@@ -124,7 +124,8 @@ where
 
         if result.status().is_success() {
             return Ok(result.json::<T>().context("Could not decode from json")?);
-        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
+        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES
+        {
             // Rate limited - backoff and retry
             let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
             tracing::warn!(
@@ -147,8 +148,7 @@ where
     // If we exhausted all retries
     Err(Error::Call(format!(
         "Exceeded maximum retries ({}) for function: {} due to rate limiting",
-        MAX_RETRIES,
-        function
+        MAX_RETRIES, function
     )))
 }
 
@@ -194,7 +194,8 @@ where
 
         if result.status().is_success() {
             return Ok(result.json::<T>().context("Could not decode from json")?);
-        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES {
+        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES
+        {
             // Rate limited - backoff and retry
             let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
             tracing::warn!(
@@ -217,8 +218,7 @@ where
     // If we exhausted all retries
     Err(Error::Call(format!(
         "Exceeded maximum retries ({}) for function: {} due to rate limiting",
-        MAX_RETRIES,
-        function
+        MAX_RETRIES, function
     )))
 }
 

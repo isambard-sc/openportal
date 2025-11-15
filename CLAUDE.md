@@ -156,4 +156,4 @@ Study these examples when creating new agents or understanding the framework.
 
 ## License
 
-Code uses SPDX identifiers: MIT license for code (SPDX-License-Identifier: MIT), CC0-1.0 for config/docs.
+Source files include SPDX license identifiers in their headers. Code files use MIT, while configuration and documentation files use CC0-1.0.

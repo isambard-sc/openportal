@@ -8,7 +8,7 @@ use paddington::SecretKey;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateTime, PyList, PyNone, PyString};
+use pyo3::types::{PyDate, PyDateTime, PyList, PyString, PyTzInfo};
 use pyo3::{IntoPyObject, PyResult, Python};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -400,7 +400,7 @@ impl Job {
         PyDateTime::from_timestamp(
             py,
             self.0.created().timestamp() as f64,
-            Some(&pyo3::types::timezone_utc(py)),
+            PyTzInfo::utc(py).ok().as_deref(),
         )
     }
 
@@ -409,7 +409,7 @@ impl Job {
         PyDateTime::from_timestamp(
             py,
             self.0.changed().timestamp() as f64,
-            Some(&pyo3::types::timezone_utc(py)),
+            PyTzInfo::utc(py).ok().as_deref(),
         )
     }
 
@@ -566,7 +566,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(PyString::new(py, &result).into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "bool" => {
@@ -577,10 +577,10 @@ impl Job {
 
                 match result {
                     Some(result) => Ok((result as u64).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
-            "None" => Ok(PyNone::get(py).as_ref().clone()),
+            "None" => Ok(py.None().into_bound(py)),
             "UserIdentifier" => {
                 let result = match self.0.result::<grammar::UserIdentifier>() {
                     Ok(result) => result,
@@ -589,7 +589,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(UserIdentifier::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectIdentifier" => {
@@ -602,7 +602,7 @@ impl Job {
                     Some(result) => Ok(ProjectIdentifier::from(result)
                         .into_pyobject(py)?
                         .into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "PortalIdentifier" => {
@@ -615,7 +615,7 @@ impl Job {
                     Some(result) => {
                         Ok(PortalIdentifier::from(result).into_pyobject(py)?.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "UserMapping" => {
@@ -626,7 +626,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(UserMapping::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectMapping" => {
@@ -637,7 +637,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(ProjectMapping::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "UsageReport" => {
@@ -648,7 +648,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(UsageReport::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectUsageReport" => {
@@ -661,7 +661,7 @@ impl Job {
                     Some(result) => Ok(ProjectUsageReport::from(result)
                         .into_pyobject(py)?
                         .into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Usage" => {
@@ -672,7 +672,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(Usage::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "DateRange" => {
@@ -683,7 +683,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(DateRange::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectDetails" => {
@@ -694,7 +694,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(ProjectDetails::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectTemplate" => {
@@ -705,7 +705,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(ProjectTemplate::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<String>" => {
@@ -722,7 +722,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<UserIdentifier>" => {
@@ -739,7 +739,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<UserMapping>" => {
@@ -756,7 +756,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<ProjectIdentifier>" => {
@@ -773,7 +773,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<ProjectMapping>" => {
@@ -790,7 +790,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<PortalIdentifier>" => {
@@ -807,7 +807,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             _ => Err(PyErr::new::<PyOSError, _>(format!(

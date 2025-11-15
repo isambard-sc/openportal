@@ -33,7 +33,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
-          sccache: 'true'
+          sccache: "true"
           manylinux: 2_17
           working-directory: python
       - name: Upload wheels
@@ -47,8 +47,6 @@ jobs:
     strategy:
       matrix:
         platform:
-          - runner: macos-12
-            target: x86_64
           - runner: macos-14
             target: aarch64
     steps:
@@ -61,7 +59,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
-          sccache: 'true'
+          sccache: "true"
           working-directory: python
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -73,10 +71,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        platform: [
-          { target: "x86_64-unknown-linux-musl", image_tag: "x86_64-musl" },
-          { target: "aarch64-unknown-linux-musl", image_tag: "aarch64-musl" },
-        ]
+        platform:
+          [
+            { target: "x86_64-unknown-linux-musl", image_tag: "x86_64-musl" },
+            { target: "aarch64-unknown-linux-musl", image_tag: "aarch64-musl" },
+          ]
     container:
       image: docker://messense/rust-musl-cross:${{ matrix.platform.image_tag }}
     steps:
@@ -90,7 +89,7 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           docker-options: -e UNSAFE_PYO3_BUILD_FREE_THREADED=1
-          sccache: 'true'
+          sccache: "true"
           working-directory: python
           manylinux: musllinux_1_1
           container: off
@@ -117,7 +116,7 @@ jobs:
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: 'wheels-*/*'
+          subject-path: "wheels-*/*"
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         env:

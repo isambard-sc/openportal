@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Updated all dependencies to their latest versions, including fixes to
+  compile with the latest PyO3 (for Python 3.14 support). Thanks to
+  @livenson for the help :-)
+
 ## [0.20.1] - 2025-10-21
 
 ### Fixed

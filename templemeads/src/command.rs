@@ -5,6 +5,7 @@ use crate::agent::{self, Peer, Type as AgentType};
 use crate::board::SyncState;
 use crate::destination::Destination;
 use crate::error::Error;
+use crate::grammar::NamedType;
 use crate::job::Job;
 use crate::virtual_agent::send as send_to_virtual;
 
@@ -74,6 +75,12 @@ impl HealthInfo {
             engine: engine.to_owned(),
             version: version.to_owned(),
         }
+    }
+}
+
+impl NamedType for HealthInfo {
+    fn type_name() -> &'static str {
+        "HealthInfo"
     }
 }
 
@@ -208,6 +215,14 @@ impl Command {
     }
 
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
+        // Check if sending to ourselves
+        let my_name = agent::name().await;
+        if peer.name() == my_name {
+            tracing::debug!("Sending command to self - processing locally");
+            // Process the command locally by injecting it into the received queue
+            return self.received_from(peer);
+        }
+
         if agent::is_virtual(peer).await {
             tracing::debug!("Sending command to virtual peer {} locally", peer);
             Ok(send_to_virtual(

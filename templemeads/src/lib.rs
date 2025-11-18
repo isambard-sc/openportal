@@ -13,6 +13,7 @@ mod custom;
 mod error;
 mod filesystem;
 mod handler;
+mod health;
 mod instance;
 mod platform;
 mod portal;

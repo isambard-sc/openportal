@@ -46,7 +46,7 @@ static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
 /// Global cache of health responses from agents
 /// Maps agent_name -> HealthInfo (with last_updated timestamp inside)
 ///
-static HEALTH_CACHE: Lazy<RwLock<HashMap<String, crate::command::HealthInfo>>> =
+pub(crate) static HEALTH_CACHE: Lazy<RwLock<HashMap<String, crate::command::HealthInfo>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 ///
@@ -304,66 +304,8 @@ async fn process_command(
         Command::HealthCheck => {
             tracing::info!("Received health check request from {}", sender);
 
-            // Collect health information
-            let agent_name = agent::name().await;
-            let agent_type = agent::my_agent_type().await;
-            let start_time = agent::start_time().await;
-            let engine = agent::engine().await;
-            let version = agent::version().await;
-
-            let mut health = crate::command::HealthInfo::new(
-                &agent_name,
-                agent_type,
-                true, // connected (since we're responding)
-                start_time,
-                &engine,
-                &version,
-            );
-
-            // Get aggregated job stats from all boards
-            let (active, pending, running, completed, duplicates) =
-                crate::state::aggregate_job_stats().await;
-
-            health.active_jobs = active;
-            health.pending_jobs = pending;
-            health.running_jobs = running;
-            health.completed_jobs = completed;
-            health.duplicate_jobs = duplicates;
-
-            // Cascade health check to downstream peers (excluding the sender to avoid loops)
-            let all_peers = agent::all_peers().await;
-            let downstream_peers: Vec<_> = all_peers
-                .into_iter()
-                .filter(|p| p.name() != sender)
-                .collect();
-
-            if !downstream_peers.is_empty() {
-                tracing::debug!(
-                    "Cascading health check to {} downstream peers",
-                    downstream_peers.len()
-                );
-
-                // Send health checks to all downstream peers
-                for peer in downstream_peers.iter() {
-                    let health_check = Command::health_check();
-                    if let Err(e) = health_check.send_to(peer).await {
-                        tracing::warn!("Failed to send health check to {}: {}", peer.name(), e);
-                    }
-                }
-
-                // Wait for responses to arrive and be cached
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-                // Retrieve cached health responses from downstream peers
-                let cached_health = get_cached_health().await;
-                for peer in downstream_peers.iter() {
-                    if let Some(peer_health) = cached_health.get(peer.name()) {
-                        health
-                            .peers
-                            .insert(peer.name().to_owned(), Box::new(peer_health.clone()));
-                    }
-                }
-            }
+            // Collect health information (including cascaded peer health)
+            let health = crate::health::collect_health(sender).await?;
 
             tracing::info!("Health check: {}", health);
 

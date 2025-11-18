@@ -15,6 +15,7 @@ use paddington::message::Message;
 use paddington::received as received_from_peer;
 use paddington::send as send_to_peer;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Health information for an agent
@@ -46,6 +47,9 @@ pub struct HealthInfo {
     pub engine: String,
     /// Engine version
     pub version: String,
+    /// Nested health information from downstream peers
+    #[serde(default)]
+    pub peers: HashMap<String, Box<HealthInfo>>,
 }
 
 impl HealthInfo {
@@ -74,6 +78,7 @@ impl HealthInfo {
             uptime_seconds,
             engine: engine.to_owned(),
             version: version.to_owned(),
+            peers: HashMap::new(),
         }
     }
 }

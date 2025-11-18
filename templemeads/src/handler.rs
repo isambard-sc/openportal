@@ -332,6 +332,41 @@ async fn process_command(
             health.completed_jobs = completed;
             health.duplicate_jobs = duplicates;
 
+            // Cascade health check to downstream peers (excluding the sender to avoid loops)
+            let all_peers = agent::all_peers().await;
+            let downstream_peers: Vec<_> = all_peers
+                .into_iter()
+                .filter(|p| p.name() != sender)
+                .collect();
+
+            if !downstream_peers.is_empty() {
+                tracing::debug!(
+                    "Cascading health check to {} downstream peers",
+                    downstream_peers.len()
+                );
+
+                // Send health checks to all downstream peers
+                for peer in downstream_peers.iter() {
+                    let health_check = Command::health_check();
+                    if let Err(e) = health_check.send_to(peer).await {
+                        tracing::warn!("Failed to send health check to {}: {}", peer.name(), e);
+                    }
+                }
+
+                // Wait for responses to arrive and be cached
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+                // Retrieve cached health responses from downstream peers
+                let cached_health = get_cached_health().await;
+                for peer in downstream_peers.iter() {
+                    if let Some((peer_health, _timestamp)) = cached_health.get(peer.name()) {
+                        health
+                            .peers
+                            .insert(peer.name().to_owned(), Box::new(peer_health.clone()));
+                    }
+                }
+            }
+
             tracing::info!("Health check: {}", health);
 
             // Send health response back to sender

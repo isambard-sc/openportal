@@ -151,6 +151,9 @@ struct Registrar {
     name: String,
     typ: Type,
     zones: Vec<String>,
+    engine: String,
+    version: String,
+    start_time: chrono::DateTime<chrono::Utc>,
 }
 
 impl Registrar {
@@ -161,12 +164,18 @@ impl Registrar {
             name: String::new(),
             typ: Type::Portal,
             zones: Vec::new(),
+            engine: String::new(),
+            version: String::new(),
+            start_time: chrono::Utc::now(),
         }
     }
 
-    fn register_self(&mut self, name: &str, agent_type: &Type) {
+    fn register_self(&mut self, name: &str, agent_type: &Type, engine: &str, version: &str) {
         self.name = name.to_string();
         self.typ = agent_type.clone();
+        self.engine = engine.to_string();
+        self.version = version.to_string();
+        self.start_time = chrono::Utc::now();
     }
 
     fn register_peer(&mut self, peer: &Peer, agent_type: &Type, _engine: &str, _version: &str) {
@@ -279,8 +288,8 @@ pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version
 /// Register that this agent in this process is called `name` and
 /// is of type `agent_type`
 ///
-pub async fn register_self(name: &str, agent_type: &Type) {
-    REGISTRAR.write().await.register_self(name, agent_type);
+pub async fn register_self(name: &str, agent_type: &Type, engine: &str, version: &str) {
+    REGISTRAR.write().await.register_self(name, agent_type, engine, version);
 }
 
 ///
@@ -315,6 +324,34 @@ pub async fn has_virtual(peer: &Peer) -> bool {
 ///
 pub async fn name() -> String {
     REGISTRAR.read().await.name.clone()
+}
+
+///
+/// Return the engine name of this agent
+///
+pub async fn engine() -> String {
+    REGISTRAR.read().await.engine.clone()
+}
+
+///
+/// Return the version of this agent
+///
+pub async fn version() -> String {
+    REGISTRAR.read().await.version.clone()
+}
+
+///
+/// Return the start time of this agent
+///
+pub async fn start_time() -> chrono::DateTime<chrono::Utc> {
+    REGISTRAR.read().await.start_time
+}
+
+///
+/// Return the agent type of this agent
+///
+pub async fn my_agent_type() -> Type {
+    REGISTRAR.read().await.typ.clone()
 }
 
 ///

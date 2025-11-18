@@ -372,6 +372,10 @@ impl Job {
         self.state == Status::Duplicate
     }
 
+    pub fn is_running(&self) -> bool {
+        self.state == Status::Running
+    }
+
     pub fn state(&self) -> Status {
         self.state.clone()
     }

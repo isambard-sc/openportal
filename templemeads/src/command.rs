@@ -9,11 +9,91 @@ use crate::job::Job;
 use crate::virtual_agent::send as send_to_virtual;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use paddington::message::Message;
 use paddington::received as received_from_peer;
 use paddington::send as send_to_peer;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Health information for an agent
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthInfo {
+    /// Agent name
+    pub agent: String,
+    /// Agent type
+    pub agent_type: AgentType,
+    /// Whether agent is connected
+    pub connected: bool,
+    /// Number of active jobs on this agent's boards
+    pub active_jobs: usize,
+    /// Number of pending jobs
+    pub pending_jobs: usize,
+    /// Number of running jobs
+    pub running_jobs: usize,
+    /// Number of completed jobs (on boards)
+    pub completed_jobs: usize,
+    /// Number of duplicate jobs
+    pub duplicate_jobs: usize,
+    /// Time when agent started
+    pub start_time: DateTime<Utc>,
+    /// Current time on agent
+    pub current_time: DateTime<Utc>,
+    /// Uptime in seconds
+    pub uptime_seconds: i64,
+    /// Engine name (e.g., "templemeads")
+    pub engine: String,
+    /// Engine version
+    pub version: String,
+}
+
+impl HealthInfo {
+    pub fn new(
+        agent: &str,
+        agent_type: AgentType,
+        connected: bool,
+        start_time: DateTime<Utc>,
+        engine: &str,
+        version: &str,
+    ) -> Self {
+        let current_time = Utc::now();
+        let uptime_seconds = current_time.signed_duration_since(start_time).num_seconds();
+
+        Self {
+            agent: agent.to_owned(),
+            agent_type,
+            connected,
+            active_jobs: 0,
+            pending_jobs: 0,
+            running_jobs: 0,
+            completed_jobs: 0,
+            duplicate_jobs: 0,
+            start_time,
+            current_time,
+            uptime_seconds,
+            engine: engine.to_owned(),
+            version: version.to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for HealthInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ({}) - {} - uptime: {}s, jobs: {} active ({} pending, {} running, {} completed, {} duplicates)",
+            self.agent,
+            self.agent_type,
+            if self.connected { "connected" } else { "disconnected" },
+            self.uptime_seconds,
+            self.active_jobs,
+            self.pending_jobs,
+            self.running_jobs,
+            self.completed_jobs,
+            self.duplicate_jobs
+        )
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {
@@ -37,6 +117,15 @@ pub enum Command {
     Sync {
         state: SyncState,
     },
+    HealthCheck,
+    HealthResponse {
+        health: HealthInfo,
+    },
+    Restart,
+    RestartAck {
+        agent: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -56,6 +145,12 @@ impl std::fmt::Display for Command {
                 agent, engine, version
             ),
             Command::Sync { state: _ } => write!(f, "Sync: State"),
+            Command::HealthCheck => write!(f, "HealthCheck"),
+            Command::HealthResponse { health } => write!(f, "HealthResponse: {}", health),
+            Command::Restart => write!(f, "Restart"),
+            Command::RestartAck { agent, message } => {
+                write!(f, "RestartAck: {} - {}", agent, message)
+            }
         }
     }
 }
@@ -90,6 +185,25 @@ impl Command {
     pub fn sync(state: &SyncState) -> Self {
         Self::Sync {
             state: state.clone(),
+        }
+    }
+
+    pub fn health_check() -> Self {
+        Self::HealthCheck
+    }
+
+    pub fn health_response(health: HealthInfo) -> Self {
+        Self::HealthResponse { health }
+    }
+
+    pub fn restart() -> Self {
+        Self::Restart
+    }
+
+    pub fn restart_ack(agent: &str, message: &str) -> Self {
+        Self::RestartAck {
+            agent: agent.to_owned(),
+            message: message.to_owned(),
         }
     }
 
@@ -134,6 +248,10 @@ impl Command {
                 version: _,
             } => None,
             Command::Error { error: _ } => None,
+            Command::HealthCheck => None,
+            Command::HealthResponse { health: _ } => None,
+            Command::Restart => None,
+            Command::RestartAck { agent: _, message: _ } => None,
         }
     }
 
@@ -149,6 +267,10 @@ impl Command {
                 version: _,
             } => None,
             Command::Error { error: _ } => None,
+            Command::HealthCheck => None,
+            Command::HealthResponse { health: _ } => None,
+            Command::Restart => None,
+            Command::RestartAck { agent: _, message: _ } => None,
         }
     }
 
@@ -164,6 +286,10 @@ impl Command {
                 version: _,
             } => None,
             Command::Error { error: _ } => None,
+            Command::HealthCheck => None,
+            Command::HealthResponse { health: _ } => None,
+            Command::Restart => None,
+            Command::RestartAck { agent: _, message: _ } => None,
         }
     }
 }

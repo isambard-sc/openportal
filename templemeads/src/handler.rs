@@ -46,13 +46,16 @@ pub async fn set_my_service_details(
     agent_type: &agent::Type,
     runner: Option<AsyncRunnable>,
 ) -> Result<()> {
+    let engine = env!("CARGO_PKG_NAME");
+    let version = env!("CARGO_PKG_VERSION");
+
     tracing::info!(
         "Agent layer: {} version {}",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        engine,
+        version
     );
 
-    agent::register_self(service, agent_type).await;
+    agent::register_self(service, agent_type, engine, version).await;
     let mut service_details = SERVICE_DETAILS.write().await;
     service_details.service = service.to_string();
     service_details.agent_type = agent_type.clone();
@@ -270,6 +273,70 @@ async fn process_command(
         Command::Sync { state } => {
             let peer = Peer::new(sender, zone);
             sync_from_peer(recipient, &peer, state).await?;
+        }
+        Command::HealthCheck => {
+            tracing::info!("Received health check request from {}", sender);
+
+            // Collect health information
+            let agent_name = agent::name().await;
+            let agent_type = agent::my_agent_type().await;
+            let start_time = agent::start_time().await;
+            let engine = agent::engine().await;
+            let version = agent::version().await;
+
+            let mut health = crate::command::HealthInfo::new(
+                &agent_name,
+                agent_type,
+                true, // connected (since we're responding)
+                start_time,
+                &engine,
+                &version,
+            );
+
+            // Get aggregated job stats from all boards
+            let (active, pending, running, completed, duplicates) =
+                crate::state::aggregate_job_stats().await;
+
+            health.active_jobs = active;
+            health.pending_jobs = pending;
+            health.running_jobs = running;
+            health.completed_jobs = completed;
+            health.duplicate_jobs = duplicates;
+
+            tracing::info!("Health check: {}", health);
+
+            // Send health response back to sender
+            let response = Command::health_response(health);
+            response.send_to(&Peer::new(sender, zone)).await?;
+        }
+        Command::HealthResponse { health } => {
+            tracing::info!("Received health response: {}", health);
+            // Health responses are typically just logged or stored
+            // The requesting agent can wait for this response if needed
+        }
+        Command::Restart => {
+            tracing::warn!("Received restart command from {}", sender);
+
+            let agent_name = agent::name().await;
+            let ack = Command::restart_ack(
+                &agent_name,
+                "Restart acknowledged - agent will terminate and rely on supervisor to restart",
+            );
+
+            // Send acknowledgment before terminating
+            if let Err(e) = ack.send_to(&Peer::new(sender, zone)).await {
+                tracing::error!("Failed to send restart acknowledgment: {}", e);
+            }
+
+            // Give time for the ack to be sent
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Exit the process - supervisor should restart it
+            tracing::warn!("Terminating process for restart...");
+            std::process::exit(0);
+        }
+        Command::RestartAck { agent, message } => {
+            tracing::info!("Restart acknowledged by {}: {}", agent, message);
         }
         _ => {
             tracing::warn!("Command {} not recognised", command);

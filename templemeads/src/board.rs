@@ -87,6 +87,32 @@ impl Board {
     }
 
     ///
+    /// Return job statistics for this board
+    /// Returns (active, pending, running, completed, duplicates)
+    ///
+    pub fn job_stats(&self) -> (usize, usize, usize, usize, usize) {
+        let mut pending = 0;
+        let mut running = 0;
+        let mut completed = 0;
+        let mut duplicates = 0;
+
+        for job in self.jobs.values() {
+            if job.is_pending() {
+                pending += 1;
+            } else if job.is_running() {
+                running += 1;
+            } else if job.is_finished() {
+                completed += 1;
+            } else if job.is_duplicate() {
+                duplicates += 1;
+            }
+        }
+
+        let active = self.jobs.len();
+        (active, pending, running, completed, duplicates)
+    }
+
+    ///
     /// Return a waiter that can be used to receive a job when
     /// it is either completed or errored. This will block until
     /// the passed job transitions into one of those states,

@@ -105,3 +105,29 @@ impl State {
         self.board.clone()
     }
 }
+
+///
+/// Collect aggregate job statistics from all boards
+/// Returns (active, pending, running, completed, duplicates)
+///
+pub async fn aggregate_job_stats() -> (usize, usize, usize, usize, usize) {
+    let states = STATES.read().await;
+    let mut total_active = 0;
+    let mut total_pending = 0;
+    let mut total_running = 0;
+    let mut total_completed = 0;
+    let mut total_duplicates = 0;
+
+    for state in states.states.values() {
+        let board = state.board().await;
+        let board = board.read().await;
+        let (active, pending, running, completed, duplicates) = board.job_stats();
+        total_active += active;
+        total_pending += pending;
+        total_running += running;
+        total_completed += completed;
+        total_duplicates += duplicates;
+    }
+
+    (total_active, total_pending, total_running, total_completed, total_duplicates)
+}

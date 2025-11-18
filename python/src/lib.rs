@@ -263,6 +263,12 @@ fn initialize_tracing() -> PyResult<()> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
     pub status: String,
+    #[serde(default)]
+    pub bridge: Option<serde_json::Value>,
+    #[serde(default)]
+    pub peers: Option<serde_json::Value>,
+    #[serde(default)]
+    pub peers_queried: Option<Vec<String>>,
 }
 
 #[pymethods]
@@ -272,8 +278,28 @@ impl Health {
         Ok(self.status.clone())
     }
 
+    #[getter]
+    fn bridge(&self) -> PyResult<Option<String>> {
+        Ok(self.bridge.as_ref().map(|v| v.to_string()))
+    }
+
+    #[getter]
+    fn peers(&self) -> PyResult<Option<String>> {
+        Ok(self.peers.as_ref().map(|v| v.to_string()))
+    }
+
+    #[getter]
+    fn peers_queried(&self) -> PyResult<Option<Vec<String>>> {
+        Ok(self.peers_queried.clone())
+    }
+
     fn __str__(&self) -> PyResult<String> {
-        Ok(format!("Health( status: {} )", self.status))
+        let mut s = format!("Health( status: {}", self.status);
+        if let Some(ref peers) = self.peers_queried {
+            s.push_str(&format!(", peers: {}", peers.len()));
+        }
+        s.push_str(" )");
+        Ok(s)
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -290,6 +316,32 @@ impl Health {
 
     fn is_healthy(&self) -> PyResult<bool> {
         Ok(self.status == "ok")
+    }
+
+    fn get_details(&self) -> PyResult<String> {
+        let mut details = format!("OpenPortal Health Status: {}\n\n", self.status);
+
+        if let Some(ref bridge) = self.bridge {
+            details.push_str(&format!("Bridge Health:\n{}\n\n",
+                serde_json::to_string_pretty(bridge).unwrap_or_else(|_| bridge.to_string())
+            ));
+        }
+
+        if let Some(ref peers) = self.peers {
+            details.push_str("Peer Health:\n");
+            details.push_str(&format!("{}\n\n",
+                serde_json::to_string_pretty(peers).unwrap_or_else(|_| peers.to_string())
+            ));
+        }
+
+        if let Some(ref peers_queried) = self.peers_queried {
+            details.push_str(&format!("Health checks sent to {} peer(s):\n", peers_queried.len()));
+            for peer in peers_queried {
+                details.push_str(&format!("  - {}\n", peer));
+            }
+        }
+
+        Ok(details)
     }
 }
 

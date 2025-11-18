@@ -355,6 +355,13 @@ pub async fn my_agent_type() -> Type {
 }
 
 ///
+/// Return all registered peers
+///
+pub async fn all_peers() -> Vec<Peer> {
+    REGISTRAR.read().await.peers.keys().cloned().collect()
+}
+
+///
 /// Return the name of the first portal agent in the system.
 /// Note that this will wait for up to 30 seconds for a portal
 /// agent to be registered before returning None

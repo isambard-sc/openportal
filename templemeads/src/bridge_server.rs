@@ -502,8 +502,97 @@ async fn health(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     verify_headers(&state, &headers, "get", "health", None).await?;
-    tracing::debug!("Health check");
-    Ok(Json(json!({"status": "ok"})))
+    tracing::debug!("Health check - collecting from all agents");
+
+    // Get health from this agent (bridge)
+    let agent_name = crate::agent::name().await;
+    let agent_type = crate::agent::my_agent_type().await;
+    let start_time = crate::agent::start_time().await;
+    let engine = crate::agent::engine().await;
+    let version = crate::agent::version().await;
+
+    let mut my_health = crate::command::HealthInfo::new(
+        &agent_name,
+        agent_type,
+        true,
+        start_time,
+        &engine,
+        &version,
+    );
+
+    let (active, pending, running, completed, duplicates) =
+        crate::state::aggregate_job_stats().await;
+
+    my_health.active_jobs = active;
+    my_health.pending_jobs = pending;
+    my_health.running_jobs = running;
+    my_health.completed_jobs = completed;
+    my_health.duplicate_jobs = duplicates;
+
+    // Get all connected peers
+    let peers = crate::agent::all_peers().await;
+
+    tracing::debug!("Sending health checks to {} peers", peers.len());
+
+    // Send health check to each peer and collect responses
+    // We'll do this concurrently with a timeout
+    let health_checks: Vec<_> = peers
+        .iter()
+        .map(|peer| {
+            let peer = peer.clone();
+            async move {
+                let health_check = crate::command::Command::health_check();
+                match health_check.send_to(&peer).await {
+                    Ok(_) => {
+                        tracing::debug!("Sent health check to {}", peer);
+                        Some(peer.name().to_string())
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to send health check to {}: {}", peer, e);
+                        None
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Send all health checks concurrently
+    for health_check in health_checks {
+        tokio::spawn(health_check);
+    }
+
+    // Wait 250ms for health responses to come back
+    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+    // Get all cached health responses
+    let cached_health = crate::handler::get_cached_health().await;
+
+    // Build the response with bridge health, cached peer health, and timestamps
+    let mut result = serde_json::Map::new();
+
+    // Add bridge health with timestamp
+    let mut bridge_with_timestamp = serde_json::Map::new();
+    bridge_with_timestamp.insert("health".to_string(), serde_json::to_value(&my_health).unwrap());
+    bridge_with_timestamp.insert("last_updated".to_string(), json!(chrono::Utc::now().to_rfc3339()));
+    result.insert("bridge".to_string(), json!(bridge_with_timestamp));
+
+    // Add cached health from peers
+    let mut peers_health = serde_json::Map::new();
+    for (agent_name, (health_info, timestamp)) in cached_health {
+        let mut peer_data = serde_json::Map::new();
+        peer_data.insert("health".to_string(), serde_json::to_value(&health_info).unwrap());
+        peer_data.insert("last_updated".to_string(), json!(timestamp.to_rfc3339()));
+        peers_health.insert(agent_name, json!(peer_data));
+    }
+    result.insert("peers".to_string(), json!(peers_health));
+
+    result.insert(
+        "peers_queried".to_string(),
+        serde_json::to_value(peers.iter().map(|p| p.name()).collect::<Vec<_>>()).unwrap(),
+    );
+    result.insert("status".to_string(), json!("ok"));
+
+    Ok(Json(json!(result)))
 }
 
 //

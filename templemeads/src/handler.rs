@@ -11,11 +11,12 @@ use crate::job::{sync_from_peer, Envelope, Status};
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use paddington::async_message_handler;
 use paddington::message::{Message, MessageType};
 use std::boxed::Box;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
@@ -40,6 +41,34 @@ impl Default for ServiceDetails {
 
 static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
     Lazy::new(|| RwLock::new(ServiceDetails::default()));
+
+///
+/// Global cache of health responses from agents
+/// Maps agent_name -> (HealthInfo, timestamp_received)
+///
+static HEALTH_CACHE: Lazy<RwLock<HashMap<String, (crate::command::HealthInfo, DateTime<Utc>)>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+///
+/// Store a health response in the global cache
+///
+pub async fn cache_health_response(health: crate::command::HealthInfo) {
+    let agent_name = health.agent.clone();
+    let timestamp = Utc::now();
+
+    let mut cache = HEALTH_CACHE.write().await;
+    cache.insert(agent_name.clone(), (health, timestamp));
+
+    tracing::debug!("Cached health response for agent: {}", agent_name);
+}
+
+///
+/// Get all cached health responses
+/// Returns a HashMap of agent_name -> (HealthInfo, timestamp)
+///
+pub async fn get_cached_health() -> HashMap<String, (crate::command::HealthInfo, DateTime<Utc>)> {
+    HEALTH_CACHE.read().await.clone()
+}
 
 pub async fn set_my_service_details(
     service: &str,
@@ -311,8 +340,8 @@ async fn process_command(
         }
         Command::HealthResponse { health } => {
             tracing::info!("Received health response: {}", health);
-            // Health responses are typically just logged or stored
-            // The requesting agent can wait for this response if needed
+            // Cache the health response for later retrieval
+            cache_health_response(health.clone()).await;
         }
         Command::Restart => {
             tracing::warn!("Received restart command from {}", sender);

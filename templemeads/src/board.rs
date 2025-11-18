@@ -192,6 +192,56 @@ impl Board {
             // and command
             for (id, existing_job) in &self.jobs.clone() {
                 if *id != job.id() && job.is_duplicate_of(existing_job) {
+                    // Check if the original job is too old (older than 10 minutes)
+                    let age = chrono::Utc::now().signed_duration_since(existing_job.created());
+                    if age.num_minutes() > 10 {
+                        tracing::warn!(
+                            "Not creating duplicate - original job {} is too old ({} minutes)",
+                            existing_job.id(),
+                            age.num_minutes()
+                        );
+
+                        // Return an error instead of creating a duplicate
+                        let errored_job = match job.errored(&format!(
+                            "TooManyDuplicatesError{{Original job is too old ({} minutes). Please retry.}}",
+                            age.num_minutes()
+                        )) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::error!("Failed to create error job: {}", e);
+                                continue;
+                            }
+                        };
+
+                        self.jobs.insert(errored_job.id(), errored_job.clone());
+                        return Ok((errored_job, JobAddState::Added));
+                    }
+
+                    // Check if there are already too many duplicates (max 100)
+                    let duplicate_count = self.duplicates.get(id).map_or(0, |v| v.len());
+                    if duplicate_count >= 100 {
+                        tracing::warn!(
+                            "Not creating duplicate - too many duplicates ({}) for job {}",
+                            duplicate_count,
+                            existing_job.id()
+                        );
+
+                        // Return an error instead of creating a duplicate
+                        let errored_job = match job.errored(&format!(
+                            "TooManyDuplicatesError{{Maximum duplicates ({}) reached. Please retry later.}}",
+                            duplicate_count
+                        )) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::error!("Failed to create error job: {}", e);
+                                continue;
+                            }
+                        };
+
+                        self.jobs.insert(errored_job.id(), errored_job.clone());
+                        return Ok((errored_job, JobAddState::Added));
+                    }
+
                     // change the status of our job to be a duplicate
                     let duplicate = match job.duplicate(existing_job) {
                         Ok(dup) => dup,
@@ -456,7 +506,51 @@ impl Board {
             })
             .collect();
 
+        // Also handle duplicates of expired jobs
+        let mut duplicates_to_expire = Vec::<Uuid>::new();
         for job_id in expired_jobs.iter() {
+            // If this expired job has duplicates, we need to expire them too
+            if let Some(duplicate_ids) = self.duplicates.remove(job_id) {
+                tracing::info!(
+                    "Original job {} expired - expiring {} duplicates",
+                    job_id,
+                    duplicate_ids.len()
+                );
+
+                for duplicate_id in duplicate_ids {
+                    if let Some(duplicate_job) = self.jobs.get_mut(&duplicate_id) {
+                        // Mark the duplicate as expired/errored
+                        if !duplicate_job.is_finished() && !duplicate_job.is_expired() {
+                            *duplicate_job = match duplicate_job.errored("Original job expired") {
+                                Ok(j) => j,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to mark duplicate job as errored: {}",
+                                        e
+                                    );
+                                    duplicate_job.clone()
+                                }
+                            };
+                        }
+
+                        // Notify any listeners for the duplicate job
+                        if let Some(listeners) = self.waiters.remove(&duplicate_id) {
+                            for listener in listeners {
+                                listener.notify(duplicate_job.clone());
+                            }
+                        }
+                    }
+
+                    duplicates_to_expire.push(duplicate_id);
+                }
+            }
+        }
+
+        // Remove expired originals and their duplicates
+        for job_id in expired_jobs.iter() {
+            let _ = self.jobs.remove(job_id);
+        }
+        for job_id in duplicates_to_expire.iter() {
             let _ = self.jobs.remove(job_id);
         }
 

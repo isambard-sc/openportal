@@ -560,7 +560,7 @@ async fn health(
     tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
 
     // Get all cached health responses
-    let cached_health = crate::handler::get_cached_health().await;
+    let cached_health = crate::health::get_cached_health().await;
 
     // Add cached health from peers (each has last_updated field)
     for (agent_name, health_info) in cached_health {

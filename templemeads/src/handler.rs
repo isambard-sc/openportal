@@ -11,12 +11,11 @@ use crate::job::{sync_from_peer, Envelope, Status};
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
-use chrono::Utc;
 use once_cell::sync::Lazy;
 use paddington::async_message_handler;
 use paddington::message::{Message, MessageType};
 use std::boxed::Box;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
@@ -41,36 +40,6 @@ impl Default for ServiceDetails {
 
 static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
     Lazy::new(|| RwLock::new(ServiceDetails::default()));
-
-///
-/// Global cache of health responses from agents
-/// Maps agent_name -> HealthInfo (with last_updated timestamp inside)
-///
-pub(crate) static HEALTH_CACHE: Lazy<RwLock<HashMap<String, crate::command::HealthInfo>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-///
-/// Store a health response in the global cache
-///
-pub async fn cache_health_response(mut health: crate::command::HealthInfo) {
-    let name = health.name.clone();
-
-    // Update the last_updated timestamp to now
-    health.last_updated = Utc::now();
-
-    let mut cache = HEALTH_CACHE.write().await;
-    cache.insert(name.clone(), health);
-
-    tracing::debug!("Cached health response for agent: {}", name);
-}
-
-///
-/// Get all cached health responses
-/// Returns a HashMap of agent_name -> HealthInfo
-///
-pub async fn get_cached_health() -> HashMap<String, crate::command::HealthInfo> {
-    HEALTH_CACHE.read().await.clone()
-}
 
 pub async fn set_my_service_details(
     service: &str,
@@ -316,7 +285,7 @@ async fn process_command(
         Command::HealthResponse { health } => {
             tracing::info!("Received health response: {}", health);
             // Cache the health response for later retrieval
-            cache_health_response(health.clone()).await;
+            crate::health::cache_health_response(health.clone()).await;
         }
         Command::Restart => {
             tracing::warn!("Received restart command from {}", sender);

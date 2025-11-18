@@ -9,7 +9,39 @@
 use crate::agent::{self, Peer};
 use crate::command::{Command, HealthInfo};
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use tokio::sync::RwLock;
+
+///
+/// Global cache of health responses from agents
+/// Maps agent_name -> HealthInfo (with last_updated timestamp inside)
+///
+static HEALTH_CACHE: Lazy<RwLock<HashMap<String, HealthInfo>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+///
+/// Store a health response in the global cache
+///
+pub async fn cache_health_response(mut health: HealthInfo) {
+    let name = health.name.clone();
+
+    // Update the last_updated timestamp to now
+    health.last_updated = Utc::now();
+
+    let mut cache = HEALTH_CACHE.write().await;
+    cache.insert(name.clone(), health);
+
+    tracing::debug!("Cached health response for agent: {}", name);
+}
+
+///
+/// Get all cached health responses
+/// Returns a HashMap of agent_name -> HealthInfo
+///
+pub async fn get_cached_health() -> HashMap<String, HealthInfo> {
+    HEALTH_CACHE.read().await.clone()
+}
 
 ///
 /// Collect health information for this agent, including cascaded health from downstream peers
@@ -112,7 +144,7 @@ async fn cascade_health_checks(health: &mut HealthInfo, downstream_peers: &[Peer
     }
 
     // Retrieve cached health responses from downstream peers
-    let cached_health = crate::handler::get_cached_health().await;
+    let cached_health = get_cached_health().await;
     for peer in downstream_peers.iter() {
         if let Some(peer_health) = cached_health.get(peer.name()) {
             health
@@ -183,7 +215,7 @@ async fn wait_for_health_updates(
 
     loop {
         // Check if all peers have updated health since baseline
-        let cache = crate::handler::HEALTH_CACHE.read().await;
+        let cache = HEALTH_CACHE.read().await;
         let all_updated = peer_names.iter().all(|name| {
             cache
                 .get(name)
@@ -204,7 +236,7 @@ async fn wait_for_health_updates(
         // Check if we've exceeded timeout
         if tokio::time::Instant::now() >= deadline {
             // Count how many peers did respond
-            let cache = crate::handler::HEALTH_CACHE.read().await;
+            let cache = HEALTH_CACHE.read().await;
             let responded = peer_names
                 .iter()
                 .filter(|name| {

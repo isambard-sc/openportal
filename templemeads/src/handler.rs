@@ -53,15 +53,15 @@ static HEALTH_CACHE: Lazy<RwLock<HashMap<String, crate::command::HealthInfo>>> =
 /// Store a health response in the global cache
 ///
 pub async fn cache_health_response(mut health: crate::command::HealthInfo) {
-    let agent_name = health.agent.clone();
+    let name = health.name.clone();
 
     // Update the last_updated timestamp to now
     health.last_updated = Utc::now();
 
     let mut cache = HEALTH_CACHE.write().await;
-    cache.insert(agent_name.clone(), health);
+    cache.insert(name.clone(), health);
 
-    tracing::debug!("Cached health response for agent: {}", agent_name);
+    tracing::debug!("Cached health response for agent: {}", name);
 }
 
 ///
@@ -80,11 +80,7 @@ pub async fn set_my_service_details(
     let engine = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
 
-    tracing::info!(
-        "Agent layer: {} version {}",
-        engine,
-        version
-    );
+    tracing::info!("Agent layer: {} version {}", engine, version);
 
     agent::register_self(service, agent_type, engine, version).await;
     let mut service_details = SERVICE_DETAILS.write().await;

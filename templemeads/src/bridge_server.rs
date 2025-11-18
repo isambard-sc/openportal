@@ -4,6 +4,7 @@
 use crate::agent;
 use crate::bridge::{run as bridge_run, status as bridge_status};
 use crate::bridgestate::get as get_board;
+use crate::command::HealthInfo;
 use crate::destination::Destinations;
 use crate::error::Error;
 use crate::grammar::PortalIdentifier;
@@ -511,14 +512,8 @@ async fn health(
     let engine = crate::agent::engine().await;
     let version = crate::agent::version().await;
 
-    let mut my_health = crate::command::HealthInfo::new(
-        &agent_name,
-        agent_type,
-        true,
-        start_time,
-        &engine,
-        &version,
-    );
+    let mut my_health =
+        HealthInfo::new(&agent_name, agent_type, true, start_time, &engine, &version);
 
     let (active, pending, running, completed, duplicates) =
         crate::state::aggregate_job_stats().await;
@@ -567,25 +562,18 @@ async fn health(
     // Get all cached health responses
     let cached_health = crate::handler::get_cached_health().await;
 
-    // Build the response with bridge health and cached peer health
-    // (timestamps are now inside HealthInfo.last_updated)
-    let mut result = serde_json::Map::new();
-
-    // Add bridge health (already has last_updated field)
-    result.insert("bridge".to_string(), serde_json::to_value(&my_health).unwrap());
-
     // Add cached health from peers (each has last_updated field)
-    let mut peers_health = serde_json::Map::new();
     for (agent_name, health_info) in cached_health {
-        peers_health.insert(agent_name, serde_json::to_value(&health_info).unwrap());
+        my_health
+            .peers
+            .insert(agent_name.clone(), health_info.into());
     }
-    result.insert("peers".to_string(), json!(peers_health));
 
-    result.insert(
-        "peers_queried".to_string(),
-        serde_json::to_value(peers.iter().map(|p| p.name()).collect::<Vec<_>>()).unwrap(),
-    );
+    let mut result = HashMap::new();
+
     result.insert("status".to_string(), json!("ok"));
+
+    result.insert("health".to_string(), json!(my_health));
 
     Ok(Json(json!(result)))
 }

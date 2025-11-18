@@ -22,7 +22,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HealthInfo {
     /// Agent name
-    pub agent: String,
+    pub name: String,
     /// Agent type
     pub agent_type: AgentType,
     /// Whether agent is connected
@@ -56,7 +56,7 @@ pub struct HealthInfo {
 
 impl HealthInfo {
     pub fn new(
-        agent: &str,
+        name: &str,
         agent_type: AgentType,
         connected: bool,
         start_time: DateTime<Utc>,
@@ -67,7 +67,7 @@ impl HealthInfo {
         let uptime_seconds = current_time.signed_duration_since(start_time).num_seconds();
 
         Self {
-            agent: agent.to_owned(),
+            name: name.to_owned(),
             agent_type,
             connected,
             active_jobs: 0,
@@ -97,7 +97,7 @@ impl std::fmt::Display for HealthInfo {
         write!(
             f,
             "{} ({}) - {} - uptime: {}s, jobs: {} active ({} pending, {} running, {} completed, {} duplicates)",
-            self.agent,
+            self.name,
             self.agent_type,
             if self.connected { "connected" } else { "disconnected" },
             self.uptime_seconds,
@@ -107,6 +107,21 @@ impl std::fmt::Display for HealthInfo {
             self.completed_jobs,
             self.duplicate_jobs
         )
+    }
+}
+
+impl HealthInfo {
+    pub fn add_peer_health(&mut self, peer_health: HealthInfo) {
+        self.peers
+            .insert(peer_health.name.clone(), Box::new(peer_health));
+    }
+
+    pub fn get(&self, peer_name: &str) -> Option<HealthInfo> {
+        self.peers.get(peer_name).map(|h| *h.clone())
+    }
+
+    pub fn keys(&self) -> Vec<String> {
+        self.peers.keys().cloned().collect()
     }
 }
 
@@ -274,7 +289,10 @@ impl Command {
             Command::HealthCheck => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
-            Command::RestartAck { agent: _, message: _ } => None,
+            Command::RestartAck {
+                agent: _,
+                message: _,
+            } => None,
         }
     }
 
@@ -293,7 +311,10 @@ impl Command {
             Command::HealthCheck => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
-            Command::RestartAck { agent: _, message: _ } => None,
+            Command::RestartAck {
+                agent: _,
+                message: _,
+            } => None,
         }
     }
 
@@ -312,7 +333,10 @@ impl Command {
             Command::HealthCheck => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
-            Command::RestartAck { agent: _, message: _ } => None,
+            Command::RestartAck {
+                agent: _,
+                message: _,
+            } => None,
         }
     }
 }

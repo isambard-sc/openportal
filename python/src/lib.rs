@@ -14,6 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path;
 use std::sync::RwLock;
+use templemeads::command;
 use templemeads::destination;
 use templemeads::grammar;
 use templemeads::job;
@@ -257,6 +258,150 @@ fn initialize_tracing() -> PyResult<()> {
 }
 
 ///
+/// The HealthInfo object for each of the agent health checks
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthInfo(command::HealthInfo);
+
+#[pymethods]
+impl HealthInfo {
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        Ok(self.0.name.clone())
+    }
+
+    #[getter]
+    fn agent_type(&self) -> PyResult<String> {
+        Ok(self.0.agent_type.to_string())
+    }
+
+    #[getter]
+    fn connected(&self) -> PyResult<bool> {
+        Ok(self.0.connected)
+    }
+
+    #[getter]
+    fn active_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.active_jobs as u64)
+    }
+
+    #[getter]
+    fn pending_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.pending_jobs as u64)
+    }
+
+    #[getter]
+    fn running_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.running_jobs as u64)
+    }
+
+    #[getter]
+    fn completed_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.completed_jobs as u64)
+    }
+
+    #[getter]
+    fn duplicate_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.duplicate_jobs as u64)
+    }
+
+    #[getter]
+    fn start_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.start_time.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn current_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.current_time.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn uptime_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.uptime_seconds as u64)
+    }
+
+    #[getter]
+    fn engine(&self) -> PyResult<String> {
+        Ok(self.0.engine.clone())
+    }
+
+    #[getter]
+    fn version(&self) -> PyResult<String> {
+        Ok(self.0.version.clone())
+    }
+
+    #[getter]
+    fn last_updated<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.last_updated.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!(
+            "HealthInfo( agent_name: {}, agent_type: {}, is_healthy: {}, start_time: {}, engine: {}, version: {} )",
+            self.name()?,
+            self.agent_type()?,
+            self.connected()?,
+            self.0.start_time,
+            self.engine()?,
+            self.version()?
+        ))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<HealthInfo> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<HealthInfo> {
+        Ok(self.clone())
+    }
+
+    fn keys(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.peers.keys().cloned().collect())
+    }
+
+    fn __getitem__(&self, key: &str) -> PyResult<HealthInfo> {
+        match self.0.peers.get(key) {
+            Some(peer_health) => Ok((**peer_health).clone().into()),
+            None => Err(PyErr::new::<PyOSError, _>(format!(
+                "No peer health info for key: {}",
+                key
+            ))),
+        }
+    }
+
+    fn peers(&self) -> PyResult<HashMap<String, HealthInfo>> {
+        let mut result: HashMap<String, HealthInfo> = HashMap::new();
+        for (key, value) in &self.0.peers {
+            result.insert(key.clone(), (**value).clone().into());
+        }
+        Ok(result)
+    }
+}
+
+impl From<command::HealthInfo> for HealthInfo {
+    fn from(health_info: command::HealthInfo) -> Self {
+        HealthInfo(health_info)
+    }
+}
+
+///
 /// Return type for the health function
 ///
 #[pyclass(module = "openportal")]
@@ -264,11 +409,7 @@ fn initialize_tracing() -> PyResult<()> {
 pub struct Health {
     pub status: String,
     #[serde(default)]
-    pub bridge: Option<serde_json::Value>,
-    #[serde(default)]
-    pub peers: Option<serde_json::Value>,
-    #[serde(default)]
-    pub peers_queried: Option<Vec<String>>,
+    pub health: Option<HealthInfo>,
 }
 
 #[pymethods]
@@ -279,24 +420,14 @@ impl Health {
     }
 
     #[getter]
-    fn bridge(&self) -> PyResult<Option<String>> {
-        Ok(self.bridge.as_ref().map(|v| v.to_string()))
-    }
-
-    #[getter]
-    fn peers(&self) -> PyResult<Option<String>> {
-        Ok(self.peers.as_ref().map(|v| v.to_string()))
-    }
-
-    #[getter]
-    fn peers_queried(&self) -> PyResult<Option<Vec<String>>> {
-        Ok(self.peers_queried.clone())
+    fn health(&self) -> PyResult<Option<HealthInfo>> {
+        Ok(self.health.clone())
     }
 
     fn __str__(&self) -> PyResult<String> {
         let mut s = format!("Health( status: {}", self.status);
-        if let Some(ref peers) = self.peers_queried {
-            s.push_str(&format!(", peers: {}", peers.len()));
+        if let Some(ref health) = self.health {
+            s.push_str(&format!(", health: {:?}", health));
         }
         s.push_str(" )");
         Ok(s)
@@ -318,30 +449,26 @@ impl Health {
         Ok(self.status == "ok")
     }
 
-    fn get_details(&self) -> PyResult<String> {
-        let mut details = format!("OpenPortal Health Status: {}\n\n", self.status);
-
-        if let Some(ref bridge) = self.bridge {
-            details.push_str(&format!("Bridge Health:\n{}\n\n",
-                serde_json::to_string_pretty(bridge).unwrap_or_else(|_| bridge.to_string())
-            ));
+    fn __getitem__(&self, key: &str) -> PyResult<HealthInfo> {
+        match &self.health {
+            Some(health_info) => match health_info.0.name == key {
+                true => Ok(health_info.clone()),
+                false => Err(PyErr::new::<PyOSError, _>(format!(
+                    "No health information available for key: {}",
+                    key
+                ))),
+            },
+            None => Err(PyErr::new::<PyOSError, _>(
+                "No health information available",
+            )),
         }
+    }
 
-        if let Some(ref peers) = self.peers {
-            details.push_str("Peer Health:\n");
-            details.push_str(&format!("{}\n\n",
-                serde_json::to_string_pretty(peers).unwrap_or_else(|_| peers.to_string())
-            ));
+    fn keys(&self) -> PyResult<Vec<String>> {
+        match &self.health {
+            Some(health_info) => Ok(vec![health_info.0.name.clone()]),
+            None => Ok(vec![]),
         }
-
-        if let Some(ref peers_queried) = self.peers_queried {
-            details.push_str(&format!("Health checks sent to {} peer(s):\n", peers_queried.len()));
-            for peer in peers_queried {
-                details.push_str(&format!("  - {}\n", peer));
-            }
-        }
-
-        Ok(details)
     }
 }
 

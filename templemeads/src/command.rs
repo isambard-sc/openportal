@@ -47,6 +47,8 @@ pub struct HealthInfo {
     pub engine: String,
     /// Engine version
     pub version: String,
+    /// Time when this health response was received/cached
+    pub last_updated: DateTime<Utc>,
     /// Nested health information from downstream peers
     #[serde(default)]
     pub peers: HashMap<String, Box<HealthInfo>>,
@@ -78,6 +80,7 @@ impl HealthInfo {
             uptime_seconds,
             engine: engine.to_owned(),
             version: version.to_owned(),
+            last_updated: current_time,
             peers: HashMap::new(),
         }
     }

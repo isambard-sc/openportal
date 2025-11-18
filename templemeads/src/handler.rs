@@ -11,7 +11,7 @@ use crate::job::{sync_from_peer, Envelope, Status};
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use once_cell::sync::Lazy;
 use paddington::async_message_handler;
 use paddington::message::{Message, MessageType};
@@ -44,29 +44,31 @@ static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
 
 ///
 /// Global cache of health responses from agents
-/// Maps agent_name -> (HealthInfo, timestamp_received)
+/// Maps agent_name -> HealthInfo (with last_updated timestamp inside)
 ///
-static HEALTH_CACHE: Lazy<RwLock<HashMap<String, (crate::command::HealthInfo, DateTime<Utc>)>>> =
+static HEALTH_CACHE: Lazy<RwLock<HashMap<String, crate::command::HealthInfo>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 ///
 /// Store a health response in the global cache
 ///
-pub async fn cache_health_response(health: crate::command::HealthInfo) {
+pub async fn cache_health_response(mut health: crate::command::HealthInfo) {
     let agent_name = health.agent.clone();
-    let timestamp = Utc::now();
+
+    // Update the last_updated timestamp to now
+    health.last_updated = Utc::now();
 
     let mut cache = HEALTH_CACHE.write().await;
-    cache.insert(agent_name.clone(), (health, timestamp));
+    cache.insert(agent_name.clone(), health);
 
     tracing::debug!("Cached health response for agent: {}", agent_name);
 }
 
 ///
 /// Get all cached health responses
-/// Returns a HashMap of agent_name -> (HealthInfo, timestamp)
+/// Returns a HashMap of agent_name -> HealthInfo
 ///
-pub async fn get_cached_health() -> HashMap<String, (crate::command::HealthInfo, DateTime<Utc>)> {
+pub async fn get_cached_health() -> HashMap<String, crate::command::HealthInfo> {
     HEALTH_CACHE.read().await.clone()
 }
 
@@ -359,7 +361,7 @@ async fn process_command(
                 // Retrieve cached health responses from downstream peers
                 let cached_health = get_cached_health().await;
                 for peer in downstream_peers.iter() {
-                    if let Some((peer_health, _timestamp)) = cached_health.get(peer.name()) {
+                    if let Some(peer_health) = cached_health.get(peer.name()) {
                         health
                             .peers
                             .insert(peer.name().to_owned(), Box::new(peer_health.clone()));

@@ -567,22 +567,17 @@ async fn health(
     // Get all cached health responses
     let cached_health = crate::handler::get_cached_health().await;
 
-    // Build the response with bridge health, cached peer health, and timestamps
+    // Build the response with bridge health and cached peer health
+    // (timestamps are now inside HealthInfo.last_updated)
     let mut result = serde_json::Map::new();
 
-    // Add bridge health with timestamp
-    let mut bridge_with_timestamp = serde_json::Map::new();
-    bridge_with_timestamp.insert("health".to_string(), serde_json::to_value(&my_health).unwrap());
-    bridge_with_timestamp.insert("last_updated".to_string(), json!(chrono::Utc::now().to_rfc3339()));
-    result.insert("bridge".to_string(), json!(bridge_with_timestamp));
+    // Add bridge health (already has last_updated field)
+    result.insert("bridge".to_string(), serde_json::to_value(&my_health).unwrap());
 
-    // Add cached health from peers
+    // Add cached health from peers (each has last_updated field)
     let mut peers_health = serde_json::Map::new();
-    for (agent_name, (health_info, timestamp)) in cached_health {
-        let mut peer_data = serde_json::Map::new();
-        peer_data.insert("health".to_string(), serde_json::to_value(&health_info).unwrap());
-        peer_data.insert("last_updated".to_string(), json!(timestamp.to_rfc3339()));
-        peers_health.insert(agent_name, json!(peer_data));
+    for (agent_name, health_info) in cached_health {
+        peers_health.insert(agent_name, serde_json::to_value(&health_info).unwrap());
     }
     result.insert("peers".to_string(), json!(peers_health));
 

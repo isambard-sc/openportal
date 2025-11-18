@@ -45,13 +45,14 @@ pub async fn set_my_service_details(
     service: &str,
     agent_type: &agent::Type,
     runner: Option<AsyncRunnable>,
+    cascade_health: bool,
 ) -> Result<()> {
     let engine = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
 
     tracing::info!("Agent layer: {} version {}", engine, version);
 
-    agent::register_self(service, agent_type, engine, version).await;
+    agent::register_self(service, agent_type, engine, version, cascade_health).await;
     let mut service_details = SERVICE_DETAILS.write().await;
     service_details.service = service.to_string();
     service_details.agent_type = agent_type.clone();
@@ -270,17 +271,38 @@ async fn process_command(
             let peer = Peer::new(sender, zone);
             sync_from_peer(recipient, &peer, state).await?;
         }
-        Command::HealthCheck => {
-            tracing::info!("Received health check request from {}", sender);
+        Command::HealthCheck { visited } => {
+            tracing::info!(
+                "Received health check request from {} (visited chain: {:?})",
+                sender,
+                visited
+            );
+
+            // Security: Portals must not respond to health checks from other portals
+            // to prevent information leakage between sites
+            let my_type = agent::my_agent_type().await;
+            let sender_peer = Peer::new(sender, zone);
+
+            if my_type == agent::Type::Portal {
+                if let Some(sender_type) = agent::agent_type(&sender_peer).await {
+                    if sender_type == agent::Type::Portal {
+                        tracing::warn!(
+                            "Ignoring health check from portal {} - portals do not share health with other portals",
+                            sender
+                        );
+                        return Ok(());
+                    }
+                }
+            }
 
             // Collect health information (including cascaded peer health)
-            let health = crate::health::collect_health(sender).await?;
+            let health = crate::health::collect_health(sender, visited.clone()).await?;
 
             tracing::info!("Health check: {}", health);
 
             // Send health response back to sender
             let response = Command::health_response(health);
-            response.send_to(&Peer::new(sender, zone)).await?;
+            response.send_to(&sender_peer).await?;
         }
         Command::HealthResponse { health } => {
             tracing::info!("Received health response: {}", health);

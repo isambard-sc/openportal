@@ -48,12 +48,22 @@ pub async fn get_cached_health() -> HashMap<String, HealthInfo> {
 ///
 /// This function:
 /// - Collects local health info (job stats, uptime, etc.)
-/// - Sends health checks to all downstream peers (excluding the requester)
+/// - Sends health checks to all downstream peers (excluding the requester and visited chain)
 /// - Waits intelligently for responses (up to 500ms or until all respond)
 /// - Marks disconnected peers appropriately
 ///
-pub async fn collect_health(requester: &str) -> Result<HealthInfo, anyhow::Error> {
-    tracing::info!("Collecting health information");
+/// Parameters:
+/// - `requester`: The agent that requested this health check
+/// - `visited`: Chain of agents already visited in this health check (to prevent circular loops)
+///
+pub async fn collect_health(
+    requester: &str,
+    visited: Vec<String>,
+) -> Result<HealthInfo, anyhow::Error> {
+    tracing::info!(
+        "Collecting health information (visited chain length: {})",
+        visited.len()
+    );
 
     // Collect our own health information
     let agent_name = agent::name().await;
@@ -64,7 +74,7 @@ pub async fn collect_health(requester: &str) -> Result<HealthInfo, anyhow::Error
 
     let mut health = HealthInfo::new(
         &agent_name,
-        agent_type,
+        agent_type.clone(),
         true, // connected (since we're responding)
         start_time,
         &engine,
@@ -81,15 +91,48 @@ pub async fn collect_health(requester: &str) -> Result<HealthInfo, anyhow::Error
     health.completed_jobs = completed;
     health.duplicate_jobs = duplicates;
 
-    // Cascade health check to downstream peers (excluding the requester to avoid loops)
-    let all_peers = agent::all_peers().await;
-    let downstream_peers: Vec<_> = all_peers
-        .into_iter()
-        .filter(|p| p.name() != requester)
-        .collect();
+    // Cascade health check to downstream peers (if enabled for this agent)
+    // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false
+    if agent::should_cascade_health().await {
+        // Exclude:
+        // - The requester (to avoid immediate loops)
+        // - Any agents in the visited chain (to avoid circular loops across zones)
+        // - Other portals (security: portals must not query other portals)
+        let all_peers = agent::all_peers().await;
 
-    if !downstream_peers.is_empty() {
-        cascade_health_checks(&mut health, &downstream_peers).await;
+        // Filter based on basic rules first
+        let mut downstream_peers: Vec<_> = all_peers
+            .into_iter()
+            .filter(|p| p.name() != requester && !visited.contains(&p.name().to_owned()))
+            .collect();
+
+        // Security: If we're a portal, remove other portals from the list
+        if agent_type == agent::Type::Portal {
+            let mut filtered_peers = Vec::new();
+            for peer in downstream_peers {
+                if let Some(peer_type) = agent::agent_type(&peer).await {
+                    if peer_type == agent::Type::Portal {
+                        tracing::debug!(
+                            "Skipping portal {} - portals do not query other portals",
+                            peer.name()
+                        );
+                        continue;
+                    }
+                }
+                filtered_peers.push(peer);
+            }
+            downstream_peers = filtered_peers;
+        }
+
+        if !downstream_peers.is_empty() {
+            // Build new visited chain: existing visited + this agent
+            let mut new_visited = visited.clone();
+            new_visited.push(agent_name.clone());
+
+            cascade_health_checks(&mut health, &downstream_peers, new_visited).await;
+        }
+    } else {
+        tracing::debug!("Health cascade disabled for this agent (leaf node)");
     }
 
     Ok(health)
@@ -98,10 +141,18 @@ pub async fn collect_health(requester: &str) -> Result<HealthInfo, anyhow::Error
 ///
 /// Cascade health checks to downstream peers and populate the health.peers map
 ///
-async fn cascade_health_checks(health: &mut HealthInfo, downstream_peers: &[Peer]) {
+/// Parameters:
+/// - `visited`: Chain of agents already visited (will be passed to downstream peers)
+///
+async fn cascade_health_checks(
+    health: &mut HealthInfo,
+    downstream_peers: &[Peer],
+    visited: Vec<String>,
+) {
     tracing::debug!(
-        "Cascading health check to {} downstream peers",
-        downstream_peers.len()
+        "Cascading health check to {} downstream peers (visited chain: {:?})",
+        downstream_peers.len(),
+        visited
     );
 
     // Record baseline time before sending health checks
@@ -112,7 +163,7 @@ async fn cascade_health_checks(health: &mut HealthInfo, downstream_peers: &[Peer
     let mut disconnected_peers = Vec::new();
 
     for peer in downstream_peers.iter() {
-        let health_check = Command::health_check();
+        let health_check = Command::health_check_with_visited(visited.clone());
         match health_check.send_to(peer).await {
             Ok(_) => {
                 successfully_contacted.push(peer.name().to_owned());

@@ -23,7 +23,13 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     }
 
     // pass the service details onto the handler
-    set_my_service_details(&config.service().name(), &config.agent(), Some(runner)).await?;
+    set_my_service_details(
+        &config.service().name(),
+        &config.agent(),
+        Some(runner),
+        false,
+    )
+    .await?;
 
     if let Some(one_shot_commands) = config.one_shot_commands() {
         for one_shot_command in one_shot_commands {

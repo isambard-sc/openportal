@@ -154,6 +154,9 @@ struct Registrar {
     engine: String,
     version: String,
     start_time: chrono::DateTime<chrono::Utc>,
+    /// Whether this agent should cascade health checks to its peers
+    /// Set to false for leaf nodes (e.g., FreeIPA) that bridge zones
+    cascade_health: bool,
 }
 
 impl Registrar {
@@ -167,15 +170,24 @@ impl Registrar {
             engine: String::new(),
             version: String::new(),
             start_time: chrono::Utc::now(),
+            cascade_health: true, // Default to cascading
         }
     }
 
-    fn register_self(&mut self, name: &str, agent_type: &Type, engine: &str, version: &str) {
+    fn register_self(
+        &mut self,
+        name: &str,
+        agent_type: &Type,
+        engine: &str,
+        version: &str,
+        cascade_health: bool,
+    ) {
         self.name = name.to_string();
         self.typ = agent_type.clone();
         self.engine = engine.to_string();
         self.version = version.to_string();
         self.start_time = chrono::Utc::now();
+        self.cascade_health = cascade_health;
     }
 
     fn register_peer(&mut self, peer: &Peer, agent_type: &Type, _engine: &str, _version: &str) {
@@ -288,8 +300,22 @@ pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version
 /// Register that this agent in this process is called `name` and
 /// is of type `agent_type`
 ///
-pub async fn register_self(name: &str, agent_type: &Type, engine: &str, version: &str) {
-    REGISTRAR.write().await.register_self(name, agent_type, engine, version);
+pub async fn register_self(
+    name: &str,
+    agent_type: &Type,
+    engine: &str,
+    version: &str,
+    cascade_health: bool,
+) {
+    REGISTRAR
+        .write()
+        .await
+        .register_self(name, agent_type, engine, version, cascade_health);
+}
+
+/// Check whether this agent should cascade health checks to its peers
+pub async fn should_cascade_health() -> bool {
+    REGISTRAR.read().await.cascade_health
 }
 
 ///

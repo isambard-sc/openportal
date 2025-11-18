@@ -129,5 +129,11 @@ pub async fn aggregate_job_stats() -> (usize, usize, usize, usize, usize) {
         total_duplicates += duplicates;
     }
 
-    (total_active, total_pending, total_running, total_completed, total_duplicates)
+    (
+        total_active,
+        total_pending,
+        total_running,
+        total_completed,
+        total_duplicates,
+    )
 }

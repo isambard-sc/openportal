@@ -147,7 +147,12 @@ pub enum Command {
     Sync {
         state: SyncState,
     },
-    HealthCheck,
+    HealthCheck {
+        /// Chain of agents that have already been visited in this health check cascade
+        /// to prevent circular loops across zones
+        #[serde(default)]
+        visited: Vec<String>,
+    },
     HealthResponse {
         health: HealthInfo,
     },
@@ -175,7 +180,9 @@ impl std::fmt::Display for Command {
                 agent, engine, version
             ),
             Command::Sync { state: _ } => write!(f, "Sync: State"),
-            Command::HealthCheck => write!(f, "HealthCheck"),
+            Command::HealthCheck { visited } => {
+                write!(f, "HealthCheck (visited: {})", visited.len())
+            }
             Command::HealthResponse { health } => write!(f, "HealthResponse: {}", health),
             Command::Restart => write!(f, "Restart"),
             Command::RestartAck { agent, message } => {
@@ -219,7 +226,13 @@ impl Command {
     }
 
     pub fn health_check() -> Self {
-        Self::HealthCheck
+        Self::HealthCheck {
+            visited: Vec::new(),
+        }
+    }
+
+    pub fn health_check_with_visited(visited: Vec<String>) -> Self {
+        Self::HealthCheck { visited }
     }
 
     pub fn health_response(health: HealthInfo) -> Self {
@@ -286,7 +299,7 @@ impl Command {
                 version: _,
             } => None,
             Command::Error { error: _ } => None,
-            Command::HealthCheck => None,
+            Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
             Command::RestartAck {
@@ -308,7 +321,7 @@ impl Command {
                 version: _,
             } => None,
             Command::Error { error: _ } => None,
-            Command::HealthCheck => None,
+            Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
             Command::RestartAck {
@@ -330,7 +343,7 @@ impl Command {
                 version: _,
             } => None,
             Command::Error { error: _ } => None,
-            Command::HealthCheck => None,
+            Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
             Command::RestartAck {

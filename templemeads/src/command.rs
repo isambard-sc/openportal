@@ -156,7 +156,13 @@ pub enum Command {
     HealthResponse {
         health: HealthInfo,
     },
-    Restart,
+    Restart {
+        /// Type of restart: "soft" (networking only), "hard" (terminate process), etc.
+        restart_type: String,
+        /// Dot-separated destination path (e.g., "brics.aip2.clusters")
+        /// Empty string means restart self
+        destination: String,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -180,7 +186,14 @@ impl std::fmt::Display for Command {
                 write!(f, "HealthCheck (visited: {})", visited.len())
             }
             Command::HealthResponse { health } => write!(f, "HealthResponse: {}", health),
-            Command::Restart => write!(f, "Restart"),
+            Command::Restart {
+                restart_type,
+                destination,
+            } => write!(
+                f,
+                "Restart: type={}, destination={}",
+                restart_type, destination
+            ),
         }
     }
 }
@@ -232,8 +245,11 @@ impl Command {
         Self::HealthResponse { health }
     }
 
-    pub fn restart() -> Self {
-        Self::Restart
+    pub fn restart(restart_type: &str, destination: &str) -> Self {
+        Self::Restart {
+            restart_type: restart_type.to_owned(),
+            destination: destination.to_owned(),
+        }
     }
 
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
@@ -287,7 +303,10 @@ impl Command {
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
-            Command::Restart => None,
+            Command::Restart {
+                restart_type: _,
+                destination: _,
+            } => None,
         }
     }
 
@@ -305,7 +324,10 @@ impl Command {
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
-            Command::Restart => None,
+            Command::Restart {
+                restart_type: _,
+                destination: _,
+            } => None,
         }
     }
 
@@ -323,7 +345,10 @@ impl Command {
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
-            Command::Restart => None,
+            Command::Restart {
+                restart_type: _,
+                destination: _,
+            } => None,
         }
     }
 }

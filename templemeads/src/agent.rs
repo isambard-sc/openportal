@@ -313,6 +313,16 @@ pub async fn register_self(
         .register_self(name, agent_type, engine, version, cascade_health);
 }
 
+///
+/// Return a Peer that represent this agent. If 'zone' is None,
+/// then the default "local" zone is used
+///
+pub async fn get_self(zone: Option<&str>) -> Peer {
+    let registrar = REGISTRAR.read().await;
+
+    Peer::new(&registrar.name, zone.unwrap_or("local"))
+}
+
 /// Check whether this agent should cascade health checks to its peers
 pub async fn should_cascade_health() -> bool {
     REGISTRAR.read().await.cascade_health

@@ -309,8 +309,11 @@ async fn process_command(
             // Cache the health response for later retrieval
             crate::health::cache_health_response(health.clone()).await;
         }
-        Command::Restart => {
-            crate::restart::handle_restart_request(sender, zone).await?;
+        Command::Restart {
+            restart_type,
+            destination,
+        } => {
+            crate::restart::handle_restart_request(sender, restart_type, destination).await?;
         }
         _ => {
             tracing::warn!("Command {} not recognised", command);

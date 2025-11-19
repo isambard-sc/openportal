@@ -4,7 +4,7 @@
 use crate::agent;
 use crate::bridge::{run as bridge_run, status as bridge_status};
 use crate::bridgestate::get as get_board;
-use crate::command::HealthInfo;
+use crate::command::{Command, HealthInfo};
 use crate::destination::Destinations;
 use crate::error::Error;
 use crate::grammar::PortalIdentifier;
@@ -579,6 +579,88 @@ async fn health(
 }
 
 //
+// Restart endpoint for the web API
+//
+#[derive(Serialize, Deserialize, Debug)]
+struct RestartRequest {
+    restart_type: String,
+    destination: String,
+}
+
+#[tracing::instrument(skip_all)]
+async fn restart(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<RestartRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let payload_value = serde_json::to_value(&payload)?;
+    verify_headers(&state, &headers, "post", "restart", Some(payload_value)).await?;
+
+    tracing::info!(
+        "Restart request - type: {}, destination: {}",
+        payload.restart_type,
+        payload.destination
+    );
+
+    // Get all peers
+    let peers = crate::agent::all_peers().await;
+
+    if payload.destination.is_empty() {
+        // Restart the bridge itself
+        let restart_cmd = Command::restart(&payload.restart_type, "");
+
+        // Send the restart command to self
+        let self_peer = agent::get_self(None).await;
+        restart_cmd.send_to(&self_peer).await?;
+
+        // Return success immediately - bridge will restart after response is sent
+        let mut result = HashMap::new();
+        result.insert("status".to_string(), json!("ok"));
+        result.insert(
+            "message".to_string(),
+            json!("Restart command sent successfully"),
+        );
+
+        Ok(Json(json!(result)))
+    } else {
+        // Forward restart to specific destination
+        let destination_parts: Vec<&str> = payload.destination.split('.').collect();
+        let next_peer_name = destination_parts[0];
+        let remaining_path = destination_parts[1..].join(".");
+
+        tracing::debug!(
+            "Forwarding restart to peer: {}, remaining path: {}",
+            next_peer_name,
+            remaining_path
+        );
+
+        // Find the peer to forward to
+        if let Some(next_peer) = peers.iter().find(|p| p.name() == next_peer_name) {
+            let restart_cmd = Command::restart(&payload.restart_type, &remaining_path);
+            restart_cmd.send_to(next_peer).await?;
+
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("ok"));
+            result.insert(
+                "message".to_string(),
+                json!(format!("Restart forwarded to {}", next_peer_name)),
+            );
+
+            Ok(Json(json!(result)))
+        } else {
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("error"));
+            result.insert(
+                "message".to_string(),
+                json!(format!("Peer {} not found", next_peer_name)),
+            );
+
+            Ok(Json(json!(result)))
+        }
+    }
+}
+
+//
 // Struct to represent the requests to the 'run' endpoint
 //
 #[derive(Deserialize, Debug)]
@@ -1075,6 +1157,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
     let app = Router::new()
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
         .route("/health", get(health))
+        .route("/restart", post(restart))
         .route("/run", post(run))
         .route("/status", post(status))
         .route("/fetch_job", post(fetch_job))

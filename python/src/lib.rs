@@ -485,6 +485,75 @@ fn health() -> PyResult<Health> {
 }
 
 ///
+/// Return type for the restart function
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestartResponse {
+    pub status: String,
+    pub message: String,
+}
+
+#[pymethods]
+impl RestartResponse {
+    #[getter]
+    fn status(&self) -> PyResult<String> {
+        Ok(self.status.clone())
+    }
+
+    #[getter]
+    fn message(&self) -> PyResult<String> {
+        Ok(self.message.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!(
+            "RestartResponse( status: {}, message: {} )",
+            self.status, self.message
+        ))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<RestartResponse> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<RestartResponse> {
+        Ok(self.clone())
+    }
+
+    fn is_ok(&self) -> PyResult<bool> {
+        Ok(self.status == "ok")
+    }
+}
+
+///
+/// Restart an agent in the OpenPortal system.
+///
+/// Parameters:
+/// - restart_type: Type of restart ("soft", "hard", etc.)
+/// - destination: Dot-separated path to the agent (e.g., "brics.aip2.clusters")
+///                Empty string means restart the bridge itself
+///
+#[pyfunction]
+fn restart(restart_type: &str, destination: &str) -> PyResult<RestartResponse> {
+    tracing::debug!("Calling /restart with type={}, destination={}", restart_type, destination);
+
+    let params = serde_json::json!({
+        "restart_type": restart_type,
+        "destination": destination,
+    });
+
+    match call_post::<RestartResponse>("restart", params) {
+        Ok(response) => Ok(response),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
 /// Return type for the run function. This represents the job being
 /// run, and provides functions that let you query the status and
 /// get the results
@@ -3008,12 +3077,14 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(remove_offerings, m)?)?;
+    m.add_function(wrap_pyfunction!(restart, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(send_result, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
     m.add_function(wrap_pyfunction!(sync_offerings, m)?)?;
 
     m.add_class::<Health>()?;
+    m.add_class::<RestartResponse>()?;
     m.add_class::<Job>()?;
     m.add_class::<UserIdentifier>()?;
     m.add_class::<ProjectIdentifier>()?;

@@ -93,7 +93,8 @@ async fn process_command(
                 );
 
                 let peer = Peer::new(sender, zone);
-                let errored_job = job.errored("Agent is performing a soft restart - please retry")?;
+                let errored_job =
+                    job.errored("Agent is performing a soft restart - please retry")?;
 
                 // Send the errored job back to the sender
                 if let Err(e) = errored_job.update(&peer).await {
@@ -311,7 +312,7 @@ async fn process_command(
             sync_from_peer(recipient, &peer, state).await?;
         }
         Command::HealthCheck { visited } => {
-            tracing::info!(
+            tracing::debug!(
                 "Received health check request from {} (visited chain: {:?})",
                 sender,
                 visited
@@ -337,14 +338,14 @@ async fn process_command(
             // Collect health information (including cascaded peer health)
             let health = crate::health::collect_health(sender, visited.clone()).await?;
 
-            tracing::info!("Health check: {}", health);
+            tracing::debug!("Health check: {}", health);
 
             // Send health response back to sender
             let response = Command::health_response(health);
             response.send_to(&sender_peer).await?;
         }
         Command::HealthResponse { health } => {
-            tracing::info!("Received health response: {}", health);
+            tracing::debug!("Received health response: {}", health);
             // Cache the health response for later retrieval
             crate::health::cache_health_response(health.clone()).await;
         }

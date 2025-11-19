@@ -22,7 +22,7 @@ async fn perform_soft_restart() -> Result<(), anyhow::Error> {
     let _guard = paddington::SoftRestartGuard::new();
 
     // Get all peers
-    let all_peers = agent::all_peers().await;
+    let all_peers = agent::real_peers().await;
 
     tracing::info!(
         "Soft restart: clearing job boards and disconnecting from {} peers",
@@ -116,11 +116,19 @@ async fn perform_soft_restart() -> Result<(), anyhow::Error> {
     tracing::info!("Soft restart: disconnecting from all peers");
 
     for peer in all_peers.iter() {
-        tracing::debug!("Disconnecting from peer {} in zone {}", peer.name(), peer.zone());
+        tracing::debug!(
+            "Disconnecting from peer {} in zone {}",
+            peer.name(),
+            peer.zone()
+        );
 
         match paddington::disconnect(peer.name(), peer.zone()).await {
             Ok(_) => {
-                tracing::info!("Successfully disconnected from {} ({})", peer.name(), peer.zone());
+                tracing::info!(
+                    "Successfully disconnected from {} ({})",
+                    peer.name(),
+                    peer.zone()
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -215,14 +223,19 @@ pub async fn handle_restart_request(
 
         match restart_type {
             "soft" => {
-                tracing::warn!("Performing soft restart - disconnecting all peers and clearing boards");
+                tracing::warn!(
+                    "Performing soft restart - disconnecting all peers and clearing boards"
+                );
                 match perform_soft_restart().await {
                     Ok(_) => {
                         tracing::info!("Soft restart completed successfully");
                         Ok(())
                     }
                     Err(e) => {
-                        tracing::error!("Soft restart failed: {} - falling back to hard restart", e);
+                        tracing::error!(
+                            "Soft restart failed: {} - falling back to hard restart",
+                            e
+                        );
                         tracing::warn!("Performing hard restart due to soft restart failure - terminating process");
                         // Exit the process - supervisor should restart it
                         std::process::exit(1);

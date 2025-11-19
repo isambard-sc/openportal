@@ -60,7 +60,7 @@ pub async fn collect_health(
     requester: &str,
     visited: Vec<String>,
 ) -> Result<HealthInfo, anyhow::Error> {
-    tracing::info!(
+    tracing::debug!(
         "Collecting health information (visited chain length: {})",
         visited.len()
     );
@@ -98,7 +98,7 @@ pub async fn collect_health(
         // - The requester (to avoid immediate loops)
         // - Any agents in the visited chain (to avoid circular loops across zones)
         // - Other portals (security: portals must not query other portals)
-        let all_peers = agent::all_peers().await;
+        let all_peers = agent::real_peers().await;
 
         // Filter based on basic rules first
         let mut downstream_peers: Vec<_> = all_peers
@@ -179,6 +179,8 @@ async fn cascade_health_checks(
         }
     }
 
+    tracing::debug!("Disconnected peers: {:?}", disconnected_peers);
+
     // Only wait for peers we successfully contacted
     if !successfully_contacted.is_empty() {
         tracing::debug!(
@@ -220,6 +222,10 @@ async fn mark_disconnected_peers(
     cached_health: &HashMap<String, HealthInfo>,
 ) {
     for peer in disconnected_peers.iter() {
+        tracing::debug!(
+            "Marking peer {} as disconnected in health response",
+            peer.name()
+        );
         // Try to get cached health first, otherwise create empty health
         let mut disconnected_health = if let Some(cached) = cached_health.get(peer.name()) {
             // Use cached health but mark as disconnected

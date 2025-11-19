@@ -398,6 +398,24 @@ pub async fn all_peers() -> Vec<Peer> {
 }
 
 ///
+/// Return all real, non-virtual registered peers
+///
+pub async fn real_peers() -> Vec<Peer> {
+    let registrar = REGISTRAR.read().await;
+    registrar
+        .peers
+        .iter()
+        .filter_map(|(peer, agent_type)| {
+            if agent_type != &Type::Virtual {
+                Some(peer.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+///
 /// Return the name of the first portal agent in the system.
 /// Note that this will wait for up to 30 seconds for a portal
 /// agent to be registered before returning None

@@ -26,6 +26,7 @@ rand = { version = "0.9.2", features = ["std_rng"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+sysinfo = "0.33"
 thiserror = "2.0.17"
 tokio = { version = "1.48", features = ["full", "tracing"] }
 toml = "0.9.8"

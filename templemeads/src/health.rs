@@ -94,6 +94,13 @@ pub async fn collect_health(
     // Get the worker count from paddington
     health.worker_count = paddington::worker_count();
 
+    // Collect system information (memory, CPU, etc.)
+    let sysinfo = crate::systeminfo::collect();
+    health.memory_bytes = sysinfo.memory_bytes;
+    health.cpu_percent = sysinfo.cpu_percent;
+    health.system_memory_total = sysinfo.system_memory_total;
+    health.system_cpus = sysinfo.system_cpus;
+
     // Cascade health check to downstream peers (if enabled for this agent)
     // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false
     if agent::should_cascade_health().await {

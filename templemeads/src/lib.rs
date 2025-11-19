@@ -20,6 +20,7 @@ mod portal;
 mod provider;
 mod restart;
 mod scheduler;
+mod systeminfo;
 mod virtual_agent;
 
 // public API
@@ -40,3 +41,6 @@ pub mod server {
     pub use crate::bridge_server::sign_api_call;
     pub use crate::bridgestate::get as get_board;
 }
+
+// Re-export system info monitor for agents to use at startup
+pub use systeminfo::spawn_monitor as spawn_system_monitor;

@@ -39,6 +39,14 @@ pub struct HealthInfo {
     pub duplicate_jobs: usize,
     /// Number of active worker tasks processing messages
     pub worker_count: usize,
+    /// Memory usage of this agent process in bytes
+    pub memory_bytes: u64,
+    /// CPU usage of this agent process (percentage, 0.0-100.0)
+    pub cpu_percent: f32,
+    /// Total system memory in bytes
+    pub system_memory_total: u64,
+    /// Number of CPU cores on the system
+    pub system_cpus: usize,
     /// Time when agent started
     pub start_time: DateTime<Utc>,
     /// Current time on agent
@@ -78,6 +86,10 @@ impl HealthInfo {
             completed_jobs: 0,
             duplicate_jobs: 0,
             worker_count: 0,
+            memory_bytes: 0,
+            cpu_percent: 0.0,
+            system_memory_total: 0,
+            system_cpus: 0,
             start_time,
             current_time,
             uptime_seconds,
@@ -97,14 +109,27 @@ impl NamedType for HealthInfo {
 
 impl std::fmt::Display for HealthInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let memory_mb = self.memory_bytes as f64 / 1_048_576.0;
+        let system_memory_gb = self.system_memory_total as f64 / 1_073_741_824.0;
+        let memory_percent = if self.system_memory_total > 0 {
+            (self.memory_bytes as f64 / self.system_memory_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
         write!(
             f,
-            "{} ({}) - {} - uptime: {}s, workers: {}, jobs: {} active ({} pending, {} running, {} completed, {} duplicates)",
+            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed, {} duplicates)",
             self.name,
             self.agent_type,
             if self.connected { "connected" } else { "disconnected" },
             self.uptime_seconds,
             self.worker_count,
+            memory_mb,
+            memory_percent,
+            system_memory_gb,
+            self.cpu_percent,
+            self.system_cpus,
             self.active_jobs,
             self.pending_jobs,
             self.running_jobs,

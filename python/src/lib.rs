@@ -312,6 +312,26 @@ impl HealthInfo {
     }
 
     #[getter]
+    fn memory_bytes(&self) -> PyResult<u64> {
+        Ok(self.0.memory_bytes)
+    }
+
+    #[getter]
+    fn cpu_percent(&self) -> PyResult<f32> {
+        Ok(self.0.cpu_percent)
+    }
+
+    #[getter]
+    fn system_memory_total(&self) -> PyResult<u64> {
+        Ok(self.0.system_memory_total)
+    }
+
+    #[getter]
+    fn system_cpus(&self) -> PyResult<usize> {
+        Ok(self.0.system_cpus)
+    }
+
+    #[getter]
     fn start_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
         PyDateTime::from_timestamp(
             py,

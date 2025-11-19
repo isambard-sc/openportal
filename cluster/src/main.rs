@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
     // start tracing
     templemeads::config::initialise_tracing();
 
+    // start system monitoring
+    templemeads::spawn_system_monitor();
+
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
         Some("cluster".to_owned()),

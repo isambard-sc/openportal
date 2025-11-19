@@ -235,6 +235,9 @@ async fn process_command(
                                     job.instruction()
                                 );
 
+                                // Start timing the job execution
+                                let start_time = std::time::Instant::now();
+
                                 job = match runner(Envelope::new(recipient, sender, zone, &job))
                                     .await
                                 {
@@ -244,6 +247,17 @@ async fn process_command(
                                         job.errored(&e.to_string())?
                                     }
                                 };
+
+                                // Record the job execution time
+                                let duration = start_time.elapsed();
+                                let duration_ms = duration.as_secs_f64() * 1000.0;
+                                crate::jobtiming::record_job_time(duration_ms);
+
+                                tracing::debug!(
+                                    "Job {} completed in {:.2}ms",
+                                    job.id(),
+                                    duration_ms
+                                );
                             }
                         }
                     }

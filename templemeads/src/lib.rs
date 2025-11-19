@@ -15,6 +15,7 @@ mod filesystem;
 mod handler;
 mod health;
 mod instance;
+mod jobtiming;
 mod platform;
 mod portal;
 mod provider;

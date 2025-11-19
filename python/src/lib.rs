@@ -327,8 +327,33 @@ impl HealthInfo {
     }
 
     #[getter]
-    fn system_cpus(&self) -> PyResult<usize> {
-        Ok(self.0.system_cpus)
+    fn system_cpus(&self) -> PyResult<u32> {
+        Ok(self.0.system_cpus as u32)
+    }
+
+    #[getter]
+    fn job_time_min_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_min_ms)
+    }
+
+    #[getter]
+    fn job_time_max_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_max_ms)
+    }
+
+    #[getter]
+    fn job_time_mean_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_mean_ms)
+    }
+
+    #[getter]
+    fn job_time_median_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_median_ms)
+    }
+
+    #[getter]
+    fn job_time_count(&self) -> PyResult<u32> {
+        Ok(self.0.job_time_count as u32)
     }
 
     #[getter]

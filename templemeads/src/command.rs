@@ -47,6 +47,16 @@ pub struct HealthInfo {
     pub system_memory_total: u64,
     /// Number of CPU cores on the system
     pub system_cpus: usize,
+    /// Minimum job execution time in milliseconds
+    pub job_time_min_ms: f64,
+    /// Maximum job execution time in milliseconds
+    pub job_time_max_ms: f64,
+    /// Mean job execution time in milliseconds
+    pub job_time_mean_ms: f64,
+    /// Median job execution time in milliseconds
+    pub job_time_median_ms: f64,
+    /// Number of jobs timed
+    pub job_time_count: usize,
     /// Time when agent started
     pub start_time: DateTime<Utc>,
     /// Current time on agent
@@ -90,6 +100,11 @@ impl HealthInfo {
             cpu_percent: 0.0,
             system_memory_total: 0,
             system_cpus: 0,
+            job_time_min_ms: 0.0,
+            job_time_max_ms: 0.0,
+            job_time_mean_ms: 0.0,
+            job_time_median_ms: 0.0,
+            job_time_count: 0,
             start_time,
             current_time,
             uptime_seconds,
@@ -117,9 +132,23 @@ impl std::fmt::Display for HealthInfo {
             0.0
         };
 
+        // Build job timing string if we have data
+        let timing_str = if self.job_time_count > 0 {
+            format!(
+                ", timing: min={:.1}ms, max={:.1}ms, mean={:.1}ms, median={:.1}ms (n={})",
+                self.job_time_min_ms,
+                self.job_time_max_ms,
+                self.job_time_mean_ms,
+                self.job_time_median_ms,
+                self.job_time_count
+            )
+        } else {
+            String::new()
+        };
+
         write!(
             f,
-            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed, {} duplicates)",
+            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed, {} duplicates){}",
             self.name,
             self.agent_type,
             if self.connected { "connected" } else { "disconnected" },
@@ -134,7 +163,8 @@ impl std::fmt::Display for HealthInfo {
             self.pending_jobs,
             self.running_jobs,
             self.completed_jobs,
-            self.duplicate_jobs
+            self.duplicate_jobs,
+            timing_str
         )
     }
 }

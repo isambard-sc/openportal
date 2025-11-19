@@ -101,6 +101,14 @@ pub async fn collect_health(
     health.system_memory_total = sysinfo.system_memory_total;
     health.system_cpus = sysinfo.system_cpus;
 
+    // Collect job timing statistics
+    let job_stats = crate::jobtiming::get_stats();
+    health.job_time_min_ms = job_stats.min_ms;
+    health.job_time_max_ms = job_stats.max_ms;
+    health.job_time_mean_ms = job_stats.mean_ms;
+    health.job_time_median_ms = job_stats.median_ms;
+    health.job_time_count = job_stats.count;
+
     // Cascade health check to downstream peers (if enabled for this agent)
     // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false
     if agent::should_cascade_health().await {

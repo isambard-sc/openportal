@@ -602,62 +602,21 @@ async fn restart(
         payload.destination
     );
 
-    // Get all peers
-    let peers = crate::agent::all_peers().await;
+    // Send the restart command to self with the full destination
+    // This reuses the routing logic in the handler, including zone disambiguation
+    let restart_cmd = Command::restart(&payload.restart_type, &payload.destination);
+    let self_peer = agent::get_self(None).await;
+    restart_cmd.send_to(&self_peer).await?;
 
-    if payload.destination.is_empty() {
-        // Restart the bridge itself
-        let restart_cmd = Command::restart(&payload.restart_type, "");
+    // Return success immediately
+    let mut result = HashMap::new();
+    result.insert("status".to_string(), json!("ok"));
+    result.insert(
+        "message".to_string(),
+        json!("Restart command sent successfully"),
+    );
 
-        // Send the restart command to self
-        let self_peer = agent::get_self(None).await;
-        restart_cmd.send_to(&self_peer).await?;
-
-        // Return success immediately - bridge will restart after response is sent
-        let mut result = HashMap::new();
-        result.insert("status".to_string(), json!("ok"));
-        result.insert(
-            "message".to_string(),
-            json!("Restart command sent successfully"),
-        );
-
-        Ok(Json(json!(result)))
-    } else {
-        // Forward restart to specific destination
-        let destination_parts: Vec<&str> = payload.destination.split('.').collect();
-        let next_peer_name = destination_parts[0];
-        let remaining_path = destination_parts[1..].join(".");
-
-        tracing::debug!(
-            "Forwarding restart to peer: {}, remaining path: {}",
-            next_peer_name,
-            remaining_path
-        );
-
-        // Find the peer to forward to
-        if let Some(next_peer) = peers.iter().find(|p| p.name() == next_peer_name) {
-            let restart_cmd = Command::restart(&payload.restart_type, &remaining_path);
-            restart_cmd.send_to(next_peer).await?;
-
-            let mut result = HashMap::new();
-            result.insert("status".to_string(), json!("ok"));
-            result.insert(
-                "message".to_string(),
-                json!(format!("Restart forwarded to {}", next_peer_name)),
-            );
-
-            Ok(Json(json!(result)))
-        } else {
-            let mut result = HashMap::new();
-            result.insert("status".to_string(), json!("error"));
-            result.insert(
-                "message".to_string(),
-                json!(format!("Peer {} not found", next_peer_name)),
-            );
-
-            Ok(Json(json!(result)))
-        }
-    }
+    Ok(Json(json!(result)))
 }
 
 //

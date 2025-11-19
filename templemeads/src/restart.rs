@@ -61,9 +61,17 @@ pub async fn handle_restart_request(
     let is_target = if destination_parts.is_empty() {
         // Empty destination means restart the agent that received the request
         true
+    } else if destination_parts.len() == 1 {
+        // Extract just the name part (before any @zone) and check if it matches
+        let target_spec = destination_parts[0];
+        let target_name = if target_spec.contains('@') {
+            target_spec.split('@').next().unwrap_or(target_spec)
+        } else {
+            target_spec
+        };
+        target_name == my_name
     } else {
-        // Check if there are no more parts in the path (we're the final destination)
-        destination_parts.len() == 1 && destination_parts[0] == my_name
+        false
     };
 
     if is_target {
@@ -107,19 +115,46 @@ pub async fn handle_restart_request(
         }
 
         // We need to forward the restart to the next peer in the path
-        let next_peer_name = destination_parts[0];
+        // Parse the next hop, which may include a zone specifier (name@zone)
+        let next_hop = destination_parts[0];
+        let (next_peer_name, zone_filter) = if next_hop.contains('@') {
+            let parts: Vec<&str> = next_hop.split('@').collect();
+            if parts.len() == 2 {
+                (parts[0], Some(parts[1]))
+            } else {
+                tracing::error!("Invalid format for agent specification: {}", next_hop);
+                return Err(anyhow::anyhow!(
+                    "Invalid format '{}' - use 'name' or 'name@zone'",
+                    next_hop
+                ));
+            }
+        } else {
+            (next_hop, None)
+        };
+
         let remaining_path = destination_parts[1..].join(".");
 
         tracing::info!(
-            "Forwarding restart request from {} to {} (remaining path: {})",
+            "Forwarding restart request from {} to {} (zone: {}, remaining path: {})",
             sender,
             next_peer_name,
+            zone_filter.unwrap_or("any"),
             remaining_path
         );
 
         // Find the peer to forward to
         let all_peers = agent::all_peers().await;
-        if let Some(next_peer) = all_peers.iter().find(|p| p.name() == next_peer_name) {
+        let next_peer = if let Some(required_zone) = zone_filter {
+            // Find peer with matching name AND zone
+            all_peers
+                .iter()
+                .find(|p| p.name() == next_peer_name && p.zone() == required_zone)
+        } else {
+            // Find first peer with matching name (any zone)
+            all_peers.iter().find(|p| p.name() == next_peer_name)
+        };
+
+        if let Some(next_peer) = next_peer {
             // Security: If we're a portal, don't forward to other portals
             if my_type == agent::Type::Portal {
                 if let Some(peer_type) = agent::agent_type(next_peer).await {
@@ -139,14 +174,23 @@ pub async fn handle_restart_request(
             let restart_cmd = Command::restart(restart_type, &remaining_path);
             restart_cmd.send_to(next_peer).await?;
 
-            tracing::debug!("Forwarded restart to {}", next_peer_name);
+            tracing::debug!(
+                "Forwarded restart to {} in zone {}",
+                next_peer_name,
+                next_peer.zone()
+            );
             Ok(())
         } else {
-            tracing::error!("Cannot find peer {} to forward restart to", next_peer_name);
-            Err(anyhow::anyhow!(
-                "Cannot find peer {} in destination path",
-                next_peer_name
-            ))
+            let error_msg = if let Some(zone) = zone_filter {
+                format!(
+                    "Cannot find peer {} in zone {} to forward restart to",
+                    next_peer_name, zone
+                )
+            } else {
+                format!("Cannot find peer {} to forward restart to", next_peer_name)
+            };
+            tracing::error!("{}", error_msg);
+            Err(anyhow::anyhow!("{}", error_msg))
         }
     }
 }

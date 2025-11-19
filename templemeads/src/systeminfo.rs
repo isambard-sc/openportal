@@ -144,6 +144,16 @@ pub fn spawn_monitor() {
                     "High CPU usage: {:.1}%",
                     info.cpu_percent
                 );
+
+                // Fetch health info (without cascading) for troubleshooting
+                match crate::health::collect_health("", vec![]).await {
+                    Ok(health) => {
+                        tracing::warn!("Health info at high CPU: {}", health);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to collect health info during high CPU: {}", e);
+                    }
+                }
             }
 
             // Check process memory usage
@@ -157,6 +167,16 @@ pub fn spawn_monitor() {
                         process_memory_mb,
                         process_memory_percent
                     );
+
+                    // Fetch health info (without cascading) for troubleshooting
+                    match crate::health::collect_health("", vec![]).await {
+                        Ok(health) => {
+                            tracing::warn!("Health info at high memory: {}", health);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to collect health info during high memory: {}", e);
+                        }
+                    }
                 } else if process_memory_mb > 0.0 {
                     tracing::debug!(
                         "Process stats: CPU {:.1}%, Memory {:.1}MB ({:.1}% of system)",

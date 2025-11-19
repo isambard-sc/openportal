@@ -37,6 +37,8 @@ pub struct HealthInfo {
     pub completed_jobs: usize,
     /// Number of duplicate jobs
     pub duplicate_jobs: usize,
+    /// Number of active worker tasks processing messages
+    pub worker_count: usize,
     /// Time when agent started
     pub start_time: DateTime<Utc>,
     /// Current time on agent
@@ -75,6 +77,7 @@ impl HealthInfo {
             running_jobs: 0,
             completed_jobs: 0,
             duplicate_jobs: 0,
+            worker_count: 0,
             start_time,
             current_time,
             uptime_seconds,
@@ -96,11 +99,12 @@ impl std::fmt::Display for HealthInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "{} ({}) - {} - uptime: {}s, jobs: {} active ({} pending, {} running, {} completed, {} duplicates)",
+            "{} ({}) - {} - uptime: {}s, workers: {}, jobs: {} active ({} pending, {} running, {} completed, {} duplicates)",
             self.name,
             self.agent_type,
             if self.connected { "connected" } else { "disconnected" },
             self.uptime_seconds,
+            self.worker_count,
             self.active_jobs,
             self.pending_jobs,
             self.running_jobs,

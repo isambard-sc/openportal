@@ -91,6 +91,9 @@ pub async fn collect_health(
     health.completed_jobs = completed;
     health.duplicate_jobs = duplicates;
 
+    // Get the worker count from paddington
+    health.worker_count = paddington::worker_count();
+
     // Cascade health check to downstream peers (if enabled for this agent)
     // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false
     if agent::should_cascade_health().await {

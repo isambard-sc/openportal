@@ -120,6 +120,9 @@ pub struct Exchange {
     // a hash counting the number of standby connections
     // per peer
     standby_peers: HashMap<String, u32>,
+
+    // number of active worker tasks processing messages
+    worker_count: Arc<Mutex<usize>>,
 }
 
 impl Default for Exchange {
@@ -222,6 +225,17 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
     let mut last_logged_update = chrono::Utc::now();
     let mut last_logged_count: i64 = 0;
 
+    // Get a reference to the worker_count Arc so we can update it
+    let worker_count = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange.worker_count.clone(),
+        Err(e) => {
+            tracing::error!("Error getting worker_count reference: {}", e);
+            return Err(Error::Poison(
+                "Error getting worker_count reference".to_string(),
+            ));
+        }
+    };
+
     while let Some(mut message) = rx.recv().await {
         // process and spawn a new task to handle the message first...
         let (handler, name) = match SINGLETON_EXCHANGE.read() {
@@ -251,6 +265,11 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                     tracing::error!("Error processing message: {}", e);
                 }
             }
+        }
+
+        // Update the worker count in the exchange
+        if let Ok(mut count) = worker_count.lock() {
+            *count = workers.len();
         }
 
         if (last_logged_count - workers.len() as i64).abs() >= 10
@@ -341,6 +360,7 @@ impl Exchange {
             watchdogs: Arc::new(Mutex::new(HashSet::new())),
             is_secondary: false,
             standby_peers: HashMap::new(),
+            worker_count: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -736,5 +756,24 @@ pub async fn disconnect(peer: &str, zone: &str) -> Result<(), Error> {
             "Connection {} not found",
             peer
         )))
+    }
+}
+
+///
+/// Get the current number of active worker tasks processing messages
+///
+pub fn worker_count() -> usize {
+    match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => match exchange.worker_count.lock() {
+            Ok(count) => *count,
+            Err(e) => {
+                tracing::error!("Error getting worker_count lock: {}", e);
+                0
+            }
+        },
+        Err(e) => {
+            tracing::error!("Error getting exchange read lock: {}", e);
+            0
+        }
     }
 }

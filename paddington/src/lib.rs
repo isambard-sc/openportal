@@ -23,6 +23,7 @@ pub use exchange::received;
 pub use exchange::send;
 pub use exchange::set_handler;
 pub use exchange::watchdog;
+pub use exchange::worker_count;
 pub use exchange::SoftRestartGuard;
 pub mod invite;
 pub mod message;

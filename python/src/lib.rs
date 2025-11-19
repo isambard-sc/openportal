@@ -307,6 +307,11 @@ impl HealthInfo {
     }
 
     #[getter]
+    fn worker_count(&self) -> PyResult<u64> {
+        Ok(self.0.worker_count as u64)
+    }
+
+    #[getter]
     fn start_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
         PyDateTime::from_timestamp(
             py,
@@ -540,7 +545,11 @@ impl RestartResponse {
 ///
 #[pyfunction]
 fn restart(restart_type: &str, destination: &str) -> PyResult<RestartResponse> {
-    tracing::debug!("Calling /restart with type={}, destination={}", restart_type, destination);
+    tracing::debug!(
+        "Calling /restart with type={}, destination={}",
+        restart_type,
+        destination
+    );
 
     let params = serde_json::json!({
         "restart_type": restart_type,

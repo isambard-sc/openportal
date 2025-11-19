@@ -10,6 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - Implemented cascading health checks across the agent network with intelligent timeout handling (500ms or until all peers respond), automatic detection of disconnected peers, circular loop prevention via visited-chain tracking, and configurable cascade blocking for leaf nodes (FreeIPA, Filesystem). Portal-to-portal health queries are blocked to prevent cross-site information leakage.
 - Added restart command functionality allowing agents to be remotely restarted via control commands.
+- Implemented soft restart functionality. Jobs are error-cancelled during restart and new job submissions are rejected with retry-able errors. Routing of restart requests respects portal and leaf node boundaries.
+- Added worker count tracking to health checks. The paddington event loop now tracks active worker tasks, exposed via the health endpoint and included in HealthInfo.
+- Implemented system resource monitoring using the sysinfo crate. Agents now track and report process memory usage, CPU usage, total system memory, and CPU core count in health checks.
+- Added background monitoring task that refreshes every 10 seconds, warning when CPU usage exceeds 90% or process memory exceeds 80% of system memory. High resource usage triggers detailed health info logging for troubleshooting.
+- Implemented job execution timing statistics. Job run times are tracked with min/max/mean/median calculations over a rolling window of 1000 jobs, exposed in health checks for performance monitoring.
 
 ## [0.20.2] - 2025-11-15
 

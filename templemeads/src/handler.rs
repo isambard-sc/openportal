@@ -310,28 +310,10 @@ async fn process_command(
             crate::health::cache_health_response(health.clone()).await;
         }
         Command::Restart => {
-            tracing::warn!("Received restart command from {}", sender);
-
-            let agent_name = agent::name().await;
-            let ack = Command::restart_ack(
-                &agent_name,
-                "Restart acknowledged - agent will terminate and rely on supervisor to restart",
-            );
-
-            // Send acknowledgment before terminating
-            if let Err(e) = ack.send_to(&Peer::new(sender, zone)).await {
-                tracing::error!("Failed to send restart acknowledgment: {}", e);
-            }
-
-            // Give time for the ack to be sent
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-            // Exit the process - supervisor should restart it
-            tracing::warn!("Terminating process for restart...");
-            std::process::exit(0);
+            crate::restart::handle_restart_request(sender, zone).await?;
         }
         Command::RestartAck { agent, message } => {
-            tracing::info!("Restart acknowledged by {}: {}", agent, message);
+            crate::restart::handle_restart_ack(&agent, &message).await;
         }
         _ => {
             tracing::warn!("Command {} not recognised", command);

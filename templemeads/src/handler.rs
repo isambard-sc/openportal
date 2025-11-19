@@ -312,9 +312,6 @@ async fn process_command(
         Command::Restart => {
             crate::restart::handle_restart_request(sender, zone).await?;
         }
-        Command::RestartAck { agent, message } => {
-            crate::restart::handle_restart_ack(&agent, &message).await;
-        }
         _ => {
             tracing::warn!("Command {} not recognised", command);
         }

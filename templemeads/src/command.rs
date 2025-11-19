@@ -157,10 +157,6 @@ pub enum Command {
         health: HealthInfo,
     },
     Restart,
-    RestartAck {
-        agent: String,
-        message: String,
-    },
 }
 
 impl std::fmt::Display for Command {
@@ -185,9 +181,6 @@ impl std::fmt::Display for Command {
             }
             Command::HealthResponse { health } => write!(f, "HealthResponse: {}", health),
             Command::Restart => write!(f, "Restart"),
-            Command::RestartAck { agent, message } => {
-                write!(f, "RestartAck: {} - {}", agent, message)
-            }
         }
     }
 }
@@ -243,13 +236,6 @@ impl Command {
         Self::Restart
     }
 
-    pub fn restart_ack(agent: &str, message: &str) -> Self {
-        Self::RestartAck {
-            agent: agent.to_owned(),
-            message: message.to_owned(),
-        }
-    }
-
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
         // Check if sending to ourselves
         let my_name = agent::name().await;
@@ -302,10 +288,6 @@ impl Command {
             Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
-            Command::RestartAck {
-                agent: _,
-                message: _,
-            } => None,
         }
     }
 
@@ -324,10 +306,6 @@ impl Command {
             Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
-            Command::RestartAck {
-                agent: _,
-                message: _,
-            } => None,
         }
     }
 
@@ -346,10 +324,6 @@ impl Command {
             Command::HealthCheck { visited: _ } => None,
             Command::HealthResponse { health: _ } => None,
             Command::Restart => None,
-            Command::RestartAck {
-                agent: _,
-                message: _,
-            } => None,
         }
     }
 }

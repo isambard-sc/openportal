@@ -9,6 +9,137 @@ use crate::agent;
 use crate::command::Command;
 
 ///
+/// Perform a soft restart by disconnecting all peers and clearing boards
+///
+/// This function:
+/// - Gets all connected peers
+/// - Disconnects from each peer
+/// - Clears all job boards (cancels in-flight jobs)
+///
+async fn perform_soft_restart() -> Result<(), anyhow::Error> {
+    // Acquire the RAII guard to block new connections
+    // The guard will automatically clear the flag when this function exits (even on panic)
+    let _guard = paddington::SoftRestartGuard::new();
+
+    // Get all peers
+    let all_peers = agent::all_peers().await;
+
+    tracing::info!(
+        "Soft restart: clearing job boards and disconnecting from {} peers",
+        all_peers.len()
+    );
+
+    // STEP 1: Clear all boards and cancel in-flight jobs BEFORE disconnecting
+    // This ensures that cancellation messages are sent back to peers before connections are severed
+    tracing::info!("Soft restart: clearing all job boards and cancelling in-flight jobs");
+
+    for peer in all_peers.iter() {
+        match crate::state::get(peer).await {
+            Ok(state) => {
+                let board = state.board().await;
+
+                // STEP 1: Get all jobs while holding the lock, then release it
+                let all_jobs = {
+                    let board = board.read().await;
+                    let sync_state = board.sync_state();
+                    sync_state.jobs().clone()
+                };
+
+                tracing::debug!(
+                    "Clearing {} jobs from board for peer {}",
+                    all_jobs.len(),
+                    peer.name()
+                );
+
+                // STEP 2: Error jobs and send them back WITHOUT holding the lock
+                // This prevents deadlock when job.update() tries to acquire locks
+                let mut errored_jobs = Vec::new();
+                for mut job in all_jobs {
+                    if !job.is_finished() {
+                        // Mark the job as errored due to restart
+                        match job.errored("Agent soft restart - job cancelled") {
+                            Ok(errored_job) => {
+                                job = errored_job.clone();
+
+                                // Send the errored job back to the peer
+                                if let Err(e) = errored_job.update(peer).await {
+                                    tracing::warn!(
+                                        "Failed to send cancelled job {} back to {}: {}",
+                                        job.id(),
+                                        peer.name(),
+                                        e
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        "Sent cancelled job {} back to {}",
+                                        job.id(),
+                                        peer.name()
+                                    );
+                                }
+
+                                errored_jobs.push(job);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to error job {}: {}", job.id(), e);
+                                errored_jobs.push(job);
+                            }
+                        }
+                    } else {
+                        errored_jobs.push(job);
+                    }
+                }
+
+                // STEP 3: Now acquire write lock to remove jobs from the board
+                {
+                    let mut board = board.write().await;
+
+                    // Remove all jobs from the board
+                    for job in errored_jobs {
+                        if let Err(e) = board.remove(&job) {
+                            tracing::warn!("Failed to remove job {} from board: {}", job.id(), e);
+                        }
+                    }
+
+                    // Clear any queued commands
+                    let _ = board.take_queued();
+                }
+
+                tracing::info!("Cleared board for peer {}", peer.name());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get state for peer {}: {}", peer.name(), e);
+            }
+        }
+    }
+
+    // STEP 2: Disconnect from all peers AFTER cancelling jobs
+    tracing::info!("Soft restart: disconnecting from all peers");
+
+    for peer in all_peers.iter() {
+        tracing::debug!("Disconnecting from peer {} in zone {}", peer.name(), peer.zone());
+
+        match paddington::disconnect(peer.name(), peer.zone()).await {
+            Ok(_) => {
+                tracing::info!("Successfully disconnected from {} ({})", peer.name(), peer.zone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to disconnect from {} ({}): {}",
+                    peer.name(),
+                    peer.zone(),
+                    e
+                );
+                // Continue with other disconnections even if one fails
+            }
+        }
+    }
+
+    tracing::warn!("Soft restart complete - all peers disconnected and boards cleared");
+
+    Ok(())
+}
+
+///
 /// Handle a restart request from another agent
 ///
 /// This function:
@@ -84,13 +215,19 @@ pub async fn handle_restart_request(
 
         match restart_type {
             "soft" => {
-                tracing::info!("Performing soft restart - disconnecting all peers");
-                // TODO: Implement soft restart (disconnect and reconnect networking)
-                // For now, just log that this would happen
-                tracing::warn!(
-                    "Soft restart not yet implemented - would disconnect/reconnect all peers"
-                );
-                Ok(())
+                tracing::warn!("Performing soft restart - disconnecting all peers and clearing boards");
+                match perform_soft_restart().await {
+                    Ok(_) => {
+                        tracing::info!("Soft restart completed successfully");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        tracing::error!("Soft restart failed: {} - falling back to hard restart", e);
+                        tracing::warn!("Performing hard restart due to soft restart failure - terminating process");
+                        // Exit the process - supervisor should restart it
+                        std::process::exit(1);
+                    }
+                }
             }
             "hard" => {
                 tracing::warn!("Performing hard restart - terminating process");

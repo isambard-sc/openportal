@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -16,6 +17,46 @@ use crate::connection::Connection;
 use crate::connection::StandbyStatus;
 use crate::error::Error;
 use crate::message::Message;
+
+///
+/// Global flag indicating whether a soft restart is in progress
+/// When true, new connections should be rejected
+///
+static SOFT_RESTART_IN_PROGRESS: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
+///
+/// Check if a soft restart is currently in progress
+///
+pub fn is_soft_restart_in_progress() -> bool {
+    SOFT_RESTART_IN_PROGRESS.load(Ordering::Acquire)
+}
+
+///
+/// RAII guard that sets the soft restart flag on creation and clears it on drop
+/// This ensures the flag is always cleared even if the restart function panics
+///
+pub struct SoftRestartGuard;
+
+impl SoftRestartGuard {
+    pub fn new() -> Self {
+        SOFT_RESTART_IN_PROGRESS.store(true, Ordering::Release);
+        tracing::debug!("Soft restart guard acquired - blocking new connections");
+        SoftRestartGuard
+    }
+}
+
+impl Default for SoftRestartGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SoftRestartGuard {
+    fn drop(&mut self) {
+        SOFT_RESTART_IN_PROGRESS.store(false, Ordering::Release);
+        tracing::debug!("Soft restart guard released - accepting connections again");
+    }
+}
 
 // We use the singleton pattern for the exchange data, as there can only
 // be one in the program, and this will let us expose the exchange functions

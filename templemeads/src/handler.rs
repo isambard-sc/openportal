@@ -77,6 +77,45 @@ async fn process_command(
     command: &Command,
     runner: &AsyncRunnable,
 ) -> Result<(), Error> {
+    // Block new jobs during soft restart
+    // Allow Register, HealthCheck, and Restart commands to pass through
+    if paddington::is_soft_restart_in_progress() {
+        match command {
+            Command::Register { .. } | Command::HealthCheck { .. } | Command::Restart { .. } => {
+                // Allow these commands during soft restart
+            }
+            Command::Put { job } | Command::Update { job } => {
+                // Error the job and send it back to the sender
+                tracing::warn!(
+                    "Rejecting job {} during soft restart from {}",
+                    job.id(),
+                    sender
+                );
+
+                let peer = Peer::new(sender, zone);
+                let errored_job = job.errored("Agent is performing a soft restart - please retry")?;
+
+                // Send the errored job back to the sender
+                if let Err(e) = errored_job.update(&peer).await {
+                    tracing::warn!("Failed to send errored job back to sender: {}", e);
+                }
+
+                return Ok(());
+            }
+            _ => {
+                // Reject other commands during soft restart
+                tracing::warn!(
+                    "Rejecting command during soft restart: {} from {}",
+                    command,
+                    sender
+                );
+                return Err(Error::Unavailable(
+                    "Agent is currently performing a soft restart - please retry".to_string(),
+                ));
+            }
+        }
+    }
+
     match command {
         Command::Register {
             agent,

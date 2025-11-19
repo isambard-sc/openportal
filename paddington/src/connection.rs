@@ -968,6 +968,14 @@ impl Connection {
     /// loop to handle the sending and receiving of messages.
     ///
     pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
+        // Reject new connections during soft restart
+        if crate::exchange::is_soft_restart_in_progress() {
+            tracing::warn!("Rejecting new connection - soft restart in progress");
+            return Err(Error::Unavailable(
+                "Agent is performing a soft restart - please retry".to_string(),
+            ));
+        }
+
         let service_name = self.config.name();
 
         if service_name.is_empty() {

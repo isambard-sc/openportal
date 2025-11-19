@@ -66,4 +66,7 @@ pub enum Error {
 
     #[error("{0}")]
     Incompatible(String),
+
+    #[error("{0}")]
+    Unavailable(String),
 }

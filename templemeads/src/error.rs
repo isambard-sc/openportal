@@ -116,6 +116,9 @@ pub enum Error {
 
     #[error("{0}")]
     UnmanagedGroup(String),
+
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 // implement into a paddington::Error

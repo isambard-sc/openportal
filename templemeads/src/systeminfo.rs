@@ -111,7 +111,8 @@ pub fn initialize() {
     // Initial refresh to establish baseline
     system.refresh_all();
 
-    tracing::debug!("System info initialized: {} CPUs, {} total memory",
+    tracing::debug!(
+        "System info initialized: {} CPUs, {} total memory",
         system.cpus().len(),
         system.total_memory()
     );
@@ -140,10 +141,7 @@ pub fn spawn_monitor() {
 
             // Check CPU usage
             if info.cpu_percent > 90.0 {
-                tracing::warn!(
-                    "High CPU usage: {:.1}%",
-                    info.cpu_percent
-                );
+                tracing::warn!("High CPU usage: {:.1}%", info.cpu_percent);
 
                 // Fetch health info (without cascading) for troubleshooting
                 match crate::health::collect_health("", vec![]).await {
@@ -159,7 +157,8 @@ pub fn spawn_monitor() {
             // Check process memory usage
             if info.system_memory_total > 0 {
                 let process_memory_mb = info.memory_bytes as f64 / 1_048_576.0;
-                let process_memory_percent = (info.memory_bytes as f64 / info.system_memory_total as f64) * 100.0;
+                let process_memory_percent =
+                    (info.memory_bytes as f64 / info.system_memory_total as f64) * 100.0;
 
                 if process_memory_percent > 80.0 {
                     tracing::warn!(
@@ -174,7 +173,10 @@ pub fn spawn_monitor() {
                             tracing::warn!("Health info at high memory: {}", health);
                         }
                         Err(e) => {
-                            tracing::error!("Failed to collect health info during high memory: {}", e);
+                            tracing::error!(
+                                "Failed to collect health info during high memory: {}",
+                                e
+                            );
                         }
                     }
                 } else if process_memory_mb > 0.0 {

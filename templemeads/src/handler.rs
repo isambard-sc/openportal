@@ -361,7 +361,7 @@ async fn process_command(
         Command::HealthResponse { health } => {
             tracing::debug!("Received health response: {}", health);
             // Cache the health response for later retrieval
-            crate::health::cache_health_response(health.clone()).await;
+            crate::health::cache_health_response(*health.clone()).await;
         }
         Command::Restart {
             restart_type,

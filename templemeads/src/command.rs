@@ -213,7 +213,7 @@ pub enum Command {
         visited: Vec<String>,
     },
     HealthResponse {
-        health: HealthInfo,
+        health: Box<HealthInfo>,
     },
     Restart {
         /// Type of restart: "soft" (networking only), "hard" (terminate process), etc.
@@ -301,7 +301,9 @@ impl Command {
     }
 
     pub fn health_response(health: HealthInfo) -> Self {
-        Self::HealthResponse { health }
+        Self::HealthResponse {
+            health: Box::new(health),
+        }
     }
 
     pub fn restart(restart_type: &str, destination: &str) -> Self {

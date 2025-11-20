@@ -302,6 +302,21 @@ impl HealthInfo {
     }
 
     #[getter]
+    fn successful_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.successful_jobs as u64)
+    }
+
+    #[getter]
+    fn expired_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.expired_jobs as u64)
+    }
+
+    #[getter]
+    fn errored_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.errored_jobs as u64)
+    }
+
+    #[getter]
     fn duplicate_jobs(&self) -> PyResult<u64> {
         Ok(self.0.duplicate_jobs as u64)
     }

@@ -88,13 +88,16 @@ impl Board {
 
     ///
     /// Return job statistics for this board
-    /// Returns (active, pending, running, completed, duplicates)
+    /// Returns (active, pending, running, completed, duplicates, successful, expired, errored)
     ///
-    pub fn job_stats(&self) -> (usize, usize, usize, usize, usize) {
+    pub fn job_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
         let mut pending = 0;
         let mut running = 0;
         let mut completed = 0;
         let mut duplicates = 0;
+        let mut successful = 0;
+        let mut expired = 0;
+        let mut errored = 0;
 
         for job in self.jobs.values() {
             if job.is_pending() {
@@ -103,13 +106,30 @@ impl Board {
                 running += 1;
             } else if job.is_finished() {
                 completed += 1;
+                // Categorize completed jobs
+                if job.is_expired() {
+                    expired += 1;
+                } else if job.is_error() {
+                    errored += 1;
+                } else {
+                    successful += 1;
+                }
             } else if job.is_duplicate() {
                 duplicates += 1;
             }
         }
 
         let active = self.jobs.len();
-        (active, pending, running, completed, duplicates)
+        (
+            active,
+            pending,
+            running,
+            completed,
+            duplicates,
+            successful,
+            expired,
+            errored,
+        )
     }
 
     ///

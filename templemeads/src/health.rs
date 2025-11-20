@@ -34,6 +34,12 @@ pub struct HealthInfo {
     pub completed_jobs: usize,
     /// Number of duplicate jobs
     pub duplicate_jobs: usize,
+    /// Number of successfully completed jobs
+    pub successful_jobs: usize,
+    /// Number of jobs that expired
+    pub expired_jobs: usize,
+    /// Number of jobs that errored (not including expired)
+    pub errored_jobs: usize,
     /// Number of active worker tasks processing messages
     pub worker_count: usize,
     /// Memory usage of this agent process in bytes
@@ -92,6 +98,9 @@ impl HealthInfo {
             running_jobs: 0,
             completed_jobs: 0,
             duplicate_jobs: 0,
+            successful_jobs: 0,
+            expired_jobs: 0,
+            errored_jobs: 0,
             worker_count: 0,
             memory_bytes: 0,
             cpu_percent: 0.0,
@@ -137,7 +146,10 @@ impl HealthInfo {
         let mut output = String::new();
 
         // Format header with agent name and type
-        output.push_str(&format!("{}┌─ {} ({})\n", prefix, self.name, self.agent_type));
+        output.push_str(&format!(
+            "{}┌─ {} ({})\n",
+            prefix, self.name, self.agent_type
+        ));
 
         // Connection status with warning if disconnected
         let connection_status = if self.connected {
@@ -207,6 +219,22 @@ impl HealthInfo {
             ""
         };
 
+        let expired_warning = if self.expired_jobs > 10 {
+            " ⚠️"
+        } else if self.expired_jobs > 0 {
+            " ⚡"
+        } else {
+            ""
+        };
+
+        let errored_warning = if self.errored_jobs > 10 {
+            " ⚠️"
+        } else if self.errored_jobs > 0 {
+            " ⚡"
+        } else {
+            ""
+        };
+
         output.push_str(&format!(
             "{}│  Jobs: {} active ({} pending{}, {} running{}, {} completed, {} duplicates)\n",
             prefix,
@@ -217,6 +245,21 @@ impl HealthInfo {
             running_warning,
             self.completed_jobs,
             self.duplicate_jobs
+        ));
+
+        output.push_str(&format!(
+            "{}│    ├─ Successful: {}\n",
+            prefix, self.successful_jobs
+        ));
+
+        output.push_str(&format!(
+            "{}│    ├─ Expired: {}{}\n",
+            prefix, self.expired_jobs, expired_warning
+        ));
+
+        output.push_str(&format!(
+            "{}│    └─ Errored: {}{}\n",
+            prefix, self.errored_jobs, errored_warning
         ));
 
         // Job timing information if available
@@ -326,7 +369,7 @@ impl std::fmt::Display for HealthInfo {
 
         write!(
             f,
-            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed, {} duplicates){}",
+            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed [{} successful, {} expired, {} errored], {} duplicates){}",
             self.name,
             self.agent_type,
             if self.connected { "connected" } else { "disconnected" },
@@ -341,6 +384,9 @@ impl std::fmt::Display for HealthInfo {
             self.pending_jobs,
             self.running_jobs,
             self.completed_jobs,
+            self.successful_jobs,
+            self.expired_jobs,
+            self.errored_jobs,
             self.duplicate_jobs,
             timing_str
         )
@@ -416,7 +462,7 @@ pub async fn collect_health(
     );
 
     // Get aggregated job stats from all boards
-    let (active, pending, running, completed, duplicates) =
+    let (active, pending, running, completed, duplicates, successful, expired, errored) =
         crate::state::aggregate_job_stats().await;
 
     health.active_jobs = active;
@@ -424,6 +470,9 @@ pub async fn collect_health(
     health.running_jobs = running;
     health.completed_jobs = completed;
     health.duplicate_jobs = duplicates;
+    health.successful_jobs = successful;
+    health.expired_jobs = expired;
+    health.errored_jobs = errored;
 
     // Get the worker count from paddington
     health.worker_count = paddington::worker_count();

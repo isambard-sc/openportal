@@ -4,6 +4,7 @@
 use crate::agent;
 use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
+use crate::diagnostics;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
 use crate::error::Error;
@@ -238,6 +239,9 @@ async fn process_command(
                                 // Start timing the job execution
                                 let start_time = std::time::Instant::now();
 
+                                // Record job started for diagnostics
+                                diagnostics::record_job_started(&job).await;
+
                                 job = match runner(Envelope::new(recipient, sender, zone, &job))
                                     .await
                                 {
@@ -252,6 +256,22 @@ async fn process_command(
                                 let duration = start_time.elapsed();
                                 let duration_ms = duration.as_secs_f64() * 1000.0;
                                 crate::jobtiming::record_job_time(duration_ms);
+
+                                // Record job finished for diagnostics
+                                diagnostics::record_job_finished(&job).await;
+
+                                // Track failures and slow jobs
+                                if job.is_expired() {
+                                    diagnostics::record_expired_job(&job).await;
+                                } else if job.is_error() {
+                                    let error_msg = job
+                                        .error_message()
+                                        .unwrap_or_else(|| "Unknown error".to_string());
+                                    diagnostics::record_failed_job(&job, error_msg).await;
+                                } else {
+                                    // Only track successful jobs for slowness
+                                    diagnostics::record_slow_job(&job, duration_ms).await;
+                                }
 
                                 tracing::debug!(
                                     "Job {} completed in {:.2}ms",
@@ -368,6 +388,20 @@ async fn process_command(
             destination,
         } => {
             crate::restart::handle_restart_request(sender, restart_type, destination).await?;
+        }
+        Command::DiagnosticsRequest { destination } => {
+            diagnostics::handle_diagnostics_request(sender, zone, destination).await?;
+        }
+        Command::DiagnosticsResponse { report } => {
+            tracing::debug!("Received diagnostics response from {}", report.agent_name);
+
+            // Cache the response using the agent_name as the key
+            // This allows intermediate agents to retrieve it when forwarding responses
+            diagnostics::cache_diagnostics_response(report.agent_name.clone(), *report.clone())
+                .await;
+
+            // Also log it if this is the final destination (we requested it)
+            tracing::info!("Diagnostics response:\n{}", report.to_pretty_string());
         }
         _ => {
             tracing::warn!("Command {} not recognised", command);

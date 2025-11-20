@@ -5,6 +5,7 @@ use crate::agent::Type as AgentType;
 use crate::agent::{self, Peer};
 use crate::board::SyncState;
 use crate::destination::Destination;
+use crate::diagnostics::DiagnosticsReport;
 use crate::error::Error;
 use crate::health::HealthInfo;
 use crate::job::Job;
@@ -55,6 +56,14 @@ pub enum Command {
         /// Empty string means restart self
         destination: String,
     },
+    DiagnosticsRequest {
+        /// Dot-separated destination path (e.g., "brics.aip2.clusters")
+        /// Empty string means request from self
+        destination: String,
+    },
+    DiagnosticsResponse {
+        report: Box<DiagnosticsReport>,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -86,6 +95,12 @@ impl std::fmt::Display for Command {
                 "Restart: type={}, destination={}",
                 restart_type, destination
             ),
+            Command::DiagnosticsRequest { destination } => {
+                write!(f, "DiagnosticsRequest: destination={}", destination)
+            }
+            Command::DiagnosticsResponse { report } => {
+                write!(f, "DiagnosticsResponse: {}", report)
+            }
         }
     }
 }
@@ -146,6 +161,18 @@ impl Command {
         }
     }
 
+    pub fn diagnostics_request(destination: &str) -> Self {
+        Self::DiagnosticsRequest {
+            destination: destination.to_owned(),
+        }
+    }
+
+    pub fn diagnostics_response(report: DiagnosticsReport) -> Self {
+        Self::DiagnosticsResponse {
+            report: Box::new(report),
+        }
+    }
+
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
         // Check if sending to ourselves
         let my_name = agent::name().await;
@@ -201,6 +228,8 @@ impl Command {
                 restart_type: _,
                 destination: _,
             } => None,
+            Command::DiagnosticsRequest { destination: _ } => None,
+            Command::DiagnosticsResponse { report: _ } => None,
         }
     }
 
@@ -222,6 +251,8 @@ impl Command {
                 restart_type: _,
                 destination: _,
             } => None,
+            Command::DiagnosticsRequest { destination: _ } => None,
+            Command::DiagnosticsResponse { report: _ } => None,
         }
     }
 
@@ -243,6 +274,8 @@ impl Command {
                 restart_type: _,
                 destination: _,
             } => None,
+            Command::DiagnosticsRequest { destination: _ } => None,
+            Command::DiagnosticsResponse { report: _ } => None,
         }
     }
 }

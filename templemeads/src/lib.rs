@@ -10,6 +10,7 @@ mod bridgeboard;
 mod bridgestate;
 mod control_message;
 mod custom;
+mod diagnostics;
 mod error;
 mod filesystem;
 mod handler;

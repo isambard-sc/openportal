@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path;
 use std::sync::RwLock;
 use templemeads::destination;
+use templemeads::diagnostics as mod_diagnostics;
 use templemeads::grammar;
 use templemeads::health as mod_health;
 use templemeads::job;
@@ -255,6 +256,380 @@ fn initialize_tracing() -> PyResult<()> {
     // Initialize tracing
     templemeads::config::initialise_tracing();
     Ok(())
+}
+
+///
+/// The FailedJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedJobEntry(mod_diagnostics::FailedJobEntry);
+
+#[pymethods]
+impl FailedJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn error_message(&self) -> PyResult<String> {
+        Ok(self.0.error_message.clone())
+    }
+
+    #[getter]
+    fn count(&self) -> PyResult<usize> {
+        Ok(self.0.count)
+    }
+
+    #[getter]
+    fn first_seen<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.first_seen.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn last_seen<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.last_seen.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+}
+
+impl From<mod_diagnostics::FailedJobEntry> for FailedJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::FailedJobEntry) -> Self {
+        FailedJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The SlowJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlowJobEntry(mod_diagnostics::SlowJobEntry);
+
+#[pymethods]
+impl SlowJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn duration_ms(&self) -> PyResult<f64> {
+        Ok(self.0.duration_ms)
+    }
+
+    #[getter]
+    fn completed_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.completed_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+}
+
+impl From<mod_diagnostics::SlowJobEntry> for SlowJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::SlowJobEntry) -> Self {
+        SlowJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The ExpiredJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpiredJobEntry(mod_diagnostics::ExpiredJobEntry);
+
+#[pymethods]
+impl ExpiredJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn created_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.created_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn expired_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.expired_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn count(&self) -> PyResult<usize> {
+        Ok(self.0.count)
+    }
+}
+
+impl From<mod_diagnostics::ExpiredJobEntry> for ExpiredJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::ExpiredJobEntry) -> Self {
+        ExpiredJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The RunningJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningJobEntry(mod_diagnostics::RunningJobEntry);
+
+#[pymethods]
+impl RunningJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn started_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.started_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn count(&self) -> PyResult<usize> {
+        Ok(self.0.count)
+    }
+
+    #[getter]
+    fn running_for_seconds(&self) -> PyResult<i64> {
+        Ok(self.0.running_for_seconds)
+    }
+}
+
+impl From<mod_diagnostics::RunningJobEntry> for RunningJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::RunningJobEntry) -> Self {
+        RunningJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The DiagnosticsReport object returned from diagnostics requests
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsReport(mod_diagnostics::DiagnosticsReport);
+
+#[pymethods]
+impl DiagnosticsReport {
+    #[getter]
+    fn agent_name(&self) -> PyResult<String> {
+        Ok(self.0.agent_name.clone())
+    }
+
+    #[getter]
+    fn generated_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.generated_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn failed_jobs(&self) -> PyResult<Vec<FailedJobEntry>> {
+        Ok(self.0.failed_jobs.iter().cloned().map(Into::into).collect())
+    }
+
+    #[getter]
+    fn slowest_jobs(&self) -> PyResult<Vec<SlowJobEntry>> {
+        Ok(self
+            .0
+            .slowest_jobs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[getter]
+    fn expired_jobs(&self) -> PyResult<Vec<ExpiredJobEntry>> {
+        Ok(self
+            .0
+            .expired_jobs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[getter]
+    fn running_jobs(&self) -> PyResult<Vec<RunningJobEntry>> {
+        Ok(self
+            .0
+            .running_jobs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[getter]
+    fn warnings(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.warnings.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_pretty_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
+impl From<mod_diagnostics::DiagnosticsReport> for DiagnosticsReport {
+    fn from(diagnostics_report: mod_diagnostics::DiagnosticsReport) -> Self {
+        DiagnosticsReport(diagnostics_report)
+    }
+}
+
+///
+/// Return type for the diagnostics function
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Diagnostics {
+    pub status: String,
+    #[serde(default)]
+    pub diagnostics: Option<DiagnosticsReport>,
+}
+
+#[pymethods]
+impl Diagnostics {
+    #[getter]
+    fn status(&self) -> PyResult<String> {
+        Ok(self.status.clone())
+    }
+
+    #[getter]
+    fn detail(&self) -> PyResult<Option<DiagnosticsReport>> {
+        Ok(self.diagnostics.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        let mut s = format!("Diagnostics( status: {}", self.status);
+        if let Some(ref diagnostics) = self.diagnostics {
+            s.push_str(&format!(
+                ", detail:\n{}\n",
+                diagnostics.0.to_pretty_string()
+            ));
+        }
+        s.push_str(" )");
+        Ok(s)
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Diagnostics> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Diagnostics> {
+        Ok(self.clone())
+    }
+
+    fn is_healthy(&self) -> PyResult<bool> {
+        Ok(self.status == "ok")
+    }
+}
+
+///
+/// Fetch the diagnostics report from an agent in the OpenPortal system.
+///
+/// Parameters:
+/// - destination: Dot-separated path to the agent (e.g., "brics.aip2.clusters")
+///                Empty string means get the diagnostics from the bridge itself.
+///
+#[pyfunction]
+fn diagnostics(destination: &str) -> PyResult<Diagnostics> {
+    tracing::debug!("Calling /diagnostics with destination={}", destination);
+
+    let params = serde_json::json!({
+        "destination": destination,
+    });
+
+    match call_post::<Diagnostics>("diagnostics", params) {
+        Ok(response) => Ok(response),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
 }
 
 ///
@@ -3144,6 +3519,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get, m)?)?;
     m.add_function(wrap_pyfunction!(get_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(get_portal, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
     m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;

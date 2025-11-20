@@ -4,9 +4,9 @@
 use crate::agent;
 use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
-use crate::diagnostics;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
+use crate::diagnostics;
 use crate::error::Error;
 use crate::job::{sync_from_peer, Envelope, Status};
 use crate::runnable::{default_runner, AsyncRunnable};

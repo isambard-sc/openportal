@@ -108,6 +108,30 @@ impl NamedType for DiagnosticsReport {
     }
 }
 
+impl NamedType for FailedJobEntry {
+    fn type_name() -> &'static str {
+        "FailedJobEntry"
+    }
+}
+
+impl NamedType for SlowJobEntry {
+    fn type_name() -> &'static str {
+        "SlowJobEntry"
+    }
+}
+
+impl NamedType for ExpiredJobEntry {
+    fn type_name() -> &'static str {
+        "ExpiredJobEntry"
+    }
+}
+
+impl NamedType for RunningJobEntry {
+    fn type_name() -> &'static str {
+        "RunningJobEntry"
+    }
+}
+
 /// Key for deduplicating jobs
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct JobKey {
@@ -513,6 +537,108 @@ async fn wait_for_diagnostics_response(
 }
 
 ///
+/// Collect diagnostics from a specific agent or self
+///
+/// This function sends a diagnostics request to the specified destination and waits
+/// for the response (up to 5 seconds). If no destination is provided, generates a report for self.
+///
+/// Parameters:
+/// - `destination`: Dot-separated path to target agent (e.g., "provider.cluster"), empty means self
+///
+/// Returns the diagnostics report or an error if the request fails or times out.
+///
+pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport, anyhow::Error> {
+    use crate::agent;
+    use crate::command::Command;
+
+    // If destination is empty, generate report for self
+    if destination.is_empty() {
+        let agent_name = agent::name().await;
+        return Ok(generate_report(agent_name).await);
+    }
+
+    // Send the diagnostics command to self with the full destination
+    // This reuses the routing logic in the handler
+    let diagnostics_cmd = Command::diagnostics_request(destination);
+    let self_peer = agent::get_self(None).await;
+    diagnostics_cmd.send_to(&self_peer).await?;
+
+    // Extract the ultimate target agent name from the destination path
+    // The target is the last component in the destination path
+    let target_agent = destination
+        .split('.')
+        .last()
+        .unwrap_or(destination)
+        .split('@')
+        .next()
+        .unwrap_or(destination)
+        .to_string();
+
+    tracing::debug!(
+        "Waiting for diagnostics response from {} (destination: {})",
+        target_agent,
+        destination
+    );
+
+    // Record baseline time before waiting
+    let baseline_time = chrono::Utc::now();
+
+    // Wait up to 5 seconds for the diagnostics response
+    let report = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        wait_for_diagnostics_response(
+            &target_agent,
+            baseline_time,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+    })
+    .await;
+
+    match report {
+        Ok(Some(report)) => {
+            tracing::debug!("Received diagnostics response from {}", target_agent);
+            Ok(report)
+        }
+        Ok(None) => {
+            // Timeout - try to get cached report
+            if let Some(cached_report) = get_cached_diagnostics(&target_agent).await {
+                tracing::warn!(
+                    "Timeout waiting for fresh diagnostics from {}, using cached report (age: {}s)",
+                    target_agent,
+                    chrono::Utc::now()
+                        .signed_duration_since(cached_report.generated_at)
+                        .num_seconds()
+                );
+                Ok(cached_report)
+            } else {
+                Err(anyhow::anyhow!(
+                    "No diagnostics response received from {} and no cached data available",
+                    target_agent
+                ))
+            }
+        }
+        Err(_) => {
+            // Outer timeout - try to get any cached report
+            if let Some(cached_report) = get_cached_diagnostics(&target_agent).await {
+                tracing::warn!(
+                    "Timeout waiting for diagnostics from {}, using cached report (age: {}s)",
+                    target_agent,
+                    chrono::Utc::now()
+                        .signed_duration_since(cached_report.generated_at)
+                        .num_seconds()
+                );
+                Ok(cached_report)
+            } else {
+                Err(anyhow::anyhow!(
+                    "Timeout waiting for diagnostics response from {}",
+                    target_agent
+                ))
+            }
+        }
+    }
+}
+
+///
 /// Handle a diagnostics request from another agent
 ///
 /// This function:
@@ -688,10 +814,7 @@ pub async fn handle_diagnostics_request(
                 next_peer_name
             } else {
                 // Find the last component in the remaining path
-                remaining_path
-                    .split('.')
-                    .last()
-                    .unwrap_or(next_peer_name)
+                remaining_path.split('.').last().unwrap_or(next_peer_name)
             };
 
             // Extract just the name part if it includes @zone
@@ -920,6 +1043,63 @@ impl std::fmt::Display for DiagnosticsReport {
             self.expired_jobs.len(),
             self.running_jobs.len(),
             self.generated_at.format("%Y-%m-%d %H:%M:%S UTC")
+        )
+    }
+}
+
+impl std::fmt::Display for FailedJobEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {}: \"{}\" ({} occurrence{})",
+            self.destination,
+            self.instruction,
+            self.error_message,
+            self.count,
+            if self.count == 1 { "" } else { "s" }
+        )
+    }
+}
+
+impl std::fmt::Display for SlowJobEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {}: {:.1}ms (completed at {})",
+            self.destination,
+            self.instruction,
+            self.duration_ms,
+            self.completed_at.format("%Y-%m-%d %H:%M:%S")
+        )
+    }
+}
+
+impl std::fmt::Display for ExpiredJobEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} ({} occurrence{}) - Created: {}, Expired: {}",
+            self.destination,
+            self.instruction,
+            self.count,
+            if self.count == 1 { "" } else { "s" },
+            self.created_at.format("%Y-%m-%d %H:%M:%S"),
+            self.expired_at.format("%Y-%m-%d %H:%M:%S")
+        )
+    }
+}
+
+impl std::fmt::Display for RunningJobEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} ({} instance{}) - started at {}, running for {}",
+            self.destination,
+            self.instruction,
+            self.count,
+            if self.count == 1 { "" } else { "s" },
+            self.started_at.format("%Y-%m-%d %H:%M:%S"),
+            format_duration(self.running_for_seconds)
         )
     }
 }

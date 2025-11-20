@@ -560,6 +560,35 @@ async fn restart(
 }
 
 //
+// Diagnostics endpoint for the web API
+//
+#[derive(Serialize, Deserialize, Debug)]
+struct DiagnosticsRequest {
+    destination: String,
+}
+
+#[tracing::instrument(skip_all)]
+async fn diagnostics(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<DiagnosticsRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let payload_value = serde_json::to_value(&payload)?;
+    verify_headers(&state, &headers, "post", "diagnostics", Some(payload_value)).await?;
+
+    tracing::info!("Diagnostics request - destination: {}", payload.destination);
+
+    // Collect diagnostics from the specified agent
+    let report = crate::diagnostics::collect_diagnostics(&payload.destination).await?;
+
+    let mut result = HashMap::new();
+    result.insert("status".to_string(), json!("ok"));
+    result.insert("report".to_string(), json!(report));
+
+    Ok(Json(json!(result)))
+}
+
+//
 // Struct to represent the requests to the 'run' endpoint
 //
 #[derive(Deserialize, Debug)]
@@ -1057,6 +1086,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
         .route("/health", get(health))
         .route("/restart", post(restart))
+        .route("/diagnostics", post(diagnostics))
         .route("/run", post(run))
         .route("/status", post(status))
         .route("/fetch_job", post(fetch_job))

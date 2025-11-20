@@ -14,9 +14,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path;
 use std::sync::RwLock;
-use templemeads::command;
 use templemeads::destination;
 use templemeads::grammar;
+use templemeads::health as mod_health;
 use templemeads::job;
 use templemeads::server::sign_api_call;
 use templemeads::usagereport;
@@ -262,7 +262,7 @@ fn initialize_tracing() -> PyResult<()> {
 ///
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthInfo(command::HealthInfo);
+pub struct HealthInfo(mod_health::HealthInfo);
 
 #[pymethods]
 impl HealthInfo {
@@ -398,16 +398,18 @@ impl HealthInfo {
         )
     }
 
+    #[getter]
+    fn x(&self) -> PyResult<Self> {
+        // return a copy that has any children removed. This
+        // allows just the health of this single agent to be
+        // extracted (x) and printed
+        let mut clone = self.clone();
+        clone.0.peers.clear();
+        Ok(clone)
+    }
+
     fn __str__(&self) -> PyResult<String> {
-        Ok(format!(
-            "HealthInfo( agent_name: {}, agent_type: {}, is_healthy: {}, start_time: {}, engine: {}, version: {} )",
-            self.name()?,
-            self.agent_type()?,
-            self.connected()?,
-            self.0.start_time,
-            self.engine()?,
-            self.version()?
-        ))
+        Ok(self.0.to_pretty_string())
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -445,8 +447,8 @@ impl HealthInfo {
     }
 }
 
-impl From<command::HealthInfo> for HealthInfo {
-    fn from(health_info: command::HealthInfo) -> Self {
+impl From<mod_health::HealthInfo> for HealthInfo {
+    fn from(health_info: mod_health::HealthInfo) -> Self {
         HealthInfo(health_info)
     }
 }
@@ -470,14 +472,14 @@ impl Health {
     }
 
     #[getter]
-    fn health(&self) -> PyResult<Option<HealthInfo>> {
+    fn detail(&self) -> PyResult<Option<HealthInfo>> {
         Ok(self.health.clone())
     }
 
     fn __str__(&self) -> PyResult<String> {
         let mut s = format!("Health( status: {}", self.status);
         if let Some(ref health) = self.health {
-            s.push_str(&format!(", health: {:?}", health));
+            s.push_str(&format!(", detail:\n{}\n", health.0.to_pretty_string()));
         }
         s.push_str(" )");
         Ok(s)

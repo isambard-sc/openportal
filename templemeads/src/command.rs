@@ -1,188 +1,21 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::agent::{self, Peer, Type as AgentType};
+use crate::agent::Type as AgentType;
+use crate::agent::{self, Peer};
 use crate::board::SyncState;
 use crate::destination::Destination;
 use crate::error::Error;
-use crate::grammar::NamedType;
+use crate::health::HealthInfo;
 use crate::job::Job;
 use crate::virtual_agent::send as send_to_virtual;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use paddington::message::Message;
 use paddington::received as received_from_peer;
 use paddington::send as send_to_peer;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use uuid::Uuid;
-
-/// Health information for an agent
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HealthInfo {
-    /// Agent name
-    pub name: String,
-    /// Agent type
-    pub agent_type: AgentType,
-    /// Whether agent is connected
-    pub connected: bool,
-    /// Number of active jobs on this agent's boards
-    pub active_jobs: usize,
-    /// Number of pending jobs
-    pub pending_jobs: usize,
-    /// Number of running jobs
-    pub running_jobs: usize,
-    /// Number of completed jobs (on boards)
-    pub completed_jobs: usize,
-    /// Number of duplicate jobs
-    pub duplicate_jobs: usize,
-    /// Number of active worker tasks processing messages
-    pub worker_count: usize,
-    /// Memory usage of this agent process in bytes
-    pub memory_bytes: u64,
-    /// CPU usage of this agent process (percentage, 0.0-100.0)
-    pub cpu_percent: f32,
-    /// Total system memory in bytes
-    pub system_memory_total: u64,
-    /// Number of CPU cores on the system
-    pub system_cpus: usize,
-    /// Minimum job execution time in milliseconds
-    pub job_time_min_ms: f64,
-    /// Maximum job execution time in milliseconds
-    pub job_time_max_ms: f64,
-    /// Mean job execution time in milliseconds
-    pub job_time_mean_ms: f64,
-    /// Median job execution time in milliseconds
-    pub job_time_median_ms: f64,
-    /// Number of jobs timed
-    pub job_time_count: usize,
-    /// Time when agent started
-    pub start_time: DateTime<Utc>,
-    /// Current time on agent
-    pub current_time: DateTime<Utc>,
-    /// Uptime in seconds
-    pub uptime_seconds: i64,
-    /// Engine name (e.g., "templemeads")
-    pub engine: String,
-    /// Engine version
-    pub version: String,
-    /// Time when this health response was received/cached
-    pub last_updated: DateTime<Utc>,
-    /// Nested health information from downstream peers
-    #[serde(default)]
-    pub peers: HashMap<String, Box<HealthInfo>>,
-}
-
-impl HealthInfo {
-    pub fn new(
-        name: &str,
-        agent_type: AgentType,
-        connected: bool,
-        start_time: DateTime<Utc>,
-        engine: &str,
-        version: &str,
-    ) -> Self {
-        let current_time = Utc::now();
-        let uptime_seconds = current_time.signed_duration_since(start_time).num_seconds();
-
-        Self {
-            name: name.to_owned(),
-            agent_type,
-            connected,
-            active_jobs: 0,
-            pending_jobs: 0,
-            running_jobs: 0,
-            completed_jobs: 0,
-            duplicate_jobs: 0,
-            worker_count: 0,
-            memory_bytes: 0,
-            cpu_percent: 0.0,
-            system_memory_total: 0,
-            system_cpus: 0,
-            job_time_min_ms: 0.0,
-            job_time_max_ms: 0.0,
-            job_time_mean_ms: 0.0,
-            job_time_median_ms: 0.0,
-            job_time_count: 0,
-            start_time,
-            current_time,
-            uptime_seconds,
-            engine: engine.to_owned(),
-            version: version.to_owned(),
-            last_updated: current_time,
-            peers: HashMap::new(),
-        }
-    }
-}
-
-impl NamedType for HealthInfo {
-    fn type_name() -> &'static str {
-        "HealthInfo"
-    }
-}
-
-impl std::fmt::Display for HealthInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let memory_mb = self.memory_bytes as f64 / 1_048_576.0;
-        let system_memory_gb = self.system_memory_total as f64 / 1_073_741_824.0;
-        let memory_percent = if self.system_memory_total > 0 {
-            (self.memory_bytes as f64 / self.system_memory_total as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        // Build job timing string if we have data
-        let timing_str = if self.job_time_count > 0 {
-            format!(
-                ", timing: min={:.1}ms, max={:.1}ms, mean={:.1}ms, median={:.1}ms (n={})",
-                self.job_time_min_ms,
-                self.job_time_max_ms,
-                self.job_time_mean_ms,
-                self.job_time_median_ms,
-                self.job_time_count
-            )
-        } else {
-            String::new()
-        };
-
-        write!(
-            f,
-            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed, {} duplicates){}",
-            self.name,
-            self.agent_type,
-            if self.connected { "connected" } else { "disconnected" },
-            self.uptime_seconds,
-            self.worker_count,
-            memory_mb,
-            memory_percent,
-            system_memory_gb,
-            self.cpu_percent,
-            self.system_cpus,
-            self.active_jobs,
-            self.pending_jobs,
-            self.running_jobs,
-            self.completed_jobs,
-            self.duplicate_jobs,
-            timing_str
-        )
-    }
-}
-
-impl HealthInfo {
-    pub fn add_peer_health(&mut self, peer_health: HealthInfo) {
-        self.peers
-            .insert(peer_health.name.clone(), Box::new(peer_health));
-    }
-
-    pub fn get(&self, peer_name: &str) -> Option<HealthInfo> {
-        self.peers.get(peer_name).map(|h| *h.clone())
-    }
-
-    pub fn keys(&self) -> Vec<String> {
-        self.peers.keys().cloned().collect()
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {

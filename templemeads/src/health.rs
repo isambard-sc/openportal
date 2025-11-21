@@ -8,10 +8,10 @@
 
 use crate::agent::{self, Peer, Type as AgentType};
 use crate::command::Command;
-use crate::grammar::NamedType;
-use crate::state;
 use crate::diagnostics;
+use crate::grammar::NamedType;
 use crate::jobtiming;
+use crate::state;
 use crate::systeminfo;
 
 use chrono::{DateTime, Utc};
@@ -329,7 +329,10 @@ impl HealthInfo {
                 self.total_slow
             ));
         } else {
-            output.push_str(&format!("{}│  Total Jobs Processed: No data available\n", prefix));
+            output.push_str(&format!(
+                "{}│  Total Jobs Processed: No data available\n",
+                prefix
+            ));
         }
 
         // Engine and version

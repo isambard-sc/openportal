@@ -6,8 +6,8 @@
 //! This module provides functions for handling agent restart requests.
 
 use crate::agent;
-use crate::diagnostics;
 use crate::command::Command;
+use crate::diagnostics;
 
 ///
 /// Perform a soft restart by disconnecting all peers and clearing boards

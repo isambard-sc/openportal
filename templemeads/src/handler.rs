@@ -10,6 +10,8 @@ use crate::diagnostics;
 use crate::error::Error;
 use crate::health;
 use crate::job::{sync_from_peer, Envelope, Status};
+use crate::jobtiming;
+use crate::restart;
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
@@ -256,7 +258,7 @@ async fn process_command(
                                 // Record the job execution time
                                 let duration = start_time.elapsed();
                                 let duration_ms = duration.as_secs_f64() * 1000.0;
-                                crate::jobtiming::record_job_time(duration_ms);
+                                jobtiming::record_job_time(duration_ms);
 
                                 // Record job finished for diagnostics
                                 diagnostics::record_job_finished(&job).await;
@@ -382,13 +384,13 @@ async fn process_command(
         Command::HealthResponse { health } => {
             tracing::debug!("Received health response: {}", health);
             // Cache the health response for later retrieval
-            crate::health::cache_health_response(*health.clone()).await;
+            health::cache_health_response(*health.clone()).await;
         }
         Command::Restart {
             restart_type,
             destination,
         } => {
-            crate::restart::handle_restart_request(sender, restart_type, destination).await?;
+            restart::handle_restart_request(sender, restart_type, destination).await?;
         }
         Command::DiagnosticsRequest { destination } => {
             tracing::debug!(

@@ -121,14 +121,7 @@ impl Board {
 
         let active = self.jobs.len();
         (
-            active,
-            pending,
-            running,
-            completed,
-            duplicates,
-            successful,
-            expired,
-            errored,
+            active, pending, running, completed, duplicates, successful, expired, errored,
         )
     }
 
@@ -518,48 +511,70 @@ impl Board {
     }
 
     ///
-    /// Remove all expired jobs from the board
+    /// Remove all expired jobs from the board and return them
+    /// so that the caller can send error updates back upstream if needed
     ///
-    pub fn remove_expired_jobs(&mut self) {
-        let expired_jobs: Vec<Uuid> = self
+    /// Returns a vector of jobs that were expired and removed
+    ///
+    pub fn remove_expired_jobs(&mut self) -> Vec<Job> {
+        let mut expired_jobs: Vec<Job> = self
             .jobs
             .iter()
-            .filter_map(|(id, job)| {
+            .filter_map(|(_, job)| {
                 if job.is_expired() {
-                    // make sure that the job is in an errored state
-                    let job = match job.is_finished() {
-                        true => job.clone(),
-                        false => match job.errored("Job expired") {
-                            Ok(j) => j,
-                            Err(e) => {
-                                tracing::error!("Failed to mark job as errored: {}", e);
-                                job.clone()
-                            }
-                        },
-                    };
-
-                    // remove any listeners for this job
-                    if let Some(listeners) = self.waiters.remove(id) {
-                        for listener in listeners {
-                            listener.notify(job.clone());
-                        }
-                    }
-
-                    Some(*id)
+                    Some(job.clone())
                 } else {
                     None
                 }
             })
             .collect();
 
-        // Also handle duplicates of expired jobs
-        let mut duplicates_to_expire = Vec::<Uuid>::new();
-        for job_id in expired_jobs.iter() {
+        // Also add on expired queued jobs
+        self.queued_commands.retain(|command| {
+            if let Some(job) = command.job() {
+                if job.is_expired() {
+                    tracing::debug!("Removing expired queued job {}", job);
+                    expired_jobs.push(job.clone());
+                    false
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        });
+
+        // Collect the errored versions of jobs to return
+        let mut errored_jobs = Vec::new();
+
+        for job in expired_jobs.iter() {
+            // make sure that the job is in an errored state
+            let job = match job.is_finished() {
+                true => job.clone(),
+                false => match job.errored("Job expired") {
+                    Ok(j) => j,
+                    Err(e) => {
+                        tracing::error!("Failed to mark job as errored: {}", e);
+                        job.clone()
+                    }
+                },
+            };
+
+            // Add to the list of errored jobs to return
+            errored_jobs.push(job.clone());
+
+            // remove any listeners for this job
+            if let Some(listeners) = self.waiters.remove(&job.id()) {
+                for listener in listeners {
+                    listener.notify(job.clone());
+                }
+            }
+
             // If this expired job has duplicates, we need to expire them too
-            if let Some(duplicate_ids) = self.duplicates.remove(job_id) {
+            if let Some(duplicate_ids) = self.duplicates.remove(&job.id()) {
                 tracing::info!(
                     "Original job {} expired - expiring {} duplicates",
-                    job_id,
+                    job,
                     duplicate_ids.len()
                 );
 
@@ -587,40 +602,15 @@ impl Board {
                         }
                     }
 
-                    duplicates_to_expire.push(duplicate_id);
+                    self.jobs.remove(&duplicate_id);
                 }
             }
+
+            self.jobs.remove(&job.id());
         }
 
-        // Remove expired originals and their duplicates
-        for job_id in expired_jobs.iter() {
-            let _ = self.jobs.remove(job_id);
-        }
-        for job_id in duplicates_to_expire.iter() {
-            let _ = self.jobs.remove(job_id);
-        }
-
-        // now remove any queued expired jobs
-        self.queued_commands.retain(|command| {
-            if let Some(job) = command.job() {
-                if job.is_expired() {
-                    tracing::debug!("Removing expired queued job {}", job);
-
-                    // remove any listeners for this job
-                    if let Some(listeners) = self.waiters.remove(&job.id()) {
-                        for listener in listeners {
-                            listener.notify(job.clone());
-                        }
-                    }
-
-                    false
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        });
+        // Return the errored jobs so the caller can send updates back upstream
+        errored_jobs
     }
 }
 

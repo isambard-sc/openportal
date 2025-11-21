@@ -136,6 +136,11 @@ async fn process_command(
             agent::register_peer(&Peer::new(sender, zone), agent, engine, version).await;
         }
         Command::Update { job } => {
+            if job.is_expired() {
+                tracing::debug!("Skipping expired job update: {}", job);
+                return Ok(());
+            }
+
             let peer = Peer::new(sender, zone);
 
             tracing::debug!("Update job: {} to {} from {}", job, recipient, peer,);
@@ -172,6 +177,11 @@ async fn process_command(
             }
         }
         Command::Put { job } => {
+            if job.is_expired() {
+                tracing::debug!("Skipping expired job put: {}", job);
+                return Ok(());
+            }
+
             let peer = Peer::new(sender, zone);
 
             // update the sender's board with the received job
@@ -307,6 +317,11 @@ async fn process_command(
             let _ = job.update(&peer).await?;
         }
         Command::Delete { job } => {
+            if job.is_expired() {
+                tracing::debug!("Skipping expired job delete: {}", job);
+                return Ok(());
+            }
+
             let peer = Peer::new(sender, zone);
 
             tracing::warn!("Delete job: {} to {} from {}", job, recipient, peer,);

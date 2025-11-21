@@ -3,6 +3,7 @@
 
 use crate::agent::Peer;
 use crate::board::Board;
+use crate::command::Command as ControlCommand;
 use crate::error::Error;
 
 use anyhow::Result;
@@ -43,6 +44,13 @@ fn start_cleaner() {
 /// Call this function to clean up the expired jobs from the boards
 ///
 async fn clean_boards() {
+    use crate::agent;
+    use crate::destination::Position;
+
+    // Get our own peer identity
+    let my_peer = agent::get_self(None).await;
+    let my_name = my_peer.name();
+
     let peers = STATES
         .read()
         .await
@@ -61,7 +69,63 @@ async fn clean_boards() {
         };
 
         let board = state.board().await;
-        board.write().await.remove_expired_jobs();
+        let expired_jobs = board.write().await.remove_expired_jobs();
+
+        // For each expired job, check if we need to send it back upstream
+        for job in expired_jobs {
+            // Determine our position in the job's destination path
+            // If we are downstream (received this job from upstream), send error back
+            let position = job.destination().position(my_name, peer.name());
+
+            match position {
+                Position::Downstream | Position::Destination => {
+                    // We received this job from upstream (via peer), but it expired
+                    // We need to send the error back to the previous hop in the path
+                    // The job's destination tells us where it was going, and peer is who we tried to send it to
+                    // We need to find who sent it to us by looking at the destination path
+
+                    // Get the previous agent in the destination path (who sent it to us)
+                    if let Some(previous_agent) = job.destination().previous(my_name) {
+                        // the zone must be the same as the board peer's zone, as
+                        // all communication is zone-specific
+                        let previous_peer = agent::Peer::new(&previous_agent, peer.zone());
+
+                        tracing::debug!(
+                            "Sending expired job error back to upstream peer: {}",
+                            previous_peer
+                        );
+
+                        match ControlCommand::update(&job).send_to(&previous_peer).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to send expired job update to {}: {}",
+                                    previous_peer,
+                                    e
+                                );
+                            }
+                        }
+                    } else {
+                        // No previous agent - we originated this job
+                        tracing::debug!(
+                            "Expired job {} was originated by us, no upstream to notify",
+                            job.id()
+                        );
+                    }
+                }
+                Position::Upstream => {
+                    // We are sending this job back upstream (it's a response)
+                    // Send the error to the peer this job was meant for
+                    tracing::debug!("No need to send expiry message upstream to: {}", peer);
+                }
+                Position::Error => {
+                    tracing::warn!(
+                        "Expired job {} has invalid destination position, cannot send error back",
+                        job.id()
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::agent::Peer;
-use crate::board::Board;
+use crate::agent;
+use crate::board;
 use crate::command::Command as ControlCommand;
+use crate::destination;
 use crate::error::Error;
 
 use anyhow::Result;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 struct States {
-    states: HashMap<Peer, Arc<State>>,
+    states: HashMap<agent::Peer, Arc<State>>,
 }
 
 static STATES: Lazy<RwLock<States>> = Lazy::new(|| RwLock::new(States::new()));
@@ -44,9 +45,6 @@ fn start_cleaner() {
 /// Call this function to clean up the expired jobs from the boards
 ///
 async fn clean_boards() {
-    use crate::agent;
-    use crate::destination::Position;
-
     // Get our own peer identity
     let my_peer = agent::get_self(None).await;
     let my_name = my_peer.name();
@@ -57,7 +55,7 @@ async fn clean_boards() {
         .states
         .keys()
         .cloned()
-        .collect::<Vec<Peer>>();
+        .collect::<Vec<agent::Peer>>();
 
     for peer in peers.iter() {
         let state = match get(peer).await {
@@ -78,7 +76,7 @@ async fn clean_boards() {
             let position = job.destination().position(my_name, peer.name());
 
             match position {
-                Position::Downstream | Position::Destination => {
+                destination::Position::Downstream | destination::Position::Destination => {
                     // We received this job from upstream (via peer), but it expired
                     // We need to send the error back to the previous hop in the path
                     // The job's destination tells us where it was going, and peer is who we tried to send it to
@@ -113,12 +111,12 @@ async fn clean_boards() {
                         );
                     }
                 }
-                Position::Upstream => {
+                destination::Position::Upstream => {
                     // We are sending this job back upstream (it's a response)
                     // Send the error to the peer this job was meant for
                     tracing::debug!("No need to send expiry message upstream to: {}", peer);
                 }
-                Position::Error => {
+                destination::Position::Error => {
                     tracing::warn!(
                         "Expired job {} has invalid destination position, cannot send error back",
                         job.id()
@@ -129,7 +127,7 @@ async fn clean_boards() {
     }
 }
 
-async fn _force_get(peer: Peer) -> Result<Arc<State>, Error> {
+async fn _force_get(peer: agent::Peer) -> Result<Arc<State>, Error> {
     Ok(STATES
         .write()
         .await
@@ -139,11 +137,11 @@ async fn _force_get(peer: Peer) -> Result<Arc<State>, Error> {
         .clone())
 }
 
-async fn _get(peer: &Peer) -> Result<Option<Arc<State>>, Error> {
+async fn _get(peer: &agent::Peer) -> Result<Option<Arc<State>>, Error> {
     Ok(STATES.read().await.states.get(peer).cloned())
 }
 
-pub async fn get(peer: &Peer) -> Result<Arc<State>, Error> {
+pub async fn get(peer: &agent::Peer) -> Result<Arc<State>, Error> {
     if let Some(state) = _get(peer).await? {
         Ok(state)
     } else {
@@ -153,61 +151,46 @@ pub async fn get(peer: &Peer) -> Result<Arc<State>, Error> {
 
 #[derive(Debug, Default, Clone)]
 pub struct State {
-    board: Arc<RwLock<Board>>,
+    board: Arc<RwLock<board::Board>>,
 }
 
 impl State {
-    pub fn new(peer: Peer) -> Self {
+    pub fn new(peer: agent::Peer) -> Self {
         tracing::debug!("Creating new board for agent {}", peer);
 
         Self {
-            board: Arc::new(RwLock::new(Board::new(&peer))),
+            board: Arc::new(RwLock::new(board::Board::new(&peer))),
         }
     }
 
-    pub async fn board(&self) -> Arc<RwLock<Board>> {
+    pub async fn board(&self) -> Arc<RwLock<board::Board>> {
         self.board.clone()
     }
 }
 
 ///
 /// Collect aggregate job statistics from all boards
-/// Returns (active, pending, running, completed, duplicates, successful, expired, errored)
 ///
-pub async fn aggregate_job_stats() -> (usize, usize, usize, usize, usize, usize, usize, usize) {
+pub async fn aggregate_job_stats() -> board::BoardJobStats {
+    let my_name = agent::name().await;
     let states = STATES.read().await;
-    let mut total_active = 0;
-    let mut total_pending = 0;
-    let mut total_running = 0;
-    let mut total_completed = 0;
-    let mut total_duplicates = 0;
-    let mut total_successful = 0;
-    let mut total_expired = 0;
-    let mut total_errored = 0;
+    let mut totals = board::BoardJobStats::default();
 
     for state in states.states.values() {
         let board = state.board().await;
         let board = board.read().await;
-        let (active, pending, running, completed, duplicates, successful, expired, errored) =
-            board.job_stats();
-        total_active += active;
-        total_pending += pending;
-        total_running += running;
-        total_completed += completed;
-        total_duplicates += duplicates;
-        total_successful += successful;
-        total_expired += expired;
-        total_errored += errored;
+        let stats = board.job_stats(&my_name);
+        totals.active += stats.active;
+        totals.pending += stats.pending;
+        totals.running += stats.running;
+        totals.completed += stats.completed;
+        totals.duplicates += stats.duplicates;
+        totals.successful += stats.successful;
+        totals.expired += stats.expired;
+        totals.errored += stats.errored;
+        totals.in_flight += stats.in_flight;
+        totals.queued += stats.queued;
     }
 
-    (
-        total_active,
-        total_pending,
-        total_running,
-        total_completed,
-        total_duplicates,
-        total_successful,
-        total_expired,
-        total_errored,
-    )
+    totals
 }

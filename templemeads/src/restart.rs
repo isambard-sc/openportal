@@ -6,6 +6,7 @@
 //! This module provides functions for handling agent restart requests.
 
 use crate::agent;
+use crate::diagnostics;
 use crate::command::Command;
 
 ///
@@ -112,7 +113,11 @@ async fn perform_soft_restart() -> Result<(), anyhow::Error> {
         }
     }
 
-    // STEP 2: Disconnect from all peers AFTER cancelling jobs
+    // STEP 2: Clear diagnostics data
+    tracing::info!("Soft restart: clearing diagnostics data");
+    diagnostics::clear_diagnostics().await;
+
+    // STEP 3: Disconnect from all peers AFTER cancelling jobs
     tracing::info!("Soft restart: disconnecting from all peers");
 
     for peer in all_peers.iter() {

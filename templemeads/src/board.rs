@@ -34,6 +34,31 @@ impl SyncState {
     }
 }
 
+/// Statistics about jobs on a board
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct BoardJobStats {
+    /// Total number of active jobs on the board
+    pub active: usize,
+    /// Number of pending jobs
+    pub pending: usize,
+    /// Number of running jobs
+    pub running: usize,
+    /// Number of completed jobs
+    pub completed: usize,
+    /// Number of duplicate jobs
+    pub duplicates: usize,
+    /// Number of successfully completed jobs
+    pub successful: usize,
+    /// Number of expired jobs
+    pub expired: usize,
+    /// Number of errored jobs
+    pub errored: usize,
+    /// Number of in-flight jobs (passing through intermediate agents)
+    pub in_flight: usize,
+    /// Number of queued jobs (waiting for connection)
+    pub queued: usize,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Board {
     peer: Peer,
@@ -88,41 +113,49 @@ impl Board {
 
     ///
     /// Return job statistics for this board
-    /// Returns (active, pending, running, completed, duplicates, successful, expired, errored)
     ///
-    pub fn job_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
-        let mut pending = 0;
-        let mut running = 0;
-        let mut completed = 0;
-        let mut duplicates = 0;
-        let mut successful = 0;
-        let mut expired = 0;
-        let mut errored = 0;
+    /// Jobs are counted as "in_flight" if this agent is an intermediate hop (not source or destination).
+    /// Only the source agent (sender) and destination agent show detailed job states.
+    ///
+    pub fn job_stats(&self, my_name: &str) -> BoardJobStats {
+        let mut stats = BoardJobStats::default();
 
         for job in self.jobs.values() {
-            if job.is_pending() {
-                pending += 1;
-            } else if job.is_running() {
-                running += 1;
-            } else if job.is_finished() {
-                completed += 1;
-                // Categorize completed jobs
-                if job.is_expired() {
-                    expired += 1;
-                } else if job.is_error() {
-                    errored += 1;
-                } else {
-                    successful += 1;
+            // Check if this agent is the final destination or the sender
+            let is_final_destination = job.destination().last() == my_name;
+
+            let is_sender = job.destination().first() == my_name;
+
+            // If this is an intermediate agent (not sender, not final destination),
+            // count all non-finished jobs as in_flight
+            if !is_sender && !is_final_destination {
+                stats.in_flight += 1;
+            } else {
+                // For sender and destination agents, show detailed status
+                if job.is_pending() {
+                    stats.pending += 1;
+                } else if job.is_running() {
+                    stats.running += 1;
+                } else if job.is_finished() {
+                    stats.completed += 1;
+                    // Categorize completed jobs
+                    if job.is_expired() {
+                        stats.expired += 1;
+                    } else if job.is_error() {
+                        stats.errored += 1;
+                    } else {
+                        stats.successful += 1;
+                    }
+                } else if job.is_duplicate() {
+                    stats.duplicates += 1;
                 }
-            } else if job.is_duplicate() {
-                duplicates += 1;
             }
         }
 
-        let active = self.jobs.len();
-        (
-            active, pending, running, completed, duplicates, successful, expired, errored,
-        )
+        stats.active = self.jobs.len();
+        stats.queued = self.queued_commands.len();
+
+        stats
     }
 
     ///

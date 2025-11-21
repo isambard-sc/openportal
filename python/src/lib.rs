@@ -738,6 +738,16 @@ impl HealthInfo {
     }
 
     #[getter]
+    fn inflight_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.inflight_jobs as u64)
+    }
+
+    #[getter]
+    fn queued_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.queued_jobs as u64)
+    }
+
+    #[getter]
     fn worker_count(&self) -> PyResult<u64> {
         Ok(self.0.worker_count as u64)
     }
@@ -785,6 +795,26 @@ impl HealthInfo {
     #[getter]
     fn job_time_count(&self) -> PyResult<u32> {
         Ok(self.0.job_time_count as u32)
+    }
+
+    #[getter]
+    fn total_completed(&self) -> PyResult<u64> {
+        Ok(self.0.total_completed as u64)
+    }
+
+    #[getter]
+    fn total_failed(&self) -> PyResult<u64> {
+        Ok(self.0.total_failed as u64)
+    }
+
+    #[getter]
+    fn total_expired(&self) -> PyResult<u64> {
+        Ok(self.0.total_expired as u64)
+    }
+
+    #[getter]
+    fn total_slow(&self) -> PyResult<u64> {
+        Ok(self.0.total_slow as u64)
     }
 
     #[getter]

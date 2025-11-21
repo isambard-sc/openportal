@@ -8,13 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- Implemented cascading health checks across the agent network with intelligent timeout handling (500ms or until all peers respond), automatic detection of disconnected peers, circular loop prevention via visited-chain tracking, and configurable cascade blocking for leaf nodes (FreeIPA, Filesystem). Portal-to-portal health queries are blocked to prevent cross-site information leakage.
+- Implemented cascading health checks across the agent network with intelligent timeout handling (500ms or until all peers respond), automatic detection of disconnected peers, circular loop prevention via visited-chain tracking, and configurable cascade blocking for leaf nodes (FreeIPA, Filesystem). Portal-to-portal health queries are blocked to prevent cross-site information leakage. Health checks now report in-flight jobs (those passing through intermediate agents) and queued jobs (waiting for reconnection) separately from detailed job states, which are only shown for source and destination agents.
 - Added restart command functionality allowing agents to be remotely restarted via control commands.
-- Implemented soft restart functionality. Jobs are error-cancelled during restart and new job submissions are rejected with retry-able errors. Routing of restart requests respects portal and leaf node boundaries.
+- Implemented soft restart functionality. Jobs are error-cancelled during restart, diagnostics data is cleared, and new job submissions are rejected with retry-able errors. Routing of restart requests respects portal and leaf node boundaries.
 - Added worker count tracking to health checks. The paddington event loop now tracks active worker tasks, exposed via the health endpoint and included in HealthInfo.
 - Implemented system resource monitoring using the sysinfo crate. Agents now track and report process memory usage, CPU usage, total system memory, and CPU core count in health checks.
 - Added background monitoring task that refreshes every 10 seconds, warning when CPU usage exceeds 90% or process memory exceeds 80% of system memory. High resource usage triggers detailed health info logging for troubleshooting.
 - Implemented job execution timing statistics. Job run times are tracked with min/max/mean/median calculations over a rolling window of 1000 jobs, exposed in health checks for performance monitoring.
+- Added diagnostics tracking with all-time counters for completed, failed, expired, and slow jobs (>10s). Historical data includes recent failures, slowest executions, and expired jobs. Diagnostics totals are exposed in health checks and cleared on soft restart.
 
 ## [0.20.2] - 2025-11-15
 

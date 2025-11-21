@@ -9,6 +9,11 @@
 use crate::agent::{self, Peer, Type as AgentType};
 use crate::command::Command;
 use crate::grammar::NamedType;
+use crate::state;
+use crate::diagnostics;
+use crate::jobtiming;
+use crate::systeminfo;
+
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -40,6 +45,10 @@ pub struct HealthInfo {
     pub expired_jobs: usize,
     /// Number of jobs that errored (not including expired)
     pub errored_jobs: usize,
+    /// Number of jobs in-flight (passing through intermediate agents)
+    pub inflight_jobs: usize,
+    /// Number of jobs queued (waiting for connection)
+    pub queued_jobs: usize,
     /// Number of active worker tasks processing messages
     pub worker_count: usize,
     /// Memory usage of this agent process in bytes
@@ -60,6 +69,14 @@ pub struct HealthInfo {
     pub job_time_median_ms: f64,
     /// Number of jobs timed
     pub job_time_count: usize,
+    /// All-time total number of successfully completed jobs (from diagnostics)
+    pub total_completed: usize,
+    /// All-time total number of failed jobs (from diagnostics)
+    pub total_failed: usize,
+    /// All-time total number of expired jobs (from diagnostics)
+    pub total_expired: usize,
+    /// All-time total number of slow jobs (from diagnostics)
+    pub total_slow: usize,
     /// Time when agent started
     pub start_time: DateTime<Utc>,
     /// Current time on agent
@@ -101,6 +118,8 @@ impl HealthInfo {
             successful_jobs: 0,
             expired_jobs: 0,
             errored_jobs: 0,
+            inflight_jobs: 0,
+            queued_jobs: 0,
             worker_count: 0,
             memory_bytes: 0,
             cpu_percent: 0.0,
@@ -111,6 +130,10 @@ impl HealthInfo {
             job_time_mean_ms: 0.0,
             job_time_median_ms: 0.0,
             job_time_count: 0,
+            total_completed: 0,
+            total_failed: 0,
+            total_expired: 0,
+            total_slow: 0,
             start_time,
             current_time,
             uptime_seconds,
@@ -235,8 +258,22 @@ impl HealthInfo {
             ""
         };
 
+        // Show inflight jobs if any
+        let inflight_str = if self.inflight_jobs > 0 {
+            format!(", {} in-flight", self.inflight_jobs)
+        } else {
+            String::new()
+        };
+
+        // Show queued jobs if any
+        let queued_str = if self.queued_jobs > 0 {
+            format!(", {} queued", self.queued_jobs)
+        } else {
+            String::new()
+        };
+
         output.push_str(&format!(
-            "{}│  Jobs: {} active ({} pending{}, {} running{}, {} completed, {} duplicates)\n",
+            "{}│  Board Jobs: {} ({} pending{}, {} running{}, {} completed, {} duplicates{}{})\n",
             prefix,
             self.active_jobs,
             self.pending_jobs,
@@ -244,7 +281,9 @@ impl HealthInfo {
             self.running_jobs,
             running_warning,
             self.completed_jobs,
-            self.duplicate_jobs
+            self.duplicate_jobs,
+            inflight_str,
+            queued_str
         ));
 
         output.push_str(&format!(
@@ -273,6 +312,24 @@ impl HealthInfo {
                 self.job_time_median_ms,
                 self.job_time_count
             ));
+        } else {
+            output.push_str(&format!("{}│  Job Timing: No data available\n", prefix));
+        }
+
+        // All-time job statistics from diagnostics
+        let total_jobs = self.total_completed + self.total_failed + self.total_expired;
+        if total_jobs > 0 {
+            output.push_str(&format!(
+                "{}│  Total Jobs Processed: {} (completed: {}, failed: {}, expired: {}, slow: {})\n",
+                prefix,
+                total_jobs,
+                self.total_completed,
+                self.total_failed,
+                self.total_expired,
+                self.total_slow
+            ));
+        } else {
+            output.push_str(&format!("{}│  Total Jobs Processed: No data available\n", prefix));
         }
 
         // Engine and version
@@ -367,9 +424,38 @@ impl std::fmt::Display for HealthInfo {
             String::new()
         };
 
+        // Build total jobs string if we have data
+        let total_jobs = self.total_completed + self.total_failed + self.total_expired;
+        let total_jobs_str = if total_jobs > 0 {
+            format!(
+                ", total processed: {} (completed: {}, failed: {}, expired: {}, slow: {})",
+                total_jobs,
+                self.total_completed,
+                self.total_failed,
+                self.total_expired,
+                self.total_slow
+            )
+        } else {
+            String::new()
+        };
+
+        // Build inflight and queued string if we have data
+        let inflight_queued_str = if self.inflight_jobs > 0 || self.queued_jobs > 0 {
+            let mut parts = Vec::new();
+            if self.inflight_jobs > 0 {
+                parts.push(format!("{} in-flight", self.inflight_jobs));
+            }
+            if self.queued_jobs > 0 {
+                parts.push(format!("{} queued", self.queued_jobs));
+            }
+            format!(", {}", parts.join(", "))
+        } else {
+            String::new()
+        };
+
         write!(
             f,
-            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed [{} successful, {} expired, {} errored], {} duplicates){}",
+            "{} ({}) - {} - uptime: {}s, workers: {}, mem: {:.1}MB ({:.1}% of {:.1}GB), cpu: {:.1}%, {} cores, jobs: {} active ({} pending, {} running, {} completed [{} successful, {} expired, {} errored], {} duplicates{}){}{}",
             self.name,
             self.agent_type,
             if self.connected { "connected" } else { "disconnected" },
@@ -388,7 +474,9 @@ impl std::fmt::Display for HealthInfo {
             self.expired_jobs,
             self.errored_jobs,
             self.duplicate_jobs,
-            timing_str
+            inflight_queued_str,
+            timing_str,
+            total_jobs_str
         )
     }
 }
@@ -462,35 +550,43 @@ pub async fn collect_health(
     );
 
     // Get aggregated job stats from all boards
-    let (active, pending, running, completed, duplicates, successful, expired, errored) =
-        crate::state::aggregate_job_stats().await;
+    let stats = state::aggregate_job_stats().await;
 
-    health.active_jobs = active;
-    health.pending_jobs = pending;
-    health.running_jobs = running;
-    health.completed_jobs = completed;
-    health.duplicate_jobs = duplicates;
-    health.successful_jobs = successful;
-    health.expired_jobs = expired;
-    health.errored_jobs = errored;
+    health.active_jobs = stats.active;
+    health.pending_jobs = stats.pending;
+    health.running_jobs = stats.running;
+    health.completed_jobs = stats.completed;
+    health.duplicate_jobs = stats.duplicates;
+    health.successful_jobs = stats.successful;
+    health.expired_jobs = stats.expired;
+    health.errored_jobs = stats.errored;
+    health.inflight_jobs = stats.in_flight;
+    health.queued_jobs = stats.queued;
 
     // Get the worker count from paddington
     health.worker_count = paddington::worker_count();
 
     // Collect system information (memory, CPU, etc.)
-    let sysinfo = crate::systeminfo::collect();
+    let sysinfo = systeminfo::collect();
     health.memory_bytes = sysinfo.memory_bytes;
     health.cpu_percent = sysinfo.cpu_percent;
     health.system_memory_total = sysinfo.system_memory_total;
     health.system_cpus = sysinfo.system_cpus;
 
     // Collect job timing statistics
-    let job_stats = crate::jobtiming::get_stats();
+    let job_stats = jobtiming::get_stats();
     health.job_time_min_ms = job_stats.min_ms;
     health.job_time_max_ms = job_stats.max_ms;
     health.job_time_mean_ms = job_stats.mean_ms;
     health.job_time_median_ms = job_stats.median_ms;
     health.job_time_count = job_stats.count;
+
+    // Collect all-time job statistics from diagnostics
+    let diagnostics_stats = diagnostics::get_job_statistics().await;
+    health.total_completed = diagnostics_stats.total_completed;
+    health.total_failed = diagnostics_stats.total_failed;
+    health.total_expired = diagnostics_stats.total_expired;
+    health.total_slow = diagnostics_stats.total_slow;
 
     // Cascade health check to downstream peers (if enabled for this agent)
     // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false

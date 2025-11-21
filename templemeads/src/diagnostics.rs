@@ -25,6 +25,19 @@ const MAX_SLOW_JOBS: usize = 200;
 /// Maximum number of expired jobs to track
 const MAX_EXPIRED_JOBS: usize = 200;
 
+/// Job statistics totals for all time
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobStatistics {
+    /// Total number of successfully completed jobs
+    pub total_completed: usize,
+    /// Total number of failed jobs
+    pub total_failed: usize,
+    /// Total number of expired jobs
+    pub total_expired: usize,
+    /// Total number of slow jobs (>1s duration)
+    pub total_slow: usize,
+}
+
 /// Diagnostics report containing troubleshooting information
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiagnosticsReport {
@@ -185,6 +198,11 @@ struct DiagnosticsTracker {
     expired_jobs_order: VecDeque<JobKey>,
     /// Currently running jobs, deduplicated by destination+instruction
     running_jobs: HashMap<JobKey, RunningJobData>,
+    /// All-time total counts by job state
+    total_jobs_completed: usize,
+    total_jobs_failed: usize,
+    total_jobs_expired: usize,
+    total_jobs_slow: usize,
 }
 
 impl DiagnosticsTracker {
@@ -196,12 +214,19 @@ impl DiagnosticsTracker {
             expired_jobs: HashMap::new(),
             expired_jobs_order: VecDeque::new(),
             running_jobs: HashMap::new(),
+            total_jobs_completed: 0,
+            total_jobs_failed: 0,
+            total_jobs_expired: 0,
+            total_jobs_slow: 0,
         }
     }
 
     fn record_failed_job(&mut self, job: &Job, error_message: String) {
         let key = JobKey::from_job(job);
         let now = Utc::now();
+
+        // Increment total failed jobs counter
+        self.total_jobs_failed += 1;
 
         if let Some(data) = self.failed_jobs.get_mut(&key) {
             // Update existing entry
@@ -231,6 +256,13 @@ impl DiagnosticsTracker {
     }
 
     fn record_slow_job(&mut self, job: &Job, duration_ms: f64) {
+        if duration_ms < SLOW_JOB_THRESHOLD_MS {
+            return;
+        }
+
+        // Increment total slow jobs counter
+        self.total_jobs_slow += 1;
+
         let entry = SlowJobEntry {
             destination: job.destination().to_string(),
             instruction: job.instruction().to_string(),
@@ -254,6 +286,9 @@ impl DiagnosticsTracker {
 
     fn record_expired_job(&mut self, job: &Job) {
         let key = JobKey::from_job(job);
+
+        // Increment total expired jobs counter
+        self.total_jobs_expired += 1;
 
         if let Some(data) = self.expired_jobs.get_mut(&key) {
             // Update existing entry
@@ -410,11 +445,22 @@ impl DiagnosticsTracker {
             warnings,
         }
     }
+
+    fn get_job_statistics(&self) -> JobStatistics {
+        JobStatistics {
+            total_completed: self.total_jobs_completed,
+            total_failed: self.total_jobs_failed,
+            total_expired: self.total_jobs_expired,
+            total_slow: self.total_jobs_slow,
+        }
+    }
 }
 
 /// Global diagnostics tracker instance
 static DIAGNOSTICS: Lazy<RwLock<DiagnosticsTracker>> =
     Lazy::new(|| RwLock::new(DiagnosticsTracker::new()));
+
+static SLOW_JOB_THRESHOLD_MS: f64 = 10000.0; // 10 seconds
 
 /// Record a failed job
 pub async fn record_failed_job(job: &Job, error_message: String) {
@@ -422,10 +468,15 @@ pub async fn record_failed_job(job: &Job, error_message: String) {
     tracker.record_failed_job(job, error_message);
 }
 
+/// Record a completed (successful) job
+pub async fn record_completed_job(_job: &Job) {
+    let mut tracker = DIAGNOSTICS.write().await;
+    tracker.total_jobs_completed += 1;
+}
+
 /// Record a slow job completion
 pub async fn record_slow_job(job: &Job, duration_ms: f64) {
-    // Only track jobs that are "slow" (> 1 second)
-    if duration_ms > 1000.0 {
+    if duration_ms > SLOW_JOB_THRESHOLD_MS {
         let mut tracker = DIAGNOSTICS.write().await;
         tracker.record_slow_job(job, duration_ms);
     }
@@ -453,6 +504,19 @@ pub async fn record_job_finished(job: &Job) {
 pub async fn generate_report(agent_name: &str) -> DiagnosticsReport {
     let tracker = DIAGNOSTICS.read().await;
     tracker.generate_report(agent_name)
+}
+
+/// Get job statistics totals
+pub async fn get_job_statistics() -> JobStatistics {
+    let tracker = DIAGNOSTICS.read().await;
+    tracker.get_job_statistics()
+}
+
+/// Clear all diagnostics data (used during soft restart)
+pub async fn clear_diagnostics() {
+    let mut tracker = DIAGNOSTICS.write().await;
+    *tracker = DiagnosticsTracker::new();
+    tracing::info!("Cleared all diagnostics data");
 }
 
 ///

@@ -280,8 +280,9 @@ async fn process_command(
                                         .error_message()
                                         .unwrap_or_else(|| "Unknown error".to_string());
                                     diagnostics::record_failed_job(&job, error_msg).await;
+                                    diagnostics::record_slow_job(&job, duration_ms).await;
                                 } else {
-                                    // Only track successful jobs for slowness
+                                    diagnostics::record_completed_job(&job).await;
                                     diagnostics::record_slow_job(&job, duration_ms).await;
                                 }
 

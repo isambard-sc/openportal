@@ -6,6 +6,7 @@ use crate::bridge::{run as bridge_run, status as bridge_status};
 use crate::bridgestate::get as get_board;
 use crate::command::Command;
 use crate::destination::Destinations;
+use crate::diagnostics::collect_diagnostics;
 use crate::error::Error;
 use crate::grammar::PortalIdentifier;
 use crate::health::collect_health;
@@ -508,7 +509,15 @@ async fn health(
 
     let self_peer = agent::get_self(None).await;
 
-    let health = collect_health(self_peer.name(), vec![]).await?;
+    let health = match collect_health(self_peer.name(), vec![]).await {
+        Ok(health) => health,
+        Err(e) => {
+            tracing::error!("Error collecting health: {:?}", e);
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("error"));
+            return Ok(Json(json!(result)));
+        }
+    };
 
     let mut result = HashMap::new();
 
@@ -546,7 +555,25 @@ async fn restart(
     // This reuses the routing logic in the handler, including zone disambiguation
     let restart_cmd = Command::restart(&payload.restart_type, &payload.destination);
     let self_peer = agent::get_self(None).await;
-    restart_cmd.send_to(&self_peer).await?;
+
+    match restart_cmd.send_to(&self_peer).await {
+        Ok(_) => {
+            tracing::info!(
+                "Restart command sent to {} successfully",
+                payload.destination
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "Error sending restart command to {}: {:?}",
+                payload.destination,
+                e
+            );
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("error"));
+            return Ok(Json(json!(result)));
+        }
+    }
 
     // Return success immediately
     let mut result = HashMap::new();
@@ -579,7 +606,19 @@ async fn diagnostics(
     tracing::info!("Diagnostics request - destination: {}", payload.destination);
 
     // Collect diagnostics from the specified agent
-    let report = crate::diagnostics::collect_diagnostics(&payload.destination).await?;
+    let report = match collect_diagnostics(&payload.destination).await {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::error!(
+                "Error collecting diagnostics from {}: {:?}",
+                payload.destination,
+                e
+            );
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("error"));
+            return Ok(Json(json!(result)));
+        }
+    };
 
     let mut result = HashMap::new();
     result.insert("status".to_string(), json!("ok"));

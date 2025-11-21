@@ -8,6 +8,7 @@ use crate::control_message::process_control_message;
 use crate::destination::Position;
 use crate::diagnostics;
 use crate::error::Error;
+use crate::health;
 use crate::job::{sync_from_peer, Envelope, Status};
 use crate::runnable::{default_runner, AsyncRunnable};
 
@@ -370,7 +371,7 @@ async fn process_command(
             }
 
             // Collect health information (including cascaded peer health)
-            let health = crate::health::collect_health(sender, visited.clone()).await?;
+            let health = health::collect_health(sender, visited.clone()).await?;
 
             tracing::debug!("Health check: {}", health);
 
@@ -390,7 +391,37 @@ async fn process_command(
             crate::restart::handle_restart_request(sender, restart_type, destination).await?;
         }
         Command::DiagnosticsRequest { destination } => {
-            diagnostics::handle_diagnostics_request(sender, zone, destination).await?;
+            tracing::debug!(
+                "Received diagnostics request from {} (destination: {})",
+                sender,
+                destination
+            );
+
+            // Security: Portals must not respond to diagnostics requests from other portals
+            // to prevent information leakage between sites
+            let my_type = agent::my_agent_type().await;
+            let sender_peer = Peer::new(sender, zone);
+
+            if my_type == agent::Type::Portal {
+                if let Some(sender_type) = agent::agent_type(&sender_peer).await {
+                    if sender_type == agent::Type::Portal {
+                        tracing::warn!(
+                            "Ignoring diagnostics request from portal {} - portals do not share diagnostics with other portals",
+                            sender
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Collect diagnostics information (including cascaded peer diagnostics)
+            let diagnostics_report = diagnostics::collect_diagnostics(destination).await?;
+
+            tracing::debug!("Diagnostics report: {}", diagnostics_report);
+
+            // Send diagnostics response back to sender
+            let response = Command::diagnostics_response(diagnostics_report);
+            response.send_to(&sender_peer).await?;
         }
         Command::DiagnosticsResponse { report } => {
             tracing::debug!("Received diagnostics response from {}", report.agent_name);
@@ -399,9 +430,6 @@ async fn process_command(
             // This allows intermediate agents to retrieve it when forwarding responses
             diagnostics::cache_diagnostics_response(report.agent_name.clone(), *report.clone())
                 .await;
-
-            // Also log it if this is the final destination (we requested it)
-            tracing::info!("Diagnostics response:\n{}", report.to_pretty_string());
         }
         _ => {
             tracing::warn!("Command {} not recognised", command);

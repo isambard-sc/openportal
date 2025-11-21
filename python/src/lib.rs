@@ -312,6 +312,14 @@ impl FailedJobEntry {
             PyTzInfo::utc(py).ok().as_deref(),
         )
     }
+
+    fn __copy__(&self) -> PyResult<FailedJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<FailedJobEntry> {
+        Ok(self.clone())
+    }
 }
 
 impl From<mod_diagnostics::FailedJobEntry> for FailedJobEntry {
@@ -359,6 +367,14 @@ impl SlowJobEntry {
             self.0.completed_at.timestamp() as f64,
             PyTzInfo::utc(py).ok().as_deref(),
         )
+    }
+
+    fn __copy__(&self) -> PyResult<SlowJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<SlowJobEntry> {
+        Ok(self.clone())
     }
 }
 
@@ -417,6 +433,14 @@ impl ExpiredJobEntry {
     fn count(&self) -> PyResult<usize> {
         Ok(self.0.count)
     }
+
+    fn __copy__(&self) -> PyResult<ExpiredJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ExpiredJobEntry> {
+        Ok(self.clone())
+    }
 }
 
 impl From<mod_diagnostics::ExpiredJobEntry> for ExpiredJobEntry {
@@ -469,6 +493,14 @@ impl RunningJobEntry {
     #[getter]
     fn running_for_seconds(&self) -> PyResult<i64> {
         Ok(self.0.running_for_seconds)
+    }
+
+    fn __copy__(&self) -> PyResult<RunningJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<RunningJobEntry> {
+        Ok(self.clone())
     }
 }
 
@@ -551,6 +583,14 @@ impl DiagnosticsReport {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    fn __copy__(&self) -> PyResult<DiagnosticsReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<DiagnosticsReport> {
+        Ok(self.clone())
+    }
 }
 
 impl From<mod_diagnostics::DiagnosticsReport> for DiagnosticsReport {
@@ -567,6 +607,7 @@ impl From<mod_diagnostics::DiagnosticsReport> for DiagnosticsReport {
 pub struct Diagnostics {
     pub status: String,
     #[serde(default)]
+    #[serde(rename = "report")]
     pub diagnostics: Option<DiagnosticsReport>,
 }
 
@@ -3532,6 +3573,12 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<Health>()?;
     m.add_class::<RestartResponse>()?;
+    m.add_class::<Diagnostics>()?;
+    m.add_class::<DiagnosticsReport>()?;
+    m.add_class::<FailedJobEntry>()?;
+    m.add_class::<SlowJobEntry>()?;
+    m.add_class::<ExpiredJobEntry>()?;
+    m.add_class::<RunningJobEntry>()?;
     m.add_class::<Job>()?;
     m.add_class::<UserIdentifier>()?;
     m.add_class::<ProjectIdentifier>()?;

@@ -6,6 +6,8 @@
 //! This module provides real-time tracking of job failures, slow executions,
 //! expirations, and other diagnostic information useful for remote troubleshooting.
 
+use crate::agent;
+use crate::command::Command;
 use crate::grammar::NamedType;
 use crate::job::Job;
 use chrono::{DateTime, Utc};
@@ -306,7 +308,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn generate_report(&self, agent_name: String) -> DiagnosticsReport {
+    fn generate_report(&self, agent_name: &str) -> DiagnosticsReport {
         let now = Utc::now();
 
         // Convert failed jobs to report entries (most recent 100)
@@ -399,7 +401,7 @@ impl DiagnosticsTracker {
         }
 
         DiagnosticsReport {
-            agent_name,
+            agent_name: agent_name.to_string(),
             generated_at: now,
             failed_jobs,
             slowest_jobs,
@@ -448,7 +450,7 @@ pub async fn record_job_finished(job: &Job) {
 }
 
 /// Generate a diagnostics report
-pub async fn generate_report(agent_name: String) -> DiagnosticsReport {
+pub async fn generate_report(agent_name: &str) -> DiagnosticsReport {
     let tracker = DIAGNOSTICS.read().await;
     tracker.generate_report(agent_name)
 }
@@ -548,137 +550,7 @@ async fn wait_for_diagnostics_response(
 /// Returns the diagnostics report or an error if the request fails or times out.
 ///
 pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport, anyhow::Error> {
-    use crate::agent;
-    use crate::command::Command;
-
-    // If destination is empty, generate report for self
-    if destination.is_empty() {
-        let agent_name = agent::name().await;
-        return Ok(generate_report(agent_name).await);
-    }
-
-    // Send the diagnostics command to self with the full destination
-    // This reuses the routing logic in the handler
-    let diagnostics_cmd = Command::diagnostics_request(destination);
-    let self_peer = agent::get_self(None).await;
-    diagnostics_cmd.send_to(&self_peer).await?;
-
-    // Extract the ultimate target agent name from the destination path
-    // The target is the last component in the destination path
-    let target_agent = destination
-        .split('.')
-        .last()
-        .unwrap_or(destination)
-        .split('@')
-        .next()
-        .unwrap_or(destination)
-        .to_string();
-
-    tracing::debug!(
-        "Waiting for diagnostics response from {} (destination: {})",
-        target_agent,
-        destination
-    );
-
-    // Record baseline time before waiting
-    let baseline_time = chrono::Utc::now();
-
-    // Wait up to 5 seconds for the diagnostics response
-    let report = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        wait_for_diagnostics_response(
-            &target_agent,
-            baseline_time,
-            std::time::Duration::from_secs(5),
-        )
-        .await
-    })
-    .await;
-
-    match report {
-        Ok(Some(report)) => {
-            tracing::debug!("Received diagnostics response from {}", target_agent);
-            Ok(report)
-        }
-        Ok(None) => {
-            // Timeout - try to get cached report
-            if let Some(cached_report) = get_cached_diagnostics(&target_agent).await {
-                tracing::warn!(
-                    "Timeout waiting for fresh diagnostics from {}, using cached report (age: {}s)",
-                    target_agent,
-                    chrono::Utc::now()
-                        .signed_duration_since(cached_report.generated_at)
-                        .num_seconds()
-                );
-                Ok(cached_report)
-            } else {
-                Err(anyhow::anyhow!(
-                    "No diagnostics response received from {} and no cached data available",
-                    target_agent
-                ))
-            }
-        }
-        Err(_) => {
-            // Outer timeout - try to get any cached report
-            if let Some(cached_report) = get_cached_diagnostics(&target_agent).await {
-                tracing::warn!(
-                    "Timeout waiting for diagnostics from {}, using cached report (age: {}s)",
-                    target_agent,
-                    chrono::Utc::now()
-                        .signed_duration_since(cached_report.generated_at)
-                        .num_seconds()
-                );
-                Ok(cached_report)
-            } else {
-                Err(anyhow::anyhow!(
-                    "Timeout waiting for diagnostics response from {}",
-                    target_agent
-                ))
-            }
-        }
-    }
-}
-
-///
-/// Handle a diagnostics request from another agent
-///
-/// This function:
-/// - Checks if this agent is the destination for the diagnostics request
-/// - If destination matches or is empty, generates and sends diagnostics report back
-/// - If destination doesn't match, forwards to the next peer in the path
-///
-/// Parameters:
-/// - `sender`: The agent that requested diagnostics
-/// - `zone`: The zone of the sender
-/// - `destination`: Dot-separated path (e.g., "brics.aip2.clusters"), empty means request from self
-///
-pub async fn handle_diagnostics_request(
-    sender: &str,
-    zone: &str,
-    destination: &str,
-) -> Result<(), anyhow::Error> {
-    use crate::agent::{self, Peer};
-    use crate::command::Command;
-
-    let my_name = agent::name().await;
-    let my_type = agent::my_agent_type().await;
-
-    // Security: Portals must not accept diagnostics requests from other portals
-    // to prevent cross-site information leakage
-    if my_type == agent::Type::Portal {
-        // Check all peers to see if the sender is a portal
-        let all_peers = agent::all_peers().await;
-        if let Some(sender_peer) = all_peers.iter().find(|p| p.name() == sender) {
-            if let Some(sender_type) = agent::agent_type(sender_peer).await {
-                if sender_type == agent::Type::Portal {
-                    tracing::warn!(
-                        "Ignoring diagnostics request from portal {} - portals do not share diagnostics with other portals",
-                        sender
-                    );
-                    return Ok(());
-                }
-            }
-        }
-    }
+    let my_name = agent::get_self(None).await.name().to_owned();
 
     // Parse the destination path
     let destination_parts: Vec<&str> = if destination.is_empty() {
@@ -705,22 +577,11 @@ pub async fn handle_diagnostics_request(
     };
 
     if is_target {
-        // We are the target - generate and send diagnostics report
-        tracing::debug!(
-            "Received diagnostics request from {} - this agent is the target",
-            sender
-        );
-
-        let report = generate_report(my_name).await;
+        let report = generate_report(&my_name).await;
 
         tracing::debug!("Diagnostics report: {}", report);
 
-        // Send diagnostics response back to sender
-        let response = Command::diagnostics_response(report);
-        let sender_peer = Peer::new(sender, zone);
-        response.send_to(&sender_peer).await?;
-
-        Ok(())
+        Ok(report)
     } else {
         // Check if this agent is allowed to forward diagnostics requests
         // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false and should not forward
@@ -753,11 +614,9 @@ pub async fn handle_diagnostics_request(
 
         let remaining_path = destination_parts[1..].join(".");
 
-        tracing::info!(
-            "Forwarding diagnostics request from {} to {} (zone: {}, remaining path: {})",
-            sender,
+        tracing::debug!(
+            "Forwarding diagnostics request to {} (remaining path: {})",
             next_peer_name,
-            zone_filter.unwrap_or("any"),
             remaining_path
         );
 
@@ -775,7 +634,7 @@ pub async fn handle_diagnostics_request(
 
         if let Some(next_peer) = next_peer {
             // Security: If we're a portal, don't forward to other portals
-            if my_type == agent::Type::Portal {
+            if agent::my_agent_type().await == agent::Type::Portal {
                 if let Some(peer_type) = agent::agent_type(next_peer).await {
                     if peer_type == agent::Type::Portal {
                         tracing::error!(
@@ -832,38 +691,32 @@ pub async fn handle_diagnostics_request(
             )
             .await;
 
-            // Send the report back to the original sender
-            let sender_peer = Peer::new(sender, zone);
-
             if let Some(report) = report {
                 tracing::debug!(
-                    "Received diagnostics response from {}, forwarding back to {}",
+                    "Received diagnostics response from {}",
                     ultimate_target_name,
-                    sender
                 );
-                let response = Command::diagnostics_response(report);
-                response.send_to(&sender_peer).await?;
+                Ok(report)
             } else {
                 // Check if we have any cached report (even if old)
                 if let Some(cached_report) = get_cached_diagnostics(ultimate_target_name).await {
                     tracing::warn!(
-                        "Timeout waiting for fresh diagnostics from {}, sending cached response (age: {}s) to {}",
+                        "Timeout waiting for fresh diagnostics from {}, returning cached response (age: {}s)",
                         ultimate_target_name,
                         Utc::now().signed_duration_since(cached_report.generated_at).num_seconds(),
-                        sender
                     );
-                    let response = Command::diagnostics_response(cached_report);
-                    response.send_to(&sender_peer).await?;
+                    Ok(cached_report)
                 } else {
                     tracing::warn!(
                         "No diagnostics response received from {} and no cached data available",
                         ultimate_target_name
                     );
-                    // Don't send anything back - the original requester will timeout
+                    Err(anyhow::anyhow!(
+                        "No diagnostics response received from {}",
+                        ultimate_target_name
+                    ))
                 }
             }
-
-            Ok(())
         } else {
             let error_msg = if let Some(zone) = zone_filter {
                 format!(

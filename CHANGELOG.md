@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.21.0] - 2025-11-21
+
 ### Added
 
 - Implemented cascading health checks across the agent network with intelligent timeout handling (500ms or until all peers respond), automatic detection of disconnected peers, circular loop prevention via visited-chain tracking, and configurable cascade blocking for leaf nodes (FreeIPA, Filesystem). Portal-to-portal health queries are blocked to prevent cross-site information leakage. Health checks now report in-flight jobs (those passing through intermediate agents) and queued jobs (waiting for reconnection) separately from detailed job states, which are only shown for source and destination agents.
@@ -847,6 +849,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.21.0]: https://github.com/isambard-sc/openportal/releases/tag/0.21.0
 [0.20.2]: https://github.com/isambard-sc/openportal/releases/tag/0.20.2
 [0.20.1]: https://github.com/isambard-sc/openportal/releases/tag/0.20.1
 [0.20.0]: https://github.com/isambard-sc/openportal/releases/tag/0.20.0

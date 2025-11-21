@@ -179,7 +179,7 @@ async fn process_command(
                 Ok(job) => job,
                 Err(e) => {
                     tracing::error!("Error receiving job: {}", e);
-                    job.errored(&e.to_string())?;
+                    let job = job.errored(&e.to_string())?;
                     let _ = job.update(&Peer::new(sender, zone)).await?;
                     return Ok(());
                 }
@@ -206,7 +206,6 @@ async fn process_command(
                         // flow downstream
                         if let Some(agent) = job.destination().next(recipient) {
                             let peer = Peer::new(&agent, zone);
-                            agent::wait_for(&peer, 30).await?;
 
                             job = match job.put(&peer).await {
                                 Ok(job) => job,
@@ -305,8 +304,6 @@ async fn process_command(
 
             // now the job has finished, update the sender's board
             let peer = Peer::new(sender, zone);
-            agent::wait_for(&peer, 30).await?;
-
             let _ = job.update(&peer).await?;
         }
         Command::Delete { job } => {

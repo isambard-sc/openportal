@@ -805,7 +805,7 @@ impl Job {
             Err(e) => {
                 // if we can't send the command, then we need to need to add
                 // it to a queue for sending once the peer is back online
-                tracing::debug!("Error sending command to agent: {:?}", e);
+                tracing::warn!("Error sending command to agent: {:?}", e);
                 let mut board = board.write().await;
                 board.queue(ControlCommand::put(&job));
             }

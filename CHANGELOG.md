@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-### Fixed
+## [0.21.1] - 2025-12-02
+
+### Fixed
 
 - Fixed the issue that prevented the results of jobs sent to virtual agents from being returned to the original sender.
 
@@ -853,6 +855,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.21.1]: https://github.com/isambard-sc/openportal/releases/tag/0.21.1
 [0.21.0]: https://github.com/isambard-sc/openportal/releases/tag/0.21.0
 [0.20.2]: https://github.com/isambard-sc/openportal/releases/tag/0.20.2
 [0.20.1]: https://github.com/isambard-sc/openportal/releases/tag/0.20.1

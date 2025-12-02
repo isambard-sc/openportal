@@ -601,10 +601,23 @@ pub async fn agent_type(peer: &Peer) -> Option<Type> {
 }
 
 ///
+/// Return whether or not the passed agent is itself
+///
+pub async fn is_self(peer: &Peer) -> bool {
+    let registrar = REGISTRAR.read().await;
+
+    peer.name() == registrar.name
+}
+
+///
 /// Return whether or not the passed agent is virtual. Virtual
 /// agents are either specifically added agents, or when we
 /// send a message to ourselves (a virtual agent is created
-/// per zone)
+/// per zone). Note that this will return true if the
+/// agent is itself or if this agent is a virtual agent
+///
+/// To return only non-self virtual agents, use
+/// is_virtual(peer) && !is_self(peer)
 ///
 pub async fn is_virtual(peer: &Peer) -> bool {
     let registrar = REGISTRAR.read().await;

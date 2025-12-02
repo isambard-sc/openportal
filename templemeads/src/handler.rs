@@ -314,8 +314,34 @@ async fn process_command(
             tracing::debug!("Job has finished: {}", job);
 
             // now the job has finished, update the sender's board
-            let peer = Peer::new(sender, zone);
-            let _ = job.update(&peer).await?;
+            // Check if the recipient is a virtual agent
+            let recipient_peer = Peer::new(recipient, zone);
+
+            if agent::is_self(&recipient_peer).await {
+                // Normal case: send update to the sender
+                tracing::info!("Sending update of job {} back to sender {}", job, sender);
+                let peer = Peer::new(sender, zone);
+                let _ = job.update(&peer).await?;
+            } else if agent::is_virtual(&recipient_peer).await {
+                // Virtual agent case: use virtual_update
+                // recipient = virtual agent (e.g., isambard-ai)
+                // sender = hosting agent (e.g., waldur)
+                let virtual_peer = Peer::new(recipient, zone);
+                let hosting_peer = Peer::new(sender, zone);
+                tracing::info!(
+                    "Sending virtual update of job {} to virtual agent {} via hosting agent {}",
+                    job,
+                    virtual_peer,
+                    hosting_peer
+                );
+                let _ = job.virtual_update(&virtual_peer, &hosting_peer).await?;
+            } else {
+                tracing::error!(
+                    "Recipient {} is neither self nor virtual - not sending job update: {}",
+                    recipient,
+                    job
+                );
+            }
         }
         Command::Delete { job } => {
             if job.is_expired() {

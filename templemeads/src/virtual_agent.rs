@@ -9,14 +9,6 @@ use crate::error::Error;
 use crate::handler::process_message;
 
 pub async fn send(destination: &Option<Destination>, message: Message) -> Result<(), Error> {
-    tracing::info!(
-        "Virtual agent sending message: {:?} to destination: {}",
-        message,
-        destination
-            .as_ref()
-            .map_or("None".to_string(), |d| d.to_string())
-    );
-
     let my_name = agent::name().await;
 
     let mut message = message;
@@ -38,6 +30,14 @@ pub async fn send(destination: &Option<Destination>, message: Message) -> Result
     } else {
         message.set_sender(&my_name);
     }
+
+    tracing::info!(
+        "Virtual agent sending message: {:?} to destination: {}",
+        message,
+        destination
+            .as_ref()
+            .map_or("None".to_string(), |d| d.to_string())
+    );
 
     match process_message(message).await {
         Ok(_) => Ok(()),

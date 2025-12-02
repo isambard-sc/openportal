@@ -913,6 +913,80 @@ impl Job {
         Ok(job)
     }
 
+    /// Update a job that was processed by a virtual agent
+    ///
+    /// This handles the special case where a virtual agent (virtual_peer) processes a job
+    /// on behalf of a hosting agent (hosting_peer). It:
+    /// 1. Updates the hosting agent's board directly
+    /// 2. Sends the Update message to the upstream agent (previous to the hosting agent)
+    ///
+    /// # Arguments
+    /// * `virtual_peer` - The virtual agent that processed the job (e.g., isambard-ai)
+    /// * `hosting_peer` - The agent hosting the virtual agent (e.g., waldur)
+    pub async fn virtual_update(&self, virtual_peer: &Peer, hosting_peer: &Peer) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
+        let mut job = self.clone();
+
+        // First, update the hosting agent's board directly (since it "processed" the job)
+        let board = match state::get(hosting_peer).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for hosting agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        // Update the hosting agent's board
+        {
+            let mut board = board.write().await;
+            job.board = Some(hosting_peer.clone());
+            let state;
+            (job, state) = board.add(&job)?;
+
+            if state == JobAddState::Unchanged {
+                return Ok(job);
+            }
+        }
+
+        // Now determine where to send the Update: to the agent upstream of the hosting agent
+        // Find the previous agent before the hosting agent in the destination chain
+        if let Some(upstream_agent) = self.destination().previous(hosting_peer.name()) {
+            let upstream_peer = Peer::new(&upstream_agent, hosting_peer.zone());
+
+            tracing::debug!(
+                "Virtual agent {} (hosted by {}) sending update to upstream agent {}",
+                virtual_peer,
+                hosting_peer,
+                upstream_peer
+            );
+
+            // Send the update to the upstream agent
+            // The message should appear to come from the hosting agent
+            match ControlCommand::update(&job).send_to(&upstream_peer).await {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::debug!("Error sending command to upstream agent: {:?}", e);
+                    let mut board = board.write().await;
+                    board.queue(ControlCommand::update(&job));
+                }
+            }
+        } else {
+            // No upstream agent - the hosting agent is at the start of the chain
+            // This means the job is complete
+            tracing::debug!(
+                "Virtual agent {} (hosted by {}) has no upstream agent - job complete",
+                virtual_peer,
+                hosting_peer
+            );
+        }
+
+        Ok(job)
+    }
+
     pub async fn deleted(&self, peer: &Peer) -> Result<Job, Error> {
         self.assert_is_not_expired()?;
 

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Fixed the issue that prevented the results of jobs sent to virtual agents from being returned to the original sender.
+
 ## [0.21.0] - 2025-11-21
 
 ### Added

@@ -14,7 +14,7 @@ use templemeads::grammar::Instruction::{
     CreateProject, GetProject, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
     RemoveProject, SyncOfferings, UpdateProject,
 };
-use templemeads::job::{Envelope, Job};
+use templemeads::job::{send_queued, Envelope, Job};
 use templemeads::server;
 use templemeads::Error;
 
@@ -481,6 +481,17 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
                 virtual_agent.zone()
             );
             agent::remove(&virtual_agent).await;
+        }
+    }
+
+    // Now that virtual agents are registered, send any queued jobs to them
+    for offering in synched_offerings.iter() {
+        let resource = offering.agents()[0].clone();
+        let peer = agent::Peer::new(&resource, portal.zone());
+
+        tracing::debug!("Sending queued jobs to virtual agent {}", peer);
+        if let Err(e) = send_queued(&peer).await {
+            tracing::warn!("Error sending queued jobs to virtual agent {}: {}", peer, e);
         }
     }
 

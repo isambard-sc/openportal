@@ -18,7 +18,7 @@ use templemeads::grammar::Instruction::{
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
 };
-use templemeads::job::{Envelope, Job};
+use templemeads::job::{send_queued, Envelope, Job};
 use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
 
@@ -461,6 +461,19 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
                 tracing::info!("Offerings synched by bridge agent: {:?}", offerings);
             } else {
                 tracing::warn!("No offerings synched?");
+            }
+
+            // Now that both portal and bridge have registered their virtual agents,
+            // send any queued jobs to the virtual agents
+            for offering in synched_offerings.iter() {
+                let resource = offering.agents()[0].clone();
+                let zone = format!("{}>{}", offering.agents()[2], me);
+                let peer = agent::Peer::new(&resource, &zone);
+
+                tracing::debug!("Sending queued jobs to virtual agent {}", peer);
+                if let Err(e) = send_queued(&peer).await {
+                    tracing::warn!("Error sending queued jobs to virtual agent {}: {}", peer, e);
+                }
             }
 
             Ok(Destinations::new(&synched_offerings))

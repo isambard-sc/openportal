@@ -326,7 +326,11 @@ async fn process_command(
                     original_version
                 );
             } else {
-                tracing::debug!("Job version changed ({} -> {}) - sending update", original_version, job.version());
+                tracing::debug!(
+                    "Job version changed ({} -> {}) - sending update",
+                    original_version,
+                    job.version()
+                );
                 // now the job has finished, update the sender's board
                 // Check if the recipient is a virtual agent
                 let recipient_peer = Peer::new(recipient, zone);

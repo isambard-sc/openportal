@@ -944,7 +944,6 @@ impl Job {
             }
         };
 
-        // Update the hosting agent's board
         {
             let mut board = board.write().await;
             job.board = Some(hosting_peer.clone());
@@ -954,6 +953,34 @@ impl Job {
                     tracing::error!(
                         "Error updating hosting agent {} board with job {}: {:?}",
                         hosting_peer,
+                        job,
+                        e
+                    );
+                }
+            };
+        }
+
+        // Now update the virtual agent's board
+        let board = match state::get(virtual_peer).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for virtual agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        {
+            let mut board = board.write().await;
+            job.board = Some(virtual_peer.clone());
+            match board.add(&job) {
+                Ok((_, _)) => {}
+                Err(e) => {
+                    tracing::error!(
+                        "Error updating virtual agent {} board with job {}: {:?}",
+                        virtual_peer,
                         job,
                         e
                     );
@@ -985,7 +1012,6 @@ impl Job {
                 }
             };
 
-            // Update the upstream agent's board
             {
                 let mut board = board.write().await;
                 job.board = Some(upstream_peer.clone());

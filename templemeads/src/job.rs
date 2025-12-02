@@ -923,7 +923,11 @@ impl Job {
     /// # Arguments
     /// * `virtual_peer` - The virtual agent that processed the job (e.g., isambard-ai)
     /// * `hosting_peer` - The agent hosting the virtual agent (e.g., waldur)
-    pub async fn virtual_update(&self, virtual_peer: &Peer, hosting_peer: &Peer) -> Result<Job, Error> {
+    pub async fn virtual_update(
+        &self,
+        virtual_peer: &Peer,
+        hosting_peer: &Peer,
+    ) -> Result<Job, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
@@ -944,12 +948,17 @@ impl Job {
         {
             let mut board = board.write().await;
             job.board = Some(hosting_peer.clone());
-            let state;
-            (job, state) = board.add(&job)?;
-
-            if state == JobAddState::Unchanged {
-                return Ok(job);
-            }
+            match board.add(&job) {
+                Ok((_, _)) => {}
+                Err(e) => {
+                    tracing::error!(
+                        "Error updating hosting agent {} board with job {}: {:?}",
+                        hosting_peer,
+                        job,
+                        e
+                    );
+                }
+            };
         }
 
         // Now determine where to send the Update: to the agent upstream of the hosting agent
@@ -957,12 +966,44 @@ impl Job {
         if let Some(upstream_agent) = self.destination().previous(hosting_peer.name()) {
             let upstream_peer = Peer::new(&upstream_agent, hosting_peer.zone());
 
-            tracing::debug!(
+            tracing::info!(
                 "Virtual agent {} (hosted by {}) sending update to upstream agent {}",
                 virtual_peer,
                 hosting_peer,
                 upstream_peer
             );
+
+            // now update the upstream agent's board with the updated job
+            let board = match state::get(&upstream_peer).await {
+                Ok(b) => b.board().await,
+                Err(e) => {
+                    tracing::error!(
+                        "Error getting board for upstream agent: {:?}. Is this agent known to us?",
+                        e
+                    );
+                    return Err(e);
+                }
+            };
+
+            // Update the upstream agent's board
+            {
+                let mut board = board.write().await;
+                job.board = Some(upstream_peer.clone());
+
+                match board.add(&job) {
+                    Ok((_, _)) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            "Error updating upstream agent {} board with job {}: {:?}",
+                            upstream_peer,
+                            job,
+                            e
+                        );
+                    }
+                };
+            }
+
+            tracing::info!("ControlCommand::update({}).send_to({})", job, upstream_peer);
 
             // Send the update to the upstream agent
             // The message should appear to come from the hosting agent
@@ -977,7 +1018,7 @@ impl Job {
         } else {
             // No upstream agent - the hosting agent is at the start of the chain
             // This means the job is complete
-            tracing::debug!(
+            tracing::error!(
                 "Virtual agent {} (hosted by {}) has no upstream agent - job complete",
                 virtual_peer,
                 hosting_peer

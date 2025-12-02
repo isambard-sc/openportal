@@ -222,6 +222,8 @@ impl Board {
     /// if the job was added, updated, duplicated, or unchanged.
     ///
     pub fn add(&mut self, job: &Job) -> Result<(Job, JobAddState), Error> {
+        tracing::info!("Adding job {} to board of agent {}", job, self.peer);
+
         job.assert_is_for_board(&self.peer)?;
 
         let mut state = JobAddState::Unchanged;

@@ -143,7 +143,7 @@ async fn process_command(
 
             let peer = Peer::new(sender, zone);
 
-            tracing::debug!("Update job: {} to {} from {}", job, recipient, peer,);
+            tracing::info!("Update job: {:?} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -184,6 +184,8 @@ async fn process_command(
 
             let peer = Peer::new(sender, zone);
 
+            tracing::info!("Put job: {:?} to {} from {}", job, recipient, peer,);
+
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
                 Ok(job) => job,
@@ -195,8 +197,11 @@ async fn process_command(
                 }
             };
 
+            // Keep a copy of the original job to detect if it changed
+            let original_version = job.version();
+
             if job.is_duplicate() {
-                tracing::info!("Job is a duplicate: {}", job);
+                tracing::info!("Job is a duplicate for peer {}: {}", peer, job);
 
                 // the existing job is being processed. We now need to wait
                 // for that to finish - when it does, our new job will
@@ -313,34 +318,41 @@ async fn process_command(
 
             tracing::debug!("Job has finished: {}", job);
 
-            // now the job has finished, update the sender's board
-            // Check if the recipient is a virtual agent
-            let recipient_peer = Peer::new(recipient, zone);
-
-            if agent::is_self(&recipient_peer).await {
-                // Normal case: send update to the sender
-                tracing::info!("Sending update of job {} back to sender {}", job, sender);
-                let peer = Peer::new(sender, zone);
-                let _ = job.update(&peer).await?;
-            } else if agent::is_virtual(&recipient_peer).await {
-                // Virtual agent case: use virtual_update
-                // recipient = virtual agent (e.g., isambard-ai)
-                // sender = hosting agent (e.g., waldur)
-                let virtual_peer = Peer::new(recipient, zone);
-                let hosting_peer = Peer::new(sender, zone);
+            // Only send updates if the job changed (version increased or state changed)
+            // If we just forwarded it downstream without changes, the downstream agent will handle updates
+            if job.version() == original_version {
                 tracing::info!(
-                    "Sending virtual update of job {} to virtual agent {} via hosting agent {}",
-                    job,
-                    virtual_peer,
-                    hosting_peer
+                    "Job version unchanged ({}) - not sending update (job was forwarded or unchanged)",
+                    original_version
                 );
-                let _ = job.virtual_update(&virtual_peer, &hosting_peer).await?;
             } else {
-                tracing::error!(
-                    "Recipient {} is neither self nor virtual - not sending job update: {}",
-                    recipient,
-                    job
-                );
+                tracing::info!("Job version changed ({} -> {}) - sending update", original_version, job.version());
+                // now the job has finished, update the sender's board
+                // Check if the recipient is a virtual agent
+                let recipient_peer = Peer::new(recipient, zone);
+
+                if agent::is_self(&recipient_peer).await {
+                    // Normal case: send update to the sender
+                    tracing::info!("Sending update of job {} back to sender {}", job, peer);
+                    let _ = job.update(&peer).await?;
+                } else if agent::is_virtual(&recipient_peer).await {
+                    // Virtual agent case: use virtual_update
+                    // recipient = virtual agent (e.g., isambard-ai)
+                    // sender = hosting agent (e.g., waldur)
+                    tracing::info!(
+                        "Sending virtual update of job {} to virtual agent {} via hosting agent {}",
+                        job,
+                        recipient_peer,
+                        peer
+                    );
+                    let _ = job.virtual_update(&recipient_peer, &peer).await?;
+                } else {
+                    tracing::error!(
+                        "Recipient {} is neither self nor virtual - not sending job update: {}",
+                        recipient,
+                        job
+                    );
+                }
             }
         }
         Command::Delete { job } => {

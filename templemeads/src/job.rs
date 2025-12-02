@@ -753,7 +753,7 @@ impl Job {
     }
 
     pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
-        tracing::info!("Put {} : {}", self.destination(), self.instruction());
+        tracing::debug!("Put {} : {}", self.destination(), self.instruction());
 
         self.assert_is_not_expired()?;
 
@@ -993,7 +993,7 @@ impl Job {
         if let Some(upstream_agent) = self.destination().previous(hosting_peer.name()) {
             let upstream_peer = Peer::new(&upstream_agent, hosting_peer.zone());
 
-            tracing::info!(
+            tracing::debug!(
                 "Virtual agent {} (hosted by {}) sending update to upstream agent {}",
                 virtual_peer,
                 hosting_peer,
@@ -1028,8 +1028,6 @@ impl Job {
                     }
                 };
             }
-
-            tracing::info!("ControlCommand::update({}).send_to({})", job, upstream_peer);
 
             // Send the update to the upstream agent
             // The message should appear to come from the hosting agent

@@ -117,7 +117,7 @@ async fn clean_boards() {
                     tracing::debug!("No need to send expiry message upstream to: {}", peer);
                 }
                 destination::Position::Error => {
-                    tracing::warn!(
+                    tracing::debug!(
                         "Expired job {} has invalid destination position, cannot send error back",
                         job.id()
                     );

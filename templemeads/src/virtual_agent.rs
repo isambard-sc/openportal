@@ -31,7 +31,7 @@ pub async fn send(destination: &Option<Destination>, message: Message) -> Result
         message.set_sender(&my_name);
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Virtual agent sending message: {:?} to destination: {}",
         message,
         destination

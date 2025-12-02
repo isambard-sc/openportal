@@ -143,7 +143,7 @@ async fn process_command(
 
             let peer = Peer::new(sender, zone);
 
-            tracing::info!("Update job: {:?} to {} from {}", job, recipient, peer,);
+            tracing::debug!("Update job: {:?} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -184,7 +184,7 @@ async fn process_command(
 
             let peer = Peer::new(sender, zone);
 
-            tracing::info!("Put job: {:?} to {} from {}", job, recipient, peer,);
+            tracing::debug!("Put job: {:?} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
@@ -201,7 +201,7 @@ async fn process_command(
             let original_version = job.version();
 
             if job.is_duplicate() {
-                tracing::info!("Job is a duplicate for peer {}: {}", peer, job);
+                tracing::debug!("Job is a duplicate for peer {}: {}", peer, job);
 
                 // the existing job is being processed. We now need to wait
                 // for that to finish - when it does, our new job will
@@ -321,25 +321,25 @@ async fn process_command(
             // Only send updates if the job changed (version increased or state changed)
             // If we just forwarded it downstream without changes, the downstream agent will handle updates
             if job.version() == original_version {
-                tracing::info!(
+                tracing::debug!(
                     "Job version unchanged ({}) - not sending update (job was forwarded or unchanged)",
                     original_version
                 );
             } else {
-                tracing::info!("Job version changed ({} -> {}) - sending update", original_version, job.version());
+                tracing::debug!("Job version changed ({} -> {}) - sending update", original_version, job.version());
                 // now the job has finished, update the sender's board
                 // Check if the recipient is a virtual agent
                 let recipient_peer = Peer::new(recipient, zone);
 
                 if agent::is_self(&recipient_peer).await {
                     // Normal case: send update to the sender
-                    tracing::info!("Sending update of job {} back to sender {}", job, peer);
+                    tracing::debug!("Sending update of job {} back to sender {}", job, peer);
                     let _ = job.update(&peer).await?;
                 } else if agent::is_virtual(&recipient_peer).await {
                     // Virtual agent case: use virtual_update
                     // recipient = virtual agent (e.g., isambard-ai)
                     // sender = hosting agent (e.g., waldur)
-                    tracing::info!(
+                    tracing::debug!(
                         "Sending virtual update of job {} to virtual agent {} via hosting agent {}",
                         job,
                         recipient_peer,

@@ -3167,6 +3167,142 @@ impl From<grammar::ProjectMapping> for ProjectMapping {
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct DomainPattern(grammar::DomainPattern);
+
+#[pymethods]
+impl DomainPattern {
+    #[new]
+    fn new(pattern: &str) -> PyResult<Self> {
+        match grammar::DomainPattern::parse(pattern) {
+            Ok(domain_pattern) => Ok(Self(domain_pattern)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.pattern())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<DomainPattern> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<DomainPattern> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &DomainPattern, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn pattern(&self) -> PyResult<String> {
+        Ok(self.0.pattern())
+    }
+
+    fn matches(&self, domain: &str) -> PyResult<bool> {
+        Ok(self.0.matches(domain))
+    }
+}
+
+impl From<grammar::DomainPattern> for DomainPattern {
+    fn from(domain_pattern: grammar::DomainPattern) -> Self {
+        DomainPattern(domain_pattern)
+    }
+}
+
+/// Helper enum to accept either a DomainPattern or a string in Python
+#[derive(FromPyObject)]
+enum DomainPatternOrStr {
+    Pattern(DomainPattern),
+    Str(String),
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AwardDetails(grammar::AwardDetails);
+
+#[pymethods]
+impl AwardDetails {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(Self(grammar::AwardDetails::new()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<AwardDetails> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<AwardDetails> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &AwardDetails, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn award_id(&self) -> PyResult<Option<String>> {
+        Ok(self.0.id())
+    }
+
+    #[setter]
+    fn set_award_id(&mut self, award_id: &str) -> PyResult<()> {
+        self.0.set_id(award_id);
+        Ok(())
+    }
+
+    fn clear_award_id(&mut self) -> PyResult<()> {
+        self.0.clear_id();
+        Ok(())
+    }
+
+    #[getter]
+    fn link(&self) -> PyResult<Option<String>> {
+        Ok(self.0.link())
+    }
+
+    #[setter]
+    fn set_link(&mut self, link: &str) -> PyResult<()> {
+        self.0
+            .set_link(link)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn clear_link(&mut self) -> PyResult<()> {
+        self.0.clear_link();
+        Ok(())
+    }
+}
+
+impl From<grammar::AwardDetails> for AwardDetails {
+    fn from(award_details: grammar::AwardDetails) -> Self {
+        AwardDetails(award_details)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectTemplate(grammar::ProjectTemplate);
 
 #[pymethods]
@@ -3219,6 +3355,18 @@ impl ProjectDetails {
     #[new]
     fn new(details: &str) -> PyResult<Self> {
         match grammar::ProjectDetails::parse(details) {
+            Ok(project_details) => Ok(Self(project_details)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_json(&self) -> PyResult<String> {
+        Ok(self.0.to_json())
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match grammar::ProjectDetails::from_json(json) {
             Ok(project_details) => Ok(Self(project_details)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -3396,6 +3544,71 @@ impl ProjectDetails {
     fn clear_allocation(&mut self) -> PyResult<()> {
         self.0.clear_allocation();
         Ok(())
+    }
+
+    #[getter]
+    fn award(&self) -> PyResult<Option<AwardDetails>> {
+        Ok(self.0.award().map(|award| award.into()))
+    }
+
+    #[setter]
+    fn set_award(&mut self, award: Option<AwardDetails>) -> PyResult<()> {
+        if let Some(award) = award {
+            self.0.set_award(award.0);
+        } else {
+            self.0.clear_award();
+        }
+        Ok(())
+    }
+
+    fn clear_award(&mut self) -> PyResult<()> {
+        self.0.clear_award();
+        Ok(())
+    }
+
+    #[getter]
+    fn allowed_domains(&self) -> PyResult<Option<Vec<DomainPattern>>> {
+        Ok(self
+            .0
+            .allowed_domains()
+            .map(|domains| domains.iter().map(|d| d.clone().into()).collect()))
+    }
+
+    fn add_allowed_domain(&mut self, domain: DomainPatternOrStr) -> PyResult<()> {
+        let domain_pattern = match domain {
+            DomainPatternOrStr::Pattern(p) => p.0,
+            DomainPatternOrStr::Str(s) => grammar::DomainPattern::parse(&s)
+                .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))?,
+        };
+        self.0.add_allowed_domain(domain_pattern);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_allowed_domains(&mut self, domains: Option<Vec<DomainPatternOrStr>>) -> PyResult<()> {
+        if let Some(domains) = domains {
+            let parsed_domains: Result<Vec<grammar::DomainPattern>, PyErr> = domains
+                .into_iter()
+                .map(|d| match d {
+                    DomainPatternOrStr::Pattern(p) => Ok(p.0),
+                    DomainPatternOrStr::Str(s) => grammar::DomainPattern::parse(&s)
+                        .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                })
+                .collect();
+            self.0.set_allowed_domains(parsed_domains?);
+        } else {
+            self.0.clear_allowed_domains();
+        }
+        Ok(())
+    }
+
+    fn clear_allowed_domains(&mut self) -> PyResult<()> {
+        self.0.clear_allowed_domains();
+        Ok(())
+    }
+
+    fn is_domain_allowed(&self, domain: &str) -> PyResult<bool> {
+        Ok(self.0.is_domain_allowed(domain))
     }
 
     fn merge(&self, other: &ProjectDetails) -> PyResult<ProjectDetails> {
@@ -3626,6 +3839,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;
     m.add_class::<DailyProjectUsageReport>()?;
+    m.add_class::<DomainPattern>()?;
+    m.add_class::<AwardDetails>()?;
     m.add_class::<ProjectDetails>()?;
     m.add_class::<ProjectTemplate>()?;
 

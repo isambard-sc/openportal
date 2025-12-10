@@ -7,9 +7,11 @@ use crate::usagereport::Usage;
 
 use anyhow::Context;
 use chrono::{Datelike, Timelike};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::{hash::Hash, sync::Arc};
+use url::Url;
+use wildmatch::WildMatch;
 
 pub trait NamedType {
     fn type_name() -> &'static str;
@@ -1766,6 +1768,231 @@ where
     }
 }
 
+/// A domain pattern - this can be used to match domains that are allowed / denied
+/// Supports exact matches (e.g., "example.com") and wildcard matches (e.g., "*.example.com")
+/// Serializes to/from JSON as a plain string (e.g., "*.example.com")
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DomainPattern {
+    /// The pattern string to match the domain
+    /// e.g. "example.com" for exact match or "*.example.com" for wildcard match
+    pattern: String,
+}
+
+impl NamedType for DomainPattern {
+    fn type_name() -> &'static str {
+        "DomainPattern"
+    }
+}
+
+impl DomainPattern {
+    pub fn parse(pattern: &str) -> Result<Self, Error> {
+        // Validate the pattern
+        if pattern.is_empty() {
+            return Err(Error::Parse("Domain pattern cannot be empty".to_string()));
+        }
+
+        // Check if it's a wildcard pattern
+        if pattern.starts_with("*.") {
+            let domain_part = pattern
+                .strip_prefix("*.")
+                .ok_or_else(|| Error::Parse("Invalid wildcard pattern".to_string()))?;
+            if domain_part.is_empty() {
+                return Err(Error::Parse(
+                    "Wildcard pattern must have a domain after '*.'".to_string(),
+                ));
+            }
+            if domain_part.contains('*') {
+                return Err(Error::Parse(
+                    "Wildcard '*' can only appear at the start of the pattern".to_string(),
+                ));
+            }
+            Self::validate_domain_name(domain_part)?;
+        } else {
+            // Exact match pattern - no wildcards allowed
+            if pattern.contains('*') {
+                return Err(Error::Parse(
+                    "Wildcard '*' can only appear at the start as '*.'".to_string(),
+                ));
+            }
+            Self::validate_domain_name(pattern)?;
+        }
+
+        Ok(Self {
+            pattern: pattern.to_string(),
+        })
+    }
+
+    /// Validates that a domain name contains only valid characters
+    fn validate_domain_name(domain: &str) -> Result<(), Error> {
+        if domain.is_empty() {
+            return Err(Error::Parse("Domain name cannot be empty".to_string()));
+        }
+
+        // Domain names can contain letters, digits, hyphens, and dots
+        // Each label (part between dots) must start and end with alphanumeric
+        for label in domain.split('.') {
+            if label.is_empty() {
+                return Err(Error::Parse(
+                    "Domain name cannot have empty labels (e.g., '..', '.com')".to_string(),
+                ));
+            }
+
+            if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(Error::Parse(
+                    format!(
+                        "Domain label '{}' contains invalid characters (only letters, digits, and hyphens allowed)",
+                        label
+                    ),
+                ));
+            }
+
+            if label.starts_with('-') || label.ends_with('-') {
+                return Err(Error::Parse(format!(
+                    "Domain label '{}' cannot start or end with a hyphen",
+                    label
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn pattern(&self) -> String {
+        self.pattern.clone()
+    }
+
+    /// Tests if a concrete domain matches this pattern
+    /// - For exact patterns (e.g., "example.com"), only exact matches return true
+    /// - For wildcard patterns (e.g., "*.example.com"), matches any subdomain of example.com
+    pub fn matches(&self, domain: &str) -> bool {
+        // Use wildmatch for case-insensitive pattern matching
+        WildMatch::new(&self.pattern.to_lowercase()).matches(&domain.to_lowercase())
+    }
+}
+
+impl Serialize for DomainPattern {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize as a plain string
+        serializer.serialize_str(&self.pattern)
+    }
+}
+
+impl<'de> Deserialize<'de> for DomainPattern {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Deserialize from a string and validate it
+        let pattern = String::deserialize(deserializer)?;
+        DomainPattern::parse(&pattern).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Details about the award itself (e.g. the name, link)
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct AwardDetails {
+    /// The ID of the award
+    id: Option<String>,
+
+    /// The link to the award (must be a valid URL if provided)
+    link: Option<String>,
+}
+
+impl NamedType for AwardDetails {
+    fn type_name() -> &'static str {
+        "AwardDetails"
+    }
+}
+
+impl AwardDetails {
+    pub fn new() -> Self {
+        Self {
+            id: None,
+            link: None,
+        }
+    }
+
+    pub fn id(&self) -> Option<String> {
+        self.id.clone()
+    }
+
+    pub fn set_id(&mut self, id: &str) {
+        let id = id.trim();
+
+        if id.is_empty() {
+            self.id = None;
+        } else {
+            self.id = Some(id.to_string());
+        }
+    }
+
+    pub fn clear_id(&mut self) {
+        self.id = None;
+    }
+
+    pub fn link(&self) -> Option<String> {
+        self.link.clone()
+    }
+
+    pub fn set_link(&mut self, link: &str) -> Result<(), Error> {
+        let link = link.trim();
+
+        if link.is_empty() {
+            self.link = None;
+            Ok(())
+        } else {
+            // Validate that the link is a valid URL
+            Url::parse(link).map_err(|e| Error::Parse(
+                format!("Invalid URL for award link: {}", e),
+            ))?;
+            self.link = Some(link.to_string());
+            Ok(())
+        }
+    }
+
+    pub fn clear_link(&mut self) {
+        self.link = None;
+    }
+}
+
+impl std::fmt::Display for AwardDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).unwrap_or_default())
+    }
+}
+
+impl<'de> Deserialize<'de> for AwardDetails {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct AwardDetailsHelper {
+            id: Option<String>,
+            link: Option<String>,
+        }
+
+        let helper = AwardDetailsHelper::deserialize(deserializer)?;
+
+        // Validate the link if it's provided
+        if let Some(link) = &helper.link {
+            if !link.is_empty() {
+                Url::parse(link).map_err(|e| {
+                    serde::de::Error::custom(format!("Invalid URL for award link: {}", e))
+                })?;
+            }
+        }
+
+        Ok(AwardDetails {
+            id: helper.id,
+            link: helper.link,
+        })
+    }
+}
+
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -1803,6 +2030,16 @@ pub struct ProjectDetails {
 
     /// The allocation of resource for this project
     allocation: Option<Allocation>,
+
+    /// Details about the award associated with this project
+    award: Option<AwardDetails>,
+
+    /// The list of allowed domains for this project.
+    /// If this is None, then all domains are allowed.
+    /// If this is Some(vec![]), then no domains are allowed.
+    /// If this is Some(vec![...]), then only the domains that match
+    /// those in the list are allowed.
+    allowed_domains: Option<Vec<DomainPattern>>,
 }
 
 impl NamedType for ProjectDetails {
@@ -1822,6 +2059,8 @@ impl ProjectDetails {
             start_date: None,
             end_date: None,
             allocation: None,
+            award: None,
+            allowed_domains: None,
         }
     }
 
@@ -1989,10 +2228,62 @@ impl ProjectDetails {
         self.allocation = None;
     }
 
+    pub fn award(&self) -> Option<AwardDetails> {
+        self.award.clone()
+    }
+
+    pub fn set_award(&mut self, award: AwardDetails) {
+        self.award = Some(award);
+    }
+
+    pub fn clear_award(&mut self) {
+        self.award = None;
+    }
+
+    pub fn allowed_domains(&self) -> Option<Vec<DomainPattern>> {
+        self.allowed_domains.clone()
+    }
+
+    pub fn add_allowed_domain(&mut self, domain: DomainPattern) {
+        let domains = self.allowed_domains.get_or_insert_with(Vec::new);
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
+    }
+
+    pub fn set_allowed_domains(&mut self, domains: Vec<DomainPattern>) {
+        if domains.is_empty() {
+            self.allowed_domains = None;
+        } else {
+            self.allowed_domains = Some(domains);
+        }
+    }
+
+    pub fn clear_allowed_domains(&mut self) {
+        self.allowed_domains = None;
+    }
+
+    pub fn is_domain_allowed(&self, domain: &str) -> bool {
+        if let Some(allowed_domains) = &self.allowed_domains {
+            if allowed_domains.is_empty() {
+                return false;
+            }
+
+            for d in allowed_domains {
+                if d.matches(domain) {
+                    return true;
+                }
+            }
+
+            false
+        } else {
+            true
+        }
+    }
+
     pub fn merge(&self, other: &ProjectDetails) -> Result<ProjectDetails, Error> {
         let mut merged = self.clone();
 
-        // convert the above python into rust
         if merged.template.is_none() {
             merged.template = other.template.clone();
         } else if other.template.is_some() && merged.template != other.template {
@@ -2045,6 +2336,27 @@ impl ProjectDetails {
 
         if other.key.is_some() {
             merged.key = other.key.clone();
+        }
+
+        if other.award.is_some() {
+            merged.award = other.award.clone();
+        }
+
+        if other.allowed_domains.is_some() {
+            if self.allowed_domains.is_none() {
+                merged.allowed_domains = other.allowed_domains.clone();
+            } else {
+                let mut domains = self.allowed_domains.clone().unwrap_or_default();
+                let other_domains = other.allowed_domains.clone().unwrap_or_default();
+
+                for domain in other_domains {
+                    if !domains.contains(&domain) {
+                        domains.push(domain);
+                    }
+                }
+
+                merged.allowed_domains = Some(domains);
+            }
         }
 
         Ok(merged)

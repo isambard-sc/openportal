@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Added AwardDetails and DomainPattern types, with Python bindings.
+  These are used in ProjectDetails to provide richer information about
+  a project's associated award, and about which email domains are
+  allowed to be associated with a project.
+
 ## [0.21.1] - 2025-12-02
 
 ### Fixed

@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Added billing TRES as a value that can be used when calculating node
+  hours. This will be the only calculation method if cpu, gpu and memory
+  are not specified when creating the default node object.
+
+- Added components to the usage reports. The cpu, gpu, memory and
+  billing components are now also tracked separately and available
+  in all of the usage reports.
+
 - Added AwardDetails and DomainPattern types, with Python bindings.
   These are used in ProjectDetails to provide richer information about
   a project's associated award, and about which email domains are

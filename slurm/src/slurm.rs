@@ -3137,6 +3137,22 @@ impl SlurmJob {
     pub fn billed_node_seconds(&self) -> u64 {
         (self.duration().num_seconds() as f64 * self.billed_node_fraction()) as u64
     }
+
+    pub fn cpu_seconds(&self) -> u64 {
+        self.cpus * self.duration().num_seconds() as u64
+    }
+
+    pub fn gpu_seconds(&self) -> u64 {
+        self.gpus * self.duration().num_seconds() as u64
+    }
+
+    pub fn memory_seconds(&self) -> u64 {
+        self.memory * self.duration().num_seconds() as u64
+    }
+
+    pub fn billing_seconds(&self) -> u64 {
+        self.billing * self.duration().num_seconds() as u64
+    }
 }
 
 pub async fn connect(

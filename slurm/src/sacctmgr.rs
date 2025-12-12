@@ -1175,6 +1175,20 @@ async fn get_daily_report(
             for job in jobs {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                // also add in all of the components
+                daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+                daily_report.add_component_usage(
+                    "memory",
+                    job.user(),
+                    Usage::new(job.memory_seconds()),
+                );
+                daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+                daily_report.add_component_usage(
+                    "billing",
+                    job.user(),
+                    Usage::new(job.billing_seconds()),
+                );
             }
 
             // check that the total usage in the daily report matches the total usage calculated manually

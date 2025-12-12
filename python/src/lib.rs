@@ -1788,8 +1788,14 @@ impl Node {
     }
 
     #[staticmethod]
-    fn construct(cpus: u32, cores_per_cpu: u32, gpus: u32, memory_mb: u32) -> PyResult<Self> {
-        Ok(grammar::Node::construct(cpus, cores_per_cpu, gpus, memory_mb).into())
+    fn construct(
+        cpus: u32,
+        cores_per_cpu: u32,
+        gpus: u32,
+        memory_mb: u32,
+        billing: u32,
+    ) -> PyResult<Self> {
+        Ok(grammar::Node::construct(cpus, cores_per_cpu, gpus, memory_mb, billing).into())
     }
 
     #[getter]
@@ -1822,6 +1828,11 @@ impl Node {
         Ok(self.0.memory_gb())
     }
 
+    #[getter]
+    fn billing(&self) -> PyResult<u32> {
+        Ok(self.0.billing())
+    }
+
     #[setter]
     fn set_cpus(&mut self, cpus: u32) -> PyResult<()> {
         self.0.set_cpus(cpus);
@@ -1843,6 +1854,12 @@ impl Node {
     #[setter]
     fn set_memory_mb(&mut self, memory_mb: u32) -> PyResult<()> {
         self.0.set_memory_mb(memory_mb);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_billing(&mut self, billing: u32) -> PyResult<()> {
+        self.0.set_billing(billing);
         Ok(())
     }
 
@@ -1953,6 +1970,11 @@ impl Allocation {
         Ok(self.0.is_gb_hours())
     }
 
+    #[getter]
+    fn is_billing_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_billing_hours())
+    }
+
     fn to_node_hours(&self, node: &Node) -> PyResult<Usage> {
         match self.0.to_node_hours(&node.0) {
             Ok(usage) => Ok(usage.into()),
@@ -1983,6 +2005,13 @@ impl Allocation {
 
     fn to_gb_hours(&self, node: &Node) -> PyResult<Usage> {
         match self.0.to_gb_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_billing_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_billing_hours(&node.0) {
             Ok(usage) => Ok(usage.into()),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -2023,6 +2052,14 @@ impl Allocation {
     #[staticmethod]
     fn from_gb_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
         match grammar::Allocation::from_gb_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_billing_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_billing_hours(&usage.0, &node.0) {
             Ok(allocation) => Ok(allocation.into()),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -2286,8 +2323,17 @@ impl UsageReport {
         Ok(self.0.projects().iter().map(|p| p.clone().into()).collect())
     }
 
+    #[getter]
+    fn components(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.components().iter().map(|c| c.to_string()).collect())
+    }
+
     fn get_report(&self, project: &ProjectIdentifier) -> PyResult<ProjectUsageReport> {
         Ok(self.0.get_report(&project.0).into())
+    }
+
+    fn get_component(&self, component: &str) -> PyResult<UsageReport> {
+        Ok(self.0.get_component(component).into())
     }
 
     #[getter]
@@ -2399,6 +2445,11 @@ impl ProjectUsageReport {
     }
 
     #[getter]
+    fn components(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.components().iter().map(|c| c.to_string()).collect())
+    }
+
+    #[getter]
     fn project(&self) -> PyResult<ProjectIdentifier> {
         Ok(self.0.project().clone().into())
     }
@@ -2444,6 +2495,10 @@ impl ProjectUsageReport {
 
     fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectUsageReport> {
         Ok(self.0.get_report(&grammar::Date::from_chrono(&date)).into())
+    }
+
+    fn get_component(&self, component: &str) -> PyResult<ProjectUsageReport> {
+        Ok(self.0.get_component(component).into())
     }
 
     #[staticmethod]
@@ -2589,6 +2644,11 @@ impl DailyProjectUsageReport {
     }
 
     #[getter]
+    fn components(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.components().clone())
+    }
+
+    #[getter]
     fn total_usage(&self) -> PyResult<Usage> {
         Ok(self.0.total_usage().into())
     }
@@ -2603,6 +2663,16 @@ impl DailyProjectUsageReport {
         Ok(())
     }
 
+    fn add_component_usage(&mut self, component: &str, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.add_component_usage(component, user, usage.0);
+        Ok(())
+    }
+
+    fn add_unattributed_component_usage(&mut self, component: &str, usage: &Usage) -> PyResult<()> {
+        self.0.add_unattributed_component_usage(component, usage.0);
+        Ok(())
+    }
+
     fn set_usage(&mut self, user: &str, usage: &Usage) -> PyResult<()> {
         self.0.set_usage(user, usage.0);
         Ok(())
@@ -2613,9 +2683,23 @@ impl DailyProjectUsageReport {
         Ok(())
     }
 
+    fn set_component_usage(&mut self, component: &str, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.set_component_usage(component, user, usage.0);
+        Ok(())
+    }
+
+    fn set_unattributed_component_usage(&mut self, component: &str, usage: &Usage) -> PyResult<()> {
+        self.0.set_unattributed_component_usage(component, usage.0);
+        Ok(())
+    }
+
     fn set_complete(&mut self) -> PyResult<()> {
         self.0.set_complete();
         Ok(())
+    }
+
+    fn get_component(&self, component: &str) -> PyResult<DailyProjectUsageReport> {
+        Ok(self.0.get_component(component).into())
     }
 
     #[getter]

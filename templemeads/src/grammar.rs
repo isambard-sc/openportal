@@ -1445,17 +1445,21 @@ pub struct Node {
 
     /// The amount of memory in the node in MB
     memory_mb: u32,
+
+    /// The total billing value of one node in billing units
+    billing: u32,
 }
 
 impl std::fmt::Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Node(cpus: {}, cores_per_cpu: {}, gpus: {}, memory: {} GB)",
+            "Node(cpus: {}, cores_per_cpu: {}, gpus: {}, memory: {} GB, billing: {})",
             self.cpus,
             self.cores_per_cpu,
             self.gpus,
-            self.memory_gb()
+            self.memory_gb(),
+            self.billing
         )
     }
 }
@@ -1467,15 +1471,23 @@ impl Node {
             cores_per_cpu: 0,
             gpus: 0,
             memory_mb: 0,
+            billing: 0,
         }
     }
 
-    pub fn construct(cpus: u32, cores_per_cpu: u32, gpus: u32, memory_mb: u32) -> Self {
+    pub fn construct(
+        cpus: u32,
+        cores_per_cpu: u32,
+        gpus: u32,
+        memory_mb: u32,
+        billing: u32,
+    ) -> Self {
         Self {
             cpus,
             cores_per_cpu,
             gpus,
             memory_mb,
+            billing,
         }
     }
 
@@ -1503,6 +1515,10 @@ impl Node {
         self.memory_mb as f64 / 1024.0
     }
 
+    pub fn billing(&self) -> u32 {
+        self.billing
+    }
+
     pub fn set_cpus(&mut self, cpus: u32) {
         self.cpus = cpus;
     }
@@ -1517,6 +1533,10 @@ impl Node {
 
     pub fn set_memory_mb(&mut self, memory_mb: u32) {
         self.memory_mb = memory_mb;
+    }
+
+    pub fn set_billing(&mut self, billing: u32) {
+        self.billing = billing;
     }
 }
 
@@ -1560,6 +1580,9 @@ impl Allocation {
             return "COREHR".to_string();
         } else if canonical == "gb hours" || canonical == "gb hour" || canonical == "gbhr" {
             return "GBHR".to_string();
+        } else if canonical == "billing hours" || canonical == "billing hour" || canonical == "bhr"
+        {
+            return "BHR".to_string();
         }
 
         // Add more canonicalizations as needed
@@ -1698,6 +1721,14 @@ impl Allocation {
     pub fn is_gb_hours(&self) -> bool {
         if let Some(units) = &self.units {
             units == "GBHR"
+        } else {
+            false
+        }
+    }
+
+    pub fn is_billing_hours(&self) -> bool {
+        if let Some(units) = &self.units {
+            units == "BHR"
         } else {
             false
         }
@@ -1945,9 +1976,8 @@ impl AwardDetails {
             Ok(())
         } else {
             // Validate that the link is a valid URL
-            Url::parse(link).map_err(|e| Error::Parse(
-                format!("Invalid URL for award link: {}", e),
-            ))?;
+            Url::parse(link)
+                .map_err(|e| Error::Parse(format!("Invalid URL for award link: {}", e)))?;
             self.link = Some(link.to_string());
             Ok(())
         }

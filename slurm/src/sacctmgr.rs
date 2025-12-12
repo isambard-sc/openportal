@@ -1460,6 +1460,26 @@ pub async fn get_limit(
         }
     }
 
+    if node.has_billing() && node.billing() > 0 {
+        if let Some(billing_limit) = slurm_limit.billing_limit() {
+            let check = node.billing() * project_limit.seconds();
+            if check != billing_limit.seconds() {
+                if check != 0 {
+                    tracing::warn!(
+                        "Billing limit for account {} does not match: {} != {}",
+                        account.name(),
+                        check,
+                        billing_limit.seconds()
+                    );
+                }
+
+                if actual_slurm_limit.is_none() {
+                    actual_slurm_limit = Some(Usage::new(billing_limit.seconds() / node.billing()));
+                }
+            }
+        }
+    }
+
     if let Some(actual_slurm_limit) = actual_slurm_limit {
         // we need to set this to the actual slurm limit
         let mut account = account.clone();
@@ -1515,6 +1535,13 @@ pub async fn set_limit(
                 tres.push(format!(
                     "mem={}",
                     (node.mem() as f64 * limit.minutes()) as u64
+                ));
+            }
+
+            if node.has_billing() {
+                tres.push(format!(
+                    "billing={}",
+                    (node.billing() as f64 * limit.minutes()) as u64
                 ));
             }
 

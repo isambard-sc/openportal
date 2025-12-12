@@ -1823,18 +1823,20 @@ pub struct SlurmLimit {
     cpu_limit: Option<Usage>,
     gpu_limit: Option<Usage>,
     mem_limit: Option<Usage>,
+    billing_limit: Option<Usage>,
 }
 
 impl Display for SlurmLimit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmLimit {{ account: {}, cluster: {}, cpu: {:?}, gpu: {:?}, mem: {:?} }}",
+            "SlurmLimit {{ account: {}, cluster: {}, cpu: {:?}, gpu: {:?}, mem: {:?}, billing: {:?} }}",
             self.account(),
             self.cluster(),
             self.cpu_limit(),
             self.gpu_limit(),
-            self.mem_limit()
+            self.mem_limit(),
+            self.billing_limit()
         )
     }
 }
@@ -1914,6 +1916,7 @@ impl SlurmLimit {
         let mut cpu_limit = None;
         let mut gpu_limit = None;
         let mut mem_limit = None;
+        let mut billing_limit = None;
 
         for limit in limits {
             let typ = match limit.get("type") {
@@ -1972,6 +1975,7 @@ impl SlurmLimit {
                         continue;
                     }
                 },
+                "billing" => billing_limit = Some(Usage::new(count * 60)),
                 _ => {
                     tracing::warn!("Unknown limit type: {}", typ);
                     continue;
@@ -1985,6 +1989,7 @@ impl SlurmLimit {
             cpu_limit,
             gpu_limit,
             mem_limit,
+            billing_limit,
         })
     }
 
@@ -2006,6 +2011,10 @@ impl SlurmLimit {
 
     pub fn mem_limit(&self) -> Option<Usage> {
         self.mem_limit
+    }
+
+    pub fn billing_limit(&self) -> Option<Usage> {
+        self.billing_limit
     }
 }
 
@@ -2265,23 +2274,30 @@ pub struct SlurmNode {
     cpus: u64,
     gpus: u64,
     mem: u64,
+    billing: u64,
 }
 
 impl Display for SlurmNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmNode {{ cpus: {}, gpus: {}, mem: {} }}",
+            "SlurmNode {{ cpus: {}, gpus: {}, mem: {}, billing: {} }}",
             self.cpus(),
             self.gpus(),
-            self.mem()
+            self.mem(),
+            self.billing()
         )
     }
 }
 
 impl SlurmNode {
-    fn new(cpus: u64, gpus: u64, mem: u64) -> Self {
-        SlurmNode { cpus, gpus, mem }
+    fn new(cpus: u64, gpus: u64, mem: u64, billing: u64) -> Self {
+        SlurmNode {
+            cpus,
+            gpus,
+            mem,
+            billing,
+        }
     }
 
     pub fn construct(value: &serde_json::Value) -> Result<Self, Error> {
@@ -2324,7 +2340,20 @@ impl SlurmNode {
             None => 0,
         };
 
-        Ok(SlurmNode::new(cpus, gpus, mem))
+        let billing = match value.get("billing") {
+            Some(billing) => match billing.as_u64() {
+                Some(billing) => billing,
+                None => {
+                    tracing::warn!("Could not get billing as u64 from node: {:?}", billing);
+                    return Err(Error::Call(
+                        "Could not get billing as u64 from node".to_string(),
+                    ));
+                }
+            },
+            None => 0,
+        };
+
+        Ok(SlurmNode::new(cpus, gpus, mem, billing))
     }
 
     pub fn cpus(&self) -> u64 {
@@ -2339,6 +2368,10 @@ impl SlurmNode {
         self.mem
     }
 
+    pub fn billing(&self) -> u64 {
+        self.billing
+    }
+
     pub fn has_cpus(&self) -> bool {
         self.cpus > 0
     }
@@ -2349,6 +2382,10 @@ impl SlurmNode {
 
     pub fn has_mem(&self) -> bool {
         self.mem > 0
+    }
+
+    pub fn has_billing(&self) -> bool {
+        self.billing > 0
     }
 }
 
@@ -3057,8 +3094,12 @@ impl SlurmJob {
         let cpu_fraction = get_fraction(self.requested_cpus, self.node_info.cpus());
         let gpu_fraction = get_fraction(self.requested_gpus, self.node_info.gpus());
         let memory_fraction = get_fraction(self.requested_memory, self.node_info.mem());
+        let billing_fraction = get_fraction(self.requested_billing, self.node_info.billing());
 
-        cpu_fraction.max(gpu_fraction).max(memory_fraction)
+        cpu_fraction
+            .max(gpu_fraction)
+            .max(memory_fraction)
+            .max(billing_fraction)
     }
 
     pub fn node_fraction(&self) -> f64 {
@@ -3066,8 +3107,12 @@ impl SlurmJob {
         let cpu_fraction = get_fraction(self.cpus, self.node_info.cpus());
         let gpu_fraction = get_fraction(self.gpus, self.node_info.gpus());
         let memory_fraction = get_fraction(self.memory, self.node_info.mem());
+        let billing_fraction = get_fraction(self.billing, self.node_info.billing());
 
-        cpu_fraction.max(gpu_fraction).max(memory_fraction)
+        cpu_fraction
+            .max(gpu_fraction)
+            .max(memory_fraction)
+            .max(billing_fraction)
     }
 
     pub fn billed_node_fraction(&self) -> f64 {

@@ -3,6 +3,7 @@
 
 use crate::destination::{Destination, Destinations};
 use crate::error::Error;
+use crate::storage::{StorageQuota, StorageVolume};
 use crate::usagereport::Usage;
 
 use anyhow::Context;
@@ -2473,6 +2474,24 @@ pub enum Instruction {
     /// An instruction to set the limit of a local project
     SetLocalLimit(ProjectMapping, Usage),
 
+    /// An instruction to set the quota of a local project on a volume
+    SetLocalProjectQuota(ProjectMapping, StorageVolume, StorageQuota),
+
+    /// An instruction to get the quota of a local project on a volume
+    GetLocalProjectQuota(ProjectMapping, StorageVolume),
+
+    /// An instruction to get all quotas of a local project
+    GetLocalProjectQuotas(ProjectMapping),
+
+    /// An instruction to set the quota of a local user on a volume
+    SetLocalUserQuota(UserMapping, StorageVolume, StorageQuota),
+
+    /// An instruction to get the quota of a local user on a volume
+    GetLocalUserQuota(UserMapping, StorageVolume),
+
+    /// An instruction to get all quotas of a local user
+    GetLocalUserQuotas(UserMapping),
+
     /// Return the home directory of a local user
     /// (note this does not guarantee the directory exists)
     GetLocalHomeDir(UserMapping),
@@ -2498,6 +2517,24 @@ pub enum Instruction {
 
     /// An instruction to get the usage limit for a project
     GetLimit(ProjectIdentifier),
+
+    /// An instruction to set a storage quota for a project on a volume
+    SetProjectQuota(ProjectIdentifier, StorageVolume, StorageQuota),
+
+    /// An instruction to get the storage quota for a project on a volume
+    GetProjectQuota(ProjectIdentifier, StorageVolume),
+
+    /// An instruction to get all of the storage quotas for a project
+    GetProjectQuotas(ProjectIdentifier),
+
+    /// An instruction to set a storage quota for a user on a volume
+    SetUserQuota(UserIdentifier, StorageVolume, StorageQuota),
+
+    /// An instruction to get the storage quota for a user on a volume
+    GetUserQuota(UserIdentifier, StorageVolume),
+
+    /// An instruction to get all of the storage quotas for a user
+    GetUserQuotas(UserIdentifier),
 
     /// An instruction to sync the list of offerings provided
     /// by an agent
@@ -3161,6 +3198,12 @@ impl Instruction {
             Instruction::GetLocalUsageReport(_, _) => "get_local_usage_report".to_string(),
             Instruction::GetLocalLimit(_) => "get_local_limit".to_string(),
             Instruction::SetLocalLimit(_, _) => "set_local_limit".to_string(),
+            Instruction::GetLocalProjectQuota(_, _) => "get_local_project_quota".to_string(),
+            Instruction::SetLocalProjectQuota(_, _, _) => "set_local_project_quota".to_string(),
+            Instruction::GetLocalProjectQuotas(_) => "get_local_project_quotas".to_string(),
+            Instruction::GetLocalUserQuota(_, _) => "get_local_user_quota".to_string(),
+            Instruction::SetLocalUserQuota(_, _, _) => "set_local_user_quota".to_string(),
+            Instruction::GetLocalUserQuotas(_) => "get_local_user_quotas".to_string(),
             Instruction::GetLocalHomeDir(_) => "get_local_home_dir".to_string(),
             Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
             Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
@@ -3168,6 +3211,12 @@ impl Instruction {
             Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
             Instruction::SetLimit(_, _) => "set_limit".to_string(),
             Instruction::GetLimit(_) => "get_limit".to_string(),
+            Instruction::GetProjectQuota(_, _) => "get_project_quota".to_string(),
+            Instruction::SetProjectQuota(_, _, _) => "set_project_quota".to_string(),
+            Instruction::GetProjectQuotas(_) => "get_project_quotas".to_string(),
+            Instruction::GetUserQuota(_, _) => "get_user_quota".to_string(),
+            Instruction::SetUserQuota(_, _, _) => "set_user_quota".to_string(),
+            Instruction::GetUserQuotas(_) => "get_user_quotas".to_string(),
             Instruction::IsProtectedUser(_) => "is_protected_user".to_string(),
             Instruction::SyncOfferings(_) => "sync_offerings".to_string(),
             Instruction::AddOfferings(_) => "add_offerings".to_string(),
@@ -3209,6 +3258,20 @@ impl Instruction {
             Instruction::SetLocalLimit(mapping, usage) => {
                 vec![mapping.to_string(), usage.seconds().to_string()]
             }
+            Instruction::GetLocalProjectQuota(mapping, volume) => {
+                vec![mapping.to_string(), volume.to_string()]
+            }
+            Instruction::SetLocalProjectQuota(mapping, volume, quota) => {
+                vec![mapping.to_string(), volume.to_string(), quota.to_string()]
+            }
+            Instruction::GetLocalProjectQuotas(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalUserQuota(mapping, volume) => {
+                vec![mapping.to_string(), volume.to_string()]
+            }
+            Instruction::SetLocalUserQuota(mapping, volume, quota) => {
+                vec![mapping.to_string(), volume.to_string(), quota.to_string()]
+            }
+            Instruction::GetLocalUserQuotas(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalHomeDir(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalProjectDirs(mapping) => vec![mapping.to_string()],
             Instruction::UpdateHomeDir(user, homedir) => {
@@ -3224,6 +3287,20 @@ impl Instruction {
                 vec![project.to_string(), usage.seconds().to_string()]
             }
             Instruction::GetLimit(project) => vec![project.to_string()],
+            Instruction::GetProjectQuota(project, volume) => {
+                vec![project.to_string(), volume.to_string()]
+            }
+            Instruction::SetProjectQuota(project, volume, quota) => {
+                vec![project.to_string(), volume.to_string(), quota.to_string()]
+            }
+            Instruction::GetProjectQuotas(project) => vec![project.to_string()],
+            Instruction::GetUserQuota(user, volume) => {
+                vec![user.to_string(), volume.to_string()]
+            }
+            Instruction::SetUserQuota(user, volume, quota) => {
+                vec![user.to_string(), volume.to_string(), quota.to_string()]
+            }
+            Instruction::GetUserQuotas(user) => vec![user.to_string()],
             Instruction::IsProtectedUser(user) => vec![user.to_string()],
             Instruction::SyncOfferings(offerings) => vec![offerings.to_string()],
             Instruction::AddOfferings(offerings) => vec![offerings.to_string()],
@@ -3279,6 +3356,38 @@ impl std::fmt::Display for Instruction {
             Instruction::SetLimit(project, usage) => {
                 write!(f, "set_limit {} {}", project, usage.seconds())
             }
+            Instruction::GetLocalProjectQuota(mapping, volume) => {
+                write!(f, "get_local_project_quota {} {}", mapping, volume)
+            }
+            Instruction::SetLocalProjectQuota(mapping, volume, quota) => {
+                write!(f, "set_local_project_quota {} {} {}", mapping, volume, quota)
+            }
+            Instruction::GetLocalProjectQuotas(mapping) => {
+                write!(f, "get_local_project_quotas {}", mapping)
+            }
+            Instruction::GetLocalUserQuota(mapping, volume) => {
+                write!(f, "get_local_user_quota {} {}", mapping, volume)
+            }
+            Instruction::SetLocalUserQuota(mapping, volume, quota) => {
+                write!(f, "set_local_user_quota {} {} {}", mapping, volume, quota)
+            }
+            Instruction::GetLocalUserQuotas(mapping) => {
+                write!(f, "get_local_user_quotas {}", mapping)
+            }
+            Instruction::GetProjectQuota(project, volume) => {
+                write!(f, "get_project_quota {} {}", project, volume)
+            }
+            Instruction::SetProjectQuota(project, volume, quota) => {
+                write!(f, "set_project_quota {} {} {}", project, volume, quota)
+            }
+            Instruction::GetProjectQuotas(project) => write!(f, "get_project_quotas {}", project),
+            Instruction::GetUserQuota(user, volume) => {
+                write!(f, "get_user_quota {} {}", user, volume)
+            }
+            Instruction::SetUserQuota(user, volume, quota) => {
+                write!(f, "set_user_quota {} {} {}", user, volume, quota)
+            }
+            Instruction::GetUserQuotas(user) => write!(f, "get_user_quotas {}", user),
             Instruction::GetLimit(project) => write!(f, "get_limit {}", project),
             Instruction::IsProtectedUser(user) => write!(f, "is_protected_user {}", user),
             Instruction::GetHomeDir(user) => write!(f, "get_home_dir {}", user),

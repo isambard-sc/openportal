@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use std::collections::HashMap;
 
 use templemeads::agent;
 use templemeads::agent::instance::{process_args, run, Defaults};
@@ -9,13 +10,15 @@ use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, GetHomeDir, GetLimit, GetLocalHomeDir, GetLocalProjectDirs,
-    GetProjectDirs, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
-    GetUserMapping, GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit,
+    GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects,
+    GetUsageReport, GetUsageReports, GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers,
+    IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
+use templemeads::storage::{StorageQuota, StorageVolume};
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
 
@@ -225,6 +228,30 @@ async fn main() -> Result<()> {
                 SetLimit(project, limit) => {
                     let limit = set_project_limit(me.name(), &project, limit).await?;
                     job.completed(limit)
+                }
+                GetProjectQuota(project, volume) => {
+                    let quota = get_project_quota(me.name(), &project, &volume).await?;
+                    job.completed(quota)
+                }
+                SetProjectQuota(project, volume, quota) => {
+                    let quota = set_project_quota(me.name(), &project, &volume, &quota).await?;
+                    job.completed(quota)
+                }
+                GetProjectQuotas(project) => {
+                    let quotas = get_project_quotas(me.name(), &project).await?;
+                    job.completed(quotas)
+                }
+                GetUserQuota(user, volume) => {
+                    let quota = get_user_quota(me.name(), &user, &volume).await?;
+                    job.completed(quota)
+                }
+                SetUserQuota(user, volume, quota) => {
+                    let quota = set_user_quota(me.name(), &user, &volume, &quota).await?;
+                    job.completed(quota)
+                }
+                GetUserQuotas(user) => {
+                    let quotas = get_user_quotas(me.name(), &user).await?;
+                    job.completed(quotas)
                 }
                 GetHomeDir(user) => {
                     let mapping = get_user_mapping(me.name(), &user).await?;
@@ -1203,6 +1230,298 @@ pub async fn set_project_limit(
     };
 
     Ok(limit)
+}
+
+async fn set_project_quota(
+    me: &str,
+    project: &ProjectIdentifier,
+    volume: &StorageVolume,
+    quota: &StorageQuota,
+) -> Result<StorageQuota, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to set the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} set_local_project_quota {} {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume,
+            quota
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<StorageQuota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!(
+                "Error setting quota for project {} on volume {}",
+                project,
+                volume
+            );
+            Err(Error::Call(format!(
+                "Error setting quota for project {} on volume {}",
+                project, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_project_quota(
+    me: &str,
+    project: &ProjectIdentifier,
+    volume: &StorageVolume,
+) -> Result<StorageQuota, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_project_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<StorageQuota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::warn!(
+                "No quota found for project {} on volume {}",
+                project,
+                volume
+            );
+            Err(Error::NotFound(format!(
+                "No quota found for project {} on volume {}",
+                project, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_project_quotas(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<HashMap<StorageVolume, StorageQuota>, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_project_quotas {}",
+            me,
+            filesystem.name(),
+            mapping
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job
+        .wait()
+        .await?
+        .result::<HashMap<StorageVolume, StorageQuota>>()
+    {
+        Ok(Some(quotas)) => Ok(quotas),
+        Ok(None) => {
+            tracing::warn!("No quotas found for project {}", project);
+            Ok(HashMap::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn set_user_quota(
+    me: &str,
+    user: &UserIdentifier,
+    volume: &StorageVolume,
+    quota: &StorageQuota,
+) -> Result<StorageQuota, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to set the user quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} set_local_user_quota {} {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume,
+            quota
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<StorageQuota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!("Error setting quota for user {} on volume {}", user, volume);
+            Err(Error::Call(format!(
+                "Error setting quota for user {} on volume {}",
+                user, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_user_quota(
+    me: &str,
+    user: &UserIdentifier,
+    volume: &StorageVolume,
+) -> Result<StorageQuota, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the user quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_user_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<StorageQuota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::warn!("No quota found for user {} on volume {}", user, volume);
+            Err(Error::NotFound(format!(
+                "No quota found for user {} on volume {}",
+                user, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_user_quotas(
+    me: &str,
+    user: &UserIdentifier,
+) -> Result<HashMap<StorageVolume, StorageQuota>, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the user quotas
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_user_quotas {}",
+            me,
+            filesystem.name(),
+            mapping
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quotas
+    match job
+        .wait()
+        .await?
+        .result::<HashMap<StorageVolume, StorageQuota>>()
+    {
+        Ok(Some(quotas)) => Ok(quotas),
+        Ok(None) => {
+            tracing::warn!("No quotas found for user {}", user);
+            Ok(HashMap::new())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 async fn is_protected_user(me: &str, user: &UserIdentifier) -> Result<bool, Error> {

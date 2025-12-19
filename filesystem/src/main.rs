@@ -7,8 +7,9 @@ use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, GetLocalHomeDir, GetLocalProjectDirs, RemoveLocalProject,
-    RemoveLocalUser,
+    AddLocalProject, AddLocalUser, GetLocalHomeDir, GetLocalProjectDirs, GetLocalProjectQuota,
+    GetLocalProjectQuotas, GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject,
+    RemoveLocalUser, SetLocalProjectQuota, SetLocalUserQuota,
 };
 use templemeads::grammar::ProjectMapping;
 use templemeads::job::{Envelope, Job};
@@ -169,6 +170,30 @@ async fn main() -> Result<()> {
                 GetLocalProjectDirs(mapping) => {
                     let project_dirs = get_project_dirs_and_links(&mapping).await?;
                     job.completed(project_dirs)
+                },
+                SetLocalProjectQuota(mapping, volume, quota) => {
+                    let quota = set_project_quota(&mapping, &volume, &quota).await?;
+                    job.completed(quota)
+                },
+                GetLocalProjectQuota(mapping, volume) => {
+                    let quota = get_project_quota(&mapping, &volume).await?;
+                    job.completed(quota)
+                },
+                GetLocalProjectQuotas(mapping) => {
+                    let quotas = get_project_quotas(&mapping).await?;
+                    job.completed(quotas)
+                },
+                SetLocalUserQuota(mapping, volume, quota) => {
+                    let quota = set_user_quota(&mapping, &volume, &quota).await?;
+                    job.completed(quota)
+                },
+                GetLocalUserQuota(mapping, volume) => {
+                    let quota = get_user_quota(&mapping, &volume).await?;
+                    job.completed(quota)
+                },
+                GetLocalUserQuotas(mapping) => {
+                    let quotas = get_user_quotas(&mapping).await?;
+                    job.completed(quotas)
                 },
                 _ => {
                     Err(Error::InvalidInstruction(

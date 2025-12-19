@@ -37,6 +37,7 @@ pub mod health;
 pub mod job;
 pub mod runnable;
 pub mod state;
+pub mod storage;
 pub mod usagereport;
 
 pub mod server {

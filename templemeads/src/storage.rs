@@ -45,33 +45,33 @@ impl NamedType for Vec<QuotaLimit> {
     }
 }
 
-impl NamedType for StorageQuota {
+impl NamedType for Quota {
     fn type_name() -> &'static str {
-        "StorageQuota"
+        "Quota"
     }
 }
 
-impl NamedType for Vec<StorageQuota> {
+impl NamedType for Vec<Quota> {
     fn type_name() -> &'static str {
-        "Vec<StorageQuota>"
+        "Vec<Quota>"
     }
 }
 
-impl NamedType for StorageVolume {
+impl NamedType for Volume {
     fn type_name() -> &'static str {
-        "StorageVolume"
+        "Volume"
     }
 }
 
-impl NamedType for Vec<StorageVolume> {
+impl NamedType for Vec<Volume> {
     fn type_name() -> &'static str {
-        "Vec<StorageVolume>"
+        "Vec<Volume>"
     }
 }
 
-impl NamedType for HashMap<StorageVolume, StorageQuota> {
+impl NamedType for HashMap<Volume, Quota> {
     fn type_name() -> &'static str {
-        "HashMap<StorageVolume, StorageQuota>"
+        "HashMap<Volume, Quota>"
     }
 }
 
@@ -164,7 +164,10 @@ impl std::fmt::Display for StorageSize {
             1_073_741_825..=1_099_511_627_776 => {
                 write!(f, "{:.2} GB", self.bytes as f64 / 1_073_741_824.0)
             }
-            _ => write!(f, "{:.2} TB", self.bytes as f64 / 1_099_511_627_776.0),
+            1_099_511_627_777..=1_125_899_906_842_624 => {
+                write!(f, "{:.2} TB", self.bytes as f64 / 1_099_511_627_776.0)
+            }
+            _ => write!(f, "{:.2} PB", self.bytes as f64 / 1_125_899_906_842_624.0),
         }
     }
 }
@@ -178,17 +181,19 @@ impl StorageSize {
         self.bytes
     }
 
-    pub fn from_kilobytes(kb: u64) -> Self {
-        Self { bytes: kb * 1024 }
+    pub fn from_kilobytes(kb: f64) -> Self {
+        Self {
+            bytes: (kb * 1024.0) as u64,
+        }
     }
 
     pub fn as_kilobytes(&self) -> f64 {
         self.bytes as f64 / 1024.0
     }
 
-    pub fn from_megabytes(mb: u64) -> Self {
+    pub fn from_megabytes(mb: f64) -> Self {
         Self {
-            bytes: mb * 1_048_576,
+            bytes: (mb * 1_048_576.0) as u64,
         }
     }
 
@@ -196,9 +201,9 @@ impl StorageSize {
         self.bytes as f64 / 1_048_576.0
     }
 
-    pub fn from_gigabytes(gb: u64) -> Self {
+    pub fn from_gigabytes(gb: f64) -> Self {
         Self {
-            bytes: gb * 1_073_741_824,
+            bytes: (gb * 1_073_741_824.0) as u64,
         }
     }
 
@@ -206,14 +211,24 @@ impl StorageSize {
         self.bytes as f64 / 1_073_741_824.0
     }
 
-    pub fn from_terabytes(tb: u64) -> Self {
+    pub fn from_terabytes(tb: f64) -> Self {
         Self {
-            bytes: tb * 1_099_511_627_776,
+            bytes: (tb * 1_099_511_627_776.0) as u64,
         }
     }
 
     pub fn as_terabytes(&self) -> f64 {
         self.bytes as f64 / 1_099_511_627_776.0
+    }
+
+    pub fn from_petabytes(pb: f64) -> Self {
+        Self {
+            bytes: (pb * 1_125_899_906_842_624.0) as u64,
+        }
+    }
+
+    pub fn as_petabytes(&self) -> f64 {
+        self.bytes as f64 / 1_125_899_906_842_624.0
     }
 
     pub fn parse(quantity: &str) -> Result<Self, Error> {
@@ -228,7 +243,9 @@ impl StorageSize {
             .parse()
             .with_context(|| format!("Failed to parse '{}' as a number", number_str))?;
 
-        let bytes = match unit.as_str() {
+        let unit = unit.trim();
+
+        let bytes = match unit {
             "B" => number,
             "KB" => number * 1024.0,
             "MB" => number * 1_048_576.0,
@@ -327,6 +344,28 @@ impl QuotaLimit {
             QuotaLimit::Unlimited => None,
         }
     }
+
+    /// Parse a QuotaLimit from a string
+    /// Format: "unlimited" or "<size>"
+    /// Examples: "unlimited", "100GB"
+    pub fn parse(s: &str) -> Result<Self, Error> {
+        let s = s.trim();
+
+        if s.is_empty() {
+            return Err(Error::Parse("Quota limit cannot be empty".to_string()));
+        }
+
+        // Check if it's unlimited
+        if s.eq_ignore_ascii_case("unlimited") {
+            return Ok(Self::Unlimited);
+        }
+
+        // Parse as a size
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        let size_str = parts.join("");
+        let size = StorageSize::parse(&size_str)?;
+        Ok(Self::Limited(size))
+    }
 }
 
 impl std::fmt::Display for QuotaLimit {
@@ -346,12 +385,12 @@ impl From<StorageSize> for QuotaLimit {
 
 /// Represents a storage quota with a limit and optional current usage
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StorageQuota {
+pub struct Quota {
     limit: QuotaLimit,
     usage: Option<StorageUsage>,
 }
 
-impl StorageQuota {
+impl Quota {
     pub fn limited(limit: StorageSize) -> Self {
         Self {
             limit: QuotaLimit::Limited(limit),
@@ -375,6 +414,10 @@ impl StorageQuota {
 
     pub fn limit(&self) -> &QuotaLimit {
         &self.limit
+    }
+
+    pub fn set_limit(&mut self, limit: QuotaLimit) {
+        self.limit = limit;
     }
 
     pub fn usage(&self) -> Option<StorageUsage> {
@@ -404,9 +447,78 @@ impl StorageQuota {
             _ => None,
         }
     }
+
+    /// Parse a Quota from a string
+    /// Format: "unlimited" or "limit <size>" or "limit <size> used <size>"
+    /// Examples: "unlimited", "100GB", "100GB used 50GB"
+    pub fn parse(s: &str) -> Result<Self, Error> {
+        let s = s.trim();
+
+        if s.is_empty() {
+            return Err(Error::Parse("Storage quota cannot be empty".to_string()));
+        }
+
+        // Check if it's unlimited
+        if s.eq_ignore_ascii_case("unlimited") {
+            return Ok(Self::unlimited());
+        }
+
+        // Split by "used" to separate limit from usage
+        let parts: Vec<&str> = s.split_whitespace().collect();
+
+        // Find if there's a "used" keyword
+        if let Some(used_idx) = parts.iter().position(|&p| p.eq_ignore_ascii_case("used")) {
+            // Format: "<limit> used <usage>"
+            let limit_str = parts[..used_idx].join("");
+            let usage_str = parts[used_idx + 1..].join("");
+
+            let limit = StorageSize::parse(&limit_str)?;
+            let usage = StorageSize::parse(&usage_str)?;
+
+            Ok(Self::with_usage(
+                QuotaLimit::Limited(limit),
+                StorageUsage::new(usage),
+            ))
+        } else {
+            // Just a limit, no usage
+            let limit_str = parts.join("");
+            let limit = StorageSize::parse(&limit_str)?;
+            Ok(Self::limited(limit))
+        }
+    }
+
+    /// Parse a Quota limit from a string (without usage information)
+    /// Format: "unlimited" or "<size>"
+    /// Examples: "unlimited", "100GB"
+    /// This will error if the string contains usage information (i.e., "used" keyword)
+    pub fn parse_limit_only(s: &str) -> Result<Self, Error> {
+        let s = s.trim();
+
+        if s.is_empty() {
+            return Err(Error::Parse("Storage quota cannot be empty".to_string()));
+        }
+
+        // Check if it's unlimited
+        if s.eq_ignore_ascii_case("unlimited") {
+            return Ok(Self::unlimited());
+        }
+
+        // Check if the string contains "used" keyword
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.iter().any(|&p| p.eq_ignore_ascii_case("used")) {
+            return Err(Error::Parse(
+                "Cannot set quota with usage information. Use only the limit value (e.g., '100GB' or 'unlimited')".to_string()
+            ));
+        }
+
+        // Parse just the limit
+        let limit_str = parts.join("");
+        let limit = StorageSize::parse(&limit_str)?;
+        Ok(Self::limited(limit))
+    }
 }
 
-impl std::fmt::Display for StorageQuota {
+impl std::fmt::Display for Quota {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self.usage {
             Some(usage) => match &self.limit {
@@ -419,18 +531,18 @@ impl std::fmt::Display for StorageQuota {
                 }
                 QuotaLimit::Unlimited => write!(f, "{} / unlimited", usage),
             },
-            None => write!(f, "{} limit", self.limit),
+            None => write!(f, "{}", self.limit),
         }
     }
 }
 
 /// Identifies a storage volume (e.g., "home", "scratch", "project")
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub struct StorageVolume {
+pub struct Volume {
     name: String,
 }
 
-impl StorageVolume {
+impl Volume {
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
@@ -438,9 +550,25 @@ impl StorageVolume {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    pub fn parse(s: &str) -> Result<Self, Error> {
+        let name = s.trim();
+        if name.is_empty() {
+            return Err(Error::Parse("Volume name cannot be empty".to_string()));
+        }
+        if name.contains(' ') {
+            return Err(Error::Parse(format!(
+                "Volume name '{}' cannot contain spaces",
+                name
+            )));
+        }
+        Ok(Self {
+            name: name.to_string(),
+        })
+    }
 }
 
-impl std::fmt::Display for StorageVolume {
+impl std::fmt::Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.name)
     }

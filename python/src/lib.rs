@@ -1274,6 +1274,11 @@ impl Job {
         try_extract!(DateRange, |v: DateRange| v.0.clone());
         try_extract!(ProjectTemplate, |v: ProjectTemplate| v.0.clone());
         try_extract!(ProjectDetails, |v: ProjectDetails| v.0.clone());
+        try_extract!(StorageSize, |v: StorageSize| v.0);
+        try_extract!(StorageUsage, |v: StorageUsage| v.0);
+        try_extract!(QuotaLimit, |v: QuotaLimit| v.0.clone());
+        try_extract!(Quota, |v: Quota| v.0.clone());
+        try_extract!(Volume, |v: Volume| v.0.clone());
 
         try_extract!(Vec<UserIdentifier>, |v: Vec<UserIdentifier>| {
             v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
@@ -1294,6 +1299,46 @@ impl Job {
         try_extract!(Vec<Usage>, |v: Vec<Usage>| {
             v.into_iter().map(|item| item.0).collect::<Vec<_>>()
         });
+        try_extract!(Vec<StorageSize>, |v: Vec<StorageSize>| {
+            v.into_iter().map(|item| item.0).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<StorageUsage>, |v: Vec<StorageUsage>| {
+            v.into_iter().map(|item| item.0).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<QuotaLimit>, |v: Vec<QuotaLimit>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<Quota>, |v: Vec<Quota>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<Volume>, |v: Vec<Volume>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+
+        // HashMap types - need to extract from PyDict and manually convert
+        if let Ok(dict) = result.bind(py).cast::<pyo3::types::PyDict>() {
+            let mut map: std::collections::HashMap<
+                templemeads::storage::Volume,
+                templemeads::storage::Quota,
+            > = std::collections::HashMap::new();
+            let mut is_volume_quota_dict = true;
+
+            for (key, value) in dict.iter() {
+                if let (Ok(k), Ok(v)) = (key.extract::<Volume>(), value.extract::<Quota>()) {
+                    map.insert(k.0.clone(), v.0.clone());
+                } else {
+                    is_volume_quota_dict = false;
+                    break;
+                }
+            }
+
+            if is_volume_quota_dict && !map.is_empty() {
+                return match self.0.completed(map) {
+                    Ok(result) => Ok(result.into()),
+                    Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+            }
+        }
 
         Err(PyErr::new::<PyOSError, _>("Could not extract result type"))
     }
@@ -1571,6 +1616,169 @@ impl Job {
                             list.append(PortalIdentifier::from(item).into_pyobject(py)?)?;
                         }
                         Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "StorageSize" => {
+                let result = match self.0.result::<templemeads::storage::StorageSize>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(StorageSize::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "StorageUsage" => {
+                let result = match self.0.result::<templemeads::storage::StorageUsage>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(StorageUsage::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "QuotaLimit" => {
+                let result = match self.0.result::<templemeads::storage::QuotaLimit>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(QuotaLimit::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Quota" => {
+                let result = match self.0.result::<templemeads::storage::Quota>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(Quota::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Volume" => {
+                let result = match self.0.result::<templemeads::storage::Volume>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(Volume::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<StorageSize>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::StorageSize>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(StorageSize::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<StorageUsage>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::StorageUsage>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(StorageUsage::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<QuotaLimit>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::QuotaLimit>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(QuotaLimit::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<Quota>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::Quota>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(Quota::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<Volume>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::Volume>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(Volume::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "HashMap<Volume, Quota>" => {
+                let result = match self.0.result::<std::collections::HashMap<
+                    templemeads::storage::Volume,
+                    templemeads::storage::Quota,
+                >>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let dict = pyo3::types::PyDict::new(py);
+                        for (key, value) in result {
+                            dict.set_item(
+                                Volume::from(key).into_pyobject(py)?,
+                                Quota::from(value).into_pyobject(py)?,
+                            )?;
+                        }
+                        Ok(dict.into_any())
                     }
                     None => Ok(py.None().into_bound(py)),
                 }
@@ -3858,6 +4066,456 @@ fn sync_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
     }
 }
 
+// ============================================================================
+// Storage type wrappers
+// ============================================================================
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageSize(templemeads::storage::StorageSize);
+
+#[pymethods]
+impl StorageSize {
+    #[new]
+    fn new(bytes: u64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_bytes(bytes)))
+    }
+
+    #[staticmethod]
+    fn from_bytes(bytes: u64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_bytes(bytes)))
+    }
+
+    #[staticmethod]
+    fn from_kilobytes(kb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_kilobytes(kb)))
+    }
+
+    #[staticmethod]
+    fn from_megabytes(mb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_megabytes(mb)))
+    }
+
+    #[staticmethod]
+    fn from_gigabytes(gb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_gigabytes(gb)))
+    }
+
+    #[staticmethod]
+    fn from_terabytes(tb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_terabytes(tb)))
+    }
+
+    #[staticmethod]
+    fn from_petabytes(pb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_petabytes(pb)))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::StorageSize::parse(s) {
+            Ok(size) => Ok(Self(size)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<StorageSize> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<StorageSize> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &StorageSize, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Lt => Ok(self.0.as_bytes() < other.0.as_bytes()),
+            CompareOp::Le => Ok(self.0.as_bytes() <= other.0.as_bytes()),
+            CompareOp::Gt => Ok(self.0.as_bytes() > other.0.as_bytes()),
+            CompareOp::Ge => Ok(self.0.as_bytes() >= other.0.as_bytes()),
+        }
+    }
+
+    #[getter]
+    fn bytes(&self) -> PyResult<u64> {
+        Ok(self.0.as_bytes())
+    }
+
+    #[setter]
+    fn set_bytes(&mut self, bytes: u64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_bytes(bytes);
+        Ok(())
+    }
+
+    #[getter]
+    fn kilobytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_kilobytes())
+    }
+
+    #[setter]
+    fn set_kilobytes(&mut self, kb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_kilobytes(kb);
+        Ok(())
+    }
+
+    #[getter]
+    fn megabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_megabytes())
+    }
+
+    #[setter]
+    fn set_megabytes(&mut self, mb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_megabytes(mb);
+        Ok(())
+    }
+
+    #[getter]
+    fn gigabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_gigabytes())
+    }
+
+    #[setter]
+    fn set_gigabytes(&mut self, gb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_gigabytes(gb);
+        Ok(())
+    }
+
+    #[getter]
+    fn terabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_terabytes())
+    }
+
+    #[setter]
+    fn set_terabytes(&mut self, tb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_terabytes(tb);
+        Ok(())
+    }
+
+    #[getter]
+    fn petabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_petabytes())
+    }
+
+    #[setter]
+    fn set_petabytes(&mut self, pb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_petabytes(pb);
+        Ok(())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("StorageSize(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::StorageSize> for StorageSize {
+    fn from(size: templemeads::storage::StorageSize) -> Self {
+        StorageSize(size)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageUsage(templemeads::storage::StorageUsage);
+
+#[pymethods]
+impl StorageUsage {
+    #[new]
+    fn new(size: &StorageSize) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageUsage::new(size.0)))
+    }
+
+    fn __copy__(&self) -> PyResult<StorageUsage> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<StorageUsage> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &StorageUsage, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Lt => Ok(self.0.as_bytes() < other.0.as_bytes()),
+            CompareOp::Le => Ok(self.0.as_bytes() <= other.0.as_bytes()),
+            CompareOp::Gt => Ok(self.0.as_bytes() > other.0.as_bytes()),
+            CompareOp::Ge => Ok(self.0.as_bytes() >= other.0.as_bytes()),
+        }
+    }
+
+    #[getter]
+    fn size(&self) -> PyResult<StorageSize> {
+        Ok(StorageSize(self.0.into_size()))
+    }
+
+    #[setter]
+    fn set_size(&mut self, size: &StorageSize) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageUsage::new(size.0);
+        Ok(())
+    }
+
+    #[getter]
+    fn bytes(&self) -> PyResult<u64> {
+        Ok(self.0.as_bytes())
+    }
+
+    #[setter]
+    fn set_bytes(&mut self, bytes: u64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageUsage::new(
+            templemeads::storage::StorageSize::from_bytes(bytes),
+        );
+        Ok(())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("StorageUsage(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::StorageUsage> for StorageUsage {
+    fn from(usage: templemeads::storage::StorageUsage) -> Self {
+        StorageUsage(usage)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QuotaLimit(templemeads::storage::QuotaLimit);
+
+#[pymethods]
+impl QuotaLimit {
+    #[staticmethod]
+    fn limited(size: &StorageSize) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::QuotaLimit::Limited(size.0)))
+    }
+
+    #[staticmethod]
+    fn unlimited() -> PyResult<Self> {
+        Ok(Self(templemeads::storage::QuotaLimit::Unlimited))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::QuotaLimit::parse(s) {
+            Ok(limit) => Ok(Self(limit)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<QuotaLimit> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<QuotaLimit> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &QuotaLimit, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    fn is_unlimited(&self) -> PyResult<bool> {
+        Ok(self.0.is_unlimited())
+    }
+
+    fn is_limited(&self) -> PyResult<bool> {
+        Ok(self.0.is_limited())
+    }
+
+    #[getter]
+    fn size(&self) -> PyResult<Option<StorageSize>> {
+        Ok(self.0.size().map(|s| s.into()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("QuotaLimit(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::QuotaLimit> for QuotaLimit {
+    fn from(limit: templemeads::storage::QuotaLimit) -> Self {
+        QuotaLimit(limit)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Quota(templemeads::storage::Quota);
+
+#[pymethods]
+impl Quota {
+    #[staticmethod]
+    fn limited(limit: &StorageSize) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Quota::limited(limit.0)))
+    }
+
+    #[staticmethod]
+    fn unlimited() -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Quota::unlimited()))
+    }
+
+    #[staticmethod]
+    fn with_usage(limit: &QuotaLimit, usage: &StorageUsage) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Quota::with_usage(
+            limit.0.clone(),
+            usage.0,
+        )))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::Quota::parse(s) {
+            Ok(quota) => Ok(Self(quota)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<Quota> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Quota> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Quota, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn limit(&self) -> PyResult<QuotaLimit> {
+        Ok(QuotaLimit(self.0.limit().clone()))
+    }
+
+    #[setter]
+    fn set_limit(&mut self, limit: &QuotaLimit) -> PyResult<()> {
+        self.0.set_limit(limit.0.clone());
+        Ok(())
+    }
+
+    #[getter]
+    fn usage(&self) -> PyResult<Option<StorageUsage>> {
+        Ok(self.0.usage().map(|u| u.into()))
+    }
+
+    #[setter]
+    fn set_usage(&mut self, usage: &StorageUsage) -> PyResult<()> {
+        self.0.set_usage(usage.0);
+        Ok(())
+    }
+
+    fn is_unlimited(&self) -> PyResult<bool> {
+        Ok(self.0.is_unlimited())
+    }
+
+    fn is_over_quota(&self) -> PyResult<bool> {
+        Ok(self.0.is_over_quota())
+    }
+
+    fn percentage_used(&self) -> PyResult<Option<f64>> {
+        Ok(self.0.percentage_used())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("Quota(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::Quota> for Quota {
+    fn from(quota: templemeads::storage::Quota) -> Self {
+        Quota(quota)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Volume(templemeads::storage::Volume);
+
+#[pymethods]
+impl Volume {
+    #[new]
+    fn new(name: &str) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Volume::new(name)))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::Volume::parse(s) {
+            Ok(volume) => Ok(Self(volume)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<Volume> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Volume> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Volume, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        Ok(self.0.name().to_string())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("Volume(\"{}\")", self.0))
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
+}
+
+impl From<templemeads::storage::Volume> for Volume {
+    fn from(volume: templemeads::storage::Volume) -> Self {
+        Volume(volume)
+    }
+}
+
 #[pyfunction]
 fn get_portal() -> PyResult<PortalIdentifier> {
     match call_get::<grammar::PortalIdentifier>("get_portal") {
@@ -3927,6 +4585,11 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AwardDetails>()?;
     m.add_class::<ProjectDetails>()?;
     m.add_class::<ProjectTemplate>()?;
+    m.add_class::<StorageSize>()?;
+    m.add_class::<StorageUsage>()?;
+    m.add_class::<QuotaLimit>()?;
+    m.add_class::<Quota>()?;
+    m.add_class::<Volume>()?;
 
     Ok(())
 }

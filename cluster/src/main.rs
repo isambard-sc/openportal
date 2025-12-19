@@ -18,7 +18,7 @@ use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
-use templemeads::storage::{StorageQuota, StorageVolume};
+use templemeads::storage::{Quota, Volume};
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
 
@@ -1235,9 +1235,9 @@ pub async fn set_project_limit(
 async fn set_project_quota(
     me: &str,
     project: &ProjectIdentifier,
-    volume: &StorageVolume,
-    quota: &StorageQuota,
-) -> Result<StorageQuota, Error> {
+    volume: &Volume,
+    limit: &templemeads::storage::QuotaLimit,
+) -> Result<Quota, Error> {
     // get the mapping for this project
     let mapping = get_project_mapping(me, project).await?;
 
@@ -1260,7 +1260,7 @@ async fn set_project_quota(
             filesystem.name(),
             mapping,
             volume,
-            quota
+            limit
         ),
         false,
     )?
@@ -1268,7 +1268,7 @@ async fn set_project_quota(
     .await?;
 
     // Wait for the job to complete... - get the resulting Quota
-    match job.wait().await?.result::<StorageQuota>() {
+    match job.wait().await?.result::<Quota>() {
         Ok(Some(quota)) => Ok(quota),
         Ok(None) => {
             tracing::error!(
@@ -1288,8 +1288,8 @@ async fn set_project_quota(
 async fn get_project_quota(
     me: &str,
     project: &ProjectIdentifier,
-    volume: &StorageVolume,
-) -> Result<StorageQuota, Error> {
+    volume: &Volume,
+) -> Result<Quota, Error> {
     // get the mapping for this project
     let mapping = get_project_mapping(me, project).await?;
 
@@ -1319,7 +1319,7 @@ async fn get_project_quota(
     .await?;
 
     // Wait for the job to complete... - get the resulting Quota
-    match job.wait().await?.result::<StorageQuota>() {
+    match job.wait().await?.result::<Quota>() {
         Ok(Some(quota)) => Ok(quota),
         Ok(None) => {
             tracing::warn!(
@@ -1339,7 +1339,7 @@ async fn get_project_quota(
 async fn get_project_quotas(
     me: &str,
     project: &ProjectIdentifier,
-) -> Result<HashMap<StorageVolume, StorageQuota>, Error> {
+) -> Result<HashMap<Volume, Quota>, Error> {
     // get the mapping for this project
     let mapping = get_project_mapping(me, project).await?;
 
@@ -1371,7 +1371,7 @@ async fn get_project_quotas(
     match job
         .wait()
         .await?
-        .result::<HashMap<StorageVolume, StorageQuota>>()
+        .result::<HashMap<Volume, Quota>>()
     {
         Ok(Some(quotas)) => Ok(quotas),
         Ok(None) => {
@@ -1385,9 +1385,9 @@ async fn get_project_quotas(
 async fn set_user_quota(
     me: &str,
     user: &UserIdentifier,
-    volume: &StorageVolume,
-    quota: &StorageQuota,
-) -> Result<StorageQuota, Error> {
+    volume: &Volume,
+    limit: &templemeads::storage::QuotaLimit,
+) -> Result<Quota, Error> {
     // get the mapping for this user
     let mapping = get_user_mapping(me, user).await?;
 
@@ -1410,7 +1410,7 @@ async fn set_user_quota(
             filesystem.name(),
             mapping,
             volume,
-            quota
+            limit
         ),
         false,
     )?
@@ -1418,7 +1418,7 @@ async fn set_user_quota(
     .await?;
 
     // Wait for the job to complete... - get the resulting Quota
-    match job.wait().await?.result::<StorageQuota>() {
+    match job.wait().await?.result::<Quota>() {
         Ok(Some(quota)) => Ok(quota),
         Ok(None) => {
             tracing::error!("Error setting quota for user {} on volume {}", user, volume);
@@ -1434,8 +1434,8 @@ async fn set_user_quota(
 async fn get_user_quota(
     me: &str,
     user: &UserIdentifier,
-    volume: &StorageVolume,
-) -> Result<StorageQuota, Error> {
+    volume: &Volume,
+) -> Result<Quota, Error> {
     // get the mapping for this user
     let mapping = get_user_mapping(me, user).await?;
 
@@ -1465,7 +1465,7 @@ async fn get_user_quota(
     .await?;
 
     // Wait for the job to complete... - get the resulting Quota
-    match job.wait().await?.result::<StorageQuota>() {
+    match job.wait().await?.result::<Quota>() {
         Ok(Some(quota)) => Ok(quota),
         Ok(None) => {
             tracing::warn!("No quota found for user {} on volume {}", user, volume);
@@ -1481,7 +1481,7 @@ async fn get_user_quota(
 async fn get_user_quotas(
     me: &str,
     user: &UserIdentifier,
-) -> Result<HashMap<StorageVolume, StorageQuota>, Error> {
+) -> Result<HashMap<Volume, Quota>, Error> {
     // get the mapping for this user
     let mapping = get_user_mapping(me, user).await?;
 
@@ -1513,7 +1513,7 @@ async fn get_user_quotas(
     match job
         .wait()
         .await?
-        .result::<HashMap<StorageVolume, StorageQuota>>()
+        .result::<HashMap<Volume, Quota>>()
     {
         Ok(Some(quotas)) => Ok(quotas),
         Ok(None) => {

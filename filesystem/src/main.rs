@@ -171,8 +171,8 @@ async fn main() -> Result<()> {
                     let project_dirs = get_project_dirs_and_links(&mapping).await?;
                     job.completed(project_dirs)
                 },
-                SetLocalProjectQuota(mapping, volume, quota) => {
-                    let quota = set_project_quota(&mapping, &volume, &quota).await?;
+                SetLocalProjectQuota(mapping, volume, limit) => {
+                    let quota = set_project_quota(&mapping, &volume, &limit).await?;
                     job.completed(quota)
                 },
                 GetLocalProjectQuota(mapping, volume) => {
@@ -183,8 +183,8 @@ async fn main() -> Result<()> {
                     let quotas = get_project_quotas(&mapping).await?;
                     job.completed(quotas)
                 },
-                SetLocalUserQuota(mapping, volume, quota) => {
-                    let quota = set_user_quota(&mapping, &volume, &quota).await?;
+                SetLocalUserQuota(mapping, volume, limit) => {
+                    let quota = set_user_quota(&mapping, &volume, &limit).await?;
                     job.completed(quota)
                 },
                 GetLocalUserQuota(mapping, volume) => {
@@ -381,4 +381,141 @@ async fn remove_user_dirs(mapping: &templemeads::grammar::UserMapping) -> Result
     }
 
     Ok(())
+}
+///
+/// Set a storage quota for a project on a specific volume
+///
+pub async fn set_project_quota(
+    mapping: &templemeads::grammar::ProjectMapping,
+    volume: &templemeads::storage::Volume,
+    limit: &templemeads::storage::QuotaLimit,
+) -> Result<templemeads::storage::Quota, Error> {
+    tracing::info!(
+        "set_project_quota called: project={}, volume={}, limit={}",
+        mapping.project(),
+        volume,
+        limit
+    );
+
+    // TODO: Implement actual quota setting logic
+    // For now, create a quota from the limit without usage information
+    let quota = match limit {
+        templemeads::storage::QuotaLimit::Limited(size) => {
+            templemeads::storage::Quota::limited(*size)
+        }
+        templemeads::storage::QuotaLimit::Unlimited => {
+            templemeads::storage::Quota::unlimited()
+        }
+    };
+    Ok(quota)
+}
+
+///
+/// Get the storage quota for a project on a specific volume
+///
+pub async fn get_project_quota(
+    mapping: &templemeads::grammar::ProjectMapping,
+    volume: &templemeads::storage::Volume,
+) -> Result<templemeads::storage::Quota, Error> {
+    tracing::info!(
+        "get_project_quota called: project={}, volume={}",
+        mapping.project(),
+        volume
+    );
+
+    // TODO: Implement actual quota retrieval logic
+    // For now, return an error indicating no quota found
+    Err(Error::NotFound(format!(
+        "No quota found for project {} on volume {}",
+        mapping.project(),
+        volume
+    )))
+}
+
+///
+/// Get all storage quotas for a project across all volumes
+///
+pub async fn get_project_quotas(
+    mapping: &templemeads::grammar::ProjectMapping,
+) -> Result<
+    std::collections::HashMap<
+        templemeads::storage::Volume,
+        templemeads::storage::Quota,
+    >,
+    Error,
+> {
+    tracing::info!("get_project_quotas called: project={}", mapping.project());
+
+    // TODO: Implement actual quota retrieval logic
+    // For now, return an empty HashMap
+    Ok(std::collections::HashMap::new())
+}
+
+///
+/// Set a storage quota for a user on a specific volume
+///
+pub async fn set_user_quota(
+    mapping: &templemeads::grammar::UserMapping,
+    volume: &templemeads::storage::Volume,
+    limit: &templemeads::storage::QuotaLimit,
+) -> Result<templemeads::storage::Quota, Error> {
+    tracing::info!(
+        "set_user_quota called: user={}, volume={}, limit={}",
+        mapping.user(),
+        volume,
+        limit
+    );
+
+    // TODO: Implement actual quota setting logic
+    // For now, create a quota from the limit without usage information
+    let quota = match limit {
+        templemeads::storage::QuotaLimit::Limited(size) => {
+            templemeads::storage::Quota::limited(*size)
+        }
+        templemeads::storage::QuotaLimit::Unlimited => {
+            templemeads::storage::Quota::unlimited()
+        }
+    };
+    Ok(quota)
+}
+
+///
+/// Get the storage quota for a user on a specific volume
+///
+pub async fn get_user_quota(
+    mapping: &templemeads::grammar::UserMapping,
+    volume: &templemeads::storage::Volume,
+) -> Result<templemeads::storage::Quota, Error> {
+    tracing::info!(
+        "get_user_quota called: user={}, volume={}",
+        mapping.user(),
+        volume
+    );
+
+    // TODO: Implement actual quota retrieval logic
+    // For now, return an error indicating no quota found
+    Err(Error::NotFound(format!(
+        "No quota found for user {} on volume {}",
+        mapping.user(),
+        volume
+    )))
+}
+
+///
+/// Get all storage quotas for a user across all volumes
+///
+pub async fn get_user_quotas(
+    mapping: &templemeads::grammar::UserMapping,
+) -> Result<
+    std::collections::HashMap<
+        templemeads::storage::Volume,
+        templemeads::storage::Quota,
+    >,
+    Error,
+> {
+    tracing::info!("get_user_quotas called: user={}", mapping.user());
+
+    // TODO: Implement actual quota retrieval logic
+    // For now, return an empty HashMap
+    Ok(std::collections::HashMap::new())
 }

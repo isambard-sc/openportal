@@ -3,7 +3,7 @@
 
 use crate::destination::{Destination, Destinations};
 use crate::error::Error;
-use crate::storage::{StorageQuota, StorageVolume};
+use crate::storage::{QuotaLimit, Volume};
 use crate::usagereport::Usage;
 
 use anyhow::Context;
@@ -2475,19 +2475,19 @@ pub enum Instruction {
     SetLocalLimit(ProjectMapping, Usage),
 
     /// An instruction to set the quota of a local project on a volume
-    SetLocalProjectQuota(ProjectMapping, StorageVolume, StorageQuota),
+    SetLocalProjectQuota(ProjectMapping, Volume, QuotaLimit),
 
     /// An instruction to get the quota of a local project on a volume
-    GetLocalProjectQuota(ProjectMapping, StorageVolume),
+    GetLocalProjectQuota(ProjectMapping, Volume),
 
     /// An instruction to get all quotas of a local project
     GetLocalProjectQuotas(ProjectMapping),
 
     /// An instruction to set the quota of a local user on a volume
-    SetLocalUserQuota(UserMapping, StorageVolume, StorageQuota),
+    SetLocalUserQuota(UserMapping, Volume, QuotaLimit),
 
     /// An instruction to get the quota of a local user on a volume
-    GetLocalUserQuota(UserMapping, StorageVolume),
+    GetLocalUserQuota(UserMapping, Volume),
 
     /// An instruction to get all quotas of a local user
     GetLocalUserQuotas(UserMapping),
@@ -2519,19 +2519,19 @@ pub enum Instruction {
     GetLimit(ProjectIdentifier),
 
     /// An instruction to set a storage quota for a project on a volume
-    SetProjectQuota(ProjectIdentifier, StorageVolume, StorageQuota),
+    SetProjectQuota(ProjectIdentifier, Volume, QuotaLimit),
 
     /// An instruction to get the storage quota for a project on a volume
-    GetProjectQuota(ProjectIdentifier, StorageVolume),
+    GetProjectQuota(ProjectIdentifier, Volume),
 
     /// An instruction to get all of the storage quotas for a project
     GetProjectQuotas(ProjectIdentifier),
 
     /// An instruction to set a storage quota for a user on a volume
-    SetUserQuota(UserIdentifier, StorageVolume, StorageQuota),
+    SetUserQuota(UserIdentifier, Volume, QuotaLimit),
 
     /// An instruction to get the storage quota for a user on a volume
-    GetUserQuota(UserIdentifier, StorageVolume),
+    GetUserQuota(UserIdentifier, Volume),
 
     /// An instruction to get all of the storage quotas for a user
     GetUserQuotas(UserIdentifier),
@@ -3067,6 +3067,474 @@ impl Instruction {
                         Err(Error::Parse(format!(
                             "get_limit failed to parse '{}': {}",
                             &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "set_project_quota" => {
+                if parts.len() < 4 {
+                    tracing::error!("set_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "set_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => match Volume::parse(parts[2]) {
+                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                            Ok(limit) => Ok(Instruction::SetProjectQuota(project, volume, limit)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "set_project_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "set_project_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                )))
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                "set_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "set_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "set_project_quota failed to parse project '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "set_project_quota failed to parse project '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_project_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!("get_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::GetProjectQuota(project, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "get_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "get_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "get_project_quota failed to parse project '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_project_quota failed to parse project '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_project_quotas" => {
+                if parts.len() < 2 {
+                    tracing::error!("get_project_quotas failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_project_quotas failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => Ok(Instruction::GetProjectQuotas(project)),
+                    Err(e) => {
+                        tracing::error!(
+                            "get_project_quotas failed to parse '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_project_quotas failed to parse '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "set_user_quota" => {
+                if parts.len() < 4 {
+                    tracing::error!("set_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "set_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserIdentifier::parse(parts[1]) {
+                    Ok(user) => match Volume::parse(parts[2]) {
+                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                            Ok(limit) => Ok(Instruction::SetUserQuota(user, volume, limit)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "set_user_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "set_user_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                )))
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                "set_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "set_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "set_user_quota failed to parse user '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "set_user_quota failed to parse user '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_user_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!("get_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserIdentifier::parse(parts[1]) {
+                    Ok(user) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::GetUserQuota(user, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "get_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "get_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "get_user_quota failed to parse user '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_user_quota failed to parse user '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_user_quotas" => {
+                if parts.len() < 2 {
+                    tracing::error!("get_user_quotas failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_user_quotas failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserIdentifier::parse(parts[1]) {
+                    Ok(user) => Ok(Instruction::GetUserQuotas(user)),
+                    Err(e) => {
+                        tracing::error!(
+                            "get_user_quotas failed to parse '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_user_quotas failed to parse '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "set_local_project_quota" => {
+                if parts.len() < 4 {
+                    tracing::error!("set_local_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "set_local_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => match Volume::parse(parts[2]) {
+                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                            Ok(limit) => Ok(Instruction::SetLocalProjectQuota(mapping, volume, limit)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "set_local_project_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "set_local_project_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                )))
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                "set_local_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "set_local_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "set_local_project_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "set_local_project_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_local_project_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!("get_local_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_local_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::GetLocalProjectQuota(mapping, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "get_local_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "get_local_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "get_local_project_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_project_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_local_project_quotas" => {
+                if parts.len() < 2 {
+                    tracing::error!("get_local_project_quotas failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_local_project_quotas failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => Ok(Instruction::GetLocalProjectQuotas(mapping)),
+                    Err(e) => {
+                        tracing::error!(
+                            "get_local_project_quotas failed to parse '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_project_quotas failed to parse '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "set_local_user_quota" => {
+                if parts.len() < 4 {
+                    tracing::error!("set_local_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "set_local_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserMapping::parse(parts[1]) {
+                    Ok(mapping) => match Volume::parse(parts[2]) {
+                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                            Ok(limit) => Ok(Instruction::SetLocalUserQuota(mapping, volume, limit)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "set_local_user_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "set_local_user_quota failed to parse quota '{}': {}",
+                                    &parts[3..].join(" "),
+                                    e
+                                )))
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                "set_local_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "set_local_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "set_local_user_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "set_local_user_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_local_user_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!("get_local_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_local_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserMapping::parse(parts[1]) {
+                    Ok(mapping) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::GetLocalUserQuota(mapping, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "get_local_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "get_local_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "get_local_user_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_user_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_local_user_quotas" => {
+                if parts.len() < 2 {
+                    tracing::error!("get_local_user_quotas failed to parse: {}", &parts[1..].join(" "));
+                    return Err(Error::Parse(format!(
+                        "get_local_user_quotas failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserMapping::parse(parts[1]) {
+                    Ok(mapping) => Ok(Instruction::GetLocalUserQuotas(mapping)),
+                    Err(e) => {
+                        tracing::error!(
+                            "get_local_user_quotas failed to parse '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_user_quotas failed to parse '{}': {}",
+                            parts[1],
                             e
                         )))
                     }

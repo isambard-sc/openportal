@@ -20,9 +20,16 @@ use std::path::PathBuf;
 // Configuration
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Config {
+#[serde(bound(deserialize = "T: for<'de2> Deserialize<'de2>"))]
+pub struct Config<T = ()>
+where
+    T: Serialize + Clone + std::fmt::Debug,
+{
     service: ServiceConfig,
     agent: AgentType,
+
+    #[serde(flatten)]
+    pub agent_config: T,
 
     #[serde(default)]
     extras: HashMap<String, String>,
@@ -31,11 +38,15 @@ pub struct Config {
     one_shot_commands: Option<Vec<String>>,
 }
 
-impl Config {
+impl<T> Config<T>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
+{
     pub fn new(service: ServiceConfig, agent: AgentType) -> Self {
         Self {
             service,
             agent,
+            agent_config: T::default(),
             extras: HashMap::new(),
             one_shot_commands: None,
         }
@@ -75,13 +86,21 @@ impl Config {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Defaults {
+#[serde(bound(deserialize = "T: for<'de2> Deserialize<'de2>"))]
+pub struct Defaults<T = ()>
+where
+    T: Serialize + Clone + std::fmt::Debug,
+{
     pub service: ServiceDefaults,
     pub agent: AgentType,
+    pub agent_config: T,
     pub extras: HashMap<String, String>,
 }
 
-impl Defaults {
+impl<T> Defaults<T>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
+{
     #[allow(clippy::too_many_arguments)]
     pub fn parse(
         name: Option<String>,
@@ -104,6 +123,7 @@ impl Defaults {
                 proxy_header,
             ),
             agent: agent.unwrap_or(AgentType::Portal),
+            agent_config: T::default(),
             extras: HashMap::new(),
         }
     }
@@ -133,7 +153,10 @@ fn version() -> &'static str {
 /// if this is requested. If nothing is returned then the program can
 /// cleanly exit.
 ///
-pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> {
+pub async fn process_args<T>(defaults: &Defaults<T>) -> Result<Option<Config<T>>, Error>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
+{
     let args = Args::parse();
     let defaults = defaults.clone();
 
@@ -176,6 +199,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     )?
                 },
                 agent: defaults.agent.clone(),
+                agent_config: defaults.agent_config.clone(),
                 extras: defaults.extras.clone(),
                 one_shot_commands: None,
             };
@@ -211,7 +235,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             rotate,
         }) => {
             if *list {
-                let config = load_config::<Config>(&config_file)?;
+                let config = load_config::<Config<T>>(&config_file)?;
                 for client in config.service.clients() {
                     println!("{}", client);
                 }
@@ -226,7 +250,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     )));
                 }
 
-                let mut config = load_config::<Config>(&config_file)?;
+                let mut config = load_config::<Config<T>>(&config_file)?;
 
                 let invite = config.service.add_client(
                     client,
@@ -245,7 +269,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             }
 
             if let Some(client) = remove {
-                let mut config = load_config::<Config>(&config_file)?;
+                let mut config = load_config::<Config<T>>(&config_file)?;
                 config.service.remove_client(client, zone)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Client '{}' removed.", client);
@@ -253,7 +277,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             }
 
             if let Some(client) = rotate {
-                let mut config = load_config::<Config>(&config_file)?;
+                let mut config = load_config::<Config<T>>(&config_file)?;
                 let invite = config.service.rotate_client_keys(client, zone)?;
 
                 save_config(&config, &config_file)?;
@@ -278,7 +302,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             zone,
         }) => {
             if *list {
-                let config = load_config::<Config>(&config_file)?;
+                let config = load_config::<Config<T>>(&config_file)?;
                 for server in config.service.servers() {
                     println!("{}", server);
                 }
@@ -299,7 +323,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     )));
                 }
 
-                let mut config = load_config::<Config>(&config_file)?;
+                let mut config = load_config::<Config<T>>(&config_file)?;
                 config.service.add_server(&invite)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' added.", server.display());
@@ -307,7 +331,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             }
 
             if let Some(server) = remove {
-                let mut config = load_config::<Config>(&config_file)?;
+                let mut config = load_config::<Config<T>>(&config_file)?;
                 config.service.remove_server(server, zone)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' removed.", server);
@@ -318,7 +342,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 // read the invitation from the passed toml file
                 let invite = load_invite(server)?;
 
-                let mut config = load_config::<Config>(&config_file)?;
+                let mut config = load_config::<Config<T>>(&config_file)?;
                 config.service.rotate_server_keys(&invite)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' rotated.", server.display());
@@ -333,7 +357,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             simple,
             environment,
         }) => {
-            let mut config = load_config::<Config>(&config_file)?;
+            let mut config = load_config::<Config<T>>(&config_file)?;
 
             match environment {
                 Some(env) => {
@@ -349,14 +373,14 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             return Ok(None);
         }
         Some(Commands::Secret { key, value }) => {
-            let mut config = load_config::<Config>(&config_file)?;
+            let mut config = load_config::<Config<T>>(&config_file)?;
             let value = config.service().encrypt(value)?;
             config.extras.insert(key.clone(), value.clone());
             save_config(&config, &config_file)?;
             return Ok(None);
         }
         Some(Commands::Extra { key, value }) => {
-            let mut config = load_config::<Config>(&config_file)?;
+            let mut config = load_config::<Config<T>>(&config_file)?;
             config.extras.insert(key.clone(), value.clone());
             save_config(&config, &config_file)?;
             return Ok(None);
@@ -365,7 +389,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             one_shot_commands,
             repeat,
         }) => {
-            let mut config = load_config::<Config>(&config_file)?;
+            let mut config = load_config::<Config<T>>(&config_file)?;
             tracing::info!("Loaded config from {}", &config_file.display());
 
             if let Some(one_shot_commands) = one_shot_commands {

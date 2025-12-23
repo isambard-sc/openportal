@@ -51,8 +51,9 @@ impl ProjectQuotaEntry {
 /// This enum contains variants for each supported filesystem type,
 /// with each variant holding the backend-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum QuotaEngineConfig {
-    /// Configuration for Lustre filesystem quota engine
+    #[serde(rename = "lustre")]
     Lustre(LustreEngineConfig),
     // Future backends can be added here:
     // Ceph(CephEngineConfig),

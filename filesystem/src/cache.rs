@@ -40,6 +40,8 @@ pub async fn get_filesystem_config() -> Result<FilesystemConfig, Error> {
 /// Set the filesystem configuration
 ///
 pub async fn set_filesystem_config(mut config: FilesystemConfig) -> Result<(), Error> {
+    tracing::info!("Setting filesystem configuration to {:?}", config);
+
     // Validate the config before storing
     config.validate()?;
 

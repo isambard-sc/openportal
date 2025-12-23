@@ -21,6 +21,8 @@ mod filesystem;
 mod quotaengine;
 mod volumeconfig;
 
+use volumeconfig::FilesystemConfig;
+
 ///
 /// Main function for the filesystem application
 ///
@@ -38,7 +40,7 @@ async fn main() -> Result<()> {
     templemeads::spawn_system_monitor();
 
     // create the OpenPortal paddington defaults
-    let defaults = Defaults::parse(
+    let defaults: Defaults<FilesystemConfig> = Defaults::parse(
         Some("filesystem".to_owned()),
         Some(
             dirs::config_local_dir()
@@ -66,7 +68,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    cache::set_filesystem_config(config.filesystem().clone()).await?;
+    cache::set_filesystem_config(config.agent_config.clone()).await?;
 
     async_runnable! {
         ///

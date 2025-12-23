@@ -538,6 +538,7 @@ impl std::fmt::Display for Quota {
 
 /// Identifies a storage volume (e.g., "home", "scratch", "project")
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(transparent)]
 pub struct Volume {
     name: String,
 }

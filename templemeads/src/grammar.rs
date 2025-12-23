@@ -549,6 +549,13 @@ impl UserMapping {
     pub fn local_group(&self) -> &str {
         &self.local_group
     }
+
+    pub fn project(&self) -> ProjectMapping {
+        ProjectMapping {
+            project: self.user.project_identifier(),
+            local_group: self.local_group.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for UserMapping {
@@ -575,6 +582,48 @@ impl<'de> Deserialize<'de> for UserMapping {
     {
         let s = String::deserialize(deserializer)?;
         Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+///
+/// Simple enum that can hold either a user or project identifier
+///
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum UserOrProjectIdentifier {
+    User(UserIdentifier),
+    Project(ProjectIdentifier),
+}
+
+impl From<UserIdentifier> for UserOrProjectIdentifier {
+    fn from(user: UserIdentifier) -> Self {
+        UserOrProjectIdentifier::User(user)
+    }
+}
+
+impl From<ProjectIdentifier> for UserOrProjectIdentifier {
+    fn from(project: ProjectIdentifier) -> Self {
+        UserOrProjectIdentifier::Project(project)
+    }
+}
+
+///
+/// Simple enum that can hold either a user or project mapping
+///
+#[derive(Debug, Clone, PartialEq)]
+pub enum UserOrProjectMapping {
+    User(UserMapping),
+    Project(ProjectMapping),
+}
+
+impl From<UserMapping> for UserOrProjectMapping {
+    fn from(user: UserMapping) -> Self {
+        UserOrProjectMapping::User(user)
+    }
+}
+
+impl From<ProjectMapping> for UserOrProjectMapping {
+    fn from(project: ProjectMapping) -> Self {
+        UserOrProjectMapping::Project(project)
     }
 }
 
@@ -2449,6 +2498,10 @@ pub enum Instruction {
     /// for a user - note this may not yet exist
     GetHomeDir(UserIdentifier),
 
+    /// An instruction to look up the paths to the user directories
+    /// for a user - not that these may not yet exist
+    GetUserDirs(UserIdentifier),
+
     /// An instruction to look up the paths to the project directories
     /// for a project - not that these may not yet exist
     GetProjectDirs(ProjectIdentifier),
@@ -2495,6 +2548,10 @@ pub enum Instruction {
     /// Return the home directory of a local user
     /// (note this does not guarantee the directory exists)
     GetLocalHomeDir(UserMapping),
+
+    /// Return the user directories of a local user
+    /// (note this does not guarantee the directories exist)
+    GetLocalUserDirs(UserMapping),
 
     /// Return the project directories of a local project
     /// (note this does not guarantee the directories exist)
@@ -3074,7 +3131,10 @@ impl Instruction {
             }
             "set_project_quota" => {
                 if parts.len() < 4 {
-                    tracing::error!("set_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "set_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "set_project_quota failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3106,8 +3166,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "set_project_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3119,15 +3178,17 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "set_project_quota failed to parse project '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "get_project_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!("get_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "get_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "get_project_quota failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3145,8 +3206,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "get_project_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3158,15 +3218,17 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_project_quota failed to parse project '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "get_project_quotas" => {
                 if parts.len() < 2 {
-                    tracing::error!("get_project_quotas failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "get_project_quotas failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "get_project_quotas failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3176,15 +3238,10 @@ impl Instruction {
                 match ProjectIdentifier::parse(parts[1]) {
                     Ok(project) => Ok(Instruction::GetProjectQuotas(project)),
                     Err(e) => {
-                        tracing::error!(
-                            "get_project_quotas failed to parse '{}': {}",
-                            parts[1],
-                            e
-                        );
+                        tracing::error!("get_project_quotas failed to parse '{}': {}", parts[1], e);
                         Err(Error::Parse(format!(
                             "get_project_quotas failed to parse '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
@@ -3223,8 +3280,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "set_user_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3236,8 +3292,7 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "set_user_quota failed to parse user '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
@@ -3262,8 +3317,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "get_user_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3275,8 +3329,7 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_user_quota failed to parse user '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
@@ -3293,22 +3346,20 @@ impl Instruction {
                 match UserIdentifier::parse(parts[1]) {
                     Ok(user) => Ok(Instruction::GetUserQuotas(user)),
                     Err(e) => {
-                        tracing::error!(
-                            "get_user_quotas failed to parse '{}': {}",
-                            parts[1],
-                            e
-                        );
+                        tracing::error!("get_user_quotas failed to parse '{}': {}", parts[1], e);
                         Err(Error::Parse(format!(
                             "get_user_quotas failed to parse '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "set_local_project_quota" => {
                 if parts.len() < 4 {
-                    tracing::error!("set_local_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "set_local_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "set_local_project_quota failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3318,7 +3369,9 @@ impl Instruction {
                 match ProjectMapping::parse(parts[1]) {
                     Ok(mapping) => match Volume::parse(parts[2]) {
                         Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
-                            Ok(limit) => Ok(Instruction::SetLocalProjectQuota(mapping, volume, limit)),
+                            Ok(limit) => {
+                                Ok(Instruction::SetLocalProjectQuota(mapping, volume, limit))
+                            }
                             Err(e) => {
                                 tracing::error!(
                                     "set_local_project_quota failed to parse quota '{}': {}",
@@ -3340,8 +3393,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "set_local_project_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3353,15 +3405,17 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "set_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "get_local_project_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!("get_local_project_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "get_local_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "get_local_project_quota failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3379,8 +3433,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "get_local_project_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3392,15 +3445,17 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "get_local_project_quotas" => {
                 if parts.len() < 2 {
-                    tracing::error!("get_local_project_quotas failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "get_local_project_quotas failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "get_local_project_quotas failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3417,15 +3472,17 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_project_quotas failed to parse '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "set_local_user_quota" => {
                 if parts.len() < 4 {
-                    tracing::error!("set_local_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "set_local_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "set_local_user_quota failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3457,8 +3514,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "set_local_user_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3470,15 +3526,17 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "set_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "get_local_user_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!("get_local_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "get_local_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "get_local_user_quota failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3496,8 +3554,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "get_local_user_quota failed to parse volume '{}': {}",
-                                parts[2],
-                                e
+                                parts[2], e
                             )))
                         }
                     },
@@ -3509,15 +3566,17 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
             }
             "get_local_user_quotas" => {
                 if parts.len() < 2 {
-                    tracing::error!("get_local_user_quotas failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!(
+                        "get_local_user_quotas failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
                     return Err(Error::Parse(format!(
                         "get_local_user_quotas failed to parse: {}",
                         &parts[1..].join(" ")
@@ -3534,8 +3593,7 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_user_quotas failed to parse '{}': {}",
-                            parts[1],
-                            e
+                            parts[1], e
                         )))
                     }
                 }
@@ -3658,6 +3716,7 @@ impl Instruction {
             Instruction::GetUserMapping(_) => "get_user_mapping".to_string(),
             Instruction::GetProjectMapping(_) => "get_project_mapping".to_string(),
             Instruction::GetHomeDir(_) => "get_home_dir".to_string(),
+            Instruction::GetUserDirs(_) => "get_user_dirs".to_string(),
             Instruction::GetProjectDirs(_) => "get_project_dirs".to_string(),
             Instruction::AddLocalUser(_) => "add_local_user".to_string(),
             Instruction::RemoveLocalUser(_) => "remove_local_user".to_string(),
@@ -3673,6 +3732,7 @@ impl Instruction {
             Instruction::SetLocalUserQuota(_, _, _) => "set_local_user_quota".to_string(),
             Instruction::GetLocalUserQuotas(_) => "get_local_user_quotas".to_string(),
             Instruction::GetLocalHomeDir(_) => "get_local_home_dir".to_string(),
+            Instruction::GetLocalUserDirs(_) => "get_local_user_dirs".to_string(),
             Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
             Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
             Instruction::GetUsageReport(_, _) => "get_usage_report".to_string(),
@@ -3715,6 +3775,7 @@ impl Instruction {
             Instruction::GetProjectMapping(project) => vec![project.to_string()],
             Instruction::GetHomeDir(user) => vec![user.to_string()],
             Instruction::GetProjectDirs(project) => vec![project.to_string()],
+            Instruction::GetUserDirs(user) => vec![user.to_string()],
             Instruction::AddLocalUser(mapping) => vec![mapping.to_string()],
             Instruction::RemoveLocalUser(mapping) => vec![mapping.to_string()],
             Instruction::AddLocalProject(mapping) => vec![mapping.to_string()],
@@ -3741,6 +3802,7 @@ impl Instruction {
             }
             Instruction::GetLocalUserQuotas(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalHomeDir(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalUserDirs(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalProjectDirs(mapping) => vec![mapping.to_string()],
             Instruction::UpdateHomeDir(user, homedir) => {
                 vec![user.to_string(), homedir.clone()]
@@ -3828,7 +3890,11 @@ impl std::fmt::Display for Instruction {
                 write!(f, "get_local_project_quota {} {}", mapping, volume)
             }
             Instruction::SetLocalProjectQuota(mapping, volume, quota) => {
-                write!(f, "set_local_project_quota {} {} {}", mapping, volume, quota)
+                write!(
+                    f,
+                    "set_local_project_quota {} {} {}",
+                    mapping, volume, quota
+                )
             }
             Instruction::GetLocalProjectQuotas(mapping) => {
                 write!(f, "get_local_project_quotas {}", mapping)
@@ -3859,8 +3925,10 @@ impl std::fmt::Display for Instruction {
             Instruction::GetLimit(project) => write!(f, "get_limit {}", project),
             Instruction::IsProtectedUser(user) => write!(f, "is_protected_user {}", user),
             Instruction::GetHomeDir(user) => write!(f, "get_home_dir {}", user),
+            Instruction::GetUserDirs(user) => write!(f, "get_user_dirs {}", user),
             Instruction::GetProjectDirs(project) => write!(f, "get_project_dirs {}", project),
             Instruction::GetLocalHomeDir(mapping) => write!(f, "get_local_home_dir {}", mapping),
+            Instruction::GetLocalUserDirs(mapping) => write!(f, "get_local_user_dirs {}", mapping),
             Instruction::GetLocalProjectDirs(mapping) => {
                 write!(f, "get_local_project_dirs {}", mapping)
             }

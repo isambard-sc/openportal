@@ -6,16 +6,24 @@ use once_cell::sync::Lazy;
 use templemeads::Error;
 use tokio::sync::RwLock;
 
-use crate::filesystem;
+use crate::quotaengine::QuotaEngines;
+use crate::volumeconfig::FilesystemConfig;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 struct Database {
-    home_roots: Vec<String>,
-    home_permissions: Vec<String>,
+    filesystem_config: Option<FilesystemConfig>,
+    user_quota_engines: Option<QuotaEngines>,
+    project_quota_engines: Option<QuotaEngines>,
+}
 
-    project_roots: Vec<String>,
-    project_permissions: Vec<String>,
-    project_links: Vec<Option<String>>,
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("filesystem_config", &self.filesystem_config)
+            .field("user_quota_engines", &self.user_quota_engines)
+            .field("project_quota_engines", &self.project_quota_engines)
+            .finish()
+    }
 }
 
 impl Database {
@@ -24,11 +32,9 @@ impl Database {
     ///
     fn new() -> Self {
         Self {
-            home_roots: vec!["/home".to_owned()],
-            home_permissions: vec!["0755".to_owned()],
-            project_roots: vec!["/project".to_owned()],
-            project_permissions: vec!["2770".to_owned()],
-            project_links: vec![None],
+            filesystem_config: None,
+            user_quota_engines: None,
+            project_quota_engines: None,
         }
     }
 }
@@ -36,144 +42,96 @@ impl Database {
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::new()));
 
 ///
-/// Return the roots for all home directories
+/// Get the filesystem configuration
 ///
-pub async fn get_home_roots() -> Result<Vec<String>, Error> {
+pub async fn get_filesystem_config() -> Result<FilesystemConfig, Error> {
     let cache = CACHE.read().await;
-    Ok(cache.home_roots.clone())
+    cache.filesystem_config.clone().ok_or_else(|| {
+        Error::Misconfigured("Filesystem configuration has not been set".to_owned())
+    })
 }
 
 ///
-/// Set the roots for all home directories
+/// Set the filesystem configuration
 ///
-pub async fn set_home_roots(roots: &Vec<String>) -> Result<(), Error> {
+pub async fn set_filesystem_config(mut config: FilesystemConfig) -> Result<(), Error> {
+    // Validate the config before storing
+    config.validate()?;
+
     let mut cache = CACHE.write().await;
 
-    cache.home_roots.clear();
+    tracing::info!(
+        "Setting filesystem configuration with {} user volume(s) and {} project volume(s)",
+        config.get_user_volumes().len(),
+        config.get_project_volumes().len()
+    );
 
-    for root in roots {
-        let check_root = filesystem::clean_and_check_path(root, true).await?;
-
-        if check_root != *root {
-            tracing::info!("Home {} was checked, and maps to {}", root, check_root);
-        }
-
-        tracing::info!("Adding home root {}", root);
-        cache.home_roots.push(root.clone());
+    for (volume, _) in config.get_user_volumes() {
+        tracing::info!("  - User volume: {}", volume);
     }
 
+    for (volume, _) in config.get_project_volumes() {
+        tracing::info!("  - Project volume: {}", volume);
+    }
+
+    cache.filesystem_config = Some(config);
     Ok(())
 }
 
 ///
-/// Return the root for all project directories
+/// Get the user quota engines
 ///
-pub async fn get_project_roots() -> Result<Vec<String>, Error> {
+pub async fn get_user_quota_engines() -> Result<QuotaEngines, Error> {
     let cache = CACHE.read().await;
-    Ok(cache.project_roots.clone())
+    cache.user_quota_engines.clone().ok_or_else(|| {
+        Error::Misconfigured("User quota engines have not been configured".to_owned())
+    })
 }
 
 ///
-/// Set the root for all project directories
+/// Set the user quota engines
 ///
-pub async fn set_project_roots(roots: &Vec<String>) -> Result<(), Error> {
+pub async fn set_user_quota_engines(engines: QuotaEngines) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
 
-    cache.project_roots.clear();
+    tracing::info!(
+        "Setting user quota engines for {} volume(s)",
+        engines.len()
+    );
 
-    for root in roots {
-        let check_root = filesystem::clean_and_check_path(root, true).await?;
-
-        if check_root != *root {
-            tracing::info!("Project {} was checked, and maps to {}", root, check_root);
-        }
-
-        tracing::info!("Adding project root {}", root);
-        cache.project_roots.push(root.clone());
+    for volume in engines.volumes() {
+        tracing::info!("  - User quotas configured for volume: {}", volume);
     }
 
+    cache.user_quota_engines = Some(engines);
     Ok(())
 }
 
 ///
-/// Return the permissions for all home directories
+/// Get the project quota engines
 ///
-pub async fn get_home_permissions() -> Result<Vec<String>, Error> {
+pub async fn get_project_quota_engines() -> Result<QuotaEngines, Error> {
     let cache = CACHE.read().await;
-    Ok(cache.home_permissions.clone())
+    cache.project_quota_engines.clone().ok_or_else(|| {
+        Error::Misconfigured("Project quota engines have not been configured".to_owned())
+    })
 }
 
 ///
-/// Set the permissions for all home directories
+/// Set the project quota engines
 ///
-pub async fn set_home_permissions(permissions: &Vec<String>) -> Result<(), Error> {
+pub async fn set_project_quota_engines(engines: QuotaEngines) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
 
-    cache.home_permissions.clear();
+    tracing::info!(
+        "Setting project quota engines for {} volume(s)",
+        engines.len()
+    );
 
-    for permission in permissions {
-        // ensure this is a valid permission string
-        let _ = filesystem::clean_and_check_permissions(permission).await?;
-        tracing::info!("Adding home permissions {}", permission);
-        cache.home_permissions.push(permission.to_owned());
+    for volume in engines.volumes() {
+        tracing::info!("  - Project quotas configured for volume: {}", volume);
     }
 
-    Ok(())
-}
-
-///
-/// Return the permissions for all project directories
-///
-pub async fn get_project_permissions() -> Result<Vec<String>, Error> {
-    let cache = CACHE.read().await;
-    Ok(cache.project_permissions.clone())
-}
-
-///
-/// Set the permissions for all project directories
-///
-pub async fn set_project_permissions(permissions: &Vec<String>) -> Result<(), Error> {
-    let mut cache = CACHE.write().await;
-
-    cache.project_permissions.clear();
-
-    for permission in permissions {
-        // ensure this is a valid permission string
-        let _ = filesystem::clean_and_check_permissions(permission).await?;
-        tracing::info!("Adding project permissions {}", permission);
-        cache.project_permissions.push(permission.to_owned());
-    }
-
-    Ok(())
-}
-
-///
-/// Return the links for all project directories
-///
-pub async fn get_project_links() -> Result<Vec<Option<String>>, Error> {
-    let cache = CACHE.read().await;
-    Ok(cache.project_links.clone())
-}
-
-///
-/// Set the links for all project directories
-///
-pub async fn set_project_links(links: &Vec<String>) -> Result<(), Error> {
-    let mut cache = CACHE.write().await;
-
-    cache.project_links.clear();
-
-    for link in links {
-        let link = link.trim();
-
-        if link.is_empty() {
-            tracing::info!("No link for this project directory.");
-            cache.project_links.push(None);
-        } else {
-            tracing::info!("Linking this project directory to {}", link);
-            cache.project_links.push(Some(link.to_owned()));
-        }
-    }
-
+    cache.project_quota_engines = Some(engines);
     Ok(())
 }

@@ -267,6 +267,13 @@ impl StorageSize {
     }
 }
 
+// make sure we can compare StorageSizes
+impl PartialOrd for StorageSize {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.bytes.cmp(&other.bytes))
+    }
+}
+
 /// Represents the amount of storage currently used
 #[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct StorageUsage {

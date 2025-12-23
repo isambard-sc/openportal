@@ -13,7 +13,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use templemeads::grammar::{ProjectMapping, UserMapping, UserOrProjectMapping};
-use templemeads::storage::Volume;
+use templemeads::storage::{StorageSize, Volume};
 use templemeads::Error;
 
 use crate::quotaengine::QuotaEngineConfig;
@@ -354,34 +354,14 @@ pub struct UserVolumeConfig {
     /// Optional name of quota engine to use (references quota_engines map)
     quota_engine: Option<String>,
 
-    /// Optional symlinks to create (empty string = no link, one per root)
-    /// Example: ["", "/fastwork/{project}/{user}"] for two roots
-    #[serde(default)]
-    links: Vec<String>,
+    /// Optional maximum size of any quota (defaults to unlimited)
+    max_quota: Option<StorageSize>,
+
+    /// Optional default quota size for new projects (defaults to no quota)
+    default_quota: Option<StorageSize>,
 }
 
 impl UserVolumeConfig {
-    pub fn new(
-        roots: Vec<String>,
-        subpath: String,
-        permissions: StringOrVec,
-        is_home: bool,
-        quota_engine: Option<String>,
-        links: Vec<String>,
-    ) -> Result<Self, Error> {
-        let instance = Self {
-            roots,
-            subpath,
-            permissions,
-            is_home,
-            quota_engine,
-            links,
-        };
-
-        instance.validate()?;
-        Ok(instance)
-    }
-
     pub fn validate(&self) -> Result<(), Error> {
         let num_roots = self.roots.len();
 
@@ -405,21 +385,22 @@ impl UserVolumeConfig {
             }
         }
 
-        // Check links matches roots (if provided)
-        if !self.links.is_empty() && self.links.len() != num_roots {
-            return Err(Error::Misconfigured(format!(
-                "User volume has {} roots but {} link values",
-                num_roots,
-                self.links.len()
-            )));
-        }
-
         // make sure that if this is the home volume, then there
         // is only a single path
         if self.is_home && num_roots != 1 {
             return Err(Error::Misconfigured(
                 "User home volume must have exactly one root directory".to_string(),
             ));
+        }
+
+        // make sure that the default quota is not larger than the max quota
+        if let (Some(max), Some(default)) = (&self.max_quota, &self.default_quota) {
+            if default > max {
+                return Err(Error::Misconfigured(format!(
+                    "User volume default quota ({}) cannot be larger than max quota ({})",
+                    default, max
+                )));
+            }
         }
 
         Ok(())
@@ -448,6 +429,16 @@ impl UserVolumeConfig {
         self.quota_engine.as_deref()
     }
 
+    /// Get the default quota size
+    pub fn default_quota(&self) -> Option<&StorageSize> {
+        self.default_quota.as_ref()
+    }
+
+    /// Get the maximum quota size
+    pub fn max_quota(&self) -> Option<&StorageSize> {
+        self.max_quota.as_ref()
+    }
+
     /// Return all of the paths for this volume
     pub fn path_configs(&self) -> Vec<PathConfig> {
         let num_roots = self.roots.len();
@@ -459,22 +450,11 @@ impl UserVolumeConfig {
                 StringOrVec::Vec(v) => v[i].clone(),
             };
 
-            let link = if !self.links.is_empty() {
-                let link_str = self.links[i].trim();
-                if link_str.is_empty() {
-                    None
-                } else {
-                    Some(link_str.to_string())
-                }
-            } else {
-                None
-            };
-
             paths.push(PathConfig::new(
                 self.roots[i].clone(),
                 self.subpath.clone(),
                 permission,
-                link,
+                None,
             ));
         }
 
@@ -506,6 +486,12 @@ pub struct ProjectVolumeConfig {
     /// Optional name of quota engine to use (references quota_engines map)
     quota_engine: Option<String>,
 
+    /// Optional maximum size of any quota (defaults to unlimited)
+    max_quota: Option<StorageSize>,
+
+    /// Optional default quota size for new projects (defaults to no quota)
+    default_quota: Option<StorageSize>,
+
     /// Optional symlinks to create (empty string = no link, one per root)
     /// Example: ["", "/fastwork/{project}"] for two roots
     #[serde(default)]
@@ -513,25 +499,6 @@ pub struct ProjectVolumeConfig {
 }
 
 impl ProjectVolumeConfig {
-    pub fn new(
-        roots: Vec<String>,
-        subpath: String,
-        permissions: StringOrVec,
-        quota_engine: Option<String>,
-        links: Vec<String>,
-    ) -> Result<Self, Error> {
-        let instance = Self {
-            roots,
-            subpath,
-            permissions,
-            quota_engine,
-            links,
-        };
-
-        instance.validate()?;
-        Ok(instance)
-    }
-
     pub fn validate(&self) -> Result<(), Error> {
         let num_roots = self.roots.len();
 
@@ -564,12 +531,32 @@ impl ProjectVolumeConfig {
             )));
         }
 
+        // make sure that the default quota is not larger than the max quota
+        if let (Some(max), Some(default)) = (&self.max_quota, &self.default_quota) {
+            if default > max {
+                return Err(Error::Misconfigured(format!(
+                    "Project volume default quota ({}) cannot be larger than max quota ({})",
+                    default, max
+                )));
+            }
+        }
+
         Ok(())
     }
 
     /// Get the quota engine name
     pub fn quota_engine_name(&self) -> Option<&str> {
         self.quota_engine.as_deref()
+    }
+
+    /// Get the default quota size
+    pub fn default_quota(&self) -> Option<&StorageSize> {
+        self.default_quota.as_ref()
+    }
+
+    /// Get the maximum quota size
+    pub fn max_quota(&self) -> Option<&StorageSize> {
+        self.max_quota.as_ref()
     }
 
     /// Return all of the paths for this volume

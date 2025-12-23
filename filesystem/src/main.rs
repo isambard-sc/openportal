@@ -197,13 +197,6 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
     for (volume, volume_config) in config.get_project_volumes() {
         tracing::info!("Creating project volume: {}", volume);
         for path_config in volume_config.path_configs() {
-            match path_config.link_path(mapping.clone().into()) {
-                Ok(Some(link_path)) => {
-                    tracing::info!("    - Link path to create: {}", link_path.to_string_lossy());
-                }
-                _ => {}
-            }
-
             match path_config.path(mapping.clone().into()) {
                 Ok(path) => {
                     tracing::info!("    - Directory path to create: {}", path.to_string_lossy());
@@ -226,13 +219,10 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
     for (volume, volume_config) in config.get_project_volumes() {
         tracing::info!("Creating project volume links for: {}", volume);
         for path_config in volume_config.path_configs() {
-            match path_config.link_path(mapping.clone().into()) {
-                Ok(Some(link_path)) => {
-                    tracing::info!("    - Link path to create: {}", link_path.to_string_lossy());
-                    let dir_path = path_config.path(mapping.clone().into())?;
-                    filesystem::create_link(&dir_path, &link_path).await?;
-                }
-                _ => {}
+            if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
+                tracing::info!("    - Link path to create: {}", link_path.to_string_lossy());
+                let dir_path = path_config.path(mapping.clone().into())?;
+                filesystem::create_link(&dir_path, &link_path).await?;
             }
         }
     }
@@ -312,27 +302,21 @@ async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
     for (volume, volume_config) in config.get_project_volumes() {
         tracing::info!("Removing project volume: {}", volume);
         for path_config in volume_config.path_configs() {
-            match path_config.link_path(mapping.clone().into()) {
-                Ok(Some(link_path)) => {
-                    tracing::info!("    - Link path to remove: {}", link_path.to_string_lossy());
-                    if link_path.exists() && link_path.is_symlink() {
-                        tracing::info!(
-                            "      - Removing symlink '{}'",
-                            link_path.to_string_lossy()
-                        );
-                        match std::fs::remove_file(&link_path) {
-                            Ok(_) => tracing::info!("Successfully removed symlink"),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Could not remove symlink '{}': {}",
-                                    link_path.to_string_lossy(),
-                                    e
-                                )
-                            }
+            if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
+                tracing::info!("    - Link path to remove: {}", link_path.to_string_lossy());
+                if link_path.exists() && link_path.is_symlink() {
+                    tracing::info!("      - Removing symlink '{}'", link_path.to_string_lossy());
+                    match std::fs::remove_file(&link_path) {
+                        Ok(_) => tracing::info!("Successfully removed symlink"),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Could not remove symlink '{}': {}",
+                                link_path.to_string_lossy(),
+                                e
+                            )
                         }
                     }
                 }
-                _ => {}
             }
 
             match path_config.path(mapping.clone().into()) {
@@ -474,11 +458,7 @@ pub async fn get_project_quotas(
         let engine = match config.get_quota_engine(engine_name) {
             Ok(engine) => engine,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to get quota engine for volume {}: {}",
-                    volume,
-                    e
-                );
+                tracing::warn!("Failed to get quota engine for volume {}: {}", volume, e);
                 continue;
             }
         };
@@ -581,11 +561,7 @@ pub async fn get_user_quotas(
         let engine = match config.get_quota_engine(engine_name) {
             Ok(engine) => engine,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to get quota engine for volume {}: {}",
-                    volume,
-                    e
-                );
+                tracing::warn!("Failed to get quota engine for volume {}: {}", volume, e);
                 continue;
             }
         };

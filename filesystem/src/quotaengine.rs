@@ -11,40 +11,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::storage::{Quota, QuotaLimit, StorageUsage};
+use templemeads::Error;
 
 use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
-
-/// Represents a user quota entry with username and quota information
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserQuotaEntry {
-    pub user: String,
-    pub quota: Quota,
-}
-
-impl UserQuotaEntry {
-    pub fn new(user: impl Into<String>, quota: Quota) -> Self {
-        Self {
-            user: user.into(),
-            quota,
-        }
-    }
-}
-
-/// Represents a project quota entry with project identifier and quota information
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectQuotaEntry {
-    pub project: String,
-    pub quota: Quota,
-}
-
-impl ProjectQuotaEntry {
-    pub fn new(project: impl Into<String>, quota: Quota) -> Self {
-        Self {
-            project: project.into(),
-            quota,
-        }
-    }
-}
 
 /// Configuration for creating quota engines.
 ///
@@ -69,7 +38,7 @@ impl QuotaEngineConfig {
         mapping: &UserMapping,
         volume_config: &UserVolumeConfig,
         limit: &QuotaLimit,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
@@ -86,13 +55,13 @@ impl QuotaEngineConfig {
         mapping: &ProjectMapping,
         volume_config: &ProjectVolumeConfig,
         limit: &QuotaLimit,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
-                engine
+                Ok(engine
                     .set_project_quota(mapping, volume_config, limit)
-                    .await
+                    .await?)
             }
         }
     }
@@ -104,11 +73,11 @@ impl QuotaEngineConfig {
         &self,
         mapping: &UserMapping,
         volume_config: &UserVolumeConfig,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
-                engine.get_user_quota(mapping, volume_config).await
+                Ok(engine.get_user_quota(mapping, volume_config).await?)
             }
         }
     }
@@ -120,11 +89,11 @@ impl QuotaEngineConfig {
         &self,
         mapping: &ProjectMapping,
         volume_config: &ProjectVolumeConfig,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
-                engine.get_project_quota(mapping, volume_config).await
+                Ok(engine.get_project_quota(mapping, volume_config).await?)
             }
         }
     }
@@ -181,22 +150,30 @@ impl LustreEngine {
     /// Build the command for running lfs operations
     ///
     /// The lfs_command may contain multiple parts (e.g., "sudo lfs" or "docker exec container lfs")
-    fn build_command(&self) -> Vec<String> {
-        self.config
+    fn build_command(&self, command: &str) -> Vec<String> {
+        let mut cmd = self
+            .config
             .lfs_command
             .split_whitespace()
             .map(|s| s.to_string())
-            .collect()
-    }
-}
+            .collect::<Vec<String>>();
 
-impl LustreEngine {
+        cmd.extend(
+            command
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>(),
+        );
+
+        cmd
+    }
+
     async fn set_user_quota(
         &self,
         mapping: &UserMapping,
         volume_config: &UserVolumeConfig,
         limit: &QuotaLimit,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         // TODO: Implement actual Lustre user quota setting
         // This will use: lfs setquota -u <user> -b <soft> -B <hard> <path>
         // Then immediately query to get current usage
@@ -211,6 +188,19 @@ impl LustreEngine {
             path.display(),
             limit
         );
+
+        // make sure that the limit does not exceed the maximum quota for this volume
+        if let Some(max_quota) = volume_config.max_quota() {
+            match limit {
+                QuotaLimit::Limited(size) if size > max_quota => {
+                    return Err(Error::Failed(format!(
+                        "Requested quota limit ({}) exceeds maximum allowed quota ({}) for user {} on volume",
+                        size, max_quota, user
+                    )));
+                }
+                _ => {}
+            }
+        }
 
         // Placeholder implementation
         let quota = match limit {

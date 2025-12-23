@@ -166,12 +166,24 @@ impl FilesystemConfig {
         self.project_volumes.clone()
     }
 
-    /// Return the named quota engine configurations
-    pub fn get_quota_engine(&self, name: &str) -> Result<QuotaEngineConfig, Error> {
+    /// Return the named quota engine configuration
+    ///
+    /// This returns the configuration which can then be used to create an engine
+    /// instance via `create_engine()`. For convenience, the same method is also
+    /// available as `get_quota_engine()`.
+    ///
+    /// Note: Creating engine instances is lightweight, but if needed in the future,
+    /// you could cache created engines at a higher level for better performance.
+    pub fn get_quota_engine_config(&self, name: &str) -> Result<QuotaEngineConfig, Error> {
         self.quota_engines
             .get(name)
             .cloned()
             .ok_or_else(|| Error::NotFound(format!("Quota engine '{}' not found", name)))
+    }
+
+    /// Alias for get_quota_engine_config() for convenience
+    pub fn get_quota_engine(&self, name: &str) -> Result<QuotaEngineConfig, Error> {
+        self.get_quota_engine_config(name)
     }
 }
 

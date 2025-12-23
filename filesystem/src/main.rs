@@ -403,9 +403,9 @@ pub async fn set_project_quota(
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
-    let volume = config.get_project_volume(volume)?;
+    let volume_config = config.get_project_volume(volume)?;
 
-    let engine_name = match volume.quota_engine_name() {
+    let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
         None => {
             return Ok(Quota::unlimited());
@@ -414,7 +414,10 @@ pub async fn set_project_quota(
 
     let engine = config.get_quota_engine(engine_name)?;
 
-    Ok(engine.set_project_quota(&mapping, &volume, &limit)?)
+    engine
+        .set_project_quota(mapping, &volume_config, limit)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///
@@ -426,9 +429,9 @@ pub async fn get_project_quota(
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
-    let volume = config.get_project_volume(volume)?;
+    let volume_config = config.get_project_volume(volume)?;
 
-    let engine_name = match volume.quota_engine_name() {
+    let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
         None => {
             return Ok(Quota::unlimited());
@@ -437,7 +440,10 @@ pub async fn get_project_quota(
 
     let engine = config.get_quota_engine(engine_name)?;
 
-    Ok(engine.get_project_quota(&mapping, &volume)?)
+    engine
+        .get_project_quota(mapping, &volume_config)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///
@@ -463,9 +469,19 @@ pub async fn get_project_quotas(
             }
         };
 
-        let engine = config.get_quota_engine(engine_name)?;
+        let engine = match config.get_quota_engine(engine_name) {
+            Ok(engine) => engine,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get quota engine for volume {}: {}",
+                    volume,
+                    e
+                );
+                continue;
+            }
+        };
 
-        match engine.get_project_quota(mapping, &volume).await {
+        match engine.get_project_quota(mapping, &volume_config).await {
             Ok(quota) => {
                 quotas.insert(volume.clone(), quota);
             }
@@ -494,9 +510,9 @@ pub async fn set_user_quota(
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
-    let volume = config.get_user_volume(volume)?;
+    let volume_config = config.get_user_volume(volume)?;
 
-    let engine_name = match volume.quota_engine_name() {
+    let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
         None => {
             return Ok(Quota::unlimited());
@@ -505,7 +521,10 @@ pub async fn set_user_quota(
 
     let engine = config.get_quota_engine(engine_name)?;
 
-    Ok(engine.set_user_quota(&mapping, &volume, &limit)?)
+    engine
+        .set_user_quota(mapping, &volume_config, limit)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///
@@ -517,9 +536,9 @@ pub async fn get_user_quota(
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
-    let volume = config.get_user_volume(volume)?;
+    let volume_config = config.get_user_volume(volume)?;
 
-    let engine_name = match volume.quota_engine_name() {
+    let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
         None => {
             return Ok(Quota::unlimited());
@@ -528,7 +547,10 @@ pub async fn get_user_quota(
 
     let engine = config.get_quota_engine(engine_name)?;
 
-    Ok(engine.get_user_quota(&mapping, &volume)?)
+    engine
+        .get_user_quota(mapping, &volume_config)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///
@@ -554,9 +576,19 @@ pub async fn get_user_quotas(
             }
         };
 
-        let engine = config.get_quota_engine(engine_name)?;
+        let engine = match config.get_quota_engine(engine_name) {
+            Ok(engine) => engine,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get quota engine for volume {}: {}",
+                    volume,
+                    e
+                );
+                continue;
+            }
+        };
 
-        match engine.get_user_quota(mapping, &volume).await {
+        match engine.get_user_quota(mapping, &user_config).await {
             Ok(quota) => {
                 quotas.insert(volume.clone(), quota);
             }

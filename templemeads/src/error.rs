@@ -61,6 +61,9 @@ pub enum Error {
     Duplicate(String),
 
     #[error("{0}")]
+    Failed(String),
+
+    #[error("{0}")]
     Expired(String),
 
     #[error("{0}")]

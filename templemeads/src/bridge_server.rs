@@ -14,6 +14,7 @@ use crate::job::Job;
 
 use anyhow::{Context, Result};
 use axum::{
+    body::Bytes,
     extract::{Json, State},
     http::header::HeaderMap,
     http::StatusCode,
@@ -36,33 +37,47 @@ type SharedRateLimitMap = Arc<Mutex<RateLimitMap>>;
 
 ///
 /// Return the OpenPortal authorisation header for the passed datetime,
-/// protocol, function, (optional) arguments, and nonce, signed with the passed
+/// protocol, function, (optional) body bytes, and nonce, signed with the passed
 /// key.
+///
+/// The body parameter should be the raw JSON bytes (empty slice for GET requests).
+/// This ensures the signature is computed over the exact bytes sent/received,
+/// avoiding any serialization fragility.
 ///
 pub fn sign_api_call(
     key: &SecretKey,
     date: &DateTime<Utc>,
     protocol: &str,
     function: &str,
-    arguments: &Option<serde_json::Value>,
+    body: &[u8],
     nonce: Option<&str>,
 ) -> Result<String, anyhow::Error> {
     let date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
 
-    let call_string = match (arguments, nonce) {
-        (Some(args), Some(n)) => format!(
-            "{}\napplication/json\n{}\n{}\n{}\n{}",
-            protocol, date, function, args, n
-        ),
-        (Some(args), None) => format!(
-            "{}\napplication/json\n{}\n{}\n{}",
-            protocol, date, function, args
-        ),
-        (None, Some(n)) => format!(
-            "{}\napplication/json\n{}\n{}\n{}",
-            protocol, date, function, n
-        ),
-        (None, None) => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
+    let call_string = if body.is_empty() {
+        // GET request - no body
+        match nonce {
+            Some(n) => format!(
+                "{}\napplication/json\n{}\n{}\n{}",
+                protocol, date, function, n
+            ),
+            None => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
+        }
+    } else {
+        // POST request - include raw body bytes
+        let body_str = std::str::from_utf8(body)
+            .with_context(|| "Could not parse body as UTF-8 for signing")?;
+
+        match nonce {
+            Some(n) => format!(
+                "{}\napplication/json\n{}\n{}\n{}\n{}",
+                protocol, date, function, body_str, n
+            ),
+            None => format!(
+                "{}\napplication/json\n{}\n{}\n{}",
+                protocol, date, function, body_str
+            ),
+        }
     };
 
     let signature = key.expose_secret().sign(call_string)?;
@@ -283,13 +298,14 @@ fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
 
 ///
 /// Verify the headers for the request - this checks the API key, rate limiting, and nonce
+/// The body parameter should be the raw request body bytes (empty for GET requests)
 ///
 async fn verify_headers(
     state: &AppState,
     headers: &HeaderMap,
     protocol: &str,
     function: &str,
-    arguments: Option<serde_json::Value>,
+    body: &[u8],
 ) -> Result<(), AppError> {
     // Extract client IP for rate limiting
     let client_ip = extract_client_ip(headers);
@@ -386,13 +402,13 @@ async fn verify_headers(
         nonce_store.retain(|_, timestamp| *timestamp > cutoff);
     }
 
-    // now generate the expected key
+    // Generate the expected signature from the raw body bytes
     let expected_key = sign_api_call(
         &state.config.key,
         &date,
         protocol,
         function,
-        &arguments,
+        body,
         nonce.as_deref(),
     )?;
 
@@ -504,7 +520,7 @@ async fn health(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    verify_headers(&state, &headers, "get", "health", None).await?;
+    verify_headers(&state, &headers, "get", "health", &[]).await?;
     tracing::debug!("Health check - collecting from all agents");
 
     let self_peer = agent::get_self(None).await;
@@ -540,10 +556,11 @@ struct RestartRequest {
 async fn restart(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(payload): Json<RestartRequest>,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let payload_value = serde_json::to_value(&payload)?;
-    verify_headers(&state, &headers, "post", "restart", Some(payload_value)).await?;
+    verify_headers(&state, &headers, "post", "restart", &body).await?;
+
+    let payload: RestartRequest = serde_json::from_slice(&body)?;
 
     tracing::info!(
         "Restart request - type: {}, destination: {}",
@@ -598,10 +615,11 @@ struct DiagnosticsRequest {
 async fn diagnostics(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(payload): Json<DiagnosticsRequest>,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let payload_value = serde_json::to_value(&payload)?;
-    verify_headers(&state, &headers, "post", "diagnostics", Some(payload_value)).await?;
+    verify_headers(&state, &headers, "post", "diagnostics", &body).await?;
+
+    let payload: DiagnosticsRequest = serde_json::from_slice(&body)?;
 
     tracing::info!("Diagnostics request - destination: {}", payload.destination);
 
@@ -644,17 +662,11 @@ struct RunRequest {
 async fn run(
     headers: HeaderMap,
     State(state): State<AppState>,
-    //Query(params): Query<HashMap<String, String>>,
-    Json(payload): Json<RunRequest>,
+    body: Bytes,
 ) -> Result<Json<Job>, AppError> {
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "run",
-        Some(serde_json::json!({"command": payload.command})),
-    )
-    .await?;
+    verify_headers(&state, &headers, "post", "run", &body).await?;
+
+    let payload: RunRequest = serde_json::from_slice(&body)?;
 
     tracing::debug!("Running command: {}", payload.command);
 
@@ -683,17 +695,11 @@ struct StatusRequest {
 async fn status(
     headers: HeaderMap,
     State(state): State<AppState>,
-    //Query(params): Query<HashMap<String, String>>,
-    Json(payload): Json<StatusRequest>,
+    body: Bytes,
 ) -> Result<Json<Job>, AppError> {
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "status",
-        Some(serde_json::json!({"job": payload.job})),
-    )
-    .await?;
+    verify_headers(&state, &headers, "post", "status", &body).await?;
+
+    let payload: StatusRequest = serde_json::from_slice(&body)?;
 
     tracing::debug!("Status request for job: {:?}", payload);
 
@@ -716,7 +722,7 @@ async fn fetch_jobs(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Job>>, AppError> {
-    verify_headers(&state, &headers, "get", "fetch_jobs", None).await?;
+    verify_headers(&state, &headers, "get", "fetch_jobs", &[]).await?;
 
     tracing::debug!("Fetching jobs");
 
@@ -742,16 +748,11 @@ async fn fetch_jobs(
 async fn fetch_job(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(uid): Json<Uuid>,
+    body: Bytes,
 ) -> Result<Json<Job>, AppError> {
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "fetch_job",
-        Some(serde_json::json!(uid)),
-    )
-    .await?;
+    verify_headers(&state, &headers, "post", "fetch_job", &body).await?;
+
+    let uid: Uuid = serde_json::from_slice(&body)?;
 
     tracing::debug!("fetch_job: {:?}", uid);
 
@@ -789,18 +790,11 @@ async fn fetch_job(
 async fn send_result(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(job): Json<Job>,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    tracing::debug!("Send result: {:?}", job);
+    verify_headers(&state, &headers, "post", "send_result", &body).await?;
 
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "send_result",
-        Some(serde_json::json!(job)),
-    )
-    .await?;
+    let job: Job = serde_json::from_slice(&body)?;
 
     tracing::debug!("Sending result: {:?}", job);
 
@@ -829,7 +823,7 @@ async fn get_portal(
     State(state): State<AppState>,
 ) -> Result<Json<PortalIdentifier>, AppError> {
     tracing::debug!("get_portal");
-    verify_headers(&state, &headers, "get", "get_portal", None).await?;
+    verify_headers(&state, &headers, "get", "get_portal", &[]).await?;
 
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => match PortalIdentifier::parse(portal.name()) {
@@ -853,18 +847,11 @@ async fn get_portal(
 async fn sync_offerings(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(offerings): Json<Destinations>,
+    body: Bytes,
 ) -> Result<Json<Destinations>, AppError> {
-    tracing::debug!("sync_offerings: {:?}", offerings);
+    verify_headers(&state, &headers, "post", "sync_offerings", &body).await?;
 
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "sync_offerings",
-        Some(serde_json::json!(offerings)),
-    )
-    .await?;
+    let offerings: Destinations = serde_json::from_slice(&body)?;
 
     tracing::debug!("sync_offerings: {:?}", offerings);
 
@@ -917,18 +904,11 @@ async fn sync_offerings(
 async fn add_offerings(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(offerings): Json<Destinations>,
+    body: Bytes,
 ) -> Result<Json<Destinations>, AppError> {
-    tracing::debug!("add_offerings: {:?}", offerings);
+    verify_headers(&state, &headers, "post", "add_offerings", &body).await?;
 
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "add_offerings",
-        Some(serde_json::json!(offerings)),
-    )
-    .await?;
+    let offerings: Destinations = serde_json::from_slice(&body)?;
 
     tracing::debug!("add_offerings: {:?}", offerings);
 
@@ -986,7 +966,7 @@ async fn get_offerings(
     State(state): State<AppState>,
 ) -> Result<Json<Destinations>, AppError> {
     tracing::debug!("get_offerings");
-    verify_headers(&state, &headers, "get", "get_offerings", None).await?;
+    verify_headers(&state, &headers, "get", "get_offerings", &[]).await?;
 
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
@@ -1035,18 +1015,11 @@ async fn get_offerings(
 async fn remove_offerings(
     headers: HeaderMap,
     State(state): State<AppState>,
-    Json(offerings): Json<Destinations>,
+    body: Bytes,
 ) -> Result<Json<Destinations>, AppError> {
-    tracing::debug!("remove_offerings: {:?}", offerings);
+    verify_headers(&state, &headers, "post", "remove_offerings", &body).await?;
 
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "remove_offerings",
-        Some(serde_json::json!(offerings)),
-    )
-    .await?;
+    let offerings: Destinations = serde_json::from_slice(&body)?;
 
     tracing::debug!("remove_offerings: {:?}", offerings);
 
@@ -1182,11 +1155,11 @@ mod tests {
         let date = Utc::now();
         let protocol = "get";
         let function = "health";
-        let arguments = None;
+        let body = b""; // Empty body for GET request
         let nonce = None;
 
         let signed =
-            sign_api_call(&key, &date, protocol, function, &arguments, nonce).unwrap_or_default();
+            sign_api_call(&key, &date, protocol, function, body, nonce).unwrap_or_default();
 
         #[allow(clippy::unwrap_used)] // safe to do this in a test
         {
@@ -1198,6 +1171,38 @@ mod tests {
                         protocol,
                         date.format("%a, %d %b %Y %H:%M:%S GMT"),
                         function
+                    ))
+                    .unwrap()
+            );
+
+            assert_eq!(signed, expected);
+        }
+    }
+
+    #[test]
+    fn test_sign_api_call_with_body() {
+        let key = Key::generate();
+        let date = Utc::now();
+        let protocol = "post";
+        let function = "run";
+        let body = b"{\"command\":\"test\"}";
+        let nonce = Some("test-nonce");
+
+        let signed =
+            sign_api_call(&key, &date, protocol, function, body, nonce).unwrap_or_default();
+
+        #[allow(clippy::unwrap_used)] // safe to do this in a test
+        {
+            let expected = format!(
+                "OpenPortal {}",
+                key.expose_secret()
+                    .sign(format!(
+                        "{}\napplication/json\n{}\n{}\n{}\n{}",
+                        protocol,
+                        date.format("%a, %d %b %Y %H:%M:%S GMT"),
+                        function,
+                        std::str::from_utf8(body).unwrap(),
+                        nonce.unwrap()
                     ))
                     .unwrap()
             );

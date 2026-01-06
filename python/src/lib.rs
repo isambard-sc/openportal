@@ -110,7 +110,8 @@ where
 
         // Generate a unique nonce for replay attack prevention
         let nonce = uuid::Uuid::new_v4().to_string();
-        let auth_token = sign_api_call(&config.key, &date, "get", function, &None, Some(&nonce))?;
+        // GET requests have no body, so sign with empty slice
+        let auth_token = sign_api_call(&config.key, &date, "get", function, &[], Some(&nonce))?;
 
         let result = reqwest::blocking::Client::new()
             .get(url)
@@ -166,18 +167,23 @@ where
     const MAX_RETRIES: u32 = 5;
     const INITIAL_BACKOFF_MS: u64 = 100;
 
+    // Serialize the arguments once to get the exact bytes we'll send
+    let body_bytes = serde_json::to_vec(&arguments)
+        .with_context(|| "Could not serialize arguments to JSON")?;
+
     for attempt in 0..=MAX_RETRIES {
         let date = Utc::now();
         let url = config.url.join(function).context("Could not join URL")?;
 
         // Generate a unique nonce for replay attack prevention
         let nonce = uuid::Uuid::new_v4().to_string();
+        // Sign the exact bytes we're about to send
         let auth_token = sign_api_call(
             &config.key,
             &date,
             "post",
             function,
-            &Some(arguments.to_owned()),
+            &body_bytes,
             Some(&nonce),
         )?;
 
@@ -185,10 +191,11 @@ where
             .post(url)
             .query(&[("openportal-version", "0.1")])
             .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
             .header("Authorization", auth_token)
             .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
             .header("X-Nonce", nonce)
-            .json(&arguments)
+            .body(body_bytes.clone())
             .send()
             .with_context(|| format!("Could not call function: {}", function))?;
 

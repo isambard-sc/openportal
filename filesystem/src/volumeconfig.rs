@@ -378,6 +378,14 @@ pub struct UserVolumeConfig {
     /// Optional default quota size for new projects (defaults to unlimited
     /// if a quota engine is used, or to none if there is no quota engine)
     default_quota: Option<QuotaLimit>,
+
+    /// Optional mount point for the filesystem (needed by some quota engines like Lustre)
+    /// Example: "/mnt/lustre" or "/scratch"
+    mount_point: Option<String>,
+
+    /// Optional default inode limit for quota (number of files/directories allowed)
+    /// If not specified, quota engines may use a large default (e.g., 1000000)
+    default_inode_limit: Option<u64>,
 }
 
 impl UserVolumeConfig {
@@ -474,6 +482,16 @@ impl UserVolumeConfig {
         self.max_quota.as_ref()
     }
 
+    /// Get the mount point for this volume
+    pub fn mount_point(&self) -> Option<&str> {
+        self.mount_point.as_deref()
+    }
+
+    /// Get the default inode limit for quotas on this volume
+    pub fn default_inode_limit(&self) -> Option<u64> {
+        self.default_inode_limit
+    }
+
     /// Return all of the paths for this volume
     pub fn path_configs(&self) -> Vec<PathConfig> {
         let num_roots = self.roots.len();
@@ -528,6 +546,14 @@ pub struct ProjectVolumeConfig {
     /// Optional default quota size for new projects (defaults to unlimited
     /// if a quota engine is used, or to none if there is no quota engine)
     default_quota: Option<QuotaLimit>,
+
+    /// Optional mount point for the filesystem (needed by some quota engines like Lustre)
+    /// Example: "/mnt/lustre" or "/scratch"
+    mount_point: Option<String>,
+
+    /// Optional default inode limit for quota (number of files/directories allowed)
+    /// If not specified, quota engines may use a large default (e.g., 1000000)
+    default_inode_limit: Option<u64>,
 
     /// Optional symlinks to create (empty string = no link, one per root)
     /// Example: ["", "/fastwork/{project}"] for two roots
@@ -599,6 +625,16 @@ impl ProjectVolumeConfig {
     /// Get the maximum quota size
     pub fn max_quota(&self) -> Option<&QuotaLimit> {
         self.max_quota.as_ref()
+    }
+
+    /// Get the mount point for this volume
+    pub fn mount_point(&self) -> Option<&str> {
+        self.mount_point.as_deref()
+    }
+
+    /// Get the default inode limit for quotas on this volume
+    pub fn default_inode_limit(&self) -> Option<u64> {
+        self.default_inode_limit
     }
 
     /// Return all of the paths for this volume

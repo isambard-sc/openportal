@@ -353,16 +353,16 @@ pub struct LustreEngineConfig {
     /// Can include full path, sudo, or container exec as needed
     /// Examples: "lfs", "sudo lfs", "/usr/bin/lfs", "docker exec lustre lfs"
     #[serde(default = "default_lfs_command")]
-    pub lfs_command: String,
+    lfs_command: String,
 
     /// Timeout in seconds for lfs commands (default: 30)
     #[serde(default = "default_command_timeout")]
-    pub command_timeout_secs: u64,
+    command_timeout_secs: u64,
 
     /// Timeout in seconds for recursive lfs project operations (default: 600)
     /// The `lfs project -srp` command can take a long time on large directory trees
     #[serde(default = "default_recursive_timeout")]
-    pub recursive_timeout_secs: u64,
+    recursive_timeout_secs: u64,
 
     /// Map from volume name to quota ID generation strategy
     ///
@@ -387,7 +387,7 @@ pub struct LustreEngineConfig {
     /// home = { format = "{UID-1483800000}01" }
     /// ```
     #[serde(default, flatten)]
-    pub id_strategies: HashMap<Volume, LustreIdStrategy>,
+    id_strategies: HashMap<Volume, LustreIdStrategy>,
 }
 
 fn default_lfs_command() -> String {
@@ -410,6 +410,28 @@ impl Default for LustreEngineConfig {
             recursive_timeout_secs: default_recursive_timeout(),
             id_strategies: HashMap::new(),
         }
+    }
+}
+
+impl LustreEngineConfig {
+    pub fn lfs_command(&self) -> &str {
+        &self.lfs_command
+    }
+
+    pub fn command_timeout(&self) -> Duration {
+        Duration::from_secs(self.command_timeout_secs)
+    }
+
+    pub fn recursive_timeout(&self) -> Duration {
+        // use the maximum of the command timeout and recursive timeout to avoid premature timeouts
+        Duration::from_secs(std::cmp::max(
+            self.command_timeout_secs,
+            self.recursive_timeout_secs,
+        ))
+    }
+
+    pub fn get_id_strategy(&self, volume: &Volume) -> Option<&LustreIdStrategy> {
+        self.id_strategies.get(volume)
     }
 }
 
@@ -636,25 +658,27 @@ impl LustreEngine {
     async fn run_lfs_command(
         &self,
         args: &[&str],
-        timeout_secs: u64,
+        timeout_duration: Duration,
     ) -> Result<String, Error> {
-        let cmd_parts: Vec<&str> = self.config.lfs_command.split_whitespace().collect();
+        let cmd_parts: Vec<&str> = self.config.lfs_command().split_whitespace().collect();
         let (program, initial_args) = cmd_parts
             .split_first()
             .ok_or_else(|| Error::Misconfigured("lfs_command is empty".to_string()))?;
+
+        let command_string = format!("{} {}", program, args.join(" "));
 
         let mut command = Command::new(program);
         command.args(initial_args);
         command.args(args);
 
-        tracing::debug!("Executing lfs command: {:?}", command);
+        tracing::info!("Executing lfs command: {}", command_string);
 
-        let result = timeout(Duration::from_secs(timeout_secs), command.output())
+        let result = timeout(timeout_duration, command.output())
             .await
             .map_err(|_| {
                 Error::Timeout(format!(
                     "lfs command timed out after {} seconds",
-                    timeout_secs
+                    timeout_duration.as_secs()
                 ))
             })?
             .map_err(|e| Error::Failed(format!("Failed to execute lfs command: {}", e)))?;
@@ -670,17 +694,21 @@ impl LustreEngine {
         Ok(String::from_utf8_lossy(&result.stdout).to_string())
     }
 
-    /// Get the current project ID assigned to a directory
+    /// Get the current Lustre ID assigned to a directory
     ///
-    /// Uses `lfs project -d <directory>` to query the project ID
-    /// Returns None if no project ID is set
-    async fn get_project_id_from_dir(&self, directory: &Path) -> Result<Option<u64>, Error> {
+    /// Uses `lfs project -d <directory>` to query the Lustre ID
+    /// Returns None if no Lustre ID is set
+    async fn get_lustre_id_from_dir(&self, directory: &Path) -> Result<Option<u64>, Error> {
         let output = self
             .run_lfs_command(
-                &["project", "-d", directory.to_str().ok_or_else(|| {
-                    Error::Incompatible("Directory path contains invalid UTF-8".to_string())
-                })?],
-                self.config.command_timeout_secs,
+                &[
+                    "project",
+                    "-d",
+                    directory.to_str().ok_or_else(|| {
+                        Error::Incompatible("Directory path contains invalid UTF-8".to_string())
+                    })?,
+                ],
+                self.config.command_timeout(),
             )
             .await?;
 
@@ -705,18 +733,14 @@ impl LustreEngine {
         Ok(None)
     }
 
-    /// Assign a project ID to a directory recursively
+    /// Assign a Lustre ID to a directory recursively
     ///
-    /// Uses `lfs project -srp <id> <directory>` to recursively set the project ID
+    /// Uses `lfs project -srp <id> <directory>` to recursively set the Lustre ID
     /// This operation can be very slow on large directory trees
-    async fn assign_project_id(
-        &self,
-        directory: &Path,
-        project_id: u64,
-    ) -> Result<(), Error> {
+    async fn assign_lustre_id(&self, directory: &Path, lustre_id: u64) -> Result<(), Error> {
         tracing::info!(
-            "Assigning project ID {} to directory {} (this may take a while)",
-            project_id,
+            "Assigning Lustre ID {} to directory {} (this may take a while)",
+            lustre_id,
             directory.display()
         );
 
@@ -724,18 +748,18 @@ impl LustreEngine {
             &[
                 "project",
                 "-srp",
-                &project_id.to_string(),
+                &lustre_id.to_string(),
                 directory.to_str().ok_or_else(|| {
                     Error::Incompatible("Directory path contains invalid UTF-8".to_string())
                 })?,
             ],
-            self.config.recursive_timeout_secs,
+            self.config.recursive_timeout(),
         )
         .await?;
 
         tracing::info!(
-            "Successfully assigned project ID {} to directory {}",
-            project_id,
+            "Successfully assigned Lustre ID {} to directory {}",
+            lustre_id,
             directory.display()
         );
 
@@ -772,7 +796,7 @@ impl LustreEngine {
                 &format!("{}k", inode_limit / 1000), // Lustre uses k suffix for thousands
                 mount_point,
             ],
-            self.config.command_timeout_secs,
+            self.config.command_timeout(),
         )
         .await?;
 
@@ -815,7 +839,7 @@ impl LustreEngine {
                 &format!("{}k", inode_limit / 1000),
                 mount_point,
             ],
-            self.config.command_timeout_secs,
+            self.config.command_timeout(),
         )
         .await?;
 
@@ -840,7 +864,7 @@ impl LustreEngine {
         let output = self
             .run_lfs_command(
                 &["quota", "-p", &project_id.to_string(), mount_point],
-                self.config.command_timeout_secs,
+                self.config.command_timeout(),
             )
             .await?;
 
@@ -854,7 +878,7 @@ impl LustreEngine {
         let output = self
             .run_lfs_command(
                 &["quota", "-u", &user_id.to_string(), mount_point],
-                self.config.command_timeout_secs,
+                self.config.command_timeout(),
             )
             .await?;
 
@@ -898,8 +922,14 @@ impl LustreEngine {
         }
 
         // If we couldn't parse the output, return unlimited with zero usage
-        tracing::warn!("Could not parse quota output, returning unlimited: {}", output);
-        Ok(Quota::with_usage(QuotaLimit::Unlimited, StorageUsage::from(0)))
+        tracing::warn!(
+            "Could not parse quota output, returning unlimited: {}",
+            output
+        );
+        Ok(Quota::with_usage(
+            QuotaLimit::Unlimited,
+            StorageUsage::from(0),
+        ))
     }
 
     pub async fn set_user_quota(
@@ -950,10 +980,23 @@ impl LustreEngine {
         let volume_lock = Self::get_volume_lock(volume).await;
         let _lock = volume_lock.lock().await;
 
-        // For user quotas, we typically don't need to assign project IDs to directories
-        // (unlike project quotas). We just set the quota limits directly.
-        // However, if user quotas on Lustre also use project IDs, we would need
-        // to check and assign them here similar to set_project_quota.
+        // Step 1: Check if the directory has the correct Lustre ID assigned (idempotency)
+        let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
+        if current_lustre_id != Some(quota_id) {
+            tracing::info!(
+                "Directory {} has Lustre ID {:?}, need to assign {}",
+                path.display(),
+                current_lustre_id,
+                quota_id
+            );
+            self.assign_lustre_id(&path, quota_id).await?;
+        } else {
+            tracing::debug!(
+                "Directory {} already has correct Lustre ID {}",
+                path.display(),
+                quota_id
+            );
+        }
 
         // Set the quota limits
         self.set_user_quota_limits(quota_id, limit, inode_limit, mount_point)
@@ -1013,19 +1056,19 @@ impl LustreEngine {
         let volume_lock = Self::get_volume_lock(volume).await;
         let _lock = volume_lock.lock().await;
 
-        // Step 1: Check if the directory has the correct project ID assigned (idempotency)
-        let current_project_id = self.get_project_id_from_dir(&path).await?;
-        if current_project_id != Some(quota_id) {
+        // Step 1: Check if the directory has the correct Lustre ID assigned (idempotency)
+        let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
+        if current_lustre_id != Some(quota_id) {
             tracing::info!(
-                "Directory {} has project ID {:?}, need to assign {}",
+                "Directory {} has Lustre ID {:?}, need to assign {}",
                 path.display(),
-                current_project_id,
+                current_lustre_id,
                 quota_id
             );
-            self.assign_project_id(&path, quota_id).await?;
+            self.assign_lustre_id(&path, quota_id).await?;
         } else {
             tracing::debug!(
-                "Directory {} already has correct project ID {}",
+                "Directory {} already has correct Lustre ID {}",
                 path.display(),
                 quota_id
             );

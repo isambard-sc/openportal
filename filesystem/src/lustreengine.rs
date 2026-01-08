@@ -262,8 +262,8 @@ impl LustreIdStrategy {
     /// Evaluate a simple arithmetic expression
     ///
     /// Supports addition (+) and subtraction (-) operations on integers
-    /// Example: "125-1000" evaluates to -875, "5000+1000" evaluates to 6000
-    fn evaluate_arithmetic(expr: &str) -> Result<i64, Error> {
+    /// This must not result in negative numbers
+    fn evaluate_arithmetic(expr: &str) -> Result<u64, Error> {
         let expr = expr.trim();
 
         // Look for operators (+ or -)
@@ -312,10 +312,17 @@ impl LustreIdStrategy {
                 _ => unreachable!(),
             };
 
-            Ok(result)
+            if result < 0 {
+                return Err(Error::Incompatible(format!(
+                    "Expression '{}' evaluated to negative value {}",
+                    expr, result
+                )));
+            }
+
+            Ok(result as u64)
         } else {
             // No operator found, just parse as a number
-            expr.parse::<i64>().map_err(|e| {
+            expr.parse::<u64>().map_err(|e| {
                 Error::Misconfigured(format!(
                     "Failed to parse expression '{}' as number: {}",
                     expr, e
@@ -473,6 +480,8 @@ impl LustreEngine {
             ))
         })?;
 
+        tracing::info!("Resolved username '{}' to UID {}", username, uid);
+
         Ok(uid)
     }
 
@@ -529,6 +538,8 @@ impl LustreEngine {
             ))
         })?;
 
+        tracing::info!("Resolved group name '{}' to GID {}", groupname, gid);
+
         Ok(gid)
     }
 
@@ -538,9 +549,7 @@ impl LustreEngine {
     async fn get_gid_from_file(&self, groupname: &str) -> Result<u32, Error> {
         let contents = tokio::fs::read_to_string("/etc/group")
             .await
-            .map_err(|e| {
-                Error::Failed(format!("Failed to read /etc/group: {}", e))
-            })?;
+            .map_err(|e| Error::Failed(format!("Failed to read /etc/group: {}", e)))?;
 
         // Search for line matching "^groupname:"
         for line in contents.lines() {

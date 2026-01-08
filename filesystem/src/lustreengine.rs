@@ -986,8 +986,9 @@ mod tests {
     #[test]
     fn test_deserialize_config_with_flattened_strategies() {
         // Test the full config with flattened strategies
+        // Note: We deserialize without the 'type' field since LustreEngineConfig
+        // is typically used inside QuotaEngineConfig which handles that field
         let toml_str = r#"
-            type = "lustre"
             lfs_command = "lfs"
             command_timeout_secs = 30
             home = "{UID-1483800000}01"

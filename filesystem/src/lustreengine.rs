@@ -15,36 +15,36 @@ use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
 /// Quota ID strategy for generating unique lustre quota identifiers.
 ///
 /// This defines how to compute the numeric quota ID that Lustre uses internally.
-/// The strategy is specified as a format string that supports variable substitution
-/// and arithmetic operations.
+/// The strategy uses a format string where:
+/// 1. Variable names (UID, GID) are replaced with their numeric values
+/// 2. Expressions in curly braces `{...}` are evaluated as arithmetic operations
+/// 3. The final result is parsed as the quota ID
 ///
-/// Supported variables:
-/// - `{$UID}` - User ID
-/// - `{$GID}` - Group ID
+/// ## Supported Variables:
+/// - `UID` - User ID (must be provided if used in format)
+/// - `GID` - Group ID (must be provided if used in format)
 ///
-/// Supported operations:
-/// - `{$UID-offset}` - Subtract offset from UID (e.g., `{$UID-1483800000}`)
-/// - `{$GID+offset}` - Add offset to GID (e.g., `{$GID+1000}`)
+/// ## Expression Evaluation:
+/// Expressions in `{...}` support:
+/// - Simple numbers: `{5000}` → 5000
+/// - Addition: `{GID+1000}` → evaluates GID + 1000
+/// - Subtraction: `{UID-1483800000}` → evaluates UID - 1483800000
+/// - Nested evaluation: Variables replaced first, then expressions evaluated
 ///
-/// The format string can include a literal suffix after the variable:
-/// - `{$UID-1483800000}01` - Subtract offset and append "01"
-/// - `{$GID}02` - Use GID directly and append "02"
-///
-/// Examples:
-/// - `"{$GID}"` - Use the group ID directly for project quotas
-/// - `"{$UID-1483800000}01"` - For home volume: subtract offset and append "01"
-/// - `"{$UID-1483800000}02"` - For scratch volume: subtract offset and append "02"
+/// ## Examples:
+/// - `"{GID}"` - Use the group ID directly for project quotas
+/// - `"{UID-100000}01"` - Subtract offset from UID and append "01"
+///   - For UID=100125: {100125-100000}01 → 12501
+/// - `"{UID-100000}02"` - Subtract offset from UID and append "02"
+///   - For UID=100125: {100125-100000}02 → 12502
+/// - `"{GID+1000}"` - Add offset to GID
+///   - For GID=5000: {5000+1000} → 6000
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LustreIdStrategy {
     format: String,
 }
 
 impl LustreIdStrategy {
-    /// Create a new lustre quota ID strategy from a format string
-    pub fn new(format: String) -> Self {
-        Self { format }
-    }
-
     /// Compute the lustre quota ID for a user based on their UID and GID
     ///
     /// # Arguments
@@ -57,109 +57,146 @@ impl LustreIdStrategy {
     /// # Errors
     /// Returns an error if:
     /// - The format string is invalid
-    /// - Arithmetic operations result in negative numbers
+    /// - Arithmetic operations result in negative or zero numbers
+    /// - The expression required a UID or GID that was not provided
     /// - The resulting ID cannot be parsed as a number
-    pub fn compute_id(&self, uid: u32, gid: u32) -> Result<u64, Error> {
-        let format = &self.format;
+    pub fn compute_id(&self, uid: Option<u32>, gid: Option<u32>) -> Result<u64, Error> {
+        let mut format = self.format.clone();
 
-        // Check if format contains a variable substitution
-        if !format.contains("{$") {
-            return Err(Error::Misconfigured(format!(
-                "Invalid quota ID strategy format '{}': must contain a variable like {{$UID}} or {{$GID}}",
-                format
-            )));
+        // Check if required variables are provided
+        if format.contains("UID") && uid.is_none() {
+            return Err(Error::Misconfigured(
+                "UID is required for this quota ID strategy".to_string(),
+            ));
         }
 
-        // Find the variable and extract the formula
-        let start = format
-            .find("{$")
-            .ok_or_else(|| Error::Misconfigured("Missing {$ in format".to_string()))?;
-        let end = format[start..]
-            .find('}')
-            .ok_or_else(|| Error::Misconfigured("Missing } in format".to_string()))?
-            + start;
-
-        let variable_expr = &format[start + 2..end]; // Skip the "{$" prefix
-        let suffix = &format[end + 1..]; // Everything after the "}"
-
-        // Parse the variable expression (e.g., "UID-1483800000" or "GID")
-        let (var_name, operation, offset) = Self::parse_variable_expression(variable_expr)?;
-
-        // Get the base value
-        let base_value = match var_name {
-            "UID" => uid as i64,
-            "GID" => gid as i64,
-            _ => {
-                return Err(Error::Misconfigured(format!(
-                    "Unknown variable '{}' in quota ID strategy. Supported: UID, GID",
-                    var_name
-                )))
-            }
-        };
-
-        // Apply the operation
-        let computed_value = match operation {
-            Some('+') => base_value.checked_add(offset).ok_or_else(|| {
-                Error::Failed("Arithmetic overflow in quota ID computation".to_string())
-            })?,
-            Some('-') => base_value.checked_sub(offset).ok_or_else(|| {
-                Error::Failed("Arithmetic underflow in quota ID computation".to_string())
-            })?,
-            None => base_value,
-            _ => {
-                return Err(Error::Misconfigured(format!(
-                    "Unsupported operation '{}' in quota ID strategy",
-                    operation.unwrap_or(' ')
-                )))
-            }
-        };
-
-        // Check for negative result
-        if computed_value < 0 {
-            return Err(Error::Failed(format!(
-                "Quota ID computation resulted in negative value: {}",
-                computed_value
-            )));
+        if format.contains("GID") && gid.is_none() {
+            return Err(Error::Misconfigured(
+                "GID is required for this quota ID strategy".to_string(),
+            ));
         }
 
-        // Combine with suffix and parse as final ID
-        let id_string = format!("{}{}", computed_value, suffix);
-        id_string.parse::<u64>().map_err(|e| {
-            Error::Failed(format!(
-                "Failed to parse computed quota ID '{}' as number: {}",
-                id_string, e
-            ))
-        })
+        // Substitute all UID and GID with provided values
+        let uid_str = uid.unwrap_or(0).to_string();
+        let gid_str = gid.unwrap_or(0).to_string();
+
+        format = format.replace("UID", &uid_str).replace("GID", &gid_str);
+
+        // Find and evaluate all expressions in curly braces
+        format = Self::evaluate_expressions(&format)?;
+
+        // Convert final format to a number
+        let lustre_id: u64 = format.parse().map_err(|e| {
+            Error::Misconfigured(format!("Invalid quota ID format '{}': {}", format, e))
+        })?;
+
+        // Check for zero result
+        if lustre_id == 0 {
+            Err(Error::Failed(format!(
+                "Quota ID computation resulted in zero value: {}",
+                lustre_id
+            )))
+        } else {
+            Ok(lustre_id)
+        }
     }
 
-    /// Parse a variable expression like "UID-1483800000" or "GID" or "UID+100"
+    /// Find and evaluate all arithmetic expressions in curly braces
     ///
-    /// Returns (variable_name, operation, offset)
-    fn parse_variable_expression(expr: &str) -> Result<(&str, Option<char>, i64), Error> {
-        // Check for + or - operator
-        if let Some(pos) = expr.find('-') {
-            let var_name = &expr[..pos];
-            let offset_str = &expr[pos + 1..];
-            let offset = offset_str.parse::<i64>().map_err(|e| {
+    /// Expressions are in the form {num+num}, {num-num}, or just {num}
+    /// This function iteratively finds expressions, evaluates them, and replaces them
+    /// with their results until no more expressions remain.
+    fn evaluate_expressions(input: &str) -> Result<String, Error> {
+        let mut result = input.to_string();
+
+        // Keep evaluating until there are no more curly brace expressions
+        while let Some(start) = result.find('{') {
+            // Find the matching closing brace
+            let end = match result[start..].find('}') {
+                Some(pos) => start + pos,
+                None => {
+                    return Err(Error::Misconfigured(format!(
+                        "Unmatched opening brace in expression: {}",
+                        result
+                    )))
+                }
+            };
+
+            // Extract the expression content (without braces)
+            let expr = &result[start + 1..end];
+
+            // Evaluate the expression
+            let value = Self::evaluate_arithmetic(expr)?;
+
+            // Replace the expression (including braces) with the result
+            result.replace_range(start..=end, &value.to_string());
+        }
+
+        Ok(result)
+    }
+
+    /// Evaluate a simple arithmetic expression
+    ///
+    /// Supports addition (+) and subtraction (-) operations on integers
+    /// Example: "125-1000" evaluates to -875, "5000+1000" evaluates to 6000
+    fn evaluate_arithmetic(expr: &str) -> Result<i64, Error> {
+        let expr = expr.trim();
+
+        // Look for operators (+ or -)
+        // We need to find the last operator to handle negative numbers correctly
+        // e.g., "-100+50" should split as ["-100", "+", "50"]
+        let mut operator_pos = None;
+        let mut operator = ' ';
+
+        // Scan from left to right, skipping the first character (which might be a negative sign)
+        for (i, ch) in expr.chars().enumerate().skip(1) {
+            if ch == '+' || ch == '-' {
+                operator_pos = Some(i);
+                operator = ch;
+                // Don't break - keep looking for the rightmost operator
+            }
+        }
+
+        if let Some(pos) = operator_pos {
+            // Split at the operator
+            let left = expr[..pos].trim();
+            let right = expr[pos + 1..].trim();
+
+            // Parse both sides as integers
+            let left_val = left.parse::<i64>().map_err(|e| {
                 Error::Misconfigured(format!(
-                    "Failed to parse offset '{}' in quota ID strategy: {}",
-                    offset_str, e
+                    "Failed to parse left operand '{}' in expression '{}': {}",
+                    left, expr, e
                 ))
             })?;
-            Ok((var_name, Some('-'), offset))
-        } else if let Some(pos) = expr.find('+') {
-            let var_name = &expr[..pos];
-            let offset_str = &expr[pos + 1..];
-            let offset = offset_str.parse::<i64>().map_err(|e| {
+
+            let right_val = right.parse::<i64>().map_err(|e| {
                 Error::Misconfigured(format!(
-                    "Failed to parse offset '{}' in quota ID strategy: {}",
-                    offset_str, e
+                    "Failed to parse right operand '{}' in expression '{}': {}",
+                    right, expr, e
                 ))
             })?;
-            Ok((var_name, Some('+'), offset))
+
+            // Perform the operation
+            let result = match operator {
+                '+' => left_val.checked_add(right_val).ok_or_else(|| {
+                    Error::Failed(format!("Arithmetic overflow in expression '{}'", expr))
+                })?,
+                '-' => left_val.checked_sub(right_val).ok_or_else(|| {
+                    Error::Failed(format!("Arithmetic underflow in expression '{}'", expr))
+                })?,
+                _ => unreachable!(),
+            };
+
+            Ok(result)
         } else {
-            // No operation, just the variable name
-            Ok((expr, None, 0))
+            // No operator found, just parse as a number
+            expr.parse::<i64>().map_err(|e| {
+                Error::Misconfigured(format!(
+                    "Failed to parse expression '{}' as number: {}",
+                    expr, e
+                ))
+            })
         }
     }
 }
@@ -185,9 +222,9 @@ pub struct LustreEngineConfig {
     /// Example:
     /// ```toml
     /// [quota_engines.lustre_main.id_strategies]
-    /// home = { format = "{$UID-1483800000}01" }
-    /// scratch = { format = "{$UID-1483800000}02" }
-    /// projects = { format = "{$GID}" }
+    /// home = { format = "{UID-1483800000}01" }
+    /// scratch = { format = "{UID-1483800000}02" }
+    /// projects = { format = "{GID}" }
     /// ```
     #[serde(default)]
     pub id_strategies: HashMap<Volume, LustreIdStrategy>,
@@ -226,6 +263,15 @@ impl LustreEngine {
         // Validate that the lfs command exists
         // TODO: Add validation that lfs is available
         Ok(Self { config })
+    }
+
+    fn get_id_strategy(&self, volume: &Volume) -> Result<&LustreIdStrategy, Error> {
+        self.config.id_strategies.get(volume).ok_or_else(|| {
+            Error::Misconfigured(format!(
+                "No Lustre quota ID strategy defined for volume '{}'",
+                volume
+            ))
+        })
     }
 
     /// Build the command for running lfs operations
@@ -329,17 +375,12 @@ impl LustreEngine {
         volume: &Volume,
         mapping: &UserMapping,
     ) -> Result<u64, Error> {
-        let strategy = self.config.id_strategies.get(volume).ok_or_else(|| {
-            Error::Misconfigured(format!(
-                "No quota ID strategy defined for volume '{}' in Lustre engine configuration",
-                volume
-            ))
-        })?;
+        let strategy = self.get_id_strategy(volume)?;
 
         let uid = self.get_uid(mapping.local_user()).await?;
         let gid = self.get_gid(mapping.local_group()).await?;
 
-        strategy.compute_id(uid, gid)
+        strategy.compute_id(Some(uid), Some(gid))
     }
 
     /// Compute the quota ID for a project on a specific volume
@@ -348,19 +389,12 @@ impl LustreEngine {
         volume: &Volume,
         mapping: &ProjectMapping,
     ) -> Result<u64, Error> {
-        let strategy = self.config.id_strategies.get(volume).ok_or_else(|| {
-            Error::Misconfigured(format!(
-                "No quota ID strategy defined for volume '{}' in Lustre engine configuration",
-                volume
-            ))
-        })?;
+        let strategy = self.get_id_strategy(volume)?;
 
-        // For project quotas, we use the GID of the project's group
-        // We don't have a UID in this context, so we'll use 0 as a placeholder
         let project_name = mapping.project().project();
         let gid = self.get_gid(&project_name).await?;
 
-        strategy.compute_id(0, gid)
+        strategy.compute_id(None, Some(gid))
     }
 
     pub async fn set_user_quota(
@@ -538,10 +572,10 @@ mod tests {
     #[test]
     fn test_quota_id_strategy_gid() {
         let strategy = LustreIdStrategy {
-            format: "{$GID}".to_string(),
+            format: "{GID}".to_string(),
         };
 
-        let result = strategy.compute_id(1483800125, 5000);
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
         assert!(result.is_ok());
         #[allow(clippy::unwrap_used)]
         {
@@ -552,10 +586,10 @@ mod tests {
     #[test]
     fn test_quota_id_strategy_uid() {
         let strategy = LustreIdStrategy {
-            format: "{$UID}".to_string(),
+            format: "{UID}".to_string(),
         };
 
-        let result = strategy.compute_id(1483800125, 5000);
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
         assert!(result.is_ok());
         #[allow(clippy::unwrap_used)]
         {
@@ -566,10 +600,10 @@ mod tests {
     #[test]
     fn test_quota_id_strategy_uid_with_offset_and_suffix() {
         let strategy = LustreIdStrategy {
-            format: "{$UID-1483800000}01".to_string(),
+            format: "{UID-1483800000}01".to_string(),
         };
 
-        let result = strategy.compute_id(1483800125, 5000);
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
         assert!(result.is_ok());
         // 1483800125 - 1483800000 = 125, then append "01" = "12501"
         #[allow(clippy::unwrap_used)]
@@ -581,10 +615,10 @@ mod tests {
     #[test]
     fn test_quota_id_strategy_uid_different_suffix() {
         let strategy = LustreIdStrategy {
-            format: "{$UID-1483800000}02".to_string(),
+            format: "{UID-1483800000}02".to_string(),
         };
 
-        let result = strategy.compute_id(1483800125, 5000);
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
         assert!(result.is_ok());
         // 1483800125 - 1483800000 = 125, then append "02" = "12502"
 
@@ -597,10 +631,10 @@ mod tests {
     #[test]
     fn test_quota_id_strategy_gid_with_offset() {
         let strategy = LustreIdStrategy {
-            format: "{$GID+1000}".to_string(),
+            format: "{GID+1000}".to_string(),
         };
 
-        let result = strategy.compute_id(1483800125, 5000);
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
         assert!(result.is_ok());
         // 5000 + 1000 = 6000
         #[allow(clippy::unwrap_used)]
@@ -612,62 +646,169 @@ mod tests {
     #[test]
     fn test_quota_id_strategy_negative_result() {
         let strategy = LustreIdStrategy {
-            format: "{$UID-2000000000}".to_string(),
+            format: "{UID-2000000000}".to_string(),
         };
 
-        let result = strategy.compute_id(1483800125, 5000);
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
         assert!(result.is_err());
-        #[allow(clippy::unwrap_used)]
-        {
-            assert!(result.unwrap_err().to_string().contains("negative value"));
-        }
-    }
-
-    #[test]
-    fn test_quota_id_strategy_invalid_variable() {
-        let strategy = LustreIdStrategy {
-            format: "{$INVALID}".to_string(),
-        };
-
-        let result = strategy.compute_id(1483800125, 5000);
-        assert!(result.is_err());
-        #[allow(clippy::unwrap_used)]
-        {
-            assert!(result.unwrap_err().to_string().contains("Unknown variable"));
-        }
-    }
-
-    #[test]
-    fn test_quota_id_strategy_missing_variable() {
-        let strategy = LustreIdStrategy {
-            format: "12345".to_string(),
-        };
-
-        let result = strategy.compute_id(1483800125, 5000);
-        assert!(result.is_err());
-        #[allow(clippy::unwrap_used)]
-        {
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("must contain a variable"));
-        }
+        // Negative intermediate result will produce invalid u64
     }
 
     #[test]
     fn test_quota_id_strategy_invalid_offset() {
         let strategy = LustreIdStrategy {
-            format: "{$UID-notanumber}".to_string(),
+            format: "{UID-notanumber}".to_string(),
         };
 
-        let result = strategy.compute_id(1483800125, 5000);
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
         assert!(result.is_err());
         #[allow(clippy::unwrap_used)]
         {
             assert!(result
                 .unwrap_err()
                 .to_string()
-                .contains("Failed to parse offset"));
+                .contains("Failed to parse"));
+        }
+    }
+
+    #[test]
+    fn test_evaluate_simple_number() {
+        let strategy = LustreIdStrategy {
+            format: "{5000}".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(125), Some(5000));
+        assert!(result.is_ok());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert_eq!(result.unwrap(), 5000);
+        }
+    }
+
+    #[test]
+    fn test_evaluate_addition() {
+        let strategy = LustreIdStrategy {
+            format: "{GID+1000}".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(125), Some(5000));
+        assert!(result.is_ok());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert_eq!(result.unwrap(), 6000);
+        }
+    }
+
+    #[test]
+    fn test_evaluate_subtraction() {
+        let strategy = LustreIdStrategy {
+            format: "{UID-1483800000}".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
+        assert!(result.is_ok());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert_eq!(result.unwrap(), 125);
+        }
+    }
+
+    #[test]
+    fn test_evaluate_with_suffix() {
+        let strategy = LustreIdStrategy {
+            format: "{UID-1483800000}01".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
+        assert!(result.is_ok());
+        // 125 becomes "125", then "12501"
+        #[allow(clippy::unwrap_used)]
+        {
+            assert_eq!(result.unwrap(), 12501);
+        }
+    }
+
+    #[test]
+    fn test_evaluate_negative_intermediate_result() {
+        let strategy = LustreIdStrategy {
+            format: "{UID-2000000000}99".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
+        // This should work - intermediate result is negative but becomes "-51619987599"
+        // which is a valid string but will fail to parse as u64
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_evaluate_multiple_operations() {
+        // After UID substitution: {1483800125-1483800000}
+        // After evaluation: 125
+        let strategy = LustreIdStrategy {
+            format: "{UID-1483800000}".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
+        assert!(result.is_ok());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert_eq!(result.unwrap(), 125);
+        }
+    }
+
+    #[test]
+    fn test_unmatched_brace() {
+        let strategy = LustreIdStrategy {
+            format: "{UID-1000".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
+        assert!(result.is_err());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert!(result.unwrap_err().to_string().contains("Unmatched"));
+        }
+    }
+
+    #[test]
+    fn test_no_braces_direct_number() {
+        let strategy = LustreIdStrategy {
+            format: "12345".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(1483800125), Some(5000));
+        assert!(result.is_ok());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert_eq!(result.unwrap(), 12345);
+        }
+    }
+
+    #[test]
+    fn test_uid_required_but_not_provided() {
+        let strategy = LustreIdStrategy {
+            format: "{UID}".to_string(),
+        };
+
+        let result = strategy.compute_id(None, Some(5000));
+        assert!(result.is_err());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert!(result.unwrap_err().to_string().contains("UID is required"));
+        }
+    }
+
+    #[test]
+    fn test_gid_required_but_not_provided() {
+        let strategy = LustreIdStrategy {
+            format: "{GID}".to_string(),
+        };
+
+        let result = strategy.compute_id(Some(125), None);
+        assert!(result.is_err());
+        #[allow(clippy::unwrap_used)]
+        {
+            assert!(result.unwrap_err().to_string().contains("GID is required"));
         }
     }
 }

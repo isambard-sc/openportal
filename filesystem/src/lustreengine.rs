@@ -39,9 +39,66 @@ use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
 ///   - For UID=100125: {100125-100000}02 → 12502
 /// - `"{GID+1000}"` - Add offset to GID
 ///   - For GID=5000: {5000+1000} → 6000
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LustreIdStrategy {
     format: String,
+}
+
+// Custom deserialization to allow both forms:
+// 1. Simple string: home = "{UID-100000}01"
+// 2. Explicit format: home = { format = "{UID-100000}01" }
+impl<'de> Deserialize<'de> for LustreIdStrategy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct LustreIdStrategyVisitor;
+
+        impl<'de> Visitor<'de> for LustreIdStrategyVisitor {
+            type Value = LustreIdStrategy;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a string or a map with a 'format' field")
+            }
+
+            // Handle direct string form: "{UID-100000}01"
+            fn visit_str<E>(self, value: &str) -> Result<LustreIdStrategy, E>
+            where
+                E: de::Error,
+            {
+                Ok(LustreIdStrategy {
+                    format: value.to_string(),
+                })
+            }
+
+            // Handle map form: { format = "{UID-100000}01" }
+            fn visit_map<M>(self, mut map: M) -> Result<LustreIdStrategy, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut format = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "format" {
+                        if format.is_some() {
+                            return Err(de::Error::duplicate_field("format"));
+                        }
+                        format = Some(map.next_value()?);
+                    } else {
+                        return Err(de::Error::unknown_field(&key, &["format"]));
+                    }
+                }
+
+                let format = format.ok_or_else(|| de::Error::missing_field("format"))?;
+                Ok(LustreIdStrategy { format })
+            }
+        }
+
+        deserializer.deserialize_any(LustreIdStrategyVisitor)
+    }
 }
 
 impl LustreIdStrategy {
@@ -221,12 +278,22 @@ pub struct LustreEngineConfig {
     ///
     /// Example:
     /// ```toml
-    /// [quota_engines.lustre_main.id_strategies]
-    /// home = { format = "{UID-1483800000}01" }
-    /// scratch = { format = "{UID-1483800000}02" }
-    /// projects = { format = "{GID}" }
+    /// [quota_engines.lustre]
+    /// type = "lustre"
+    /// lfs_command = "lfs"
+    ///
+    /// [quota_engines.lustre.id_strategies]
+    /// home = "{UID-1483800000}01"
+    /// scratch = "{UID-1483800000}02"
+    /// projects = "{GID}"
     /// ```
-    #[serde(default)]
+    ///
+    /// Or with the legacy explicit format:
+    /// ```toml
+    /// [quota_engines.lustre.id_strategies]
+    /// home = { format = "{UID-1483800000}01" }
+    /// ```
+    #[serde(default, flatten)]
     pub id_strategies: HashMap<Volume, LustreIdStrategy>,
 }
 
@@ -810,5 +877,72 @@ mod tests {
         {
             assert!(result.unwrap_err().to_string().contains("GID is required"));
         }
+    }
+
+    #[test]
+    fn test_deserialize_string_format() {
+        // Test that we can deserialize a simple string
+        let toml_str = r#"
+            home = "{UID-1483800000}01"
+        "#;
+
+        let result: Result<HashMap<Volume, LustreIdStrategy>, _> = toml::from_str(toml_str);
+        assert!(result.is_ok());
+
+        #[allow(clippy::unwrap_used)]
+        let strategies = result.unwrap();
+        let home_strategy = strategies.get(&Volume::from("home"));
+        assert!(home_strategy.is_some());
+
+        #[allow(clippy::unwrap_used)]
+        let home_strategy = home_strategy.unwrap();
+        assert_eq!(home_strategy.format, "{UID-1483800000}01");
+    }
+
+    #[test]
+    fn test_deserialize_map_format() {
+        // Test that we can still deserialize the explicit format
+        let toml_str = r#"
+            home = { format = "{UID-1483800000}01" }
+        "#;
+
+        let result: Result<HashMap<Volume, LustreIdStrategy>, _> = toml::from_str(toml_str);
+        assert!(result.is_ok());
+
+        #[allow(clippy::unwrap_used)]
+        let strategies = result.unwrap();
+        let home_strategy = strategies.get(&Volume::from("home"));
+        assert!(home_strategy.is_some());
+
+        #[allow(clippy::unwrap_used)]
+        let home_strategy = home_strategy.unwrap();
+        assert_eq!(home_strategy.format, "{UID-1483800000}01");
+    }
+
+    #[test]
+    fn test_deserialize_config_with_flattened_strategies() {
+        // Test the full config with flattened strategies
+        let toml_str = r#"
+            type = "lustre"
+            lfs_command = "lfs"
+            command_timeout_secs = 30
+            home = "{UID-1483800000}01"
+            scratch = "{UID-1483800000}02"
+            projects = "{GID}"
+        "#;
+
+        let result: Result<LustreEngineConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_ok());
+
+        #[allow(clippy::unwrap_used)]
+        let config = result.unwrap();
+        assert_eq!(config.lfs_command, "lfs");
+        assert_eq!(config.command_timeout_secs, 30);
+        assert_eq!(config.id_strategies.len(), 3);
+
+        let home_strategy = config.id_strategies.get(&Volume::from("home"));
+        assert!(home_strategy.is_some());
+        #[allow(clippy::unwrap_used)]
+        assert_eq!(home_strategy.unwrap().format, "{UID-1483800000}01");
     }
 }

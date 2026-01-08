@@ -124,6 +124,23 @@ impl FilesystemConfig {
             vol.validate()?;
         }
 
+        // Validate that quota engines are properly configured for their volumes
+        for (volume, config) in &self.user_volumes {
+            if let Some(engine_name) = config.quota_engine_name() {
+                if let Some(engine_config) = self.quota_engines.get(engine_name) {
+                    engine_config.verify_volume_config(volume)?;
+                }
+            }
+        }
+
+        for (volume, config) in &self.project_volumes {
+            if let Some(engine_name) = config.quota_engine_name() {
+                if let Some(engine_config) = self.quota_engines.get(engine_name) {
+                    engine_config.verify_volume_config(volume)?;
+                }
+            }
+        }
+
         Ok(())
     }
 

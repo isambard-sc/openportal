@@ -106,6 +106,13 @@ impl<'de> Deserialize<'de> for LustreIdStrategy {
 }
 
 impl LustreIdStrategy {
+    #[allow(dead_code)] // used by the tests
+    pub fn new(format: &str) -> Self {
+        Self {
+            format: format.to_string(),
+        }
+    }
+
     /// Validate the format string to catch common mistakes
     ///
     /// Checks for:
@@ -113,37 +120,37 @@ impl LustreIdStrategy {
     /// - Mismatched braces
     /// - Invalid variable names (warns about common typos like $UID, uid, etc.)
     /// - Format strings that can't possibly produce a valid quota ID
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), Error> {
         let format = &self.format;
 
         // Check for empty format
         if format.trim().is_empty() {
-            return Err("Format string cannot be empty".to_string());
+            return Err(Error::Parse("Format string cannot be empty".to_string()));
         }
 
         // Check for mismatched braces
         let open_count = format.chars().filter(|&c| c == '{').count();
         let close_count = format.chars().filter(|&c| c == '}').count();
         if open_count != close_count {
-            return Err(format!(
+            return Err(Error::Parse(format!(
                 "Mismatched braces in format string '{}': {} opening, {} closing",
                 format, open_count, close_count
-            ));
+            )));
         }
 
         // Check for common typos in variable names
         if format.contains("$UID") || format.contains("$GID") {
-            return Err(format!(
+            return Err(Error::Parse(format!(
                 "Invalid variable in format string '{}': use 'UID' or 'GID' without the $ prefix",
                 format
-            ));
+            )));
         }
 
         if format.contains("uid") || format.contains("gid") {
-            return Err(format!(
+            return Err(Error::Parse(format!(
                 "Invalid variable in format string '{}': variables must be uppercase (UID, GID)",
                 format
-            ));
+            )));
         }
 
         // Warn about spaces inside braces (likely a typo)
@@ -151,10 +158,10 @@ impl LustreIdStrategy {
             if let Some(end) = format[start..].find('}') {
                 let expr = &format[start + 1..start + end];
                 if expr.starts_with(' ') || expr.ends_with(' ') {
-                    return Err(format!(
+                    return Err(Error::Parse(format!(
                         "Expression in braces contains leading/trailing spaces: '{{{}}}'",
                         expr
-                    ));
+                    )));
                 }
             }
         }
@@ -791,10 +798,7 @@ mod tests {
         assert!(result.is_err());
         #[allow(clippy::unwrap_used)]
         {
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("Failed to parse"));
+            assert!(result.unwrap_err().to_string().contains("Failed to parse"));
         }
     }
 
@@ -951,7 +955,7 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         let strategies = result.unwrap();
-        let home_strategy = strategies.get(&Volume::from("home"));
+        let home_strategy = strategies.get(&Volume::new("home"));
         assert!(home_strategy.is_some());
 
         #[allow(clippy::unwrap_used)]
@@ -971,7 +975,7 @@ mod tests {
 
         #[allow(clippy::unwrap_used)]
         let strategies = result.unwrap();
-        let home_strategy = strategies.get(&Volume::from("home"));
+        let home_strategy = strategies.get(&Volume::new("home"));
         assert!(home_strategy.is_some());
 
         #[allow(clippy::unwrap_used)]
@@ -1000,10 +1004,12 @@ mod tests {
         assert_eq!(config.command_timeout_secs, 30);
         assert_eq!(config.id_strategies.len(), 3);
 
-        let home_strategy = config.id_strategies.get(&Volume::from("home"));
+        let home_strategy = config.id_strategies.get(&Volume::new("home"));
         assert!(home_strategy.is_some());
         #[allow(clippy::unwrap_used)]
-        assert_eq!(home_strategy.unwrap().format, "{UID-1483800000}01");
+        {
+            assert_eq!(home_strategy.unwrap().format, "{UID-1483800000}01");
+        }
     }
 
     #[test]
@@ -1015,7 +1021,9 @@ mod tests {
         let result: Result<HashMap<Volume, LustreIdStrategy>, _> = toml::from_str(toml_str);
         assert!(result.is_err());
         #[allow(clippy::unwrap_used)]
-        assert!(result.unwrap_err().to_string().contains("empty"));
+        {
+            assert!(result.unwrap_err().to_string().contains("empty"));
+        }
     }
 
     #[test]
@@ -1027,7 +1035,12 @@ mod tests {
         let result: Result<HashMap<Volume, LustreIdStrategy>, _> = toml::from_str(toml_str);
         assert!(result.is_err());
         #[allow(clippy::unwrap_used)]
-        assert!(result.unwrap_err().to_string().contains("Mismatched braces"));
+        {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Mismatched braces"));
+        }
     }
 
     #[test]
@@ -1039,10 +1052,12 @@ mod tests {
         let result: Result<HashMap<Volume, LustreIdStrategy>, _> = toml::from_str(toml_str);
         assert!(result.is_err());
         #[allow(clippy::unwrap_used)]
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("without the $ prefix"));
+        {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("without the $ prefix"));
+        }
     }
 
     #[test]
@@ -1054,10 +1069,12 @@ mod tests {
         let result: Result<HashMap<Volume, LustreIdStrategy>, _> = toml::from_str(toml_str);
         assert!(result.is_err());
         #[allow(clippy::unwrap_used)]
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must be uppercase"));
+        {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("must be uppercase"));
+        }
     }
 
     #[test]
@@ -1069,10 +1086,12 @@ mod tests {
         let result: Result<HashMap<Volume, LustreIdStrategy>, _> = toml::from_str(toml_str);
         assert!(result.is_err());
         #[allow(clippy::unwrap_used)]
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("leading/trailing spaces"));
+        {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("leading/trailing spaces"));
+        }
     }
 
     #[test]

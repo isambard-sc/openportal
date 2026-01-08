@@ -3,10 +3,13 @@
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
+use templemeads::storage::QuotaLimit;
 use templemeads::Error;
 use tokio::sync::RwLock;
 
 use crate::volumeconfig::FilesystemConfig;
+
+use std::collections::HashSet;
 
 #[derive(Default, Debug)]
 struct Database {
@@ -54,12 +57,71 @@ pub async fn set_filesystem_config(mut config: FilesystemConfig) -> Result<(), E
         config.get_project_volumes().len()
     );
 
-    for (volume, _) in config.get_user_volumes() {
+    let mut quota_engines = HashSet::new();
+
+    for (volume, volume_config) in config.get_user_volumes() {
         tracing::info!("  - User volume: {}", volume);
+        tracing::info!("    - Paths: {:?}", volume_config.path_configs());
+
+        if volume_config.has_quota_engine() {
+            let engine_name = match volume_config.quota_engine_name() {
+                Some(engine_name) => {
+                    quota_engines.insert(engine_name.to_string());
+                    engine_name
+                }
+                None => {
+                    continue;
+                }
+            };
+
+            tracing::info!("    - Quota engine: {}", engine_name);
+            tracing::info!(
+                "    - Max quota: {}",
+                volume_config.max_quota().unwrap_or(&QuotaLimit::Unlimited)
+            );
+            tracing::info!(
+                "    - Default quota: {}",
+                volume_config
+                    .default_quota()
+                    .unwrap_or(&QuotaLimit::Unlimited)
+            )
+        };
     }
 
-    for (volume, _) in config.get_project_volumes() {
+    for (volume, volume_config) in config.get_project_volumes() {
         tracing::info!("  - Project volume: {}", volume);
+        tracing::info!("    - Paths: {:?}", volume_config.path_configs());
+
+        if volume_config.has_quota_engine() {
+            let engine_name = match volume_config.quota_engine_name() {
+                Some(engine_name) => {
+                    quota_engines.insert(engine_name.to_string());
+                    engine_name
+                }
+                None => {
+                    continue;
+                }
+            };
+
+            tracing::info!("    - Quota engine: {}", engine_name);
+            tracing::info!(
+                "    - Max quota: {}",
+                volume_config.max_quota().unwrap_or(&QuotaLimit::Unlimited)
+            );
+            tracing::info!(
+                "    - Default quota: {}",
+                volume_config
+                    .default_quota()
+                    .unwrap_or(&QuotaLimit::Unlimited)
+            );
+        };
+    }
+
+    for engine_name in quota_engines {
+        tracing::info!("Configured quota engine: {}", engine_name);
+        let engine_config = config.get_quota_engine(&engine_name)?;
+
+        tracing::info!("  - Config: {:?}", engine_config);
     }
 
     cache.filesystem_config = Some(config);

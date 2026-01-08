@@ -108,4 +108,99 @@ impl QuotaEngineConfig {
             }
         }
     }
+
+    ///
+    /// Verify that this engine is properly configured for the given volume.
+    ///
+    /// For Lustre engines, this checks that an ID strategy exists for the volume.
+    ///
+    pub fn verify_volume_config(&self, volume: &Volume) -> Result<(), Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                if !config.id_strategies.contains_key(volume) {
+                    return Err(Error::Misconfigured(format!(
+                        "Lustre engine is missing ID strategy for volume '{}'",
+                        volume
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lustreengine::LustreIdStrategy;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_verify_volume_config_success() {
+        // Create a Lustre engine with an ID strategy for "home"
+        let mut id_strategies = HashMap::new();
+        id_strategies.insert(
+            Volume::new("home"),
+            LustreIdStrategy::new("{UID-1483800000}01"),
+        );
+
+        let config = QuotaEngineConfig::Lustre(LustreEngineConfig {
+            lfs_command: "lfs".to_string(),
+            command_timeout_secs: 30,
+            id_strategies,
+        });
+
+        let volume = Volume::new("home");
+        let result = config.verify_volume_config(&volume);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_volume_config_missing_strategy() {
+        // Create a Lustre engine without any ID strategies
+        let config = QuotaEngineConfig::Lustre(LustreEngineConfig {
+            lfs_command: "lfs".to_string(),
+            command_timeout_secs: 30,
+            id_strategies: HashMap::new(),
+        });
+
+        let volume = Volume::new("home");
+        let result = config.verify_volume_config(&volume);
+        assert!(result.is_err());
+
+        if let Err(Error::Misconfigured(msg)) = result {
+            assert!(msg.contains("missing ID strategy"));
+            assert!(msg.contains("home"));
+        } else {
+            panic!("Expected Misconfigured error");
+        }
+    }
+
+    #[test]
+    fn test_verify_volume_config_wrong_volume() {
+        // Create a Lustre engine with an ID strategy for "home" only
+        let mut id_strategies = HashMap::new();
+        id_strategies.insert(
+            Volume::new("home"),
+            LustreIdStrategy::new("{UID-1483800000}01"),
+        );
+
+        let config = QuotaEngineConfig::Lustre(LustreEngineConfig {
+            lfs_command: "lfs".to_string(),
+            command_timeout_secs: 30,
+            id_strategies,
+        });
+
+        // Try to verify a different volume
+        let volume = Volume::new("work");
+        let result = config.verify_volume_config(&volume);
+        assert!(result.is_err());
+
+        if let Err(Error::Misconfigured(msg)) = result {
+            assert!(msg.contains("missing ID strategy"));
+            assert!(msg.contains("work"));
+        } else {
+            panic!("Expected Misconfigured error");
+        }
+    }
 }

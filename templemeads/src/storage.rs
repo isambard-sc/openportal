@@ -99,11 +99,12 @@ impl<'de> Deserialize<'de> for StorageSize {
     {
         struct StorageSizeVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for StorageSizeVisitor {
+        impl serde::de::Visitor<'_> for StorageSizeVisitor {
             type Value = StorageSize;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a storage size string (e.g., '2TB', '500GB') or a number of bytes")
+                formatter
+                    .write_str("a storage size string (e.g., '2TB', '500GB') or a number of bytes")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<StorageSize, E>
@@ -329,8 +330,7 @@ impl PartialOrd for StorageSize {
 }
 
 /// Represents the amount of storage currently used
-#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Hash)]
-#[derive(Serialize, Deserialize)]
+#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StorageUsage {
     size: StorageSize,
@@ -410,7 +410,7 @@ impl<'de> Deserialize<'de> for QuotaLimit {
     {
         struct QuotaLimitVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for QuotaLimitVisitor {
+        impl serde::de::Visitor<'_> for QuotaLimitVisitor {
             type Value = QuotaLimit;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -426,6 +426,18 @@ impl<'de> Deserialize<'de> for QuotaLimit {
         }
 
         deserializer.deserialize_str(QuotaLimitVisitor)
+    }
+}
+
+// make sure we can compare QuotaLimits
+impl PartialOrd for QuotaLimit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (QuotaLimit::Unlimited, QuotaLimit::Unlimited) => Some(std::cmp::Ordering::Equal),
+            (QuotaLimit::Unlimited, _) => Some(std::cmp::Ordering::Greater),
+            (_, QuotaLimit::Unlimited) => Some(std::cmp::Ordering::Less),
+            (QuotaLimit::Limited(a), QuotaLimit::Limited(b)) => a.partial_cmp(b),
+        }
     }
 }
 

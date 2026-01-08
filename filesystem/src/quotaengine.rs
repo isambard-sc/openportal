@@ -191,14 +191,11 @@ impl LustreEngine {
 
         // make sure that the limit does not exceed the maximum quota for this volume
         if let Some(max_quota) = volume_config.max_quota() {
-            match limit {
-                QuotaLimit::Limited(size) if size > max_quota => {
-                    return Err(Error::Failed(format!(
-                        "Requested quota limit ({}) exceeds maximum allowed quota ({}) for user {} on volume",
-                        size, max_quota, user
-                    )));
-                }
-                _ => {}
+            if limit > max_quota {
+                return Err(Error::Failed(format!(
+                    "Requested quota limit ({}) exceeds maximum allowed quota ({}) for user {} on volume",
+                    limit, max_quota, user
+                )));
             }
         }
 
@@ -221,7 +218,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume_config: &ProjectVolumeConfig,
         limit: &QuotaLimit,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         // TODO: Implement actual Lustre project quota setting
         // This will use: lfs setquota -p <project_id> -b <soft> -B <hard> <path>
         // Lustre uses numeric project IDs, so we'll need to map project names to IDs
@@ -237,6 +234,16 @@ impl LustreEngine {
             path.display(),
             limit
         );
+
+        // make sure that the limit does not exceed the maximum quota for this volume
+        if let Some(max_quota) = volume_config.max_quota() {
+            if limit > max_quota {
+                return Err(Error::Failed(format!(
+                    "Requested quota limit ({}) exceeds maximum allowed quota ({}) for project {} on volume",
+                    limit, max_quota, project
+                )));
+            }
+        }
 
         // Placeholder implementation
         let quota = match limit {
@@ -256,7 +263,7 @@ impl LustreEngine {
         &self,
         mapping: &UserMapping,
         volume_config: &UserVolumeConfig,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         // TODO: Implement actual Lustre user quota retrieval
         // This will use: lfs quota -u <user> <path>
         // Parse the output to extract limit and usage
@@ -272,18 +279,17 @@ impl LustreEngine {
         );
 
         // Placeholder implementation
-        anyhow::bail!(
-            "No quota found for user {} on path {}",
-            user,
-            path.display()
-        )
+        Ok(Quota::with_usage(
+            QuotaLimit::Unlimited,
+            StorageUsage::from(0),
+        ))
     }
 
     async fn get_project_quota(
         &self,
         mapping: &ProjectMapping,
         volume_config: &ProjectVolumeConfig,
-    ) -> Result<Quota> {
+    ) -> Result<Quota, Error> {
         // TODO: Implement actual Lustre project quota retrieval
         // This will use: lfs quota -p <project_id> <path>
         // Parse the output to extract limit and usage
@@ -299,10 +305,9 @@ impl LustreEngine {
         );
 
         // Placeholder implementation
-        anyhow::bail!(
-            "No quota found for project {} on path {}",
-            project,
-            path.display()
-        )
+        Ok(Quota::with_usage(
+            QuotaLimit::Unlimited,
+            StorageUsage::from(0),
+        ))
     }
 }

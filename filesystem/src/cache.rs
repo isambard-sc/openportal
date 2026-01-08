@@ -31,16 +31,17 @@ static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::new())
 ///
 pub async fn get_filesystem_config() -> Result<FilesystemConfig, Error> {
     let cache = CACHE.read().await;
-    cache.filesystem_config.clone().ok_or_else(|| {
-        Error::Misconfigured("Filesystem configuration has not been set".to_owned())
-    })
+    cache
+        .filesystem_config
+        .clone()
+        .ok_or_else(|| Error::Misconfigured("Filesystem configuration has not been set".to_owned()))
 }
 
 ///
 /// Set the filesystem configuration
 ///
 pub async fn set_filesystem_config(mut config: FilesystemConfig) -> Result<(), Error> {
-    tracing::info!("Setting filesystem configuration to {:?}", config);
+    tracing::debug!("Setting filesystem configuration to {:?}", config);
 
     // Validate the config before storing
     config.validate()?;

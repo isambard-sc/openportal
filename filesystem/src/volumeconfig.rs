@@ -13,7 +13,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use templemeads::grammar::{ProjectMapping, UserMapping, UserOrProjectMapping};
-use templemeads::storage::{StorageSize, Volume};
+use templemeads::storage::{QuotaLimit, Volume};
 use templemeads::Error;
 
 use crate::quotaengine::QuotaEngineConfig;
@@ -354,11 +354,13 @@ pub struct UserVolumeConfig {
     /// Optional name of quota engine to use (references quota_engines map)
     quota_engine: Option<String>,
 
-    /// Optional maximum size of any quota (defaults to unlimited)
-    max_quota: Option<StorageSize>,
+    /// Optional maximum size of any quota (defaults to unlimited if a quota
+    /// engine is used, or to none if there is no quota engine)
+    max_quota: Option<QuotaLimit>,
 
-    /// Optional default quota size for new projects (defaults to no quota)
-    default_quota: Option<StorageSize>,
+    /// Optional default quota size for new projects (defaults to unlimited
+    /// if a quota engine is used, or to none if there is no quota engine)
+    default_quota: Option<QuotaLimit>,
 }
 
 impl UserVolumeConfig {
@@ -395,11 +397,22 @@ impl UserVolumeConfig {
 
         // make sure that the default quota is not larger than the max quota
         if let (Some(max), Some(default)) = (&self.max_quota, &self.default_quota) {
-            if default > max {
-                return Err(Error::Misconfigured(format!(
-                    "User volume default quota ({}) cannot be larger than max quota ({})",
-                    default, max
-                )));
+            match (max, default) {
+                (QuotaLimit::Unlimited, _) => {}
+                (_, QuotaLimit::Unlimited) => {
+                    return Err(Error::Misconfigured(
+                        "User volume default quota cannot be Unlimited if max quota is limited"
+                            .to_string(),
+                    ));
+                }
+                (QuotaLimit::Limited(max_size), QuotaLimit::Limited(default_size)) => {
+                    if default_size > max_size {
+                        return Err(Error::Misconfigured(format!(
+                            "User volume default quota ({}) cannot be larger than max quota ({})",
+                            default_size, max_size
+                        )));
+                    }
+                }
             }
         }
 
@@ -429,13 +442,18 @@ impl UserVolumeConfig {
         self.quota_engine.as_deref()
     }
 
+    /// Return whether or not this volume has an attached quota engine
+    pub fn has_quota_engine(&self) -> bool {
+        self.quota_engine.is_some()
+    }
+
     /// Get the default quota size
-    pub fn default_quota(&self) -> Option<&StorageSize> {
+    pub fn default_quota(&self) -> Option<&QuotaLimit> {
         self.default_quota.as_ref()
     }
 
     /// Get the maximum quota size
-    pub fn max_quota(&self) -> Option<&StorageSize> {
+    pub fn max_quota(&self) -> Option<&QuotaLimit> {
         self.max_quota.as_ref()
     }
 
@@ -486,11 +504,13 @@ pub struct ProjectVolumeConfig {
     /// Optional name of quota engine to use (references quota_engines map)
     quota_engine: Option<String>,
 
-    /// Optional maximum size of any quota (defaults to unlimited)
-    max_quota: Option<StorageSize>,
+    /// Optional maximum size of any quota (defaults to unlimited if a quota
+    /// engine is used, or to none if there is no quota engine)
+    max_quota: Option<QuotaLimit>,
 
-    /// Optional default quota size for new projects (defaults to no quota)
-    default_quota: Option<StorageSize>,
+    /// Optional default quota size for new projects (defaults to unlimited
+    /// if a quota engine is used, or to none if there is no quota engine)
+    default_quota: Option<QuotaLimit>,
 
     /// Optional symlinks to create (empty string = no link, one per root)
     /// Example: ["", "/fastwork/{project}"] for two roots
@@ -549,13 +569,18 @@ impl ProjectVolumeConfig {
         self.quota_engine.as_deref()
     }
 
+    /// Return whether or not this volume has an attached quota engine
+    pub fn has_quota_engine(&self) -> bool {
+        self.quota_engine.is_some()
+    }
+
     /// Get the default quota size
-    pub fn default_quota(&self) -> Option<&StorageSize> {
+    pub fn default_quota(&self) -> Option<&QuotaLimit> {
         self.default_quota.as_ref()
     }
 
     /// Get the maximum quota size
-    pub fn max_quota(&self) -> Option<&StorageSize> {
+    pub fn max_quota(&self) -> Option<&QuotaLimit> {
         self.max_quota.as_ref()
     }
 

@@ -253,6 +253,21 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
         }
     }
 
+    // finally, set any default quotas
+    for (volume, volume_config) in config.get_project_volumes() {
+        if volume_config.has_quota_engine() {
+            if let Some(default_quota) = volume_config.default_quota() {
+                tracing::info!(
+                    "Setting default quota for project {} on volume {}: {}",
+                    mapping.project(),
+                    volume,
+                    default_quota
+                );
+                set_project_quota(mapping, &volume, default_quota).await?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -285,6 +300,21 @@ async fn create_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
                 Err(error) => {
                     tracing::warn!("Could not get path for creation: {}", error);
                 }
+            }
+        }
+    }
+
+    // now we have created all of the directories, set any default quotas
+    for (volume, volume_config) in config.get_user_volumes() {
+        if volume_config.has_quota_engine() {
+            if let Some(default_quota) = volume_config.default_quota() {
+                tracing::info!(
+                    "Setting default quota for user {} on volume {}: {}",
+                    mapping.local_user(),
+                    volume,
+                    default_quota
+                );
+                set_user_quota(mapping, &volume, default_quota).await?;
             }
         }
     }
@@ -391,6 +421,10 @@ pub async fn set_project_quota(
 
     let volume_config = config.get_project_volume(volume)?;
 
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
+
     let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
         None => {
@@ -416,6 +450,10 @@ pub async fn get_project_quota(
     let config = cache::get_filesystem_config().await?;
 
     let volume_config = config.get_project_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
 
     let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
@@ -447,6 +485,10 @@ pub async fn get_project_quotas(
 
     // Iterate through all configured project volumes and get quotas
     for (volume, volume_config) in config.get_project_volumes() {
+        if !volume_config.has_quota_engine() {
+            continue;
+        }
+
         let engine_name = match volume_config.quota_engine_name() {
             Some(engine_name) => engine_name,
             None => {
@@ -494,6 +536,10 @@ pub async fn set_user_quota(
 
     let volume_config = config.get_user_volume(volume)?;
 
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
+
     let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
         None => {
@@ -519,6 +565,10 @@ pub async fn get_user_quota(
     let config = cache::get_filesystem_config().await?;
 
     let volume_config = config.get_user_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
 
     let engine_name = match volume_config.quota_engine_name() {
         Some(engine_name) => engine_name,
@@ -550,6 +600,10 @@ pub async fn get_user_quotas(
 
     // Iterate through all configured user volumes and get quotas
     for (volume, user_config) in config.get_user_volumes() {
+        if !user_config.has_quota_engine() {
+            continue;
+        }
+
         let engine_name = match user_config.quota_engine_name() {
             Some(engine_name) => engine_name,
             None => {

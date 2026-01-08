@@ -21,6 +21,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   a project's associated award, and about which email domains are
   allowed to be associated with a project.
 
+### Fixed
+
+- Fixed a bug when signing API calls that incorrectly introduced possible
+  serialisation / deserialisation issues when verifying signatures. This
+  led to some calls failing signature verification.
+
 ## [0.21.1] - 2025-12-02
 
 ### Fixed

@@ -1186,10 +1186,10 @@ mod tests {
         let protocol = "post";
         let function = "run";
         let body = b"{\"command\":\"test\"}";
-        let nonce = Some("test-nonce");
+        let nonce = "test-nonce";
 
         let signed =
-            sign_api_call(&key, &date, protocol, function, body, nonce).unwrap_or_default();
+            sign_api_call(&key, &date, protocol, function, body, Some(nonce)).unwrap_or_default();
 
         #[allow(clippy::unwrap_used)] // safe to do this in a test
         {
@@ -1202,7 +1202,7 @@ mod tests {
                         date.format("%a, %d %b %Y %H:%M:%S GMT"),
                         function,
                         std::str::from_utf8(body).unwrap(),
-                        nonce.unwrap()
+                        nonce
                     ))
                     .unwrap()
             );

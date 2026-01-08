@@ -76,9 +76,63 @@ impl NamedType for HashMap<Volume, Quota> {
 }
 
 /// Represents a quantity of storage in bytes
-#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct StorageSize {
     bytes: u64,
+}
+
+// Custom serialization: serialize as a human-readable string (e.g., "2TB")
+impl Serialize for StorageSize {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+// Custom deserialization: parse from either a string (e.g., "2TB") or a number (bytes)
+impl<'de> Deserialize<'de> for StorageSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StorageSizeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for StorageSizeVisitor {
+            type Value = StorageSize;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a storage size string (e.g., '2TB', '500GB') or a number of bytes")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<StorageSize, E>
+            where
+                E: serde::de::Error,
+            {
+                StorageSize::parse(value).map_err(serde::de::Error::custom)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<StorageSize, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(StorageSize::from_bytes(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<StorageSize, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 0 {
+                    return Err(serde::de::Error::custom("storage size cannot be negative"));
+                }
+                Ok(StorageSize::from_bytes(value as u64))
+            }
+        }
+
+        deserializer.deserialize_any(StorageSizeVisitor)
+    }
 }
 
 impl std::ops::Add for StorageSize {
@@ -275,7 +329,9 @@ impl PartialOrd for StorageSize {
 }
 
 /// Represents the amount of storage currently used
-#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct StorageUsage {
     size: StorageSize,
 }
@@ -328,12 +384,49 @@ impl std::fmt::Display for StorageUsage {
 }
 
 /// Represents the limit of a storage quota
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuotaLimit {
     /// A hard limit on storage size
     Limited(StorageSize),
     /// No limit on storage size
     Unlimited,
+}
+
+// Custom serialization: serialize as a human-readable string (e.g., "5TB" or "unlimited")
+impl Serialize for QuotaLimit {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+// Custom deserialization: parse from a string (e.g., "5TB" or "unlimited")
+impl<'de> Deserialize<'de> for QuotaLimit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct QuotaLimitVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for QuotaLimitVisitor {
+            type Value = QuotaLimit;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a quota limit string (e.g., '5TB', 'unlimited')")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<QuotaLimit, E>
+            where
+                E: serde::de::Error,
+            {
+                QuotaLimit::parse(value).map_err(serde::de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_str(QuotaLimitVisitor)
+    }
 }
 
 impl QuotaLimit {
@@ -394,6 +487,7 @@ impl From<StorageSize> for QuotaLimit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quota {
     limit: QuotaLimit,
+    #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<StorageUsage>,
 }
 

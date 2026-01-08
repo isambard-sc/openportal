@@ -18,6 +18,7 @@ use templemeads::Error;
 
 mod cache;
 mod filesystem;
+mod lustreengine;
 mod quotaengine;
 mod volumeconfig;
 
@@ -435,7 +436,7 @@ pub async fn set_project_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .set_project_quota(mapping, &volume_config, limit)
+        .set_project_quota(mapping, volume, &volume_config, limit)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -465,7 +466,7 @@ pub async fn get_project_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .get_project_quota(mapping, &volume_config)
+        .get_project_quota(mapping, volume, &volume_config)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -505,7 +506,10 @@ pub async fn get_project_quotas(
             }
         };
 
-        match engine.get_project_quota(mapping, &volume_config).await {
+        match engine
+            .get_project_quota(mapping, &volume, &volume_config)
+            .await
+        {
             Ok(quota) => {
                 quotas.insert(volume.clone(), quota);
             }
@@ -550,7 +554,7 @@ pub async fn set_user_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .set_user_quota(mapping, &volume_config, limit)
+        .set_user_quota(mapping, volume, &volume_config, limit)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -580,7 +584,7 @@ pub async fn get_user_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .get_user_quota(mapping, &volume_config)
+        .get_user_quota(mapping, volume, &volume_config)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -620,7 +624,7 @@ pub async fn get_user_quotas(
             }
         };
 
-        match engine.get_user_quota(mapping, &user_config).await {
+        match engine.get_user_quota(mapping, &volume, &user_config).await {
             Ok(quota) => {
                 quotas.insert(volume.clone(), quota);
             }

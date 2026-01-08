@@ -430,13 +430,30 @@ impl LustreEngine {
     }
 
     /// Get the UID for a username by running `id -u <username>`
+    ///
+    /// Tries /usr/bin/id first (standard location), then falls back to PATH.
     async fn get_uid(&self, username: &str) -> Result<u32, Error> {
-        let output = tokio::process::Command::new("id")
+        // Try /usr/bin/id first (standard location)
+        let result = tokio::process::Command::new("/usr/bin/id")
             .arg("-u")
             .arg(username)
             .output()
-            .await
-            .map_err(|e| Error::Failed(format!("Failed to execute 'id -u {}': {}", username, e)))?;
+            .await;
+
+        let output = match result {
+            Ok(output) => output,
+            Err(_) => {
+                // Fall back to searching PATH
+                tokio::process::Command::new("id")
+                    .arg("-u")
+                    .arg(username)
+                    .output()
+                    .await
+                    .map_err(|e| {
+                        Error::Failed(format!("Failed to execute 'id -u {}': {}", username, e))
+                    })?
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -460,26 +477,38 @@ impl LustreEngine {
     }
 
     /// Get the GID for a group name by running `getent group <groupname>`
+    ///
+    /// This uses the system's getent command which queries NSS databases
+    /// (including /etc/group, LDAP, IPA, etc.). Tries /usr/bin/getent first
+    /// (standard Linux location), then falls back to searching PATH, and finally
+    /// falls back to reading /etc/group directly (for development on macOS).
     async fn get_gid(&self, groupname: &str) -> Result<u32, Error> {
-        let output = tokio::process::Command::new("getent")
+        // Try /usr/bin/getent first (standard Linux location)
+        let result = tokio::process::Command::new("/usr/bin/getent")
             .arg("group")
             .arg(groupname)
             .output()
-            .await
-            .map_err(|e| {
-                Error::Failed(format!(
-                    "Failed to execute 'getent group {}': {}",
-                    groupname, e
-                ))
-            })?;
+            .await;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::Failed(format!(
-                "Failed to get GID for group '{}': {}",
-                groupname, stderr
-            )));
-        }
+        let output = match result {
+            Ok(output) if output.status.success() => output,
+            _ => {
+                // Fall back to searching PATH
+                let result2 = tokio::process::Command::new("getent")
+                    .arg("group")
+                    .arg(groupname)
+                    .output()
+                    .await;
+
+                match result2 {
+                    Ok(output) if output.status.success() => output,
+                    _ => {
+                        // Final fallback: read /etc/group directly (for macOS development)
+                        return self.get_gid_from_file(groupname).await;
+                    }
+                }
+            }
+        };
 
         // getent group returns: groupname:x:gid:members
         let group_info = String::from_utf8_lossy(&output.stdout);
@@ -501,6 +530,49 @@ impl LustreEngine {
         })?;
 
         Ok(gid)
+    }
+
+    /// Fallback method to get GID by reading /etc/group directly
+    ///
+    /// This mimics the shell getent function behavior for development on macOS.
+    async fn get_gid_from_file(&self, groupname: &str) -> Result<u32, Error> {
+        let contents = tokio::fs::read_to_string("/etc/group")
+            .await
+            .map_err(|e| {
+                Error::Failed(format!("Failed to read /etc/group: {}", e))
+            })?;
+
+        // Search for line matching "^groupname:"
+        for line in contents.lines() {
+            // Skip comments
+            let line = match line.split('#').next() {
+                Some(l) => l.trim(),
+                None => continue,
+            };
+
+            if line.is_empty() {
+                continue;
+            }
+
+            // Check if line starts with "groupname:"
+            if line.starts_with(&format!("{}:", groupname)) {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 3 {
+                    let gid = parts[2].parse::<u32>().map_err(|e| {
+                        Error::Failed(format!(
+                            "Failed to parse GID '{}' for group '{}': {}",
+                            parts[2], groupname, e
+                        ))
+                    })?;
+                    return Ok(gid);
+                }
+            }
+        }
+
+        Err(Error::Failed(format!(
+            "Group '{}' not found in /etc/group",
+            groupname
+        )))
     }
 
     /// Compute the quota ID for a user on a specific volume

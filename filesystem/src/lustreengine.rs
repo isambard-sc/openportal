@@ -822,6 +822,14 @@ impl LustreEngine {
         timeout_duration: Duration,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<(), Error> {
+        assert_not_expired(expires);
+
+        if is_dry_run() {
+            let cmd_string = format!("{} {}", self.config.lfs_command(), args.join(" "));
+            tracing::info!("DRY RUN: would run lfs command: {}", cmd_string);
+            return Ok(());
+        }
+
         Ok(())
     }
 

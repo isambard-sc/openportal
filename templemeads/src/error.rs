@@ -106,6 +106,9 @@ pub enum Error {
     State(String),
 
     #[error("{0}")]
+    NotReady(String),
+
+    #[error("{0}")]
     Timeout(String),
 
     #[error("{0}")]

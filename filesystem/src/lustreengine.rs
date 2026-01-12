@@ -354,8 +354,8 @@ pub struct LustreEngineConfig {
 
     /// Maximum number of concurrent lfs commands to run (excluding setting
     /// Lustre IDs)
-    #[serde(default = "default_max_concurrent_commands")]
-    max_concurrent_commands: usize,
+    #[serde(default = "default_max_runners")]
+    max_runners: usize,
 
     /// Timeout in seconds for lfs commands (default: 30)
     #[serde(default = "default_command_timeout")]
@@ -392,7 +392,7 @@ pub struct LustreEngineConfig {
     id_strategies: HashMap<Volume, LustreIdStrategy>,
 }
 
-fn default_max_concurrent_commands() -> usize {
+fn default_max_runners() -> usize {
     4
 }
 
@@ -412,7 +412,7 @@ impl Default for LustreEngineConfig {
     fn default() -> Self {
         Self {
             lfs_command: default_lfs_command(),
-            max_concurrent_commands: default_max_concurrent_commands(),
+            max_runners: default_max_runners(),
             command_timeout_secs: default_command_timeout(),
             recursive_timeout_secs: default_recursive_timeout(),
             id_strategies: HashMap::new(),
@@ -438,7 +438,7 @@ impl LustreEngineConfig {
     }
 
     pub fn max_runners(&self) -> usize {
-        self.max_concurrent_commands
+        self.max_runners
     }
 
     pub fn get_id_strategy(&self, volume: &Volume) -> Option<&LustreIdStrategy> {
@@ -1239,7 +1239,7 @@ impl LustreEngine {
 
         if !all_set {
             // we can't set the quota yet because some lustre ids are still being assigned
-            return Err(Error::Timeout(
+            return Err(Error::NotReady(
                 "Lustre IDs are still being assigned, cannot set quota limits yet".to_string(),
             ));
         }

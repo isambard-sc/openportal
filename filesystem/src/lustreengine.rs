@@ -4,7 +4,6 @@
 //! Concrete implementation of the Lustre quota engine.
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,18 +12,9 @@ use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use templemeads::Error;
 use tokio::process::Command;
-use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
-
-/// Global per-volume locks to prevent concurrent lfs commands on the same volume.
-///
-/// Since LustreEngine instances are created per-call, we need a global lock registry
-/// to coordinate operations across multiple engine instances. This prevents race
-/// conditions when setting project IDs and quotas on the same volume.
-static VOLUME_LOCKS: Lazy<Mutex<HashMap<Volume, std::sync::Arc<Mutex<()>>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Quota ID strategy for generating unique lustre quota identifiers.
 ///
@@ -440,9 +430,6 @@ impl LustreEngineConfig {
 /// This engine uses the `lfs` command-line tool to manage quotas on Lustre filesystems.
 /// Lustre supports both user and project quotas with separate tracking for block (storage)
 /// and inode (file count) quotas.
-///
-/// The engine uses global per-volume locking (via VOLUME_LOCKS) to prevent race conditions
-/// when multiple quota operations are happening simultaneously on the same volume.
 pub struct LustreEngine {
     config: LustreEngineConfig,
 }
@@ -453,18 +440,6 @@ impl LustreEngine {
         // Validate that the lfs command exists
         // TODO: Add validation that lfs is available
         Ok(Self { config })
-    }
-
-    /// Get or create a lock for a specific volume
-    ///
-    /// This ensures that only one lfs command runs at a time on a given volume,
-    /// preventing race conditions when setting project IDs and quotas.
-    async fn get_volume_lock(volume: &Volume) -> std::sync::Arc<Mutex<()>> {
-        let mut locks = VOLUME_LOCKS.lock().await;
-        locks
-            .entry(volume.clone())
-            .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
-            .clone()
     }
 
     fn get_id_strategy(&self, volume: &Volume) -> Result<&LustreIdStrategy, Error> {
@@ -684,9 +659,11 @@ impl LustreEngine {
             .map_err(|e| Error::Failed(format!("Failed to execute lfs command: {}", e)))?;
 
         if !result.status.success() {
+            let stdout = String::from_utf8_lossy(&result.stdout);
             let stderr = String::from_utf8_lossy(&result.stderr);
             return Err(Error::Failed(format!(
-                "lfs command failed: {}",
+                "lfs command failed: stdout={} stderr={}",
+                stdout.trim(),
                 stderr.trim()
             )));
         }
@@ -696,7 +673,7 @@ impl LustreEngine {
 
     /// Get the current Lustre ID assigned to a directory
     ///
-    /// Uses `lfs project -d <directory>` to query the Lustre ID
+    /// Uses `lfs project -d <lustre_id>` to query the Lustre ID
     /// Returns None if no Lustre ID is set
     async fn get_lustre_id_from_dir(&self, directory: &Path) -> Result<Option<u64>, Error> {
         let output = self
@@ -763,13 +740,23 @@ impl LustreEngine {
             directory.display()
         );
 
+        // get the lustre id back to confirm
+        let assigned_id = self.get_lustre_id_from_dir(directory).await?;
+
+        if assigned_id != Some(lustre_id) {
+            return Err(Error::Failed(format!(
+                "Lustre ID assignment verification failed: expected {}, got {:?}",
+                lustre_id, assigned_id
+            )));
+        }
+
         Ok(())
     }
 
     /// Set quota limits for a project ID
     ///
     /// Uses `lfs setquota -p <id> -B <hard_limit> -I <inode_limit> <mount>`
-    async fn set_project_quota_limits(
+    async fn set_lustre_quota_limits(
         &self,
         project_id: u64,
         limit: &QuotaLimit,
@@ -810,49 +797,6 @@ impl LustreEngine {
         Ok(())
     }
 
-    /// Set quota limits for a user ID
-    ///
-    /// Uses `lfs setquota -u <id> -B <hard_limit> -I <inode_limit> <mount>`
-    async fn set_user_quota_limits(
-        &self,
-        user_id: u64,
-        limit: &QuotaLimit,
-        inode_limit: u64,
-        mount_point: &str,
-    ) -> Result<(), Error> {
-        let block_limit = match limit {
-            QuotaLimit::Unlimited => "0".to_string(),
-            QuotaLimit::Limited(storage) => {
-                let mb = storage.as_megabytes();
-                format!("{}M", mb)
-            }
-        };
-
-        self.run_lfs_command(
-            &[
-                "setquota",
-                "-u",
-                &user_id.to_string(),
-                "-B",
-                &block_limit,
-                "-I",
-                &format!("{}k", inode_limit / 1000),
-                mount_point,
-            ],
-            self.config.command_timeout(),
-        )
-        .await?;
-
-        tracing::info!(
-            "Set quota limits for user ID {}: {} bytes, {} inodes",
-            user_id,
-            block_limit,
-            inode_limit
-        );
-
-        Ok(())
-    }
-
     /// Query quota usage and limits for a project ID
     ///
     /// Uses `lfs quota -p <id> <mount>` to query quota information
@@ -873,11 +817,11 @@ impl LustreEngine {
 
     /// Query quota usage and limits for a user ID
     ///
-    /// Uses `lfs quota -u <id> <mount>` to query quota information
+    /// Uses `lfs quota -p <id> <mount>` to query quota information
     async fn query_user_quota(&self, user_id: u64, mount_point: &str) -> Result<Quota, Error> {
         let output = self
             .run_lfs_command(
-                &["quota", "-u", &user_id.to_string(), mount_point],
+                &["quota", "-p", &user_id.to_string(), mount_point],
                 self.config.command_timeout(),
             )
             .await?;
@@ -940,18 +884,15 @@ impl LustreEngine {
         limit: &QuotaLimit,
     ) -> Result<Quota, Error> {
         let user = mapping.local_user();
-        // Use the first path config's path for quota operations
-        let path = volume_config.path_configs()[0].path(mapping.clone().into())?;
 
         // Compute the quota ID for this user on this volume
         let quota_id = self.compute_user_quota_id(volume, mapping).await?;
 
         tracing::info!(
-            "LustreEngine::set_user_quota: user={}, volume={}, quota_id={}, path={}, limit={}",
+            "LustreEngine::set_user_quota: user={}, volume={}, quota_id={}, limit={}",
             user,
             volume,
             quota_id,
-            path.display(),
             limit
         );
 
@@ -976,30 +917,14 @@ impl LustreEngine {
         // Get inode limit (use configured value or large default)
         let inode_limit = volume_config.default_inode_limit().unwrap_or(1_000_000);
 
-        // Acquire volume lock to prevent concurrent operations
-        let volume_lock = Self::get_volume_lock(volume).await;
-        let _lock = volume_lock.lock().await;
-
-        // Step 1: Check if the directory has the correct Lustre ID assigned (idempotency)
-        let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
-        if current_lustre_id != Some(quota_id) {
-            tracing::info!(
-                "Directory {} has Lustre ID {:?}, need to assign {}",
-                path.display(),
-                current_lustre_id,
-                quota_id
-            );
+        // loop over all path configs and set lustre ids
+        for path_config in volume_config.path_configs() {
+            let path = path_config.path(mapping.clone().into())?;
             self.assign_lustre_id(&path, quota_id).await?;
-        } else {
-            tracing::debug!(
-                "Directory {} already has correct Lustre ID {}",
-                path.display(),
-                quota_id
-            );
         }
 
         // Set the quota limits
-        self.set_user_quota_limits(quota_id, limit, inode_limit, mount_point)
+        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point)
             .await?;
 
         // Query the current usage and return the quota
@@ -1016,18 +941,15 @@ impl LustreEngine {
         limit: &QuotaLimit,
     ) -> Result<Quota, Error> {
         let project = mapping.project().project();
-        // Use the first path config's path for quota operations
-        let path = volume_config.path_configs()[0].project_path(mapping)?;
 
         // Compute the quota ID for this project on this volume
         let quota_id = self.compute_project_quota_id(volume, mapping).await?;
 
         tracing::info!(
-            "LustreEngine::set_project_quota: project={}, volume={}, quota_id={}, path={}, limit={}",
+            "LustreEngine::set_project_quota: project={}, volume={}, quota_id={}, limit={}",
             project,
             volume,
             quota_id,
-            path.display(),
             limit
         );
 
@@ -1052,36 +974,66 @@ impl LustreEngine {
         // Get inode limit (use configured value or large default)
         let inode_limit = volume_config.default_inode_limit().unwrap_or(1_000_000);
 
-        // Acquire volume lock to prevent concurrent operations
-        let volume_lock = Self::get_volume_lock(volume).await;
-        let _lock = volume_lock.lock().await;
-
-        // Step 1: Check if the directory has the correct Lustre ID assigned (idempotency)
-        let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
-        if current_lustre_id != Some(quota_id) {
-            tracing::info!(
-                "Directory {} has Lustre ID {:?}, need to assign {}",
-                path.display(),
-                current_lustre_id,
-                quota_id
-            );
+        // loop over all path configs and set lustre ids
+        for path_config in volume_config.path_configs() {
+            let path = path_config.project_path(mapping)?;
             self.assign_lustre_id(&path, quota_id).await?;
-        } else {
-            tracing::debug!(
-                "Directory {} already has correct Lustre ID {}",
-                path.display(),
-                quota_id
-            );
         }
 
-        // Step 2: Set the quota limits (always do this to ensure limits are correct)
-        self.set_project_quota_limits(quota_id, limit, inode_limit, mount_point)
+        // Now set the quota limit
+        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point)
             .await?;
 
         // Step 3: Query the current usage and return the quota
         let quota = self.query_project_quota(quota_id, mount_point).await?;
 
         Ok(quota)
+    }
+
+    async fn check_user_lustre_ids(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+    ) -> Result<u64, Error> {
+        let user = mapping.local_user();
+
+        // Compute the expected quota ID for this user on this volume
+        let quota_id = self.compute_user_quota_id(volume, mapping).await?;
+
+        let mut some_zero = false;
+
+        // loop over all path configs and check lustre ids
+        for path_config in volume_config.path_configs() {
+            let path = path_config.path(mapping.clone().into())?;
+
+            // Check if the directory has the correct Lustre ID assigned
+            let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
+
+            if current_lustre_id == Some(0) {
+                tracing::warn!(
+                    "Directory {} for user '{}' has the default Lustre ID (0) set.",
+                    path.display(),
+                    user
+                );
+                some_zero = true;
+            } else if current_lustre_id != Some(quota_id) {
+                return Err(Error::Incompatible(format!(
+                    "Directory {} for user '{}' has Lustre ID {:?}, expected {}. Please run set_user_quota first to assign the correct Lustre ID.",
+                    path.display(),
+                    user,
+                    current_lustre_id,
+                    quota_id
+                )));
+            }
+        }
+
+        if some_zero {
+            // return 0 as the user is effectively uninitialized
+            Ok(0)
+        } else {
+            Ok(quota_id)
+        }
     }
 
     pub async fn get_user_quota(
@@ -1092,8 +1044,10 @@ impl LustreEngine {
     ) -> Result<Quota, Error> {
         let user = mapping.local_user();
 
-        // Compute the quota ID for this user on this volume
-        let quota_id = self.compute_user_quota_id(volume, mapping).await?;
+        // Check to see if the directories have the correct Lustre ID assigned
+        let quota_id = self
+            .check_user_lustre_ids(mapping, volume, volume_config)
+            .await?;
 
         tracing::info!(
             "LustreEngine::get_user_quota: user={}, volume={}, quota_id={}",
@@ -1101,6 +1055,14 @@ impl LustreEngine {
             volume,
             quota_id
         );
+
+        if quota_id == 0 {
+            // return unlimited quota as the user is uninitialized
+            return Ok(Quota::with_usage(
+                QuotaLimit::Unlimited,
+                StorageUsage::from(0),
+            ));
+        }
 
         // Get mount point (required for Lustre operations)
         let mount_point = volume_config.mount_point().ok_or_else(|| {
@@ -1114,16 +1076,63 @@ impl LustreEngine {
         self.query_user_quota(quota_id, mount_point).await
     }
 
+    async fn check_project_lustre_ids(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+    ) -> Result<u64, Error> {
+        let project = mapping.project().project();
+
+        // Compute the expected quota ID for this project on this volume
+        let quota_id = self.compute_project_quota_id(volume, mapping).await?;
+
+        let mut some_zero = false;
+
+        // loop over all path configs and check lustre ids
+        for path_config in volume_config.path_configs() {
+            let path = path_config.project_path(mapping)?;
+
+            // Check if the directory has the correct Lustre ID assigned
+            let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
+            if current_lustre_id == Some(0) {
+                tracing::warn!(
+                    "Directory {} for project '{}' has the default Lustre ID (0) set.",
+                    path.display(),
+                    project
+                );
+                some_zero = true;
+            } else if current_lustre_id != Some(quota_id) {
+                return Err(Error::Incompatible(format!(
+                    "Directory {} for project '{}' has Lustre ID {:?}, expected {}. Please run set_project_quota first to assign the correct Lustre ID.",
+                    path.display(),
+                    project,
+                    current_lustre_id,
+                    quota_id
+                )));
+            }
+        }
+
+        if some_zero {
+            // return 0 as the project is effectively uninitialized
+            Ok(0)
+        } else {
+            Ok(quota_id)
+        }
+    }
+
     pub async fn get_project_quota(
         &self,
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
     ) -> Result<Quota, Error> {
-        let project = mapping.project().project();
-
         // Compute the quota ID for this project on this volume
-        let quota_id = self.compute_project_quota_id(volume, mapping).await?;
+        let quota_id = self
+            .check_project_lustre_ids(mapping, volume, volume_config)
+            .await?;
+
+        let project = mapping.project().project();
 
         tracing::info!(
             "LustreEngine::get_project_quota: project={}, volume={}, quota_id={}",
@@ -1131,6 +1140,14 @@ impl LustreEngine {
             volume,
             quota_id
         );
+
+        if quota_id == 0 {
+            // return unlimited quota as the project is uninitialized
+            return Ok(Quota::with_usage(
+                QuotaLimit::Unlimited,
+                StorageUsage::from(0),
+            ));
+        }
 
         // Get mount point (required for Lustre operations)
         let mount_point = volume_config.mount_point().ok_or_else(|| {

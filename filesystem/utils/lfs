@@ -1,0 +1,145 @@
+#!/usr/bin/python3
+
+import sys
+import os
+import json
+
+metadata_file = ".lfsdata"
+quotas_file = ".lfsquotas"
+
+def read_metadata(directory):
+    try:
+        with open(os.path.join(directory, metadata_file), 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_metadata(directory, metadata):
+    with open(os.path.join(directory, metadata_file), 'w') as f:
+        json.dump(metadata, f)
+
+
+def remove_metadata(directory):
+    try:
+        os.remove(os.path.join(directory, metadata_file))
+    except FileNotFoundError:
+        pass
+
+
+def read_quotas(mountpoint):
+    try:
+        with open(os.path.join(mountpoint, quotas_file), 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_quotas(mountpoint, quotas):
+    with open(os.path.join(mountpoint, quotas_file), 'w') as f:
+        json.dump(quotas, f)
+
+
+def process_project():
+    flag = sys.argv[2]
+
+    if flag == "-d":
+        directory = sys.argv[3]
+        metadata = read_metadata(directory)
+        lustre_id = metadata.get('lustre_id', '0')
+        quota = metadata.get('quota', 'unlimited')
+        print(f"    {lustre_id} P {directory} (quota: {quota})")
+
+    elif flag == "-srp":
+        lustre_id = sys.argv[3]
+        directory = sys.argv[4]
+        metadata = read_metadata(directory)
+        metadata["lustre_id"] = int(lustre_id)
+        save_metadata(directory, metadata)
+
+    elif flag == "-Cr":
+        directory = sys.argv[3]
+        remove_metadata(directory)
+
+    else:
+        print("UNKNOWN FLAG")
+        sys.exit(-1)
+
+def process_quota():
+    flag = sys.argv[2]
+
+    if flag == "-p":
+        lustre_id = int(sys.argv[3])
+    else:
+        print("MISSING OR UNKNOWN FLAG")
+        sys.exit(-1)
+
+    mountpoint = sys.argv[4]
+
+    quotas = read_quotas(mountpoint)
+
+    if str(lustre_id) not in quotas:
+        print(f"    {lustre_id} Q (no quota set)")
+        return
+
+    quota = quotas.get(str(lustre_id), {})
+
+    quota_limit = quota.get("quota_limit", "unlimited")
+    inode_limit = quota.get("inode_limit", "unlimited")
+
+    print(f"    {lustre_id} Q (block quota: {quota_limit}, inode quota: {inode_limit})")
+
+
+def process_setquota():
+    flag = sys.argv[2]
+
+    if flag == "-p":
+        lustre_id = int(sys.argv[3])
+    else:
+        print("MISSING OR UNKNOWN FLAG")
+        sys.exit(-1)
+
+    flag = sys.argv[4]
+
+    if flag == "-B":
+        quota_limit = str(sys.argv[5])
+    else:
+        print("MISSING OR UNKNOWN FLAG")
+        sys.exit(-1)
+
+    flag = sys.argv[6]
+
+    if flag == "-I":
+        inode_limit = str(sys.argv[7])
+    else:
+        print("MISSING OR UNKNOWN FLAG")
+        sys.exit(-1)
+
+    mountpoint = sys.argv[8]
+
+    quotas = read_quotas(mountpoint)
+
+    quota = quotas.get(str(lustre_id), {})
+
+    quota["quota_limit"] = quota_limit
+    quota["inode_limit"] = inode_limit
+
+    quotas[str(lustre_id)] = quota
+
+    save_quotas(mountpoint, quotas)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("MISSING COMMAND")
+        sys.exit(-1)
+
+    if sys.argv[1] == "project":
+        process_project()
+    elif sys.argv[1] == "quota":
+        process_quota()
+    elif sys.argv[1] == "setquota":
+        process_setquota()
+    else:
+        print("UNKNOWN COMMAND")
+        sys.exit(-1)

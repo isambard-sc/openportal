@@ -511,7 +511,7 @@ impl LockedRunner {
     ) -> Result<String, Error> {
         if is_dry_run() {
             let cmd_string = format!("{} {}", self.lfs(), args.join(" "));
-            tracing::info!("DRY RUN: would execute lfs command: {}", cmd_string);
+            tracing::info!("DRY RUN: {}", cmd_string);
             return Ok(String::new());
         }
 
@@ -821,16 +821,20 @@ impl LustreEngine {
         args: &[&str],
         timeout_duration: Duration,
         expires: &chrono::DateTime<Utc>,
-    ) -> Result<(), Error> {
-        assert_not_expired(expires);
+    ) -> Result<bool, Error> {
+        assert_not_expired(expires)?;
 
         if is_dry_run() {
             let cmd_string = format!("{} {}", self.config.lfs_command(), args.join(" "));
-            tracing::info!("DRY RUN: would run lfs command: {}", cmd_string);
-            return Ok(());
+            tracing::info!("DRY RUN: {}", cmd_string);
+            return Ok(true);
         }
 
-        Ok(())
+        // we will queue the command, getting a handle we can check for if
+        // the command has completed. We return whether or not the
+        // command has completed immediately
+
+        Ok(false)
     }
 
     /// Get the current Lustre ID assigned to a directory
@@ -907,21 +911,22 @@ impl LustreEngine {
 
         // we now need to set the ID - this is very slow, so we will queue
         // this command
-        self.queue_lfs_command(
-            &[
-                "project",
-                "-srp",
-                &lustre_id.to_string(),
-                directory.to_str().ok_or_else(|| {
-                    Error::Incompatible("Directory path contains invalid UTF-8".to_string())
-                })?,
-            ],
-            self.config.recursive_timeout(),
-            expires,
-        )
-        .await?;
+        let completed: bool = self
+            .queue_lfs_command(
+                &[
+                    "project",
+                    "-srp",
+                    &lustre_id.to_string(),
+                    directory.to_str().ok_or_else(|| {
+                        Error::Incompatible("Directory path contains invalid UTF-8".to_string())
+                    })?,
+                ],
+                self.config.recursive_timeout(),
+                expires,
+            )
+            .await?;
 
-        Ok(false)
+        Ok(completed)
     }
 
     /// Set quota limits for a project ID

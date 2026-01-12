@@ -860,6 +860,11 @@ impl LustreEngine {
                         Ok(id) => {
                             if id == lustre_id {
                                 found_id = true;
+                                tracing::info!(
+                                    "Matching quota ID found ({}), processing line: {}",
+                                    lustre_id,
+                                    trimmed
+                                );
                             } else {
                                 tracing::warn!(
                                     "Lustre ID mismatch in quota output for mount {}: expected {}, found {}",
@@ -877,25 +882,40 @@ impl LustreEngine {
                             );
                         }
                     }
+                } else {
+                    tracing::warn!("Quota ID line has insufficient columns: {}", trimmed);
                 }
+
                 continue;
             }
 
             // we can't process anything else until we have the id
             if !found_id {
+                tracing::info!(
+                    "Skipping quota output line until matching ID found: {}",
+                    trimmed
+                );
                 continue;
             }
 
             // now look for the header line for the filesystem data
             if lower_trimmed.starts_with("filesystem") {
                 // double check that header contains expected columns
-                if lower_trimmed.contains("quota") && lower_trimmed.contains("limit)") {
+                if lower_trimmed.contains("quota") && lower_trimmed.contains("limit") {
                     found_header = true;
+                    tracing::info!(
+                        "Found quota header line for Lustre ID {}: {}",
+                        lustre_id,
+                        trimmed
+                    );
+                } else {
+                    tracing::warn!("Quota header line missing expected columns: {}", trimmed);
                 }
                 continue;
             }
 
             if !found_header {
+                tracing::info!("Skipping quota output line until header found: {}", trimmed);
                 continue;
             }
 
@@ -930,6 +950,15 @@ impl LustreEngine {
             let limit_kb = parts[3].parse::<u64>().map_err(|e| {
                 Error::Parse(format!("Failed to parse limit '{}': {}", parts[3], e))
             })?;
+
+            tracing::info!(
+                "Parsed quota for Lustre ID {} on mount {}: usage={} KB, limit={} KB from line: {}",
+                lustre_id,
+                mount_point,
+                usage_kb,
+                limit_kb,
+                trimmed
+            );
 
             let usage = StorageUsage::new(StorageSize::from_kilobytes(usage_kb as f64));
             let limit = if limit_kb == 0 {

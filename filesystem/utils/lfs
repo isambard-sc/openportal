@@ -47,8 +47,7 @@ def process_project():
         directory = sys.argv[3]
         metadata = read_metadata(directory)
         lustre_id = metadata.get('lustre_id', '0')
-        quota = metadata.get('quota', 'unlimited')
-        print(f"    {lustre_id} P {directory} (quota: {quota})")
+        print(f"    {lustre_id} P {directory}")
 
     elif flag == "-srp":
         lustre_id = sys.argv[3]
@@ -84,8 +83,30 @@ def process_quota():
 
     quota = quotas.get(str(lustre_id), {})
 
-    quota_limit = quota.get("quota_limit", "unlimited")
-    inode_limit = quota.get("inode_limit", "unlimited")
+    quota_limit = quota.get("quota_limit", "unlimited").lower()
+    inode_limit = quota.get("inode_limit", "unlimited").lower()
+
+    if quota_limit == "unlimited":
+        quota_limit = "0"
+    elif quota_limit.endswith("k"):
+        quota_limit = str(int(quota_limit[:-1]))
+    elif quota_limit.endswith("m"):
+        quota_limit = str(int(int(quota_limit[:-1]) * 1024))
+    elif quota_limit.endswith("g"):
+        quota_limit = str(int(int(quota_limit[:-1]) * 1024 * 1024))
+    elif quota_limit.endswith("t"):
+        quota_limit = str(int(int(quota_limit[:-1]) * 1024 * 1024 * 1024))
+    else:
+        print(f"UNKNOWN QUOTA LIMIT FORMAT {quota_limit}")
+        sys.exit(-1)
+
+    if inode_limit == "unlimited":
+        inode_limit = "0"
+    elif inode_limit.endswith("k"):
+        inode_limit = str(int(inode_limit[:-1]) * 1024)
+    else:
+        print(f"UNKNOWN INODE LIMIT FORMAT {inode_limit}")
+        sys.exit(-1)
 
     # Format is:
     # Disk quotas for prj 1 (pid 1):

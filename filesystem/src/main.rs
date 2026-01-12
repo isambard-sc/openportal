@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use chrono::Utc;
 
 use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
@@ -82,7 +83,7 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 AddLocalProject(mapping) => {
-                    create_project_dirs_and_links(&mapping).await?;
+                    create_project_dirs_and_links(&mapping, job.expires()).await?;
                     job.completed_none()
                 },
                 RemoveLocalProject(mapping) => {
@@ -90,7 +91,7 @@ async fn main() -> Result<()> {
                     job.completed_none()
                 },
                 AddLocalUser(mapping) => {
-                    create_user_dirs(&mapping).await?;
+                    create_user_dirs(&mapping, job.expires()).await?;
                     job.completed_none()
                 },
                 RemoveLocalUser(mapping) => {
@@ -151,27 +152,27 @@ async fn main() -> Result<()> {
                     job.completed(project_dirs)
                 },
                 SetLocalProjectQuota(mapping, volume, limit) => {
-                    let quota = set_project_quota(&mapping, &volume, &limit).await?;
+                    let quota = set_project_quota(&mapping, &volume, &limit, job.expires()).await?;
                     job.completed(quota)
                 },
                 GetLocalProjectQuota(mapping, volume) => {
-                    let quota = get_project_quota(&mapping, &volume).await?;
+                    let quota = get_project_quota(&mapping, &volume, job.expires()).await?;
                     job.completed(quota)
                 },
                 GetLocalProjectQuotas(mapping) => {
-                    let quotas = get_project_quotas(&mapping).await?;
+                    let quotas = get_project_quotas(&mapping, job.expires()).await?;
                     job.completed(quotas)
                 },
                 SetLocalUserQuota(mapping, volume, limit) => {
-                    let quota = set_user_quota(&mapping, &volume, &limit).await?;
+                    let quota = set_user_quota(&mapping, &volume, &limit, job.expires()).await?;
                     job.completed(quota)
                 },
                 GetLocalUserQuota(mapping, volume) => {
-                    let quota = get_user_quota(&mapping, &volume).await?;
+                    let quota = get_user_quota(&mapping, &volume, job.expires()).await?;
                     job.completed(quota)
                 },
                 GetLocalUserQuotas(mapping) => {
-                    let quotas = get_user_quotas(&mapping).await?;
+                    let quotas = get_user_quotas(&mapping, job.expires()).await?;
                     job.completed(quotas)
                 },
                 _ => {
@@ -191,7 +192,10 @@ async fn main() -> Result<()> {
 ///
 /// Create the project directories and links for a given ProjectMapping,
 ///
-async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), Error> {
+async fn create_project_dirs_and_links(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
     let config = cache::get_filesystem_config().await?;
 
     // create all of the project volume directories first
@@ -264,7 +268,24 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
                     volume,
                     default_quota
                 );
-                set_project_quota(mapping, &volume, default_quota).await?;
+
+                match set_project_quota(mapping, &volume, default_quota, expires).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "Successfully set default quota for project {} on volume {}",
+                            mapping.project(),
+                            volume
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to set default quota for project {} on volume {}: {}\n Will try again later.",
+                            mapping.project(),
+                            volume,
+                            e
+                        );
+                    }
+                }
             }
         }
     }
@@ -275,8 +296,11 @@ async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
 ///
 /// Create the user directories for a given UserMapping,
 ///
-async fn create_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
-    create_project_dirs_and_links(&mapping.project()).await?;
+async fn create_user_dirs(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    create_project_dirs_and_links(&mapping.project(), expires).await?;
 
     let config = cache::get_filesystem_config().await?;
 
@@ -315,7 +339,23 @@ async fn create_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
                     volume,
                     default_quota
                 );
-                set_user_quota(mapping, &volume, default_quota).await?;
+                match set_user_quota(mapping, &volume, default_quota, expires).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "Successfully set default quota for user {} on volume {}",
+                            mapping.local_user(),
+                            volume
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to set default quota for user {} on volume {}: {}\n Will try again later.",
+                            mapping.local_user(),
+                            volume,
+                            e
+                        );
+                    }
+                }
             }
         }
     }
@@ -417,6 +457,7 @@ pub async fn set_project_quota(
     mapping: &templemeads::grammar::ProjectMapping,
     volume: &templemeads::storage::Volume,
     limit: &templemeads::storage::QuotaLimit,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
@@ -436,7 +477,7 @@ pub async fn set_project_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .set_project_quota(mapping, volume, &volume_config, limit)
+        .set_project_quota(mapping, volume, &volume_config, limit, expires)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -447,6 +488,7 @@ pub async fn set_project_quota(
 pub async fn get_project_quota(
     mapping: &templemeads::grammar::ProjectMapping,
     volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
@@ -466,7 +508,7 @@ pub async fn get_project_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .get_project_quota(mapping, volume, &volume_config)
+        .get_project_quota(mapping, volume, &volume_config, expires)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -476,6 +518,7 @@ pub async fn get_project_quota(
 ///
 pub async fn get_project_quotas(
     mapping: &templemeads::grammar::ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<
     std::collections::HashMap<templemeads::storage::Volume, templemeads::storage::Quota>,
     Error,
@@ -507,7 +550,7 @@ pub async fn get_project_quotas(
         };
 
         match engine
-            .get_project_quota(mapping, &volume, &volume_config)
+            .get_project_quota(mapping, &volume, &volume_config, expires)
             .await
         {
             Ok(quota) => {
@@ -535,6 +578,7 @@ pub async fn set_user_quota(
     mapping: &templemeads::grammar::UserMapping,
     volume: &templemeads::storage::Volume,
     limit: &templemeads::storage::QuotaLimit,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
@@ -554,7 +598,7 @@ pub async fn set_user_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .set_user_quota(mapping, volume, &volume_config, limit)
+        .set_user_quota(mapping, volume, &volume_config, limit, expires)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -565,6 +609,7 @@ pub async fn set_user_quota(
 pub async fn get_user_quota(
     mapping: &templemeads::grammar::UserMapping,
     volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<templemeads::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
@@ -584,7 +629,7 @@ pub async fn get_user_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .get_user_quota(mapping, volume, &volume_config)
+        .get_user_quota(mapping, volume, &volume_config, expires)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -594,6 +639,7 @@ pub async fn get_user_quota(
 ///
 pub async fn get_user_quotas(
     mapping: &templemeads::grammar::UserMapping,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<
     std::collections::HashMap<templemeads::storage::Volume, templemeads::storage::Quota>,
     Error,
@@ -624,7 +670,10 @@ pub async fn get_user_quotas(
             }
         };
 
-        match engine.get_user_quota(mapping, &volume, &user_config).await {
+        match engine
+            .get_user_quota(mapping, &volume, &user_config, expires)
+            .await
+        {
             Ok(quota) => {
                 quotas.insert(volume.clone(), quota);
             }

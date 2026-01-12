@@ -4,14 +4,21 @@
 //! Concrete implementation of the Lustre quota engine.
 
 use anyhow::Result;
+use chrono::Utc;
+use once_cell::sync::Lazy;
+use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use templemeads::grammar::{ProjectMapping, UserMapping};
+use templemeads::job::assert_not_expired;
 use templemeads::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use templemeads::Error;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
@@ -345,11 +352,16 @@ pub struct LustreEngineConfig {
     #[serde(default = "default_lfs_command")]
     lfs_command: String,
 
+    /// Maximum number of concurrent lfs commands to run (excluding setting
+    /// Lustre IDs)
+    #[serde(default = "default_max_concurrent_commands")]
+    max_concurrent_commands: usize,
+
     /// Timeout in seconds for lfs commands (default: 30)
     #[serde(default = "default_command_timeout")]
     command_timeout_secs: u64,
 
-    /// Timeout in seconds for recursive lfs project operations (default: 600)
+    /// Timeout in seconds for recursive lfs project operations (default: 18,000 seconds / 5 hours)
     /// The `lfs project -srp` command can take a long time on large directory trees
     #[serde(default = "default_recursive_timeout")]
     recursive_timeout_secs: u64,
@@ -380,6 +392,10 @@ pub struct LustreEngineConfig {
     id_strategies: HashMap<Volume, LustreIdStrategy>,
 }
 
+fn default_max_concurrent_commands() -> usize {
+    4
+}
+
 fn default_lfs_command() -> String {
     "lfs".to_string()
 }
@@ -389,13 +405,14 @@ fn default_command_timeout() -> u64 {
 }
 
 fn default_recursive_timeout() -> u64 {
-    600
+    18000 // 5 hours
 }
 
 impl Default for LustreEngineConfig {
     fn default() -> Self {
         Self {
             lfs_command: default_lfs_command(),
+            max_concurrent_commands: default_max_concurrent_commands(),
             command_timeout_secs: default_command_timeout(),
             recursive_timeout_secs: default_recursive_timeout(),
             id_strategies: HashMap::new(),
@@ -420,8 +437,156 @@ impl LustreEngineConfig {
         ))
     }
 
+    pub fn max_runners(&self) -> usize {
+        self.max_concurrent_commands
+    }
+
     pub fn get_id_strategy(&self, volume: &Volume) -> Option<&LustreIdStrategy> {
         self.id_strategies.get(volume)
+    }
+}
+
+/// Whether or not to run in "dry_run" mode - in this mode, no lustre
+/// commands will actually be run
+fn is_dry_run() -> bool {
+    match std::env::var("OPENPORTAL_LUSTRE_DRY_RUN") {
+        Ok(val) => val == "1" || val.to_lowercase() == "true",
+        Err(_) => false,
+    }
+}
+
+/// Whether or not to run in Lustre ID mode only - in this mode,
+/// only lustre IDs will be set - quotas will not be applied
+fn is_lustre_id_only() -> bool {
+    match std::env::var("OPENPORTAL_LUSTRE_ID_ONLY") {
+        Ok(val) => val == "1" || val.to_lowercase() == "true",
+        Err(_) => false,
+    }
+}
+
+/// Lustre runner - ensures that only a limited number of lfs commands
+/// are run at the same time
+#[derive(Debug, Clone)]
+struct LfsRunner {
+    lfs_command: String,
+}
+
+static LFS_RUNNERS: Lazy<Mutex<Vec<Arc<Mutex<LfsRunner>>>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[derive(Debug)]
+pub struct LockedRunner {
+    runner: tokio::sync::OwnedMutexGuard<LfsRunner>,
+}
+
+pub async fn set_command(lfs: &str, max_lfs_runners: usize) {
+    tracing::debug!(
+        "Using command line lfs commands: {}, max_lfs_runners: {}",
+        lfs,
+        max_lfs_runners
+    );
+
+    // make sure we have at least one runner
+    let max_lfs_runners = max_lfs_runners.max(1);
+    let mut runners = LFS_RUNNERS.lock().await;
+
+    runners.clear();
+
+    for _ in 0..max_lfs_runners {
+        runners.push(Arc::new(Mutex::new(LfsRunner {
+            lfs_command: lfs.to_string(),
+        })));
+    }
+}
+
+impl LockedRunner {
+    pub fn lfs(&self) -> &str {
+        &self.runner.lfs_command
+    }
+
+    async fn run_command(
+        &self,
+        args: &[&str],
+        timeout_duration: Duration,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<String, Error> {
+        if is_dry_run() {
+            let cmd_string = format!("{} {}", self.lfs(), args.join(" "));
+            tracing::info!("DRY RUN: would execute lfs command: {}", cmd_string);
+            return Ok(String::new());
+        }
+
+        assert_not_expired(expires)?;
+
+        let cmd_parts: Vec<&str> = self.lfs().split_whitespace().collect();
+        let (program, initial_args) = cmd_parts
+            .split_first()
+            .ok_or_else(|| Error::Misconfigured("lfs_command is empty".to_string()))?;
+
+        let command_string = format!("{} {}", program, args.join(" "));
+
+        let mut command = Command::new(program);
+        command.args(initial_args);
+        command.args(args);
+
+        tracing::info!("Executing lfs command: {}", command_string);
+
+        let result = timeout(timeout_duration, command.output())
+            .await
+            .map_err(|_| {
+                Error::Timeout(format!(
+                    "lfs command timed out after {} seconds",
+                    timeout_duration.as_secs()
+                ))
+            })?
+            .map_err(|e| Error::Failed(format!("Failed to execute lfs command: {}", e)))?;
+
+        if !result.status.success() {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(Error::Failed(format!(
+                "lfs command failed: stdout={} stderr={}",
+                stdout.trim(),
+                stderr.trim()
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&result.stdout).to_string())
+    }
+}
+
+// function to return the runner protected by a MutexGuard - this ensures
+// that we can only run a small number of lfs commands at a time, thereby not
+// overloading the server
+pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
+    let runners = LFS_RUNNERS.lock().await;
+
+    if runners.is_empty() {
+        return Err(Error::Call(
+            "No LFS runners have been configured".to_string(),
+        ));
+    }
+
+    let mut rng = rand::rngs::StdRng::from_os_rng();
+
+    loop {
+        // try all the runners in a random order
+        for runner in runners.iter().choose_multiple(&mut rng, runners.len()) {
+            assert_not_expired(expires)?;
+
+            match runner.clone().try_lock_owned() {
+                Ok(guard) => {
+                    return Ok(LockedRunner { runner: guard });
+                }
+                Err(_) => {
+                    // the runner is already locked, so try the next one
+                    continue;
+                }
+            }
+        }
+
+        // wait a bit before trying again
+        assert_not_expired(expires)?;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -437,9 +602,18 @@ pub struct LustreEngine {
 impl LustreEngine {
     /// Create a new Lustre quota engine with the given configuration
     pub fn new(config: LustreEngineConfig) -> Result<Self> {
-        // Validate that the lfs command exists
-        // TODO: Add validation that lfs is available
         Ok(Self { config })
+    }
+
+    /// Initialise the engine
+    pub async fn initialize(&self) -> Result<(), Error> {
+        set_command(self.config.lfs_command(), self.config.max_runners()).await;
+        tracing::info!(
+            "LustreEngine initialized with command '{}' and max runners {}",
+            self.config.lfs_command(),
+            self.config.max_runners()
+        );
+        Ok(())
     }
 
     fn get_id_strategy(&self, volume: &Volume) -> Result<&LustreIdStrategy, Error> {
@@ -627,55 +801,39 @@ impl LustreEngine {
         strategy.compute_id(None, Some(gid))
     }
 
-    /// Execute an lfs command with timeout
-    ///
-    /// Returns the stdout as a String if successful
+    /// Execute a lfs command with timeout
     async fn run_lfs_command(
         &self,
         args: &[&str],
         timeout_duration: Duration,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<String, Error> {
-        let cmd_parts: Vec<&str> = self.config.lfs_command().split_whitespace().collect();
-        let (program, initial_args) = cmd_parts
-            .split_first()
-            .ok_or_else(|| Error::Misconfigured("lfs_command is empty".to_string()))?;
+        let locked_runner = runner(expires).await?;
+        let output = locked_runner
+            .run_command(args, timeout_duration, expires)
+            .await?;
+        Ok(output)
+    }
 
-        let command_string = format!("{} {}", program, args.join(" "));
-
-        let mut command = Command::new(program);
-        command.args(initial_args);
-        command.args(args);
-
-        tracing::info!("Executing lfs command: {}", command_string);
-
-        let result = timeout(timeout_duration, command.output())
-            .await
-            .map_err(|_| {
-                Error::Timeout(format!(
-                    "lfs command timed out after {} seconds",
-                    timeout_duration.as_secs()
-                ))
-            })?
-            .map_err(|e| Error::Failed(format!("Failed to execute lfs command: {}", e)))?;
-
-        if !result.status.success() {
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            return Err(Error::Failed(format!(
-                "lfs command failed: stdout={} stderr={}",
-                stdout.trim(),
-                stderr.trim()
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&result.stdout).to_string())
+    /// Queue an lfs command to be run later
+    async fn queue_lfs_command(
+        &self,
+        args: &[&str],
+        timeout_duration: Duration,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<(), Error> {
+        Ok(())
     }
 
     /// Get the current Lustre ID assigned to a directory
     ///
     /// Uses `lfs project -d <lustre_id>` to query the Lustre ID
     /// Returns None if no Lustre ID is set
-    async fn get_lustre_id_from_dir(&self, directory: &Path) -> Result<Option<u64>, Error> {
+    async fn get_lustre_id_from_dir(
+        &self,
+        directory: &Path,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<Option<u64>, Error> {
         let output = self
             .run_lfs_command(
                 &[
@@ -686,6 +844,7 @@ impl LustreEngine {
                     })?,
                 ],
                 self.config.command_timeout(),
+                expires,
             )
             .await?;
 
@@ -714,14 +873,33 @@ impl LustreEngine {
     ///
     /// Uses `lfs project -srp <id> <directory>` to recursively set the Lustre ID
     /// This operation can be very slow on large directory trees
-    async fn assign_lustre_id(&self, directory: &Path, lustre_id: u64) -> Result<(), Error> {
+    async fn assign_lustre_id(
+        &self,
+        directory: &Path,
+        lustre_id: u64,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
         tracing::info!(
             "Assigning Lustre ID {} to directory {} (this may take a while)",
             lustre_id,
             directory.display()
         );
 
-        self.run_lfs_command(
+        // see if this directory already has the correct lustre id
+        let current_id = self.get_lustre_id_from_dir(directory, expires).await?;
+
+        if current_id == Some(lustre_id) {
+            tracing::info!(
+                "Directory {} already has Lustre ID {}, skipping assignment",
+                directory.display(),
+                lustre_id
+            );
+            return Ok(true);
+        }
+
+        // we now need to set the ID - this is very slow, so we will queue
+        // this command
+        self.queue_lfs_command(
             &[
                 "project",
                 "-srp",
@@ -731,26 +909,11 @@ impl LustreEngine {
                 })?,
             ],
             self.config.recursive_timeout(),
+            expires,
         )
         .await?;
 
-        tracing::info!(
-            "Successfully assigned Lustre ID {} to directory {}",
-            lustre_id,
-            directory.display()
-        );
-
-        // get the lustre id back to confirm
-        let assigned_id = self.get_lustre_id_from_dir(directory).await?;
-
-        if assigned_id != Some(lustre_id) {
-            return Err(Error::Failed(format!(
-                "Lustre ID assignment verification failed: expected {}, got {:?}",
-                lustre_id, assigned_id
-            )));
-        }
-
-        Ok(())
+        Ok(false)
     }
 
     /// Set quota limits for a project ID
@@ -762,6 +925,7 @@ impl LustreEngine {
         limit: &QuotaLimit,
         inode_limit: u64,
         mount_point: &str,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<(), Error> {
         let block_limit = match limit {
             QuotaLimit::Unlimited => "0".to_string(), // 0 means unlimited in Lustre
@@ -784,6 +948,7 @@ impl LustreEngine {
                 mount_point,
             ],
             self.config.command_timeout(),
+            expires,
         )
         .await?;
 
@@ -804,11 +969,13 @@ impl LustreEngine {
         &self,
         project_id: u64,
         mount_point: &str,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let output = self
             .run_lfs_command(
                 &["quota", "-p", &project_id.to_string(), mount_point],
                 self.config.command_timeout(),
+                expires,
             )
             .await?;
 
@@ -818,11 +985,17 @@ impl LustreEngine {
     /// Query quota usage and limits for a user ID
     ///
     /// Uses `lfs quota -p <id> <mount>` to query quota information
-    async fn query_user_quota(&self, user_id: u64, mount_point: &str) -> Result<Quota, Error> {
+    async fn query_user_quota(
+        &self,
+        user_id: u64,
+        mount_point: &str,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<Quota, Error> {
         let output = self
             .run_lfs_command(
                 &["quota", "-p", &user_id.to_string(), mount_point],
                 self.config.command_timeout(),
+                expires,
             )
             .await?;
 
@@ -843,6 +1016,18 @@ impl LustreEngine {
         mount_point: &str,
         output: &str,
     ) -> Result<Quota, Error> {
+        if is_dry_run() || is_lustre_id_only() {
+            tracing::debug!(
+                "DRY RUN or ID ONLY: skipping parsing of quota output for Lustre ID {} on mount {}",
+                lustre_id,
+                mount_point
+            );
+            return Ok(Quota::with_usage(
+                QuotaLimit::Unlimited,
+                StorageUsage::new(StorageSize::from_kilobytes(0.0)),
+            ));
+        }
+
         // Find the line with actual quota data - this is directly after the header line
         let mut found_id = false;
         let mut found_header = false;
@@ -982,6 +1167,7 @@ impl LustreEngine {
         volume: &Volume,
         volume_config: &UserVolumeConfig,
         limit: &QuotaLimit,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let user = mapping.local_user();
 
@@ -1018,18 +1204,41 @@ impl LustreEngine {
         let inode_limit = volume_config.default_inode_limit().unwrap_or(1_000_000);
 
         // loop over all path configs and set lustre ids
+        let mut all_set = true;
+
         for path_config in volume_config.path_configs() {
             let path = path_config.path(mapping.clone().into())?;
-            self.assign_lustre_id(&path, quota_id).await?;
+            let set = self.assign_lustre_id(&path, quota_id, expires).await?;
+            if !set {
+                all_set = false;
+            }
+        }
+
+        if is_lustre_id_only() {
+            tracing::info!(
+                "Skipping quota limit setting due to OPENPORTAL_LUSTRE_ID_ONLY environment variable"
+            );
+            return Ok(Quota::with_usage(
+                QuotaLimit::Unlimited,
+                StorageUsage::from(0),
+            ));
+        }
+
+        if !all_set {
+            // we can't set the quota yet because some lustre ids are still being assigned
+            return Err(Error::Timeout(
+                "Lustre IDs are still being assigned, cannot set quota limits yet".to_string(),
+            ));
         }
 
         // Set the quota limits
-        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point)
+        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point, expires)
             .await?;
 
         // Query the current usage and return the quota
-        let quota = self.query_user_quota(quota_id, mount_point).await?;
-
+        let quota = self
+            .query_user_quota(quota_id, mount_point, expires)
+            .await?;
         Ok(quota)
     }
 
@@ -1039,6 +1248,7 @@ impl LustreEngine {
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
         limit: &QuotaLimit,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let project = mapping.project().project();
 
@@ -1075,18 +1285,41 @@ impl LustreEngine {
         let inode_limit = volume_config.default_inode_limit().unwrap_or(1_000_000);
 
         // loop over all path configs and set lustre ids
+        let mut all_set = true;
+
         for path_config in volume_config.path_configs() {
             let path = path_config.project_path(mapping)?;
-            self.assign_lustre_id(&path, quota_id).await?;
+            let set = self.assign_lustre_id(&path, quota_id, expires).await?;
+            if !set {
+                all_set = false;
+            }
+        }
+
+        if is_lustre_id_only() {
+            tracing::info!(
+                "Skipping quota limit setting due to OPENPORTAL_LUSTRE_ID_ONLY environment variable"
+            );
+            return Ok(Quota::with_usage(
+                QuotaLimit::Unlimited,
+                StorageUsage::from(0),
+            ));
+        }
+
+        if !all_set {
+            // we can't set the quota yet because some lustre ids are still being assigned
+            return Err(Error::Timeout(
+                "Lustre IDs are still being assigned, cannot set quota limits yet".to_string(),
+            ));
         }
 
         // Now set the quota limit
-        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point)
+        self.set_lustre_quota_limits(quota_id, limit, inode_limit, mount_point, expires)
             .await?;
 
         // Step 3: Query the current usage and return the quota
-        let quota = self.query_project_quota(quota_id, mount_point).await?;
-
+        let quota = self
+            .query_project_quota(quota_id, mount_point, expires)
+            .await?;
         Ok(quota)
     }
 
@@ -1095,6 +1328,7 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<u64, Error> {
         let user = mapping.local_user();
 
@@ -1108,7 +1342,7 @@ impl LustreEngine {
             let path = path_config.path(mapping.clone().into())?;
 
             // Check if the directory has the correct Lustre ID assigned
-            let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
+            let current_lustre_id = self.get_lustre_id_from_dir(&path, expires).await?;
 
             if current_lustre_id == Some(0) {
                 tracing::warn!(
@@ -1117,7 +1351,7 @@ impl LustreEngine {
                     user
                 );
                 some_zero = true;
-            } else if current_lustre_id != Some(quota_id) {
+            } else if current_lustre_id != Some(quota_id) && !is_dry_run() {
                 return Err(Error::Incompatible(format!(
                     "Directory {} for user '{}' has Lustre ID {:?}, expected {}. Please run set_user_quota first to assign the correct Lustre ID.",
                     path.display(),
@@ -1141,12 +1375,13 @@ impl LustreEngine {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         let user = mapping.local_user();
 
         // Check to see if the directories have the correct Lustre ID assigned
         let quota_id = self
-            .check_user_lustre_ids(mapping, volume, volume_config)
+            .check_user_lustre_ids(mapping, volume, volume_config, expires)
             .await?;
 
         tracing::info!(
@@ -1173,7 +1408,7 @@ impl LustreEngine {
         })?;
 
         // Query the quota and return
-        self.query_user_quota(quota_id, mount_point).await
+        self.query_user_quota(quota_id, mount_point, expires).await
     }
 
     async fn check_project_lustre_ids(
@@ -1181,6 +1416,7 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<u64, Error> {
         let project = mapping.project().project();
 
@@ -1194,7 +1430,7 @@ impl LustreEngine {
             let path = path_config.project_path(mapping)?;
 
             // Check if the directory has the correct Lustre ID assigned
-            let current_lustre_id = self.get_lustre_id_from_dir(&path).await?;
+            let current_lustre_id = self.get_lustre_id_from_dir(&path, expires).await?;
             if current_lustre_id == Some(0) {
                 tracing::warn!(
                     "Directory {} for project '{}' has the default Lustre ID (0) set.",
@@ -1202,7 +1438,7 @@ impl LustreEngine {
                     project
                 );
                 some_zero = true;
-            } else if current_lustre_id != Some(quota_id) {
+            } else if current_lustre_id != Some(quota_id) && !is_dry_run() {
                 return Err(Error::Incompatible(format!(
                     "Directory {} for project '{}' has Lustre ID {:?}, expected {}. Please run set_project_quota first to assign the correct Lustre ID.",
                     path.display(),
@@ -1226,10 +1462,11 @@ impl LustreEngine {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         // Compute the quota ID for this project on this volume
         let quota_id = self
-            .check_project_lustre_ids(mapping, volume, volume_config)
+            .check_project_lustre_ids(mapping, volume, volume_config, expires)
             .await?;
 
         let project = mapping.project().project();
@@ -1258,7 +1495,8 @@ impl LustreEngine {
         })?;
 
         // Query the quota and return
-        self.query_project_quota(quota_id, mount_point).await
+        self.query_project_quota(quota_id, mount_point, expires)
+            .await
     }
 }
 

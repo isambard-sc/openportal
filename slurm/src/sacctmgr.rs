@@ -40,7 +40,6 @@ impl Default for SlurmRunner {
     }
 }
 
-/// A mutex to ensure that only one command is run at a time
 static SLURM_RUNNERS: Lazy<Mutex<Vec<Arc<Mutex<SlurmRunner>>>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
 
@@ -216,7 +215,7 @@ impl LockedRunner {
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // function to return the runner protected by a MutexGuard - this ensures
-// that we can only run a single slurm command at a time, thereby not
+// that we can only run a small number of slurm commands at a time, thereby not
 // overloading the server
 pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
     let runners = SLURM_RUNNERS.lock().await;

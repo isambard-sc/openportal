@@ -120,8 +120,8 @@ pub async fn set_filesystem_config(mut config: FilesystemConfig) -> Result<(), E
     for engine_name in quota_engines {
         tracing::info!("Configured quota engine: {}", engine_name);
         let engine_config = config.get_quota_engine(&engine_name)?;
-
         tracing::info!("  - Config: {:?}", engine_config);
+        engine_config.initialize().await?;
     }
 
     cache.filesystem_config = Some(config);

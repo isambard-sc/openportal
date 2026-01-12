@@ -8,6 +8,7 @@
 //! implements the `QuotaEngine` trait to provide backend-specific quota management.
 
 use anyhow::Result;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::storage::{Quota, QuotaLimit, Volume};
@@ -32,6 +33,18 @@ pub enum QuotaEngineConfig {
 
 impl QuotaEngineConfig {
     ///
+    /// Initialise the engine
+    ///
+    pub async fn initialize(&self) -> Result<(), Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                engine.initialize().await
+            }
+        }
+    }
+
+    ///
     /// Set a user quota
     ///
     pub async fn set_user_quota(
@@ -40,12 +53,13 @@ impl QuotaEngineConfig {
         volume: &Volume,
         volume_config: &UserVolumeConfig,
         limit: &QuotaLimit,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
                 engine
-                    .set_user_quota(mapping, volume, volume_config, limit)
+                    .set_user_quota(mapping, volume, volume_config, limit, expires)
                     .await
             }
         }
@@ -60,12 +74,13 @@ impl QuotaEngineConfig {
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
         limit: &QuotaLimit,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
                 Ok(engine
-                    .set_project_quota(mapping, volume, volume_config, limit)
+                    .set_project_quota(mapping, volume, volume_config, limit, expires)
                     .await?)
             }
         }
@@ -79,12 +94,13 @@ impl QuotaEngineConfig {
         mapping: &UserMapping,
         volume: &Volume,
         volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
                 Ok(engine
-                    .get_user_quota(mapping, volume, volume_config)
+                    .get_user_quota(mapping, volume, volume_config, expires)
                     .await?)
             }
         }
@@ -98,12 +114,13 @@ impl QuotaEngineConfig {
         mapping: &ProjectMapping,
         volume: &Volume,
         volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
         match self {
             QuotaEngineConfig::Lustre(config) => {
                 let engine = LustreEngine::new(config.clone())?;
                 Ok(engine
-                    .get_project_quota(mapping, volume, volume_config)
+                    .get_project_quota(mapping, volume, volume_config, expires)
                     .await?)
             }
         }

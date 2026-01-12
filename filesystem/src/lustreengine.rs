@@ -812,7 +812,7 @@ impl LustreEngine {
             )
             .await?;
 
-        self.parse_quota_output(&output)
+        self.parse_quota_output(project_id, mount_point, &output)
     }
 
     /// Query quota usage and limits for a user ID
@@ -826,7 +826,7 @@ impl LustreEngine {
             )
             .await?;
 
-        self.parse_quota_output(&output)
+        self.parse_quota_output(user_id, mount_point, &output)
     }
 
     /// Parse lfs quota command output
@@ -837,42 +837,113 @@ impl LustreEngine {
     ///      Filesystem  kbytes   quota   limit   grace   files   quota   limit   grace
     ///       /scratch  1234567       0 5242880       -    5678       0 1000000       -
     /// ```
-    fn parse_quota_output(&self, output: &str) -> Result<Quota, Error> {
-        // Find the line with actual quota data (starts with filesystem path)
+    fn parse_quota_output(
+        &self,
+        lustre_id: u64,
+        mount_point: &str,
+        output: &str,
+    ) -> Result<Quota, Error> {
+        // Find the line with actual quota data - this is directly after the header line
+        let mut found_id = false;
+        let mut found_header = false;
+
         for line in output.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with('/') {
+            let lower_trimmed = trimmed.to_lowercase();
+
+            // see if this line contains the lustre id
+            if !found_id && lower_trimmed.starts_with("disk quotas for") {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    // parts[1] = current kbytes usage
-                    // parts[3] = hard limit in kbytes (0 = unlimited)
-                    let usage_kb = parts[1].parse::<u64>().map_err(|e| {
-                        Error::Parse(format!("Failed to parse usage '{}': {}", parts[1], e))
-                    })?;
-                    let limit_kb = parts[3].parse::<u64>().map_err(|e| {
-                        Error::Parse(format!("Failed to parse limit '{}': {}", parts[3], e))
-                    })?;
-
-                    let usage = StorageUsage::new(StorageSize::from_kilobytes(usage_kb as f64));
-                    let limit = if limit_kb == 0 {
-                        QuotaLimit::Unlimited
-                    } else {
-                        QuotaLimit::Limited(StorageSize::from_kilobytes(limit_kb as f64))
-                    };
-
-                    return Ok(Quota::with_usage(limit, usage));
+                if parts.len() >= 5 {
+                    // parts[3] = id
+                    match parts[4].parse::<u64>() {
+                        Ok(id) => {
+                            if id == lustre_id {
+                                found_id = true;
+                            } else {
+                                tracing::warn!(
+                                    "Lustre ID mismatch in quota output for mount {}: expected {}, found {}",
+                                    mount_point,
+                                    lustre_id,
+                                    id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to parse quota id from line '{}': {}",
+                                trimmed,
+                                e
+                            );
+                        }
+                    }
                 }
+                continue;
             }
+
+            // we can't process anything else until we have the id
+            if !found_id {
+                continue;
+            }
+
+            // now look for the header line for the filesystem data
+            if lower_trimmed.starts_with("filesystem") {
+                // double check that header contains expected columns
+                if lower_trimmed.contains("quota") && lower_trimmed.contains("limit)") {
+                    found_header = true;
+                }
+                continue;
+            }
+
+            if !found_header {
+                continue;
+            }
+
+            // the next line we process should be the data line
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+
+            if parts.len() < 4 {
+                tracing::warn!("Quota data line has insufficient columns: {}", trimmed);
+                return Err(Error::Parse(format!(
+                    "Unable to parse quota data line: {}",
+                    trimmed
+                )));
+            }
+
+            // parts[0] = filesystem
+            if parts[0] != mount_point {
+                tracing::warn!(
+                    "Filesystem mount point mismatch in quota output: expected {}, found {}",
+                    mount_point,
+                    parts[0]
+                );
+
+                continue;
+            }
+
+            // parts[1] = current kbytes usage
+            // parts[3] = hard limit in kbytes (0 = unlimited)
+            let usage_kb = parts[1].parse::<u64>().map_err(|e| {
+                Error::Parse(format!("Failed to parse usage '{}': {}", parts[1], e))
+            })?;
+
+            let limit_kb = parts[3].parse::<u64>().map_err(|e| {
+                Error::Parse(format!("Failed to parse limit '{}': {}", parts[3], e))
+            })?;
+
+            let usage = StorageUsage::new(StorageSize::from_kilobytes(usage_kb as f64));
+            let limit = if limit_kb == 0 {
+                QuotaLimit::Unlimited
+            } else {
+                QuotaLimit::Limited(StorageSize::from_kilobytes(limit_kb as f64))
+            };
+
+            return Ok(Quota::with_usage(limit, usage));
         }
 
-        // If we couldn't parse the output, return unlimited with zero usage
-        tracing::warn!(
-            "Could not parse quota output, returning unlimited: {}",
-            output
-        );
-        Ok(Quota::with_usage(
-            QuotaLimit::Unlimited,
-            StorageUsage::from(0),
+        // If we reach here, we did not find valid quota data
+        Err(Error::Parse(
+            "Unable to parse quota output: no valid data found".to_string(),
         ))
     }
 

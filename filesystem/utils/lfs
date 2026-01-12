@@ -87,8 +87,18 @@ def process_quota():
     quota_limit = quota.get("quota_limit", "unlimited")
     inode_limit = quota.get("inode_limit", "unlimited")
 
-    print(f"    {lustre_id} Q (block quota: {quota_limit}, inode quota: {inode_limit})")
+    # Format is:
+    # Disk quotas for prj 1 (pid 1):
+    #   Filesystem  kbytes   quota   limit   grace   files   quota   limit   grace
+    #    {mount_point} {usage_kbytes}       {quota_limit}       {quota_limit}       - {usage_inodes}       {inode_limit}       {inode_limit}       -
+    # pid 1 is using default block quota setting
+    # pid 1 is using default file quota setting
 
+    print(f"Disk quotas for prj {lustre_id} (pid {lustre_id}):")
+    print("  Filesystem  kbytes   quota   limit   grace   files   quota   limit   grace")
+    print(f"   {mountpoint}  0       {quota_limit}       {quota_limit}       -  0       {inode_limit}       {inode_limit}       -")
+    print(f"pid {lustre_id} is using default block quota setting")
+    print(f"pid {lustre_id} is using default file quota setting")
 
 def process_setquota():
     flag = sys.argv[2]

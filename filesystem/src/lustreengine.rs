@@ -590,6 +590,156 @@ pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Err
     }
 }
 
+/// Command queue for slow operations (like lfs project -srp)
+/// Commands are deduplicated - if the same command is queued multiple times,
+/// only one instance runs and all waiters are notified when it completes.
+#[derive(Debug)]
+struct QueuedCommand {
+    /// The lfs command to run
+    lfs_command: String,
+    /// The command arguments
+    args: Vec<String>,
+    /// Waiters that are notified when the command completes
+    waiters: Vec<tokio::sync::oneshot::Sender<Result<String, Error>>>,
+}
+
+/// FIFO queue of commands to run. Only one command runs at a time.
+static COMMAND_QUEUE: Lazy<Arc<Mutex<Vec<QueuedCommand>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
+
+/// Flag indicating if the background worker is running
+static WORKER_STARTED: Lazy<Arc<Mutex<bool>>> = Lazy::new(|| Arc::new(Mutex::new(false)));
+
+/// Start the background worker that processes queued commands
+async fn start_queue_worker() {
+    let mut started = WORKER_STARTED.lock().await;
+    if *started {
+        return; // Worker already running
+    }
+    *started = true;
+    drop(started);
+
+    tracing::info!("Starting command queue background worker");
+
+    tokio::spawn(async {
+        loop {
+            // Get next command from queue
+            let mut queue = COMMAND_QUEUE.lock().await;
+            let command = queue.pop();
+            drop(queue);
+
+            match command {
+                Some(mut cmd) => {
+                    // Run the command (without expiry check since this is background)
+                    let lfs_command = cmd.lfs_command.clone();
+
+                    tracing::info!(
+                        "Processing queued command: {} {}",
+                        lfs_command,
+                        cmd.args.join(" ")
+                    );
+
+                    // Build and execute command
+                    let cmd_parts: Vec<&str> = lfs_command.split_whitespace().collect();
+                    let result = if let Some((program, initial_args)) = cmd_parts.split_first() {
+                        let mut command = Command::new(program);
+                        command.args(initial_args);
+                        command.args(&cmd.args);
+
+                        // Use a very long timeout (5 hours)
+                        match timeout(Duration::from_secs(18000), command.output()).await {
+                            Ok(Ok(output)) => {
+                                if output.status.success() {
+                                    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+                                } else {
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    Err(Error::Failed(format!(
+                                        "Queued lfs command failed: {}",
+                                        stderr.trim()
+                                    )))
+                                }
+                            }
+                            Ok(Err(e)) => Err(Error::Failed(format!(
+                                "Failed to execute queued lfs command: {}",
+                                e
+                            ))),
+                            Err(_) => Err(Error::Timeout(
+                                "Queued lfs command timed out after 5 hours".to_string(),
+                            )),
+                        }
+                    } else {
+                        Err(Error::Misconfigured("lfs_command is empty".to_string()))
+                    };
+
+                    // Notify all waiters
+                    // We need to handle success vs error separately since Error doesn't implement Clone
+                    match &result {
+                        Ok(output) => {
+                            for waiter in cmd.waiters.drain(..) {
+                                let _ = waiter.send(Ok(output.clone()));
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = e.to_string();
+                            for waiter in cmd.waiters.drain(..) {
+                                let _ = waiter.send(Err(Error::Failed(error_msg.clone())));
+                            }
+                        }
+                    }
+
+                    tracing::debug!(
+                        "Queued command completed: {} {}",
+                        lfs_command,
+                        cmd.args.join(" ")
+                    );
+                }
+                None => {
+                    // Queue is empty, wait a bit
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    });
+}
+
+/// Queue a command for background execution
+/// Returns a receiver that will be notified when the command completes
+async fn queue_command(
+    lfs_command: &str,
+    args: Vec<String>,
+) -> tokio::sync::oneshot::Receiver<Result<String, Error>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let mut queue = COMMAND_QUEUE.lock().await;
+
+    // Check if this command is already queued
+    for queued_cmd in queue.iter_mut() {
+        if queued_cmd.args == args && queued_cmd.lfs_command == lfs_command {
+            // Command already queued, just add our waiter
+            tracing::debug!(
+                "Command already queued, adding waiter: {} {}",
+                lfs_command,
+                args.join(" ")
+            );
+            queued_cmd.waiters.push(tx);
+            return rx;
+        }
+    }
+
+    // New command, add to queue
+    tracing::debug!("Queueing new command: {} {}", lfs_command, args.join(" "));
+    queue.insert(
+        0,
+        QueuedCommand {
+            lfs_command: lfs_command.to_string(),
+            args,
+            waiters: vec![tx],
+        },
+    );
+
+    rx
+}
+
 /// Lustre filesystem quota engine implementation.
 ///
 /// This engine uses the `lfs` command-line tool to manage quotas on Lustre filesystems.
@@ -816,6 +966,13 @@ impl LustreEngine {
     }
 
     /// Queue an lfs command to be run later
+    ///
+    /// This queues slow commands (like lfs project -srp) in a FIFO queue.
+    /// Only one queued command runs at a time. If the command completes within
+    /// the timeout, returns Ok(true). If it's still running, returns Ok(false).
+    ///
+    /// Commands are deduplicated - if the same command is already queued,
+    /// we just wait for that one to complete instead of queueing a duplicate.
     async fn queue_lfs_command(
         &self,
         args: &[&str],
@@ -830,11 +987,52 @@ impl LustreEngine {
             return Ok(true);
         }
 
-        // we will queue the command, getting a handle we can check for if
-        // the command has completed. We return whether or not the
-        // command has completed immediately
+        // Ensure background worker is started
+        start_queue_worker().await;
 
-        Ok(false)
+        // Convert args to owned strings for queuing
+        let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+        // Queue the command and get a receiver to wait for completion
+        let rx = queue_command(self.config.lfs_command(), args_vec).await;
+
+        // Wait for completion with timeout
+        match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(Ok(_output))) => {
+                // Command completed successfully within timeout
+                tracing::debug!(
+                    "Queued command completed within timeout: {} {}",
+                    self.config.lfs_command(),
+                    args.join(" ")
+                );
+                Ok(true)
+            }
+            Ok(Ok(Err(e))) => {
+                // Command completed but failed
+                tracing::warn!(
+                    "Queued command failed: {} {}",
+                    self.config.lfs_command(),
+                    args.join(" ")
+                );
+                Err(e)
+            }
+            Ok(Err(_)) => {
+                // Receiver was dropped (shouldn't happen)
+                Err(Error::Failed(
+                    "Queued command receiver dropped unexpectedly".to_string(),
+                ))
+            }
+            Err(_) => {
+                // Timeout - command is still running in background
+                tracing::warn!(
+                    "Queued command still running after {}s, will continue in background: {} {}",
+                    timeout_duration.as_secs(),
+                    self.config.lfs_command(),
+                    args.join(" ")
+                );
+                Ok(false)
+            }
+        }
     }
 
     /// Get the current Lustre ID assigned to a directory
@@ -949,6 +1147,25 @@ impl LustreEngine {
             }
         };
 
+        tracing::info!(
+            "Set quota limits for project ID {}: {} bytes, {} inodes",
+            project_id,
+            block_limit,
+            inode_limit
+        );
+
+        if is_dry_run() || is_lustre_id_only() {
+            tracing::info!(
+                "DRY RUN: {} setquota -p {} -B {} -I {}k {}",
+                self.config.lfs_command(),
+                project_id,
+                block_limit,
+                inode_limit / 1000,
+                mount_point
+            );
+            return Ok(());
+        }
+
         self.run_lfs_command(
             &[
                 "setquota",
@@ -965,13 +1182,6 @@ impl LustreEngine {
         )
         .await?;
 
-        tracing::info!(
-            "Set quota limits for project ID {}: {} bytes, {} inodes",
-            project_id,
-            block_limit,
-            inode_limit
-        );
-
         Ok(())
     }
 
@@ -984,6 +1194,19 @@ impl LustreEngine {
         mount_point: &str,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
+        if is_dry_run() || is_lustre_id_only() {
+            tracing::info!(
+                "DRY RUN: {} quota -p {} {}",
+                self.config.lfs_command(),
+                project_id,
+                mount_point
+            );
+            return Ok(Quota::with_usage(
+                QuotaLimit::Unlimited,
+                StorageUsage::new(StorageSize::from_kilobytes(0.0)),
+            ));
+        }
+
         let output = self
             .run_lfs_command(
                 &["quota", "-p", &project_id.to_string(), mount_point],
@@ -1004,6 +1227,19 @@ impl LustreEngine {
         mount_point: &str,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
+        if is_dry_run() || is_lustre_id_only() {
+            tracing::info!(
+                "DRY RUN: {} quota -p {} {}",
+                self.config.lfs_command(),
+                user_id,
+                mount_point
+            );
+            return Ok(Quota::with_usage(
+                QuotaLimit::Unlimited,
+                StorageUsage::new(StorageSize::from_kilobytes(0.0)),
+            ));
+        }
+
         let output = self
             .run_lfs_command(
                 &["quota", "-p", &user_id.to_string(), mount_point],

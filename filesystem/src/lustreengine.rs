@@ -958,6 +958,12 @@ impl LustreEngine {
         timeout_duration: Duration,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<String, Error> {
+        if is_dry_run() {
+            let cmd_string = format!("{} {}", self.config.lfs_command(), args.join(" "));
+            tracing::info!("DRY RUN: {}", cmd_string);
+            return Ok(String::new());
+        }
+
         let locked_runner = runner(expires).await?;
         let output = locked_runner
             .run_command(args, timeout_duration, expires)
@@ -1079,6 +1085,58 @@ impl LustreEngine {
         Ok(None)
     }
 
+    /// Clear the Lustre ID from a directory recursively
+    ///
+    /// Uses `lfs project -Cr <directory>` to recursively clear the Lustre ID
+    /// This operation can be very slow on large directory trees
+    async fn clear_lustre_id(
+        &self,
+        directory: &Path,
+        lustre_id: u64,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        tracing::info!(
+            "Clearing Lustre ID from directory {} (this may take a while)",
+            directory.display()
+        );
+
+        let current_id = self.get_lustre_id_from_dir(directory, expires).await?;
+
+        if current_id.is_none() || current_id == Some(0) {
+            tracing::info!(
+                "Directory {} does not have a Lustre ID set, skipping clear",
+                directory.display()
+            );
+            return Ok(true);
+        }
+
+        if current_id != Some(lustre_id) {
+            tracing::info!(
+                "Directory {} has Lustre ID {}, which does not match expected ID {}, skipping clear",
+                directory.display(),
+                current_id.unwrap_or(0),
+                lustre_id
+            );
+            return Ok(true);
+        }
+
+        let completed: bool = self
+            .queue_lfs_command(
+                &[
+                    "project",
+                    "-Cr",
+                    directory.to_str().ok_or_else(|| {
+                        Error::Incompatible("Directory path contains invalid UTF-8".to_string())
+                    })?,
+                ],
+                self.config.recursive_timeout(),
+                expires,
+            )
+            .await?;
+
+        Ok(completed)
+    }
+
     /// Assign a Lustre ID to a directory recursively
     ///
     /// Uses `lfs project -srp <id> <directory>` to recursively set the Lustre ID
@@ -1125,6 +1183,41 @@ impl LustreEngine {
             .await?;
 
         Ok(completed)
+    }
+
+    /// Clear quota limits for a project ID
+    ///
+    /// Uses `lfs setquota -p <id> -D <mount>`
+    async fn clear_lustre_quota_limits(
+        &self,
+        project_id: u64,
+        mount_point: &str,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<(), Error> {
+        tracing::info!(
+            "Clearing quota limits for project ID {} on mount {}",
+            project_id,
+            mount_point
+        );
+
+        if is_dry_run() || is_lustre_id_only() {
+            tracing::info!(
+                "DRY RUN: {} setquota -p {} -D {}",
+                self.config.lfs_command(),
+                project_id,
+                mount_point
+            );
+            return Ok(());
+        }
+
+        self.run_lfs_command(
+            &["setquota", "-p", &project_id.to_string(), "-D", mount_point],
+            self.config.command_timeout(),
+            expires,
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// Set quota limits for a project ID
@@ -1410,6 +1503,46 @@ impl LustreEngine {
         ))
     }
 
+    pub async fn clear_user_quota(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<(), Error> {
+        let user = mapping.local_user();
+
+        // Compute the quota ID for this user on this volume
+        let quota_id = self.compute_user_quota_id(volume, mapping).await?;
+
+        tracing::info!(
+            "LustreEngine::clear_user_quota: user={}, volume={}, quota_id={}",
+            user,
+            volume,
+            quota_id
+        );
+
+        let mount_point = volume_config.mount_point().ok_or_else(|| {
+            Error::Misconfigured(format!(
+                "Volume '{}' does not have a mount_point configured, which is required for Lustre quotas",
+                volume
+            ))
+        })?;
+
+        for path_config in volume_config.path_configs() {
+            let path = path_config.path(mapping.clone().into())?;
+            self.clear_lustre_id(&path, quota_id, expires).await?;
+        }
+
+        if !is_lustre_id_only() {
+            // clear the quota limits
+            self.clear_lustre_quota_limits(quota_id, mount_point, expires)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn set_user_quota(
         &self,
         mapping: &UserMapping,
@@ -1489,6 +1622,47 @@ impl LustreEngine {
             .query_user_quota(quota_id, mount_point, expires)
             .await?;
         Ok(quota)
+    }
+
+    pub async fn clear_project_quota(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<(), Error> {
+        let project = mapping.project().project();
+
+        // Compute the quota ID for this project on this volume
+        let quota_id = self.compute_project_quota_id(volume, mapping).await?;
+
+        tracing::info!(
+            "LustreEngine::clear_project_quota: project={}, volume={}, quota_id={}",
+            project,
+            volume,
+            quota_id
+        );
+
+        // Get mount point (required for Lustre operations)
+        let mount_point = volume_config.mount_point().ok_or_else(|| {
+            Error::Misconfigured(format!(
+                "Volume '{}' does not have a mount_point configured, which is required for Lustre quotas",
+                volume
+            ))
+        })?;
+
+        for path_config in volume_config.path_configs() {
+            let path = path_config.path(mapping.clone().into())?;
+            self.clear_lustre_id(&path, quota_id, expires).await?;
+        }
+
+        if !is_lustre_id_only() {
+            // clear the quota limits
+            self.clear_lustre_quota_limits(quota_id, mount_point, expires)
+                .await?;
+        }
+
+        Ok(())
     }
 
     pub async fn set_project_quota(

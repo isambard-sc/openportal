@@ -9,10 +9,10 @@ use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetHomeDir, GetLimit, GetLocalHomeDir, GetLocalProjectDirs,
-    GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects,
-    GetUsageReport, GetUsageReports, GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers,
-    IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
+    AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
+    GetLocalProjectDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas,
+    GetProjects, GetUsageReport, GetUsageReports, GetUserMapping, GetUserQuota, GetUserQuotas,
+    GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
@@ -233,6 +233,10 @@ async fn main() -> Result<()> {
                     let quota = get_project_quota(me.name(), &project, &volume).await?;
                     job.completed(quota)
                 }
+                ClearProjectQuota(project, volume) => {
+                    clear_project_quota(me.name(), &project, &volume).await?;
+                    job.completed_none()
+                }
                 SetProjectQuota(project, volume, quota) => {
                     let quota = set_project_quota(me.name(), &project, &volume, &quota).await?;
                     job.completed(quota)
@@ -244,6 +248,10 @@ async fn main() -> Result<()> {
                 GetUserQuota(user, volume) => {
                     let quota = get_user_quota(me.name(), &user, &volume).await?;
                     job.completed(quota)
+                }
+                ClearUserQuota(user, volume) => {
+                    clear_user_quota(me.name(), &user, &volume).await?;
+                    job.completed_none()
                 }
                 SetUserQuota(user, volume, quota) => {
                     let quota = set_user_quota(me.name(), &user, &volume, &quota).await?;
@@ -1232,6 +1240,57 @@ pub async fn set_project_limit(
     Ok(limit)
 }
 
+async fn clear_project_quota(
+    me: &str,
+    project: &ProjectIdentifier,
+    volume: &Volume,
+) -> Result<Quota, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to clear the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} clear_local_project_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!(
+                "Error clearing quota for project {} on volume {}",
+                project,
+                volume
+            );
+            Err(Error::Call(format!(
+                "Error clearing quota for project {} on volume {}",
+                project, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 async fn set_project_quota(
     me: &str,
     project: &ProjectIdentifier,
@@ -1368,15 +1427,62 @@ async fn get_project_quotas(
     .await?;
 
     // Wait for the job to complete... - get the resulting Quota
-    match job
-        .wait()
-        .await?
-        .result::<HashMap<Volume, Quota>>()
-    {
+    match job.wait().await?.result::<HashMap<Volume, Quota>>() {
         Ok(Some(quotas)) => Ok(quotas),
         Ok(None) => {
             tracing::warn!("No quotas found for project {}", project);
             Ok(HashMap::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn clear_user_quota(
+    me: &str,
+    user: &UserIdentifier,
+    volume: &Volume,
+) -> Result<Quota, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to clear the user quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} clear_local_user_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!(
+                "Error clearing quota for user {} on volume {}",
+                user,
+                volume
+            );
+            Err(Error::Call(format!(
+                "Error clearing quota for user {} on volume {}",
+                user, volume
+            )))
         }
         Err(e) => Err(e),
     }
@@ -1431,11 +1537,7 @@ async fn set_user_quota(
     }
 }
 
-async fn get_user_quota(
-    me: &str,
-    user: &UserIdentifier,
-    volume: &Volume,
-) -> Result<Quota, Error> {
+async fn get_user_quota(me: &str, user: &UserIdentifier, volume: &Volume) -> Result<Quota, Error> {
     // get the mapping for this user
     let mapping = get_user_mapping(me, user).await?;
 
@@ -1478,10 +1580,7 @@ async fn get_user_quota(
     }
 }
 
-async fn get_user_quotas(
-    me: &str,
-    user: &UserIdentifier,
-) -> Result<HashMap<Volume, Quota>, Error> {
+async fn get_user_quotas(me: &str, user: &UserIdentifier) -> Result<HashMap<Volume, Quota>, Error> {
     // get the mapping for this user
     let mapping = get_user_mapping(me, user).await?;
 
@@ -1510,11 +1609,7 @@ async fn get_user_quotas(
     .await?;
 
     // Wait for the job to complete... - get the resulting Quotas
-    match job
-        .wait()
-        .await?
-        .result::<HashMap<Volume, Quota>>()
-    {
+    match job.wait().await?.result::<HashMap<Volume, Quota>>() {
         Ok(Some(quotas)) => Ok(quotas),
         Ok(None) => {
             tracing::warn!("No quotas found for user {}", user);

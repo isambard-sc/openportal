@@ -127,6 +127,46 @@ impl QuotaEngineConfig {
     }
 
     ///
+    /// Clear a user quota
+    ///
+    pub async fn clear_user_quota(
+        &self,
+        mapping: &UserMapping,
+        volume: &Volume,
+        volume_config: &UserVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<(), Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                engine
+                    .clear_user_quota(mapping, volume, volume_config, expires)
+                    .await
+            }
+        }
+    }
+
+    ///
+    /// Clear a project quota
+    ///
+    pub async fn clear_project_quota(
+        &self,
+        mapping: &ProjectMapping,
+        volume: &Volume,
+        volume_config: &ProjectVolumeConfig,
+        expires: &chrono::DateTime<Utc>,
+    ) -> Result<(), Error> {
+        match self {
+            QuotaEngineConfig::Lustre(config) => {
+                let engine = LustreEngine::new(config.clone())?;
+                engine
+                    .clear_project_quota(mapping, volume, volume_config, expires)
+                    .await
+            }
+        }
+    }
+
+    ///
     /// Verify that this engine is properly configured for the given volume.
     ///
     /// For Lustre engines, this checks that an ID strategy exists for the volume.

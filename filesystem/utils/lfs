@@ -7,6 +7,19 @@ import json
 metadata_file = ".lfsdata"
 quotas_file = ".lfsquotas"
 
+
+def is_dry_run():
+    is_dry_run = os.getenv("OPENPORTAL_LUSTRE_DRY_RUN", "0")
+
+    return is_dry_run == "1" or is_dry_run.lower() == "true"
+
+
+def is_lustre_id_only():
+    lustre_id_only = os.getenv("OPENPORTAL_LUSTRE_ID_ONLY", "0")
+
+    return lustre_id_only == "1" or lustre_id_only.lower() == "true"
+
+
 def read_metadata(directory):
     try:
         with open(os.path.join(directory, metadata_file), 'r') as f:
@@ -64,7 +77,12 @@ def process_project():
         print("UNKNOWN FLAG")
         sys.exit(-1)
 
+
 def process_quota():
+    if is_lustre_id_only():
+        print("This command should not be run with OPENPORTAL_LUSTRE_ID_ONLY set")
+        sys.exit(-1)
+
     flag = sys.argv[2]
 
     if flag == "-p":
@@ -122,6 +140,10 @@ def process_quota():
     print(f"pid {lustre_id} is using default file quota setting")
 
 def process_setquota():
+    if is_lustre_id_only():
+        print("This command should not be run with OPENPORTAL_LUSTRE_ID_ONLY set")
+        sys.exit(-1)
+
     flag = sys.argv[2]
 
     if flag == "-p":
@@ -161,6 +183,10 @@ def process_setquota():
 
 
 if __name__ == "__main__":
+    if is_dry_run():
+        print("This command should not be run with OPENPORTAL_LUSTRE_DRY_RUN set")
+        sys.exit(-1)
+
     if len(sys.argv) < 2:
         print("MISSING COMMAND")
         sys.exit(-1)

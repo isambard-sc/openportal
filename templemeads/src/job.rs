@@ -133,6 +133,14 @@ impl Command {
                 Instruction::IsProtectedUser(user) => Some(user),
                 Instruction::GetHomeDir(user) => Some(user),
                 Instruction::GetLocalHomeDir(user) => Some(user.user().clone()),
+                Instruction::GetUserQuota(user, _) => Some(user),
+                Instruction::SetUserQuota(user, _, _) => Some(user),
+                Instruction::ClearUserQuota(user, _) => Some(user),
+                Instruction::GetUserQuotas(user) => Some(user),
+                Instruction::GetLocalUserQuota(user, _) => Some(user.user().clone()),
+                Instruction::SetLocalUserQuota(user, _, _) => Some(user.user().clone()),
+                Instruction::ClearLocalUserQuota(user, _) => Some(user.user().clone()),
+                Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
                 _ => None,
             };
 
@@ -167,6 +175,14 @@ impl Command {
                 Instruction::SetLimit(project, _) => Some(project),
                 Instruction::GetProjectDirs(project) => Some(project),
                 Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
+                Instruction::GetProjectQuota(project, _) => Some(project),
+                Instruction::SetProjectQuota(project, _, _) => Some(project),
+                Instruction::ClearProjectQuota(project, _) => Some(project),
+                Instruction::GetProjectQuotas(project) => Some(project),
+                Instruction::GetLocalProjectQuota(project, _) => Some(project.project().clone()),
+                Instruction::SetLocalProjectQuota(project, _, _) => Some(project.project().clone()),
+                Instruction::ClearLocalProjectQuota(project, _) => Some(project.project().clone()),
+                Instruction::GetLocalProjectQuotas(project) => Some(project.project().clone()),
                 _ => None,
             };
 

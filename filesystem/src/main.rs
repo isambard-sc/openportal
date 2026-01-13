@@ -8,9 +8,10 @@ use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, GetLocalHomeDir, GetLocalProjectDirs, GetLocalProjectQuota,
-    GetLocalProjectQuotas, GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas,
-    RemoveLocalProject, RemoveLocalUser, SetLocalProjectQuota, SetLocalUserQuota,
+    AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
+    GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalUserDirs,
+    GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
+    SetLocalProjectQuota, SetLocalUserQuota,
 };
 use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::job::{Envelope, Job};
@@ -174,6 +175,14 @@ async fn main() -> Result<()> {
                 GetLocalUserQuotas(mapping) => {
                     let quotas = get_user_quotas(&mapping, job.expires()).await?;
                     job.completed(quotas)
+                },
+                ClearLocalProjectQuota(mapping, volume) => {
+                    clear_project_quota(&mapping, &volume).await?;
+                    job.completed_none()
+                },
+                ClearLocalUserQuota(mapping, volume) => {
+                    clear_user_quota(&mapping, &volume).await?;
+                    job.completed_none()
                 },
                 _ => {
                     Err(Error::InvalidInstruction(
@@ -451,6 +460,36 @@ async fn remove_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
 }
 
 ///
+/// Clear the storage quota for a project on a specific volume
+///
+pub async fn clear_project_quota(
+    mapping: &templemeads::grammar::ProjectMapping,
+    volume: &templemeads::storage::Volume,
+) -> Result<(), Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .clear_project_quota(mapping, volume, &volume_config, &chrono::Utc::now())
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
 /// Set a storage quota for a project on a specific volume
 ///
 pub async fn set_project_quota(
@@ -569,6 +608,36 @@ pub async fn get_project_quotas(
     }
 
     Ok(quotas)
+}
+
+///
+/// Clear a user quota for a user on a specific volume
+///
+pub async fn clear_user_quota(
+    mapping: &templemeads::grammar::UserMapping,
+    volume: &templemeads::storage::Volume,
+) -> Result<(), Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .clear_user_quota(mapping, volume, &volume_config, &chrono::Utc::now())
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
 }
 
 ///

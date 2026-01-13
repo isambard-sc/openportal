@@ -2527,6 +2527,9 @@ pub enum Instruction {
     /// An instruction to set the limit of a local project
     SetLocalLimit(ProjectMapping, Usage),
 
+    /// An instruction to clear the quota of a local project on a volume
+    ClearLocalProjectQuota(ProjectMapping, Volume),
+
     /// An instruction to set the quota of a local project on a volume
     SetLocalProjectQuota(ProjectMapping, Volume, QuotaLimit),
 
@@ -2535,6 +2538,9 @@ pub enum Instruction {
 
     /// An instruction to get all quotas of a local project
     GetLocalProjectQuotas(ProjectMapping),
+
+    /// An instruction to clear the quota of a local user on a volume
+    ClearLocalUserQuota(UserMapping, Volume),
 
     /// An instruction to set the quota of a local user on a volume
     SetLocalUserQuota(UserMapping, Volume, QuotaLimit),
@@ -2575,6 +2581,9 @@ pub enum Instruction {
     /// An instruction to get the usage limit for a project
     GetLimit(ProjectIdentifier),
 
+    /// An instruction to clear a storage quota for a project on a volume
+    ClearProjectQuota(ProjectIdentifier, Volume),
+
     /// An instruction to set a storage quota for a project on a volume
     SetProjectQuota(ProjectIdentifier, Volume, QuotaLimit),
 
@@ -2583,6 +2592,9 @@ pub enum Instruction {
 
     /// An instruction to get all of the storage quotas for a project
     GetProjectQuotas(ProjectIdentifier),
+
+    /// An instruction to clear a storage quota for a user on a volume
+    ClearUserQuota(UserIdentifier, Volume),
 
     /// An instruction to set a storage quota for a user on a volume
     SetUserQuota(UserIdentifier, Volume, QuotaLimit),
@@ -3129,6 +3141,46 @@ impl Instruction {
                     }
                 }
             }
+            "clear_project_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!(
+                        "clear_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "clear_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::ClearProjectQuota(project, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "clear_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "clear_project_quota failed to parse volume '{}': {}",
+                                parts[2], e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "clear_project_quota failed to parse project '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "clear_project_quota failed to parse project '{}': {}",
+                            parts[1], e
+                        )))
+                    }
+                }
+            }
             "set_project_quota" => {
                 if parts.len() < 4 {
                     tracing::error!(
@@ -3246,6 +3298,46 @@ impl Instruction {
                     }
                 }
             }
+            "clear_user_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!(
+                        "clear_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "clear_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserIdentifier::parse(parts[1]) {
+                    Ok(user) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::ClearUserQuota(user, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "clear_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "clear_user_quota failed to parse volume '{}': {}",
+                                parts[2], e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "clear_user_quota failed to parse user '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "clear_user_quota failed to parse user '{}': {}",
+                            parts[1], e
+                        )))
+                    }
+                }
+            }
             "set_user_quota" => {
                 if parts.len() < 4 {
                     tracing::error!("set_user_quota failed to parse: {}", &parts[1..].join(" "));
@@ -3349,6 +3441,46 @@ impl Instruction {
                         tracing::error!("get_user_quotas failed to parse '{}': {}", parts[1], e);
                         Err(Error::Parse(format!(
                             "get_user_quotas failed to parse '{}': {}",
+                            parts[1], e
+                        )))
+                    }
+                }
+            }
+            "clear_local_project_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!(
+                        "clear_local_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "clear_local_project_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::ClearLocalProjectQuota(mapping, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "clear_local_project_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "clear_local_project_quota failed to parse volume '{}': {}",
+                                parts[2], e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "clear_local_project_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "clear_local_project_quota failed to parse mapping '{}': {}",
                             parts[1], e
                         )))
                     }
@@ -3472,6 +3604,46 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_project_quotas failed to parse '{}': {}",
+                            parts[1], e
+                        )))
+                    }
+                }
+            }
+            "clear_local_user_quota" => {
+                if parts.len() < 3 {
+                    tracing::error!(
+                        "clear_local_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "clear_local_user_quota failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match UserMapping::parse(parts[1]) {
+                    Ok(mapping) => match Volume::parse(parts[2]) {
+                        Ok(volume) => Ok(Instruction::ClearLocalUserQuota(mapping, volume)),
+                        Err(e) => {
+                            tracing::error!(
+                                "clear_local_user_quota failed to parse volume '{}': {}",
+                                parts[2],
+                                e
+                            );
+                            Err(Error::Parse(format!(
+                                "clear_local_user_quota failed to parse volume '{}': {}",
+                                parts[2], e
+                            )))
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "clear_local_user_quota failed to parse mapping '{}': {}",
+                            parts[1],
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "clear_local_user_quota failed to parse mapping '{}': {}",
                             parts[1], e
                         )))
                     }
@@ -3726,9 +3898,11 @@ impl Instruction {
             Instruction::GetLocalLimit(_) => "get_local_limit".to_string(),
             Instruction::SetLocalLimit(_, _) => "set_local_limit".to_string(),
             Instruction::GetLocalProjectQuota(_, _) => "get_local_project_quota".to_string(),
+            Instruction::ClearLocalProjectQuota(_, _) => "clear_local_project_quota".to_string(),
             Instruction::SetLocalProjectQuota(_, _, _) => "set_local_project_quota".to_string(),
             Instruction::GetLocalProjectQuotas(_) => "get_local_project_quotas".to_string(),
             Instruction::GetLocalUserQuota(_, _) => "get_local_user_quota".to_string(),
+            Instruction::ClearLocalUserQuota(_, _) => "clear_local_user_quota".to_string(),
             Instruction::SetLocalUserQuota(_, _, _) => "set_local_user_quota".to_string(),
             Instruction::GetLocalUserQuotas(_) => "get_local_user_quotas".to_string(),
             Instruction::GetLocalHomeDir(_) => "get_local_home_dir".to_string(),
@@ -3741,8 +3915,10 @@ impl Instruction {
             Instruction::GetLimit(_) => "get_limit".to_string(),
             Instruction::GetProjectQuota(_, _) => "get_project_quota".to_string(),
             Instruction::SetProjectQuota(_, _, _) => "set_project_quota".to_string(),
+            Instruction::ClearProjectQuota(_, _) => "clear_project_quota".to_string(),
             Instruction::GetProjectQuotas(_) => "get_project_quotas".to_string(),
             Instruction::GetUserQuota(_, _) => "get_user_quota".to_string(),
+            Instruction::ClearUserQuota(_, _) => "clear_user_quota".to_string(),
             Instruction::SetUserQuota(_, _, _) => "set_user_quota".to_string(),
             Instruction::GetUserQuotas(_) => "get_user_quotas".to_string(),
             Instruction::IsProtectedUser(_) => "is_protected_user".to_string(),
@@ -3790,11 +3966,17 @@ impl Instruction {
             Instruction::GetLocalProjectQuota(mapping, volume) => {
                 vec![mapping.to_string(), volume.to_string()]
             }
+            Instruction::ClearLocalProjectQuota(mapping, volume) => {
+                vec![mapping.to_string(), volume.to_string()]
+            }
             Instruction::SetLocalProjectQuota(mapping, volume, quota) => {
                 vec![mapping.to_string(), volume.to_string(), quota.to_string()]
             }
             Instruction::GetLocalProjectQuotas(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalUserQuota(mapping, volume) => {
+                vec![mapping.to_string(), volume.to_string()]
+            }
+            Instruction::ClearLocalUserQuota(mapping, volume) => {
                 vec![mapping.to_string(), volume.to_string()]
             }
             Instruction::SetLocalUserQuota(mapping, volume, quota) => {
@@ -3820,11 +4002,17 @@ impl Instruction {
             Instruction::GetProjectQuota(project, volume) => {
                 vec![project.to_string(), volume.to_string()]
             }
+            Instruction::ClearProjectQuota(project, volume) => {
+                vec![project.to_string(), volume.to_string()]
+            }
             Instruction::SetProjectQuota(project, volume, quota) => {
                 vec![project.to_string(), volume.to_string(), quota.to_string()]
             }
             Instruction::GetProjectQuotas(project) => vec![project.to_string()],
             Instruction::GetUserQuota(user, volume) => {
+                vec![user.to_string(), volume.to_string()]
+            }
+            Instruction::ClearUserQuota(user, volume) => {
                 vec![user.to_string(), volume.to_string()]
             }
             Instruction::SetUserQuota(user, volume, quota) => {
@@ -3889,6 +4077,9 @@ impl std::fmt::Display for Instruction {
             Instruction::GetLocalProjectQuota(mapping, volume) => {
                 write!(f, "get_local_project_quota {} {}", mapping, volume)
             }
+            Instruction::ClearLocalProjectQuota(mapping, volume) => {
+                write!(f, "clear_local_project_quota {} {}", mapping, volume)
+            }
             Instruction::SetLocalProjectQuota(mapping, volume, quota) => {
                 write!(
                     f,
@@ -3902,6 +4093,9 @@ impl std::fmt::Display for Instruction {
             Instruction::GetLocalUserQuota(mapping, volume) => {
                 write!(f, "get_local_user_quota {} {}", mapping, volume)
             }
+            Instruction::ClearLocalUserQuota(mapping, volume) => {
+                write!(f, "clear_local_user_quota {} {}", mapping, volume)
+            }
             Instruction::SetLocalUserQuota(mapping, volume, quota) => {
                 write!(f, "set_local_user_quota {} {} {}", mapping, volume, quota)
             }
@@ -3911,12 +4105,18 @@ impl std::fmt::Display for Instruction {
             Instruction::GetProjectQuota(project, volume) => {
                 write!(f, "get_project_quota {} {}", project, volume)
             }
+            Instruction::ClearProjectQuota(project, volume) => {
+                write!(f, "clear_project_quota {} {}", project, volume)
+            }
             Instruction::SetProjectQuota(project, volume, quota) => {
                 write!(f, "set_project_quota {} {} {}", project, volume, quota)
             }
             Instruction::GetProjectQuotas(project) => write!(f, "get_project_quotas {}", project),
             Instruction::GetUserQuota(user, volume) => {
                 write!(f, "get_user_quota {} {}", user, volume)
+            }
+            Instruction::ClearUserQuota(user, volume) => {
+                write!(f, "clear_user_quota {} {}", user, volume)
             }
             Instruction::SetUserQuota(user, volume, quota) => {
                 write!(f, "set_user_quota {} {} {}", user, volume, quota)

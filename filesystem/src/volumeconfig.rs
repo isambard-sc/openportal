@@ -257,7 +257,7 @@ impl PathConfig {
     pub fn path(&self, mapping: UserOrProjectMapping) -> Result<PathBuf, Error> {
         match mapping {
             UserOrProjectMapping::User(user_mapping) => {
-                let project_name = user_mapping.local_group();
+                let project_name = user_mapping.project().project().project();
                 let user_name = user_mapping.local_user();
 
                 if project_name.is_empty() {
@@ -274,7 +274,7 @@ impl PathConfig {
 
                 let expanded_subpath = self
                     .subpath
-                    .replace("{project}", project_name)
+                    .replace("{project}", &project_name)
                     .replace("{user}", user_name);
 
                 Ok(Path::new(&format!("{}/{}", self.root, expanded_subpath)).to_path_buf())
@@ -299,7 +299,7 @@ impl PathConfig {
         if let Some(link_template) = &self.link {
             match mapping {
                 UserOrProjectMapping::User(user_mapping) => {
-                    let project_name = user_mapping.local_group();
+                    let project_name = user_mapping.project().project().project();
                     let user_name = user_mapping.local_user();
 
                     if project_name.is_empty() {
@@ -315,7 +315,7 @@ impl PathConfig {
                     }
 
                     let expanded_link = link_template
-                        .replace("{project}", project_name)
+                        .replace("{project}", &project_name)
                         .replace("{user}", user_name);
 
                     Ok(Some(Path::new(&expanded_link).to_path_buf()))

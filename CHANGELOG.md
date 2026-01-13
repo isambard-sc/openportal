@@ -21,6 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   a project's associated award, and about which email domains are
   allowed to be associated with a project.
 
+- Added ability to set, get and clear filesystem volume quotas. Currently
+  this is only supported for Lustre, but the engine can be expanded to
+  support other filesystems. This adds new commands, e.g.
+  `set_project_quota`, `get_project_quota`, `get_project_quotas`,
+  `clear_project_quota`, `set_user_quota`, `get_user_quota`, `get_user_quotas`,
+  and `clear_user_quota`.
+
 ### Fixed
 
 - Fixed a bug when signing API calls that incorrectly introduced possible

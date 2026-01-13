@@ -40,6 +40,14 @@ def remove_metadata(directory):
         pass
 
 
+def clear_quota(lustre_id, mountpoint):
+    quotas = read_quotas(mountpoint)
+
+    if str(lustre_id) in quotas:
+        del quotas[str(lustre_id)]
+        save_quotas(mountpoint, quotas)
+
+
 def read_quotas(mountpoint):
     try:
         with open(os.path.join(mountpoint, quotas_file), 'r') as f:
@@ -156,6 +164,10 @@ def process_setquota():
 
     if flag == "-B":
         quota_limit = str(sys.argv[5])
+    elif flag == "-D":
+        mountpoint = sys.argv[5]
+        clear_quota(lustre_id, mountpoint)
+        return
     else:
         print("MISSING OR UNKNOWN FLAG")
         sys.exit(-1)

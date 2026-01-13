@@ -177,11 +177,11 @@ async fn main() -> Result<()> {
                     job.completed(quotas)
                 },
                 ClearLocalProjectQuota(mapping, volume) => {
-                    clear_project_quota(&mapping, &volume).await?;
+                    clear_project_quota(&mapping, &volume, job.expires()).await?;
                     job.completed_none()
                 },
                 ClearLocalUserQuota(mapping, volume) => {
-                    clear_user_quota(&mapping, &volume).await?;
+                    clear_user_quota(&mapping, &volume, job.expires()).await?;
                     job.completed_none()
                 },
                 _ => {
@@ -465,6 +465,7 @@ async fn remove_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
 pub async fn clear_project_quota(
     mapping: &templemeads::grammar::ProjectMapping,
     volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
     let config = cache::get_filesystem_config().await?;
 
@@ -484,7 +485,7 @@ pub async fn clear_project_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .clear_project_quota(mapping, volume, &volume_config, &chrono::Utc::now())
+        .clear_project_quota(mapping, volume, &volume_config, expires)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }
@@ -616,6 +617,7 @@ pub async fn get_project_quotas(
 pub async fn clear_user_quota(
     mapping: &templemeads::grammar::UserMapping,
     volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
     let config = cache::get_filesystem_config().await?;
 
@@ -635,7 +637,7 @@ pub async fn clear_user_quota(
     let engine = config.get_quota_engine(engine_name)?;
 
     engine
-        .clear_user_quota(mapping, volume, &volume_config, &chrono::Utc::now())
+        .clear_user_quota(mapping, volume, &volume_config, expires)
         .await
         .map_err(|e| Error::Failed(e.to_string()))
 }

@@ -28,6 +28,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `clear_project_quota`, `set_user_quota`, `get_user_quota`, `get_user_quotas`,
   and `clear_user_quota`.
 
+- Added instructions to see if a user or project already exists, namely
+  `is_existing_user` and `is_existing_project`. This is used by the cluster
+  agent to only remove partially-added users or projects if an
+  add operation failed, and the user or project did not already exist
+  before the operation started. This adds a level of safety, as it should
+  stop the unintential removal of existing users or projects if something
+  goes wrong when talking with other agents (e.g. filesystem or scheduler)
+
 ### Fixed
 
 - Fixed a bug when signing API calls that incorrectly introduced possible

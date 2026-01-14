@@ -131,6 +131,7 @@ impl Command {
                 Instruction::UpdateHomeDir(user, _) => Some(user),
                 Instruction::GetUserMapping(user) => Some(user),
                 Instruction::IsProtectedUser(user) => Some(user),
+                Instruction::IsExistingUser(user) => Some(user),
                 Instruction::GetHomeDir(user) => Some(user),
                 Instruction::GetLocalHomeDir(user) => Some(user.user().clone()),
                 Instruction::GetUserQuota(user, _) => Some(user),
@@ -164,6 +165,7 @@ impl Command {
                 Instruction::AddProject(project) => Some(project),
                 Instruction::AddLocalProject(project) => Some(project.project().clone()),
                 Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
+                Instruction::IsExistingProject(project) => Some(project),
                 Instruction::GetUsers(project) => Some(project),
                 Instruction::RemoveProject(project) => Some(project),
                 Instruction::GetUsageReport(project, _) => Some(project),
@@ -711,6 +713,31 @@ impl Job {
             Status::Complete => match &self.result {
                 Some(result) => Ok(Some(serde_json::from_str(result)?)),
                 None => Err(Error::Unknown("No result available".to_owned())),
+            },
+        }
+    }
+
+    pub fn result_none(&self) -> Result<(), Error> {
+        match self.state {
+            Status::Created => Ok(()),
+            Status::Pending => Ok(()),
+            Status::Duplicate => Ok(()),
+            Status::Running => Ok(()),
+            Status::Error => match &self.result {
+                Some(result) => Err(Error::Run(result.clone())),
+                None => Err(Error::InvalidState("Unknown error".to_owned())),
+            },
+            Status::Complete => match self.result_type() {
+                Ok(t) => {
+                    if t == "None" {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidState(
+                            "Result type is not None for completed job".to_owned(),
+                        ))
+                    }
+                }
+                Err(e) => Err(e),
             },
         }
     }

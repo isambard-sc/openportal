@@ -2482,6 +2482,12 @@ pub enum Instruction {
     /// managed by OpenPortal
     IsProtectedUser(UserIdentifier),
 
+    /// An instruction to check if a user exists
+    IsExistingUser(UserIdentifier),
+
+    /// An instruction to check if a project exists
+    IsExistingProject(ProjectIdentifier),
+
     /// An instruction to add a user
     AddUser(UserIdentifier),
 
@@ -3783,6 +3789,32 @@ impl Instruction {
                     )))
                 }
             },
+            "is_existing_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::IsExistingUser(user)),
+                Err(_) => {
+                    tracing::error!(
+                        "is_existing_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "is_existing_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "is_existing_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::IsExistingProject(project)),
+                Err(_) => {
+                    tracing::error!(
+                        "is_existing_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "is_existing_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
             "get_home_dir" => match UserIdentifier::parse(&parts[1..].join(" ")) {
                 Ok(user) => Ok(Instruction::GetHomeDir(user)),
                 Err(_) => {
@@ -3922,6 +3954,8 @@ impl Instruction {
             Instruction::SetUserQuota(_, _, _) => "set_user_quota".to_string(),
             Instruction::GetUserQuotas(_) => "get_user_quotas".to_string(),
             Instruction::IsProtectedUser(_) => "is_protected_user".to_string(),
+            Instruction::IsExistingUser(_) => "is_existing_user".to_string(),
+            Instruction::IsExistingProject(_) => "is_existing_project".to_string(),
             Instruction::SyncOfferings(_) => "sync_offerings".to_string(),
             Instruction::AddOfferings(_) => "add_offerings".to_string(),
             Instruction::RemoveOfferings(_) => "remove_offerings".to_string(),
@@ -4020,6 +4054,8 @@ impl Instruction {
             }
             Instruction::GetUserQuotas(user) => vec![user.to_string()],
             Instruction::IsProtectedUser(user) => vec![user.to_string()],
+            Instruction::IsExistingUser(user) => vec![user.to_string()],
+            Instruction::IsExistingProject(project) => vec![project.to_string()],
             Instruction::SyncOfferings(offerings) => vec![offerings.to_string()],
             Instruction::AddOfferings(offerings) => vec![offerings.to_string()],
             Instruction::RemoveOfferings(offerings) => vec![offerings.to_string()],
@@ -4124,6 +4160,10 @@ impl std::fmt::Display for Instruction {
             Instruction::GetUserQuotas(user) => write!(f, "get_user_quotas {}", user),
             Instruction::GetLimit(project) => write!(f, "get_limit {}", project),
             Instruction::IsProtectedUser(user) => write!(f, "is_protected_user {}", user),
+            Instruction::IsExistingUser(user) => write!(f, "is_existing_user {}", user),
+            Instruction::IsExistingProject(project) => {
+                write!(f, "is_existing_project {}", project)
+            }
             Instruction::GetHomeDir(user) => write!(f, "get_home_dir {}", user),
             Instruction::GetUserDirs(user) => write!(f, "get_user_dirs {}", user),
             Instruction::GetProjectDirs(project) => write!(f, "get_project_dirs {}", project),

@@ -108,6 +108,9 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // see if the project already exists
+                    let project_exists: bool = is_existing_project(me.name(), &project).await?;
+
                     // add the project to the cluster
                     let mapping = match add_project_to_cluster(me.name(), &project).await {
                         Ok(mapping) => mapping,
@@ -116,9 +119,14 @@ async fn main() -> Result<()> {
                             // so we need to remove the project from FreeIPA
                             tracing::error!("Error adding project {} to cluster: {:?}", project, e);
 
-                            match remove_project_from_cluster(me.name(), &project).await {
-                                Ok(_) => tracing::info!("Removed partially added project {}", project),
-                                Err(e) => tracing::error!("Failed to remove partially added project {}: {:?}", project, e)
+                            // only remove the project if it didn't already exist
+                            // (this stops us removing an existing group that failed
+                            //  an update)
+                            if !project_exists {
+                                match remove_project_from_cluster(me.name(), &project).await {
+                                    Ok(_) => tracing::info!("Removed partially added project {}", project),
+                                    Err(e) => tracing::error!("Failed to remove partially added project {}: {:?}", project, e)
+                                }
                             }
 
                             return Err(e);
@@ -150,6 +158,13 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // does the user already exist?
+                    let user_exists: bool = is_existing_user(me.name(), &user).await?;
+
+                    if user_exists {
+                        tracing::info!("User {} already exists on cluster - re-adding them", user);
+                    }
+
                     // add the user to the cluster
                     let mut attempts = 0;
 
@@ -164,9 +179,15 @@ async fn main() -> Result<()> {
                                     // so we need to remove the user from FreeIPA
                                     tracing::error!("Error adding user {} to cluster: {:?}", user, e);
 
-                                    match remove_account(me.name(), &user).await {
-                                        Ok(_) => tracing::info!("Removed partially added user {}", user),
-                                        Err(e) => tracing::error!("Failed to remove partially added user {}: {:?}", user, e)
+                                    // only remove the user if they didn't already exist
+                                    // (this stops us removing an existing account that failed
+                                    //  an update)
+                                    if !user_exists {
+                                        tracing::warn!("Removing partially added user {}...", user);
+                                        match remove_account(me.name(), &user).await {
+                                            Ok(_) => tracing::info!("Removed partially added user {}", user),
+                                            Err(e) => tracing::error!("Failed to remove partially added user {}: {:?}", user, e)
+                                        }
                                     }
 
                                     return Err(e);
@@ -411,7 +432,10 @@ async fn add_user_to_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapp
     let mapping = create_account(me, user).await?;
 
     // now create their home directories
-    let homedir = create_user_directories(me, &mapping).await?;
+    create_user_directories(me, &mapping).await?;
+
+    // get the home directory path from the filesystem
+    let homedir = get_home_dir(me, &mapping).await?;
 
     // update the home directory in the account
     update_homedir(me, user, &homedir).await?;
@@ -759,7 +783,7 @@ async fn get_user_mapping(me: &str, user: &UserIdentifier) -> Result<UserMapping
     }
 }
 
-async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Result<String, Error> {
+async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Result<(), Error> {
     // find the Filesystem agent
     match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
@@ -772,20 +796,9 @@ async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?.result_none()?;
 
-            match result {
-                Some(homedir) => {
-                    tracing::info!("Directories created for project: {:?}", mapping);
-                    Ok(homedir)
-                }
-                None => {
-                    tracing::error!("Error creating the project directories: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error creating the project directories: {:?}", job).to_string(),
-                    ))
-                }
-            }
+            Ok(())
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -814,7 +827,7 @@ async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
             .await?;
 
             // Wait for the add_job to complete
-            job.wait().await?;
+            job.wait().await?.result_none()?;
 
             if job.is_error() {
                 tracing::error!("Error removing the project directories: {:?}", job);
@@ -835,7 +848,7 @@ async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
     }
 }
 
-async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<String, Error> {
+async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<(), Error> {
     // find the Filesystem agent
     match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
@@ -848,20 +861,9 @@ async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<Stri
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?.result_none()?;
 
-            match result {
-                Some(homedir) => {
-                    tracing::info!("Directories created for user: {:?}", mapping);
-                    Ok(homedir)
-                }
-                None => {
-                    tracing::error!("Error creating the user's directories: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error creating the user's directories: {:?}", job).to_string(),
-                    ))
-                }
-            }
+            Ok(())
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -885,7 +887,7 @@ async fn delete_user_directories(me: &str, mapping: &UserMapping) -> Result<(), 
             .await?;
 
             // Wait for the add_job to complete
-            job.wait().await?;
+            job.wait().await?.result_none()?;
 
             if job.is_error() {
                 tracing::error!("Error removing the user's directories: {:?}", job);
@@ -1640,8 +1642,87 @@ async fn is_protected_user(me: &str, user: &UserIdentifier) -> Result<bool, Erro
                     Ok(is_protected)
                 }
                 None => {
-                    tracing::error!("No user found?");
-                    Err(Error::MissingUser(format!("Could not find user {}", user)))
+                    tracing::error!("No information found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find information for user {}",
+                        user
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn is_existing_user(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
+    // find the Account agent
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} is_existing_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(exists) => {
+                    tracing::debug!("User exists: {}", exists);
+                    Ok(exists)
+                }
+                None => {
+                    tracing::error!("No information found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find information for user {}",
+                        user
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn is_existing_project(me: &str, project: &ProjectIdentifier) -> Result<bool, Error> {
+    // find the Account agent
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} is_existing_project {}", me, account.name(), project),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(exists) => {
+                    tracing::debug!("Project exists: {}", exists);
+                    Ok(exists)
+                }
+                None => {
+                    tracing::error!("No information found?");
+                    Err(Error::MissingProject(format!(
+                        "Could not find information for project {}",
+                        project
+                    )))
                 }
             }
         }

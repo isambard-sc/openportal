@@ -319,10 +319,7 @@ async fn create_user_dirs(
         for path_config in volume_config.path_configs() {
             match path_config.path(mapping.clone().into()) {
                 Ok(path) => {
-                    tracing::info!(
-                        "    - Home directory path to create: {}",
-                        path.to_string_lossy()
-                    );
+                    tracing::info!("    - User directory to create: {}", path.to_string_lossy());
                     filesystem::create_dir(
                         &path,
                         mapping.local_user(),

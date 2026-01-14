@@ -2823,3 +2823,29 @@ pub async fn is_protected_user(
         None => Ok(false),
     }
 }
+
+pub async fn is_existing_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    match get_user(user, expires).await? {
+        Some(user) => {
+            if user.is_enabled() || user.is_protected() {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        None => Ok(false),
+    }
+}
+
+pub async fn is_existing_project(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    match get_group(project, expires).await? {
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
+}

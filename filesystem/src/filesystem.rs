@@ -201,9 +201,7 @@ pub async fn create_dir(
 
     // Check if this directory exists in .recycle - if so, restore it
     if let Some(recycle_path) = check_recycle(&path).await? {
-        tracing::info!("Found directory in recycle, restoring instead of creating new");
         restore_from_recycle(&recycle_path, &path).await?;
-        tracing::info!("Successfully restored directory from recycle");
         return Ok(());
     }
 

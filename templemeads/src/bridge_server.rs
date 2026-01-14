@@ -1,12 +1,20 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent;
 use crate::bridge::{run as bridge_run, status as bridge_status};
+use crate::bridgestate::get as get_board;
+use crate::command::Command;
+use crate::destination::Destinations;
+use crate::diagnostics::collect_diagnostics;
 use crate::error::Error;
+use crate::grammar::PortalIdentifier;
+use crate::health::collect_health;
 use crate::job::Job;
 
 use anyhow::{Context, Result};
 use axum::{
+    body::Bytes,
     extract::{Json, State},
     http::header::HeaderMap,
     http::StatusCode,
@@ -19,32 +27,57 @@ use paddington::{Key, SecretKey};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::net::IpAddr;
-use std::path;
-use tokio::net::TcpListener;
+use std::{collections::HashMap, net::IpAddr, path, sync::Arc};
+use tokio::{net::TcpListener, sync::Mutex};
 use url::Url;
 use uuid::Uuid;
 
+type RateLimitMap = HashMap<IpAddr, (u32, DateTime<Utc>)>;
+type SharedRateLimitMap = Arc<Mutex<RateLimitMap>>;
+
 ///
 /// Return the OpenPortal authorisation header for the passed datetime,
-/// protocol, function and (optional) arguments, signed with the passed
+/// protocol, function, (optional) body bytes, and nonce, signed with the passed
 /// key.
+///
+/// The body parameter should be the raw JSON bytes (empty slice for GET requests).
+/// This ensures the signature is computed over the exact bytes sent/received,
+/// avoiding any serialization fragility.
 ///
 pub fn sign_api_call(
     key: &SecretKey,
     date: &DateTime<Utc>,
     protocol: &str,
     function: &str,
-    arguments: &Option<serde_json::Value>,
+    body: &[u8],
+    nonce: Option<&str>,
 ) -> Result<String, anyhow::Error> {
     let date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
 
-    let call_string = match arguments {
-        Some(args) => format!(
-            "{}\napplication/json\n{}\n{}\n{}",
-            protocol, date, function, args
-        ),
-        None => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
+    let call_string = if body.is_empty() {
+        // GET request - no body
+        match nonce {
+            Some(n) => format!(
+                "{}\napplication/json\n{}\n{}\n{}",
+                protocol, date, function, n
+            ),
+            None => format!("{}\napplication/json\n{}\n{}", protocol, date, function),
+        }
+    } else {
+        // POST request - include raw body bytes
+        let body_str = std::str::from_utf8(body)
+            .with_context(|| "Could not parse body as UTF-8 for signing")?;
+
+        match nonce {
+            Some(n) => format!(
+                "{}\napplication/json\n{}\n{}\n{}\n{}",
+                protocol, date, function, body_str, n
+            ),
+            None => format!(
+                "{}\napplication/json\n{}\n{}\n{}",
+                protocol, date, function, body_str
+            ),
+        }
     };
 
     let signature = key.expose_secret().sign(call_string)?;
@@ -57,6 +90,7 @@ pub struct Config {
     pub ip: IpAddr,
     pub port: u16,
     pub key: SecretKey,
+    pub signal_url: Option<Url>,
 }
 
 fn create_webserver_url(url: &str) -> Result<Url, Error> {
@@ -96,8 +130,20 @@ fn create_webserver_url(url: &str) -> Result<Url, Error> {
     Ok(format!("{}://{}:{}{}", scheme, host, port, path).parse::<Url>()?)
 }
 
+fn create_signal_url(signal_url: &str) -> Result<Option<Url>, Error> {
+    let url = signal_url
+        .parse::<Url>()
+        .with_context(|| format!("Could not parse signal URL: {}", signal_url))?;
+
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(anyhow::anyhow!("Signal URL must be http or https").into());
+    }
+
+    Ok(Some(url))
+}
+
 impl Config {
-    pub fn new(url: &str, ip: IpAddr, port: u16) -> Self {
+    pub fn new(url: &str, ip: IpAddr, port: u16, signal_url: &str) -> Self {
         Self {
             url: create_webserver_url(url).unwrap_or_else(|e| {
                 tracing::error!(
@@ -111,6 +157,15 @@ impl Config {
             ip,
             port,
             key: Key::generate(),
+            signal_url: create_signal_url(signal_url).unwrap_or_else(|e| {
+                tracing::error!(
+                    "Could not parse signal URL: {} because '{}'. Using None",
+                    signal_url,
+                    e
+                );
+                #[allow(clippy::unwrap_used)]
+                None
+            }),
         }
     }
 }
@@ -120,14 +175,21 @@ pub struct Defaults {
     url: String,
     ip: String,
     port: u16,
+    signal_url: String,
 }
 
 impl Defaults {
-    pub fn parse(url: Option<String>, ip: Option<String>, port: Option<u16>) -> Self {
+    pub fn parse(
+        url: Option<String>,
+        ip: Option<String>,
+        port: Option<u16>,
+        signal_url: Option<String>,
+    ) -> Self {
         Self {
             url: url.unwrap_or("http://localhost:8042".to_owned()),
             ip: ip.unwrap_or("127.0.0.1".to_owned()),
             port: port.unwrap_or(8042),
+            signal_url: signal_url.unwrap_or("http://localhost/signal".to_owned()),
         }
     }
 
@@ -141,6 +203,10 @@ impl Defaults {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn signal_url(&self) -> String {
+        self.signal_url.clone()
     }
 }
 
@@ -200,19 +266,62 @@ pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
 }
 
 ///
-/// Verify the headers for the request - this checks the API key
+/// Extract client IP from headers (X-Forwarded-For or X-Real-IP), with fallback
 ///
-fn verify_headers(
+fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
+    // Try X-Forwarded-For first
+    if let Some(forwarded) = headers.get("X-Forwarded-For") {
+        if let Ok(forwarded_str) = forwarded.to_str() {
+            if let Some(first_ip) = forwarded_str.split(',').next() {
+                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                    return ip;
+                }
+            }
+        }
+    }
+
+    // Try X-Real-IP
+    if let Some(real_ip) = headers.get("X-Real-IP") {
+        if let Ok(ip_str) = real_ip.to_str() {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+
+    // Fallback to localhost (not ideal, but safe default)
+    "127.0.0.1".parse::<IpAddr>().unwrap_or_else(|_| {
+        // This should never fail, but handle it anyway
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+    })
+}
+
+///
+/// Verify the headers for the request - this checks the API key, rate limiting, and nonce
+/// The body parameter should be the raw request body bytes (empty for GET requests)
+///
+async fn verify_headers(
     state: &AppState,
     headers: &HeaderMap,
     protocol: &str,
     function: &str,
-    arguments: Option<serde_json::Value>,
+    body: &[u8],
 ) -> Result<(), AppError> {
+    // Extract client IP for rate limiting
+    let client_ip = extract_client_ip(headers);
+
+    // Check rate limit first (before expensive crypto operations)
+    state.rate_limiter.check_rate_limit(client_ip).await?;
+
+    // randomly clean up old rate limit entries (1% chance)
+    if rand::random::<u8>() < 3 {
+        state.rate_limiter.cleanup_old_entries().await;
+    }
+
     let key = match headers.get("Authorization") {
         Some(key) => key,
         None => {
-            tracing::error!("No API key in headers {:?}", headers);
+            tracing::error!("No API key in headers");
             return Err(AppError(
                 anyhow::anyhow!("No API key in headers"),
                 Some(StatusCode::UNAUTHORIZED),
@@ -226,7 +335,7 @@ fn verify_headers(
     let date = match headers.get("Date") {
         Some(date) => date,
         None => {
-            tracing::error!("No date in headers {:?}", headers);
+            tracing::error!("No date in headers");
             return Err(AppError(
                 anyhow::anyhow!("No date in headers"),
                 Some(StatusCode::UNAUTHORIZED),
@@ -242,6 +351,12 @@ fn verify_headers(
         )
     })?;
 
+    // Extract nonce (optional but recommended)
+    let nonce = headers
+        .get("X-Nonce")
+        .and_then(|n| n.to_str().ok())
+        .map(|s| s.to_string());
+
     let date = DateTime::parse_from_rfc2822(date)
         .map_err(|e| {
             tracing::error!("Could not parse date: {:?}", e);
@@ -252,28 +367,75 @@ fn verify_headers(
         })?
         .with_timezone(&Utc);
 
-    // make sure that this date is within the last 5 minutes
+    // make sure that this date is within the last 5 seconds
     let now = Utc::now();
 
-    if now - date > Duration::minutes(5) || date - now > Duration::minutes(5) {
-        tracing::error!("Date is too old");
+    if now - date > Duration::seconds(5) || date - now > Duration::seconds(5) {
+        tracing::error!("Date is too old or too far in the future");
         return Err(AppError(
-            anyhow::anyhow!("Date is too old"),
+            anyhow::anyhow!("Date is outside acceptable time window"),
             Some(StatusCode::UNAUTHORIZED),
         ));
     }
 
-    // now generate the expected key
-    let expected_key = sign_api_call(&state.config.key, &date, protocol, function, &arguments)?;
+    // Check nonce for replay attack prevention
+    if let Some(ref nonce_value) = nonce {
+        let mut nonce_store = state.nonce_store.lock().await;
 
-    if key != expected_key {
-        tracing::error!("API key does not match the expected key");
-        tracing::error!("Expected: {}", expected_key);
-        tracing::error!("Got: {}", key);
-        tracing::error!("Signed for date: {:?}", date);
-        tracing::error!("Protocol: {}", protocol);
-        tracing::error!("Function: {}", function);
-        tracing::error!("Arguments: {:?}", arguments);
+        // Check if nonce has been used before
+        if let Some(last_used) = nonce_store.get(nonce_value) {
+            // If nonce was used recently, reject as replay attack
+            if now - *last_used < Duration::seconds(30) {
+                tracing::warn!("Replay attack detected: nonce {} already used", nonce_value);
+                return Err(AppError(
+                    anyhow::anyhow!("Nonce has already been used (replay attack)"),
+                    Some(StatusCode::UNAUTHORIZED),
+                ));
+            }
+        }
+
+        // Store nonce with current timestamp
+        nonce_store.insert(nonce_value.clone(), now);
+
+        // Clean up old nonces (older than 30 seconds)
+        let cutoff = now - Duration::seconds(30);
+        nonce_store.retain(|_, timestamp| *timestamp > cutoff);
+    }
+
+    // Generate the expected signature from the raw body bytes
+    let expected_key = sign_api_call(
+        &state.config.key,
+        &date,
+        protocol,
+        function,
+        body,
+        nonce.as_deref(),
+    )?;
+
+    // Use constant-time comparison to prevent timing attacks
+    let key_bytes = key.as_bytes();
+    let expected_bytes = expected_key.as_bytes();
+
+    // Constant-time comparison: always compare all bytes
+    let mut matches = key_bytes.len() == expected_bytes.len();
+    let compare_len = key_bytes.len().min(expected_bytes.len());
+
+    for i in 0..compare_len {
+        matches &= key_bytes[i] == expected_bytes[i];
+    }
+
+    // If lengths differ, still compare something to maintain constant time
+    if key_bytes.len() != expected_bytes.len() {
+        for i in compare_len..key_bytes.len().max(expected_bytes.len()) {
+            let _ = i; // Ensure compiler doesn't optimize this away
+        }
+    }
+
+    if !matches {
+        tracing::error!("API key is invalid");
+        // Don't log the actual keys in production to prevent leakage
+        tracing::debug!("Expected key length: {}", expected_key.len());
+        tracing::debug!("Received key length: {}", key.len());
         return Err(AppError(
             anyhow::anyhow!("API key is invalid!"),
             Some(StatusCode::UNAUTHORIZED),
@@ -284,12 +446,69 @@ fn verify_headers(
 }
 
 //
+// Rate limiter to track request attempts per IP address
+//
+#[derive(Clone, Debug)]
+struct RateLimiter {
+    // Map of IP address to (attempt count, window start time)
+    attempts: SharedRateLimitMap,
+    max_attempts: u32,
+    window_seconds: i64,
+}
+
+impl RateLimiter {
+    fn new(max_attempts: u32, window_seconds: i64) -> Self {
+        Self {
+            attempts: Arc::new(Mutex::new(HashMap::new())),
+            max_attempts,
+            window_seconds,
+        }
+    }
+
+    async fn check_rate_limit(&self, ip: IpAddr) -> Result<(), AppError> {
+        let mut attempts = self.attempts.lock().await;
+        let now = Utc::now();
+
+        let entry = attempts.entry(ip).or_insert((0, now));
+
+        // Check if we're in a new time window
+        if now - entry.1 > Duration::seconds(self.window_seconds) {
+            // Reset the window
+            entry.0 = 1;
+            entry.1 = now;
+            Ok(())
+        } else if entry.0 >= self.max_attempts {
+            tracing::warn!("Rate limit exceeded for IP: {}", ip);
+            Err(AppError(
+                anyhow::anyhow!("Rate limit exceeded"),
+                Some(StatusCode::TOO_MANY_REQUESTS),
+            ))
+        } else {
+            entry.0 += 1;
+            Ok(())
+        }
+    }
+
+    // Periodic cleanup of old entries (optional, can be called periodically)
+    #[allow(dead_code)]
+    async fn cleanup_old_entries(&self) {
+        let mut attempts = self.attempts.lock().await;
+        let now = Utc::now();
+        let cutoff = now - Duration::seconds(self.window_seconds * 2);
+
+        attempts.retain(|_, (_, timestamp)| *timestamp > cutoff);
+    }
+}
+
+//
 // Shared state for the web API - simple key-value store protected
 // by a tokio Mutex.
 //
 #[derive(Clone, Debug)]
 struct AppState {
     config: Config,
+    rate_limiter: RateLimiter,
+    nonce_store: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     // data: Arc<Mutex<HashMap<String, String>>>, <- this is how to have shared state
 }
 
@@ -301,9 +520,129 @@ async fn health(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    verify_headers(&state, &headers, "get", "health", None)?;
-    tracing::debug!("Health check");
-    Ok(Json(json!({"status": "ok"})))
+    verify_headers(&state, &headers, "get", "health", &[]).await?;
+    tracing::debug!("Health check - collecting from all agents");
+
+    let self_peer = agent::get_self(None).await;
+
+    let health = match collect_health(self_peer.name(), vec![]).await {
+        Ok(health) => health,
+        Err(e) => {
+            tracing::error!("Error collecting health: {:?}", e);
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("error"));
+            return Ok(Json(json!(result)));
+        }
+    };
+
+    let mut result = HashMap::new();
+
+    result.insert("status".to_string(), json!("ok"));
+    result.insert("health".to_string(), json!(health));
+
+    Ok(Json(json!(result)))
+}
+
+//
+// Restart endpoint for the web API
+//
+#[derive(Serialize, Deserialize, Debug)]
+struct RestartRequest {
+    restart_type: String,
+    destination: String,
+}
+
+#[tracing::instrument(skip_all)]
+async fn restart(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    verify_headers(&state, &headers, "post", "restart", &body).await?;
+
+    let payload: RestartRequest = serde_json::from_slice(&body)?;
+
+    tracing::info!(
+        "Restart request - type: {}, destination: {}",
+        payload.restart_type,
+        payload.destination
+    );
+
+    // Send the restart command to self with the full destination
+    // This reuses the routing logic in the handler, including zone disambiguation
+    let restart_cmd = Command::restart(&payload.restart_type, &payload.destination);
+    let self_peer = agent::get_self(None).await;
+
+    match restart_cmd.send_to(&self_peer).await {
+        Ok(_) => {
+            tracing::info!(
+                "Restart command sent to {} successfully",
+                payload.destination
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "Error sending restart command to {}: {:?}",
+                payload.destination,
+                e
+            );
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("error"));
+            return Ok(Json(json!(result)));
+        }
+    }
+
+    // Return success immediately
+    let mut result = HashMap::new();
+    result.insert("status".to_string(), json!("ok"));
+    result.insert(
+        "message".to_string(),
+        json!("Restart command sent successfully"),
+    );
+
+    Ok(Json(json!(result)))
+}
+
+//
+// Diagnostics endpoint for the web API
+//
+#[derive(Serialize, Deserialize, Debug)]
+struct DiagnosticsRequest {
+    destination: String,
+}
+
+#[tracing::instrument(skip_all)]
+async fn diagnostics(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    verify_headers(&state, &headers, "post", "diagnostics", &body).await?;
+
+    let payload: DiagnosticsRequest = serde_json::from_slice(&body)?;
+
+    tracing::info!("Diagnostics request - destination: {}", payload.destination);
+
+    // Collect diagnostics from the specified agent
+    let report = match collect_diagnostics(&payload.destination).await {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::error!(
+                "Error collecting diagnostics from {}: {:?}",
+                payload.destination,
+                e
+            );
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), json!("error"));
+            return Ok(Json(json!(result)));
+        }
+    };
+
+    let mut result = HashMap::new();
+    result.insert("status".to_string(), json!("ok"));
+    result.insert("report".to_string(), json!(report));
+
+    Ok(Json(json!(result)))
 }
 
 //
@@ -323,18 +662,13 @@ struct RunRequest {
 async fn run(
     headers: HeaderMap,
     State(state): State<AppState>,
-    //Query(params): Query<HashMap<String, String>>,
-    Json(payload): Json<RunRequest>,
+    body: Bytes,
 ) -> Result<Json<Job>, AppError> {
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "run",
-        Some(serde_json::json!({"command": payload.command})),
-    )?;
+    verify_headers(&state, &headers, "post", "run", &body).await?;
 
-    tracing::info!("Running command: {}", payload.command);
+    let payload: RunRequest = serde_json::from_slice(&body)?;
+
+    tracing::debug!("Running command: {}", payload.command);
 
     match bridge_run(&payload.command).await {
         Ok(job) => Ok(Json(job)),
@@ -361,16 +695,11 @@ struct StatusRequest {
 async fn status(
     headers: HeaderMap,
     State(state): State<AppState>,
-    //Query(params): Query<HashMap<String, String>>,
-    Json(payload): Json<StatusRequest>,
+    body: Bytes,
 ) -> Result<Json<Job>, AppError> {
-    verify_headers(
-        &state,
-        &headers,
-        "post",
-        "status",
-        Some(serde_json::json!({"job": payload.job})),
-    )?;
+    verify_headers(&state, &headers, "post", "status", &body).await?;
+
+    let payload: StatusRequest = serde_json::from_slice(&body)?;
 
     tracing::debug!("Status request for job: {:?}", payload);
 
@@ -379,6 +708,362 @@ async fn status(
         Err(e) => {
             tracing::error!("Error getting status: {:?}", e);
             Err(AppError(e.into(), None))
+        }
+    }
+}
+
+///
+/// The 'fetch_jobs' endpoint for the web API. This will return a list
+/// of all of the jobs that OpenPortal has sent to us that we need
+/// to process
+///
+#[tracing::instrument(skip_all)]
+async fn fetch_jobs(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Job>>, AppError> {
+    verify_headers(&state, &headers, "get", "fetch_jobs", &[]).await?;
+
+    tracing::debug!("Fetching jobs");
+
+    // get the BridgeBoard
+    let board = get_board().await;
+    match board {
+        Ok(board) => {
+            let jobs = board.read().await.unfinished_jobs();
+            Ok(Json(jobs))
+        }
+        Err(e) => {
+            tracing::error!("Error getting jobs: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+///
+/// The 'fetch_job' endpoint for the web API. This will return a specific
+/// job that OpenPortal has sent to us that we need to process.
+///
+#[tracing::instrument(skip_all)]
+async fn fetch_job(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<Job>, AppError> {
+    verify_headers(&state, &headers, "post", "fetch_job", &body).await?;
+
+    let uid: Uuid = serde_json::from_slice(&body)?;
+
+    tracing::debug!("fetch_job: {:?}", uid);
+
+    // get the BridgeBoard
+    let board = get_board().await;
+    match board {
+        Ok(board) => {
+            let job = board
+                .read()
+                .await
+                .unfinished_jobs()
+                .into_iter()
+                .find(|j| j.id() == uid);
+
+            match job {
+                Some(job) => Ok(Json(job.clone())),
+                None => Err(AppError(
+                    anyhow::anyhow!("Job not found"),
+                    Some(StatusCode::NOT_FOUND),
+                )),
+            }
+        }
+        Err(e) => {
+            tracing::error!("Error getting jobs: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+///
+/// The 'send_result' endpoint for the web API. This will send the
+/// result of a job that we need to process back to the OpenPortal system.
+///
+#[tracing::instrument(skip_all)]
+async fn send_result(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    verify_headers(&state, &headers, "post", "send_result", &body).await?;
+
+    let job: Job = serde_json::from_slice(&body)?;
+
+    tracing::debug!("Sending result: {:?}", job);
+
+    // get the BridgeBoard
+    let board = get_board().await;
+
+    match board {
+        Ok(board) => {
+            let mut board = board.write().await;
+            board.update(&job);
+            Ok(Json(json!({"status": "ok"})))
+        }
+        Err(e) => {
+            tracing::error!("Error getting jobs: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+#[allow(dead_code)]
+const PORTAL_WAIT_TIME: u64 = 5; // seconds
+
+#[tracing::instrument(skip_all)]
+async fn get_portal(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<PortalIdentifier>, AppError> {
+    tracing::debug!("get_portal");
+    verify_headers(&state, &headers, "get", "get_portal", &[]).await?;
+
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => match PortalIdentifier::parse(portal.name()) {
+            Ok(portal) => Ok(Json(portal)),
+            Err(e) => {
+                tracing::error!("Error getting portal: {:?}", e);
+                Err(AppError(e.into(), None))
+            }
+        },
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot get portal because there is no portal agent"),
+                None,
+            ))
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
+async fn sync_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<Destinations>, AppError> {
+    verify_headers(&state, &headers, "post", "sync_offerings", &body).await?;
+
+    let offerings: Destinations = serde_json::from_slice(&body)?;
+
+    tracing::debug!("sync_offerings: {:?}", offerings);
+
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the create_project job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} sync_offerings {}",
+                    agent::name().await,
+                    portal.name(),
+                    offerings
+                ),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+
+            // Wait for the sync_offerings job to complete
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error synchronizing offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
+
+            match result {
+                Some(offerings) => {
+                    tracing::info!("Synchronized offerings: {:?}", offerings);
+                    Ok(Json(offerings))
+                }
+                None => {
+                    tracing::warn!("No offerings synchronized?");
+                    Ok(Json(Destinations::default()))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
+            ))
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
+async fn add_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<Destinations>, AppError> {
+    verify_headers(&state, &headers, "post", "add_offerings", &body).await?;
+
+    let offerings: Destinations = serde_json::from_slice(&body)?;
+
+    tracing::debug!("add_offerings: {:?}", offerings);
+
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the create_project job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} add_offerings {}",
+                    agent::name().await,
+                    portal.name(),
+                    offerings
+                ),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+
+            // Wait for the add_offerings job to complete
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error adding offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
+
+            match result {
+                Some(offerings) => {
+                    tracing::info!("Added offerings: {:?}", offerings);
+                    Ok(Json(offerings))
+                }
+                None => {
+                    tracing::warn!("No offerings added?");
+                    Ok(Json(Destinations::default()))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
+            ))
+        }
+    }
+}
+
+///
+/// Function to list offerings in the portal
+///
+#[tracing::instrument(skip_all)]
+async fn get_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Destinations>, AppError> {
+    tracing::debug!("get_offerings");
+    verify_headers(&state, &headers, "get", "get_offerings", &[]).await?;
+
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the create_project job to the bridge agent
+            let job = Job::parse(
+                &format!("{}.{} get_offerings", agent::name().await, portal.name(),),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+
+            // Wait for the get_offerings job to complete
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error getting offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
+
+            match result {
+                Some(offerings) => {
+                    tracing::info!("Offerings: {:?}", offerings);
+                    Ok(Json(offerings))
+                }
+                None => {
+                    tracing::warn!("No offerings found?");
+                    Ok(Json(Destinations::default()))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
+            ))
+        }
+    }
+}
+
+///
+/// Remove offerings from the portal
+///
+#[tracing::instrument(skip_all)]
+async fn remove_offerings(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<Destinations>, AppError> {
+    verify_headers(&state, &headers, "post", "remove_offerings", &body).await?;
+
+    let offerings: Destinations = serde_json::from_slice(&body)?;
+
+    tracing::debug!("remove_offerings: {:?}", offerings);
+
+    match agent::portal(PORTAL_WAIT_TIME).await {
+        Some(portal) => {
+            // send the create_project job to the bridge agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} remove_offerings {}",
+                    agent::name().await,
+                    portal.name(),
+                    offerings
+                ),
+                false,
+            )?
+            .put(&portal)
+            .await?;
+
+            // Wait for the remove_offerings job to complete
+            let result = match job.wait().await?.result::<Destinations>() {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Error removing offerings: {:?}", e);
+                    return Err(AppError(e.into(), None));
+                }
+            };
+
+            match result {
+                Some(offerings) => {
+                    tracing::info!("Removed offerings: {:?}", offerings);
+                    Ok(Json(offerings))
+                }
+                None => {
+                    tracing::warn!("No offerings removed?");
+                    Ok(Json(Destinations::default()))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(AppError(
+                anyhow::anyhow!("Cannot run the job because there is no portal agent"),
+                None,
+            ))
         }
     }
 }
@@ -403,6 +1088,8 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
     // create a global state object for the web API
     let state = AppState {
         config: config.clone(),
+        rate_limiter: RateLimiter::new(10000, 10), // 10000 requests per 10 seconds
+        nonce_store: Arc::new(Mutex::new(HashMap::new())),
         // data: Arc::new(Mutex::new(HashMap::new())),
     };
 
@@ -410,8 +1097,18 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
     let app = Router::new()
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
         .route("/health", get(health))
+        .route("/restart", post(restart))
+        .route("/diagnostics", post(diagnostics))
         .route("/run", post(run))
         .route("/status", post(status))
+        .route("/fetch_job", post(fetch_job))
+        .route("/fetch_jobs", get(fetch_jobs))
+        .route("/get_portal", get(get_portal))
+        .route("/send_result", post(send_result))
+        .route("/sync_offerings", post(sync_offerings))
+        .route("/add_offerings", post(add_offerings))
+        .route("/get_offerings", get(get_offerings))
+        .route("/remove_offerings", post(remove_offerings))
         .with_state(state);
 
     // create a TCP listener on the specified port
@@ -458,9 +1155,11 @@ mod tests {
         let date = Utc::now();
         let protocol = "get";
         let function = "health";
-        let arguments = None;
+        let body = b""; // Empty body for GET request
+        let nonce = None;
 
-        let signed = sign_api_call(&key, &date, protocol, function, &arguments).unwrap_or_default();
+        let signed =
+            sign_api_call(&key, &date, protocol, function, body, nonce).unwrap_or_default();
 
         #[allow(clippy::unwrap_used)] // safe to do this in a test
         {
@@ -472,6 +1171,38 @@ mod tests {
                         protocol,
                         date.format("%a, %d %b %Y %H:%M:%S GMT"),
                         function
+                    ))
+                    .unwrap()
+            );
+
+            assert_eq!(signed, expected);
+        }
+    }
+
+    #[test]
+    fn test_sign_api_call_with_body() {
+        let key = Key::generate();
+        let date = Utc::now();
+        let protocol = "post";
+        let function = "run";
+        let body = b"{\"command\":\"test\"}";
+        let nonce = "test-nonce";
+
+        let signed =
+            sign_api_call(&key, &date, protocol, function, body, Some(nonce)).unwrap_or_default();
+
+        #[allow(clippy::unwrap_used)] // safe to do this in a test
+        {
+            let expected = format!(
+                "OpenPortal {}",
+                key.expose_secret()
+                    .sign(format!(
+                        "{}\napplication/json\n{}\n{}\n{}\n{}",
+                        protocol,
+                        date.format("%a, %d %b %Y %H:%M:%S GMT"),
+                        function,
+                        std::str::from_utf8(body).unwrap(),
+                        nonce
                     ))
                     .unwrap()
             );

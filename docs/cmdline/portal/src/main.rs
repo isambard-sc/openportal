@@ -5,6 +5,9 @@ use anyhow::Result;
 
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
+use templemeads::job::{Envelope, Job};
+use templemeads::Error;
 
 use std::path::PathBuf;
 
@@ -34,7 +37,23 @@ async fn main() -> Result<()> {
     };
 
     // run the portal agent
-    run(config).await?;
+    run(config, portal_runner).await?;
 
     Ok(())
+}
+
+async_runnable! {
+    ///
+    /// Runnable function that is called when the portal needs
+    /// to issue a job
+    ///
+    pub async fn portal_runner(envelope: Envelope) -> Result<Job, Error>
+    {
+        let job = envelope.job();
+
+        tracing::error!("Unknown instruction: {:?}", job.instruction());
+        return Err(Error::UnknownInstruction(
+            format!("Unknown instruction: {:?}", job.instruction()).to_string(),
+        ));
+    }
 }

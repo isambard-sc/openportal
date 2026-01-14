@@ -2,20 +2,29 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use chrono::Utc;
 
 use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, GetLocalHomeDir, GetLocalProjectDirs, RemoveLocalProject,
-    RemoveLocalUser,
+    AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
+    GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalUserDirs,
+    GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
+    SetLocalProjectQuota, SetLocalUserQuota,
 };
-use templemeads::grammar::ProjectMapping;
+use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::job::{Envelope, Job};
+use templemeads::storage::Quota;
 use templemeads::Error;
 
 mod cache;
 mod filesystem;
+mod lustreengine;
+mod quotaengine;
+mod volumeconfig;
+
+use volumeconfig::FilesystemConfig;
 
 ///
 /// Main function for the filesystem application
@@ -30,8 +39,11 @@ async fn main() -> Result<()> {
     // start tracing
     templemeads::config::initialise_tracing();
 
+    // start system monitoring
+    templemeads::spawn_system_monitor();
+
     // create the OpenPortal paddington defaults
-    let defaults = Defaults::parse(
+    let defaults: Defaults<FilesystemConfig> = Defaults::parse(
         Some("filesystem".to_owned()),
         Some(
             dirs::config_local_dir()
@@ -59,35 +71,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    cache::set_home_root(&config.option("home-root", "/home")).await?;
-    cache::set_home_permissions(&config.option("home-permissions", "0755")).await?;
-
-    cache::set_project_roots(
-        &config
-            .option("project-roots", "/project")
-            .split(":")
-            .map(|s| s.to_owned())
-            .collect(),
-    )
-    .await?;
-
-    cache::set_project_permissions(
-        &config
-            .option("project-permissions", "2770")
-            .split(":")
-            .map(|s| s.to_owned())
-            .collect(),
-    )
-    .await?;
-
-    cache::set_project_links(
-        &config
-            .option("project-links", "")
-            .split(":")
-            .map(|s| s.to_owned())
-            .collect(),
-    )
-    .await?;
+    cache::set_filesystem_config(config.agent_config.clone()).await?;
 
     async_runnable! {
         ///
@@ -100,45 +84,109 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 AddLocalProject(mapping) => {
-                    let home_root = create_project_dirs_and_links(&mapping).await?;
-                    job.completed(home_root)
+                    create_project_dirs_and_links(&mapping, job.expires()).await?;
+                    job.completed_none()
                 },
                 RemoveLocalProject(mapping) => {
-                    tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", mapping);
+                    remove_project_dirs_and_links(&mapping).await?;
                     job.completed_none()
                 },
                 AddLocalUser(mapping) => {
-                    // make sure all project dirs are created, and get back the
-                    // project home root
-                    let home_root = create_project_dirs_and_links(&mapping.clone().into()).await?;
-
-                    // create the home directory is, e.g. /home_root/user
-                    let home_dir = format!("{}/{}", home_root, mapping.local_user());
-                    let home_permissions = cache::get_home_permissions().await?;
-
-                    filesystem::create_home_dir(&home_dir, mapping.local_user(),
-                                                mapping.local_group(),
-                                                &home_permissions).await?;
-
-                    // update the job with the user's home directory
-                    job.completed(home_dir)
+                    create_user_dirs(&mapping, job.expires()).await?;
+                    job.completed_none()
                 },
                 RemoveLocalUser(mapping) => {
-                    tracing::info!("Will remove user files of {} when the project is removed", mapping);
+                    remove_user_dirs(&mapping).await?;
                     job.completed_none()
                 },
                 GetLocalHomeDir(mapping) => {
-                    let home_root = get_home_root(&mapping.clone().into()).await?;
-                    let home_dir = format!("{}/{}", home_root, mapping.local_user());
-                    job.completed(home_dir)
+                    let config = cache::get_filesystem_config().await?;
+                    let home_dir = config.home_volume()?.home_path(&mapping)?;
+                    job.completed(home_dir.to_string_lossy().to_string())
+                },
+                GetLocalUserDirs(mapping) => {
+                    let config = cache::get_filesystem_config().await?;
+
+                    let mut user_dirs = Vec::new();
+
+                    for (volume, volume_config) in config.get_user_volumes() {
+                        for path_config in volume_config.path_configs() {
+                            match path_config.path(mapping.clone().into()) {
+                                Ok(path) => {
+                                    user_dirs.push(path.to_string_lossy().to_string());
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "Could not get user directory path for volume {}: {}",
+                                        volume,
+                                        error
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    job.completed(user_dirs)
                 },
                 GetLocalProjectDirs(mapping) => {
-                    let project_dirs = get_project_dirs_and_links(&mapping).await?;
+                    let config = cache::get_filesystem_config().await?;
+
+                    let mut project_dirs = Vec::new();
+
+                    for (volume, volume_config) in config.get_project_volumes() {
+                        for path_config in volume_config.path_configs() {
+                            match path_config.path(mapping.clone().into()) {
+                                Ok(path) => {
+                                    project_dirs.push(path.to_string_lossy().to_string());
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "Could not get project directory path for volume {}: {}",
+                                        volume,
+                                        error
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     job.completed(project_dirs)
+                },
+                SetLocalProjectQuota(mapping, volume, limit) => {
+                    let quota = set_project_quota(&mapping, &volume, &limit, job.expires()).await?;
+                    job.completed(quota)
+                },
+                GetLocalProjectQuota(mapping, volume) => {
+                    let quota = get_project_quota(&mapping, &volume, job.expires()).await?;
+                    job.completed(quota)
+                },
+                GetLocalProjectQuotas(mapping) => {
+                    let quotas = get_project_quotas(&mapping, job.expires()).await?;
+                    job.completed(quotas)
+                },
+                SetLocalUserQuota(mapping, volume, limit) => {
+                    let quota = set_user_quota(&mapping, &volume, &limit, job.expires()).await?;
+                    job.completed(quota)
+                },
+                GetLocalUserQuota(mapping, volume) => {
+                    let quota = get_user_quota(&mapping, &volume, job.expires()).await?;
+                    job.completed(quota)
+                },
+                GetLocalUserQuotas(mapping) => {
+                    let quotas = get_user_quotas(&mapping, job.expires()).await?;
+                    job.completed(quotas)
+                },
+                ClearLocalProjectQuota(mapping, volume) => {
+                    clear_project_quota(&mapping, &volume, job.expires()).await?;
+                    job.completed_none()
+                },
+                ClearLocalUserQuota(mapping, volume) => {
+                    clear_user_quota(&mapping, &volume, job.expires()).await?;
+                    job.completed_none()
                 },
                 _ => {
                     Err(Error::InvalidInstruction(
-                        format!("Invalid instruction: {}. Filesystem only supports add_local_user and remove_local_user", job.instruction()),
+                        format!("Invalid instruction: {}", job.instruction()),
                     ))
                 }
             }
@@ -151,103 +199,563 @@ async fn main() -> Result<()> {
 }
 
 ///
-/// Return the root directory for all users in the passed project
-///
-async fn get_home_root(mapping: &ProjectMapping) -> Result<String, Error> {
-    // The name of the project directory comes from the project part of the ProjectIdentifier
-    // Eventually we would need to encode the portal into this...
-    let project_dir_name = mapping.project().project();
-
-    let home_root = cache::get_home_root().await?;
-
-    Ok(format!("{}/{}", home_root, project_dir_name))
-}
-
-///
-/// Return the paths to all of the project directories (including links)
-///
-async fn get_project_dirs_and_links(mapping: &ProjectMapping) -> Result<Vec<String>, Error> {
-    // The name of the project directory comes from the project part of the ProjectIdentifier
-    // Eventually we would need to encode the portal into this...
-    let project_dir_name = mapping.project().project();
-
-    let project_dirs = cache::get_project_roots().await?;
-    let project_links = cache::get_project_links().await?;
-
-    if project_dirs.len() != project_links.len() {
-        return Err(Error::Misconfigured(
-            "Number of project directories does not match number of links".to_owned(),
-        ));
-    }
-
-    let mut dirs = Vec::new();
-
-    // Get the name of the project dirs
-    for dir in project_dirs {
-        let project_dir = format!("{}/{}", dir, project_dir_name);
-        dirs.push(project_dir);
-    }
-
-    // And also the links
-    for link in project_links.into_iter().flatten() {
-        dirs.push(filesystem::get_project_link(&link, &project_dir_name).await?);
-    }
-
-    Ok(dirs)
-}
-
-///
 /// Create the project directories and links for a given ProjectMapping,
-/// returning the home root directory for the project
 ///
-async fn create_project_dirs_and_links(mapping: &ProjectMapping) -> Result<String, Error> {
-    // The name of the project directory comes from the project part of the ProjectIdentifier
-    // Eventually we would need to encode the portal into this...
-    let project_dir_name = mapping.project().project();
+async fn create_project_dirs_and_links(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    let config = cache::get_filesystem_config().await?;
 
-    // The group name for any project dirs are the mapping local group IDs
-    let group_name = mapping.local_group();
-
-    // home directory is, e.g. /home/project/user
-    let home_root = format!("{}/{}", cache::get_home_root().await?, project_dir_name);
-
-    let project_dirs = cache::get_project_roots().await?;
-    let project_permissions = cache::get_project_permissions().await?;
-    let project_links = cache::get_project_links().await?;
-
-    if project_dirs.len() != project_permissions.len() {
-        return Err(Error::Misconfigured(
-            "Number of project directories does not match number of permissions".to_owned(),
-        ));
-    }
-
-    if project_dirs.len() != project_links.len() {
-        return Err(Error::Misconfigured(
-            "Number of project directories does not match number of links".to_owned(),
-        ));
-    }
-
-    // create the root in which the user's home directory will be created - this is /{home_root}/{project}
-    filesystem::create_project_dir(&home_root, group_name, "0755").await?;
-
-    // create the project directories
-    for i in 0..project_dirs.len() {
-        let project_dir = format!("{}/{}", project_dirs[i], project_dir_name);
-        filesystem::create_project_dir(&project_dir, group_name, &project_permissions[i]).await?;
-    }
-
-    // now create any necessary project links
-    for i in 0..project_links.len() {
-        if let Some(link) = project_links[i].as_ref() {
-            filesystem::create_project_link(
-                &format!("{}/{}", project_dirs[i], project_dir_name),
-                link,
-                &project_dir_name,
-            )
-            .await?;
+    // create all of the project volume directories first
+    for (volume, volume_config) in config.get_project_volumes() {
+        tracing::info!("Creating project volume: {}", volume);
+        for path_config in volume_config.path_configs() {
+            match path_config.path(mapping.clone().into()) {
+                Ok(path) => {
+                    tracing::info!("    - Directory path to create: {}", path.to_string_lossy());
+                    filesystem::create_dir(
+                        &path,
+                        "root",
+                        mapping.local_group(),
+                        path_config.permission(),
+                    )
+                    .await?;
+                }
+                Err(error) => {
+                    tracing::warn!("Could not get path for creation: {}", error);
+                }
+            }
         }
     }
 
-    // return the home root
-    Ok(home_root)
+    // now create all of the project volume links (as the directories should exist)
+    for (volume, volume_config) in config.get_project_volumes() {
+        tracing::info!("Creating project volume links for: {}", volume);
+        for path_config in volume_config.path_configs() {
+            if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
+                tracing::info!("    - Link path to create: {}", link_path.to_string_lossy());
+                let dir_path = path_config.path(mapping.clone().into())?;
+                filesystem::create_link(&dir_path, &link_path).await?;
+            }
+        }
+    }
+
+    // now create the roots of all of the user directories
+    for (volume, volume_config) in config.get_user_volumes() {
+        tracing::info!("Creating user volume: {}", volume);
+
+        for path_config in volume_config.path_configs() {
+            match path_config.project_path(mapping) {
+                Ok(path) => {
+                    tracing::info!(
+                        "    - User directory root to create: {}",
+                        path.to_string_lossy()
+                    );
+                    filesystem::create_dir(
+                        &path,
+                        "root",
+                        mapping.local_group(),
+                        path_config.permission(),
+                    )
+                    .await?;
+                }
+                Err(error) => {
+                    tracing::warn!("Could not get user directory root for creation: {}", error);
+                }
+            }
+        }
+    }
+
+    // finally, set any default quotas
+    for (volume, volume_config) in config.get_project_volumes() {
+        if volume_config.has_quota_engine() {
+            if let Some(default_quota) = volume_config.default_quota() {
+                tracing::info!(
+                    "Setting default quota for project {} on volume {}: {}",
+                    mapping.project(),
+                    volume,
+                    default_quota
+                );
+
+                match set_project_quota(mapping, &volume, default_quota, expires).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "Successfully set default quota for project {} on volume {}",
+                            mapping.project(),
+                            volume
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to set default quota for project {} on volume {}: {}\n Will try again later.",
+                            mapping.project(),
+                            volume,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+///
+/// Create the user directories for a given UserMapping,
+///
+async fn create_user_dirs(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    create_project_dirs_and_links(&mapping.project(), expires).await?;
+
+    let config = cache::get_filesystem_config().await?;
+
+    for (volume, volume_config) in config.get_user_volumes() {
+        tracing::info!("Creating user volume: {}", volume);
+
+        for path_config in volume_config.path_configs() {
+            match path_config.path(mapping.clone().into()) {
+                Ok(path) => {
+                    tracing::info!("    - User directory to create: {}", path.to_string_lossy());
+                    filesystem::create_dir(
+                        &path,
+                        mapping.local_user(),
+                        mapping.local_group(),
+                        path_config.permission(),
+                    )
+                    .await?;
+                }
+                Err(error) => {
+                    tracing::warn!("Could not get path for creation: {}", error);
+                }
+            }
+        }
+    }
+
+    // now we have created all of the directories, set any default quotas
+    for (volume, volume_config) in config.get_user_volumes() {
+        if volume_config.has_quota_engine() {
+            if let Some(default_quota) = volume_config.default_quota() {
+                tracing::info!(
+                    "Setting default quota for user {} on volume {}: {}",
+                    mapping.local_user(),
+                    volume,
+                    default_quota
+                );
+                match set_user_quota(mapping, &volume, default_quota, expires).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "Successfully set default quota for user {} on volume {}",
+                            mapping.local_user(),
+                            volume
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to set default quota for user {} on volume {}: {}\n Will try again later.",
+                            mapping.local_user(),
+                            volume,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+///
+/// Remove (recycle) the project directories, links, and home roots for a given ProjectMapping.
+/// This is non-destructive - directories are moved to .recycle subdirectories.
+///
+async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    for (volume, volume_config) in config.get_project_volumes() {
+        tracing::info!("Removing project volume: {}", volume);
+        for path_config in volume_config.path_configs() {
+            if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
+                tracing::info!("    - Link path to remove: {}", link_path.to_string_lossy());
+                if link_path.exists() && link_path.is_symlink() {
+                    tracing::info!("      - Removing symlink '{}'", link_path.to_string_lossy());
+                    match std::fs::remove_file(&link_path) {
+                        Ok(_) => tracing::info!("Successfully removed symlink"),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Could not remove symlink '{}': {}",
+                                link_path.to_string_lossy(),
+                                e
+                            )
+                        }
+                    }
+                }
+            }
+
+            match path_config.path(mapping.clone().into()) {
+                Ok(path) => {
+                    tracing::info!("    - Directory path to remove: {}", path.to_string_lossy());
+                    filesystem::recycle_dir(&path).await?;
+                }
+                Err(error) => {
+                    tracing::warn!("Could not get path for removal: {}", error);
+                }
+            }
+        }
+    }
+
+    for (volume, volume_config) in config.get_user_volumes() {
+        tracing::info!("Removing user volume: {}", volume);
+
+        for path_config in volume_config.path_configs() {
+            match path_config.project_path(mapping) {
+                Ok(path) => {
+                    tracing::info!("    - Directory path to remove: {}", path.to_string_lossy());
+                    filesystem::recycle_dir(&path).await?;
+                }
+                Err(error) => {
+                    tracing::warn!("Could not get path for removal: {}", error);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+///
+/// Remove (recycle) the user's home directories in all home roots.
+/// This is non-destructive - directories are moved to .recycle subdirectories.
+///
+async fn remove_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    for (volume, volume_config) in config.get_user_volumes() {
+        tracing::info!("Removing user volume: {}", volume);
+
+        for path_config in volume_config.path_configs() {
+            match path_config.path(mapping.clone().into()) {
+                Ok(path) => {
+                    tracing::info!(
+                        "    - Home directory path to remove: {}",
+                        path.to_string_lossy()
+                    );
+                    filesystem::recycle_dir(&path).await?;
+                }
+                Err(error) => {
+                    tracing::warn!("Could not get path for removal: {}", error);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+///
+/// Clear the storage quota for a project on a specific volume
+///
+pub async fn clear_project_quota(
+    mapping: &templemeads::grammar::ProjectMapping,
+    volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .clear_project_quota(mapping, volume, &volume_config, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Set a storage quota for a project on a specific volume
+///
+pub async fn set_project_quota(
+    mapping: &templemeads::grammar::ProjectMapping,
+    volume: &templemeads::storage::Volume,
+    limit: &templemeads::storage::QuotaLimit,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<templemeads::storage::Quota, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(Quota::unlimited());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .set_project_quota(mapping, volume, &volume_config, limit, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Get the storage quota for a project on a specific volume
+///
+pub async fn get_project_quota(
+    mapping: &templemeads::grammar::ProjectMapping,
+    volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<templemeads::storage::Quota, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_project_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(Quota::unlimited());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .get_project_quota(mapping, volume, &volume_config, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Get all storage quotas for a project across all volumes
+///
+pub async fn get_project_quotas(
+    mapping: &templemeads::grammar::ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<
+    std::collections::HashMap<templemeads::storage::Volume, templemeads::storage::Quota>,
+    Error,
+> {
+    let config = cache::get_filesystem_config().await?;
+
+    let mut quotas = std::collections::HashMap::new();
+
+    // Iterate through all configured project volumes and get quotas
+    for (volume, volume_config) in config.get_project_volumes() {
+        if !volume_config.has_quota_engine() {
+            continue;
+        }
+
+        let engine_name = match volume_config.quota_engine_name() {
+            Some(engine_name) => engine_name,
+            None => {
+                // no engine, so this is not quota-able
+                continue;
+            }
+        };
+
+        let engine = match config.get_quota_engine(engine_name) {
+            Ok(engine) => engine,
+            Err(e) => {
+                tracing::warn!("Failed to get quota engine for volume {}: {}", volume, e);
+                continue;
+            }
+        };
+
+        match engine
+            .get_project_quota(mapping, &volume, &volume_config, expires)
+            .await
+        {
+            Ok(quota) => {
+                quotas.insert(volume.clone(), quota);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get quota for project {} on volume {}: {}",
+                    mapping.project(),
+                    volume,
+                    e
+                );
+                // Continue to next volume rather than failing entirely
+            }
+        }
+    }
+
+    Ok(quotas)
+}
+
+///
+/// Clear a user quota for a user on a specific volume
+///
+pub async fn clear_user_quota(
+    mapping: &templemeads::grammar::UserMapping,
+    volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .clear_user_quota(mapping, volume, &volume_config, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Set a storage quota for a user on a specific volume
+///
+pub async fn set_user_quota(
+    mapping: &templemeads::grammar::UserMapping,
+    volume: &templemeads::storage::Volume,
+    limit: &templemeads::storage::QuotaLimit,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<templemeads::storage::Quota, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(Quota::unlimited());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .set_user_quota(mapping, volume, &volume_config, limit, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Get the storage quota for a user on a specific volume
+///
+pub async fn get_user_quota(
+    mapping: &templemeads::grammar::UserMapping,
+    volume: &templemeads::storage::Volume,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<templemeads::storage::Quota, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let volume_config = config.get_user_volume(volume)?;
+
+    if !volume_config.has_quota_engine() {
+        return Ok(Quota::unlimited());
+    }
+
+    let engine_name = match volume_config.quota_engine_name() {
+        Some(engine_name) => engine_name,
+        None => {
+            return Ok(Quota::unlimited());
+        }
+    };
+
+    let engine = config.get_quota_engine(engine_name)?;
+
+    engine
+        .get_user_quota(mapping, volume, &volume_config, expires)
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))
+}
+
+///
+/// Get all storage quotas for a user across all volumes
+///
+pub async fn get_user_quotas(
+    mapping: &templemeads::grammar::UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<
+    std::collections::HashMap<templemeads::storage::Volume, templemeads::storage::Quota>,
+    Error,
+> {
+    let config = cache::get_filesystem_config().await?;
+
+    let mut quotas = std::collections::HashMap::new();
+
+    // Iterate through all configured user volumes and get quotas
+    for (volume, user_config) in config.get_user_volumes() {
+        if !user_config.has_quota_engine() {
+            continue;
+        }
+
+        let engine_name = match user_config.quota_engine_name() {
+            Some(engine_name) => engine_name,
+            None => {
+                // no engine, so this is not quota-able
+                continue;
+            }
+        };
+
+        let engine = match config.get_quota_engine(engine_name) {
+            Ok(engine) => engine,
+            Err(e) => {
+                tracing::warn!("Failed to get quota engine for volume {}: {}", volume, e);
+                continue;
+            }
+        };
+
+        match engine
+            .get_user_quota(mapping, &volume, &user_config, expires)
+            .await
+        {
+            Ok(quota) => {
+                quotas.insert(volume.clone(), quota);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get quota for user {} on volume {}: {}",
+                    mapping.local_user(),
+                    volume,
+                    e
+                );
+                // Continue to next volume rather than failing entirely
+            }
+        }
+    }
+
+    Ok(quotas)
 }

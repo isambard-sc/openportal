@@ -6,8 +6,12 @@ use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
+use crate::diagnostics;
 use crate::error::Error;
+use crate::health;
 use crate::job::{sync_from_peer, Envelope, Status};
+use crate::jobtiming;
+use crate::restart;
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
@@ -45,14 +49,14 @@ pub async fn set_my_service_details(
     service: &str,
     agent_type: &agent::Type,
     runner: Option<AsyncRunnable>,
+    cascade_health: bool,
 ) -> Result<()> {
-    tracing::info!(
-        "Agent layer: {} version {}",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
-    );
+    let engine = env!("CARGO_PKG_NAME");
+    let version = env!("CARGO_PKG_VERSION");
 
-    agent::register_self(service, agent_type).await;
+    tracing::info!("Agent layer: {} version {}", engine, version);
+
+    agent::register_self(service, agent_type, engine, version, cascade_health).await;
     let mut service_details = SERVICE_DETAILS.write().await;
     service_details.service = service.to_string();
     service_details.agent_type = agent_type.clone();
@@ -77,6 +81,46 @@ async fn process_command(
     command: &Command,
     runner: &AsyncRunnable,
 ) -> Result<(), Error> {
+    // Block new jobs during soft restart
+    // Allow Register, HealthCheck, and Restart commands to pass through
+    if paddington::is_soft_restart_in_progress() {
+        match command {
+            Command::Register { .. } | Command::HealthCheck { .. } | Command::Restart { .. } => {
+                // Allow these commands during soft restart
+            }
+            Command::Put { job } | Command::Update { job } => {
+                // Error the job and send it back to the sender
+                tracing::warn!(
+                    "Rejecting job {} during soft restart from {}",
+                    job.id(),
+                    sender
+                );
+
+                let peer = Peer::new(sender, zone);
+                let errored_job =
+                    job.errored("Agent is performing a soft restart - please retry")?;
+
+                // Send the errored job back to the sender
+                if let Err(e) = errored_job.update(&peer).await {
+                    tracing::warn!("Failed to send errored job back to sender: {}", e);
+                }
+
+                return Ok(());
+            }
+            _ => {
+                // Reject other commands during soft restart
+                tracing::warn!(
+                    "Rejecting command during soft restart: {} from {}",
+                    command,
+                    sender
+                );
+                return Err(Error::Unavailable(
+                    "Agent is currently performing a soft restart - please retry".to_string(),
+                ));
+            }
+        }
+    }
+
     match command {
         Command::Register {
             agent,
@@ -92,9 +136,14 @@ async fn process_command(
             agent::register_peer(&Peer::new(sender, zone), agent, engine, version).await;
         }
         Command::Update { job } => {
+            if job.is_expired() {
+                tracing::debug!("Skipping expired job update: {}", job);
+                return Ok(());
+            }
+
             let peer = Peer::new(sender, zone);
 
-            tracing::debug!("Update job: {} to {} from {}", job, recipient, peer,);
+            tracing::debug!("Update job: {:?} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -128,79 +177,194 @@ async fn process_command(
             }
         }
         Command::Put { job } => {
+            if job.is_expired() {
+                tracing::debug!("Skipping expired job put: {}", job);
+                return Ok(());
+            }
+
             let peer = Peer::new(sender, zone);
 
-            tracing::debug!("Put job: {} to {} from {}", job, recipient, peer,);
+            tracing::debug!("Put job: {:?} to {} from {}", job, recipient, peer,);
 
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
                 Ok(job) => job,
                 Err(e) => {
                     tracing::error!("Error receiving job: {}", e);
-                    job.errored(&e.to_string())?;
+                    let job = job.errored(&e.to_string())?;
                     let _ = job.update(&Peer::new(sender, zone)).await?;
                     return Ok(());
                 }
             };
 
-            match job.destination().position(recipient, sender) {
-                Position::Downstream => {
-                    // if we are downstream, then we continue to let the job
-                    // flow downstream
-                    if let Some(agent) = job.destination().next(recipient) {
-                        let peer = Peer::new(&agent, zone);
-                        agent::wait_for(&peer, 30).await?;
+            // Keep a copy of the original job to detect if it changed
+            let original_version = job.version();
 
-                        job = match job.put(&peer).await {
-                            Ok(job) => job,
-                            Err(e) => {
-                                tracing::error!("Error putting job: {}", e);
-                                job.errored(&e.to_string())?
+            if job.is_duplicate() {
+                tracing::debug!("Job is a duplicate for peer {}: {}", peer, job);
+
+                // the existing job is being processed. We now need to wait
+                // for that to finish - when it does, our new job will
+                // be updated with the result
+                while !job.is_finished() {
+                    job = job.wait().await?;
+
+                    if !job.is_finished() {
+                        tracing::warn!("Still waiting for duplicate job to finish: {}", job);
+                        job.assert_is_not_expired()?;
+                    }
+                }
+            } else {
+                match job.destination().position(recipient, sender) {
+                    Position::Downstream => {
+                        // if we are downstream, then we continue to let the job
+                        // flow downstream
+                        if let Some(agent) = job.destination().next(recipient) {
+                            let peer = Peer::new(&agent, zone);
+
+                            job = match job.put(&peer).await {
+                                Ok(job) => job,
+                                Err(e) => {
+                                    tracing::error!("Error putting job: {}", e);
+                                    job.errored(&e.to_string())?
+                                }
                             }
                         }
                     }
-                }
-                Position::Destination => {
-                    // we are the destination, so we need to take action
-                    match job.state() {
-                        Status::Complete => {
-                            tracing::warn!("Not rerunning job that has already completed: {}", job);
-                        }
-                        Status::Error => {
-                            tracing::warn!("Not rerunning job that has already errored: {}", job);
-                        }
-                        _ => {
-                            tracing::info!("{} : {}", job.destination(), job.instruction());
+                    Position::Destination => {
+                        // we are the destination, so we need to take action
+                        match job.state() {
+                            Status::Complete => {
+                                tracing::warn!(
+                                    "Not rerunning job that has already completed: {}",
+                                    job
+                                );
+                            }
+                            Status::Error => {
+                                tracing::warn!(
+                                    "Not rerunning job that has already errored: {}",
+                                    job
+                                );
+                            }
+                            _ => {
+                                tracing::info!(
+                                    "Execute {} : {}",
+                                    job.destination(),
+                                    job.instruction()
+                                );
 
-                            job = match runner(Envelope::new(recipient, sender, zone, &job)).await {
-                                Ok(job) => job,
-                                Err(e) => {
-                                    tracing::error!("Error running job: {}", e);
-                                    job.errored(&e.to_string())?
+                                // Start timing the job execution
+                                let start_time = std::time::Instant::now();
+
+                                // Record job started for diagnostics
+                                diagnostics::record_job_started(&job).await;
+
+                                job = match runner(Envelope::new(recipient, sender, zone, &job))
+                                    .await
+                                {
+                                    Ok(job) => job,
+                                    Err(e) => {
+                                        tracing::error!("Error running job: {}", e);
+                                        job.errored(&e.to_string())?
+                                    }
+                                };
+
+                                // Record the job execution time
+                                let duration = start_time.elapsed();
+                                let duration_ms = duration.as_secs_f64() * 1000.0;
+                                jobtiming::record_job_time(duration_ms);
+
+                                // Record job finished for diagnostics
+                                diagnostics::record_job_finished(&job).await;
+
+                                // Track failures and slow jobs
+                                if job.is_expired() {
+                                    diagnostics::record_expired_job(&job).await;
+                                } else if job.is_error() {
+                                    let error_msg = job
+                                        .error_message()
+                                        .unwrap_or_else(|| "Unknown error".to_string());
+                                    diagnostics::record_failed_job(&job, error_msg).await;
+                                    diagnostics::record_slow_job(&job, duration_ms).await;
+                                } else {
+                                    diagnostics::record_completed_job(&job).await;
+                                    diagnostics::record_slow_job(&job, duration_ms).await;
                                 }
-                            };
+
+                                tracing::debug!(
+                                    "Job {} completed in {:.2}ms",
+                                    job.id(),
+                                    duration_ms
+                                );
+                            }
                         }
                     }
-                }
-                Position::Error => {
-                    tracing::error!("Job has got into an errored position: {}", job);
-                    job = job.errored("Job has got into an errored position")?;
-                }
-                _ => {
-                    tracing::warn!("Job {} is being put, but is not moving?", job);
-                    job = job.errored("Job has got into an unknown position")?;
+                    Position::Error => {
+                        tracing::error!("Job has got into an errored position: {}", job);
+                        tracing::error!(
+                            "Recipient: {}, Sender: {}, Destination: {}",
+                            recipient,
+                            sender,
+                            job.destination()
+                        );
+                        job = job.errored("Job has got into an errored position")?;
+                    }
+                    _ => {
+                        tracing::warn!("Job {} is being put, but is not moving?", job);
+                        job = job.errored("Job has got into an unknown position")?;
+                    }
                 }
             }
 
             tracing::debug!("Job has finished: {}", job);
 
-            // now the job has finished, update the sender's board
-            let peer = Peer::new(sender, zone);
-            agent::wait_for(&peer, 30).await?;
+            // Only send updates if the job changed (version increased or state changed)
+            // If we just forwarded it downstream without changes, the downstream agent will handle updates
+            if job.version() == original_version {
+                tracing::debug!(
+                    "Job version unchanged ({}) - not sending update (job was forwarded or unchanged)",
+                    original_version
+                );
+            } else {
+                tracing::debug!(
+                    "Job version changed ({} -> {}) - sending update",
+                    original_version,
+                    job.version()
+                );
+                // now the job has finished, update the sender's board
+                // Check if the recipient is a virtual agent
+                let recipient_peer = Peer::new(recipient, zone);
 
-            let _ = job.update(&peer).await?;
+                if agent::is_self(&recipient_peer).await {
+                    // Normal case: send update to the sender
+                    tracing::debug!("Sending update of job {} back to sender {}", job, peer);
+                    let _ = job.update(&peer).await?;
+                } else if agent::is_virtual(&recipient_peer).await {
+                    // Virtual agent case: use virtual_update
+                    // recipient = virtual agent (e.g., isambard-ai)
+                    // sender = hosting agent (e.g., waldur)
+                    tracing::debug!(
+                        "Sending virtual update of job {} to virtual agent {} via hosting agent {}",
+                        job,
+                        recipient_peer,
+                        peer
+                    );
+                    let _ = job.virtual_update(&recipient_peer, &peer).await?;
+                } else {
+                    tracing::error!(
+                        "Recipient {} is neither self nor virtual - not sending job update: {}",
+                        recipient,
+                        job
+                    );
+                }
+            }
         }
         Command::Delete { job } => {
+            if job.is_expired() {
+                tracing::debug!("Skipping expired job delete: {}", job);
+                return Ok(());
+            }
+
             let peer = Peer::new(sender, zone);
 
             tracing::warn!("Delete job: {} to {} from {}", job, recipient, peer,);
@@ -239,6 +403,91 @@ async fn process_command(
             let peer = Peer::new(sender, zone);
             sync_from_peer(recipient, &peer, state).await?;
         }
+        Command::HealthCheck { visited } => {
+            tracing::debug!(
+                "Received health check request from {} (visited chain: {:?})",
+                sender,
+                visited
+            );
+
+            // Security: Portals must not respond to health checks from other portals
+            // to prevent information leakage between sites
+            let my_type = agent::my_agent_type().await;
+            let sender_peer = Peer::new(sender, zone);
+
+            if my_type == agent::Type::Portal {
+                if let Some(sender_type) = agent::agent_type(&sender_peer).await {
+                    if sender_type == agent::Type::Portal {
+                        tracing::warn!(
+                            "Ignoring health check from portal {} - portals do not share health with other portals",
+                            sender
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Collect health information (including cascaded peer health)
+            let health = health::collect_health(sender, visited.clone()).await?;
+
+            tracing::debug!("Health check: {}", health);
+
+            // Send health response back to sender
+            let response = Command::health_response(health);
+            response.send_to(&sender_peer).await?;
+        }
+        Command::HealthResponse { health } => {
+            tracing::debug!("Received health response: {}", health);
+            // Cache the health response for later retrieval
+            health::cache_health_response(*health.clone()).await;
+        }
+        Command::Restart {
+            restart_type,
+            destination,
+        } => {
+            restart::handle_restart_request(sender, restart_type, destination).await?;
+        }
+        Command::DiagnosticsRequest { destination } => {
+            tracing::debug!(
+                "Received diagnostics request from {} (destination: {})",
+                sender,
+                destination
+            );
+
+            // Security: Portals must not respond to diagnostics requests from other portals
+            // to prevent information leakage between sites
+            let my_type = agent::my_agent_type().await;
+            let sender_peer = Peer::new(sender, zone);
+
+            if my_type == agent::Type::Portal {
+                if let Some(sender_type) = agent::agent_type(&sender_peer).await {
+                    if sender_type == agent::Type::Portal {
+                        tracing::warn!(
+                            "Ignoring diagnostics request from portal {} - portals do not share diagnostics with other portals",
+                            sender
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Collect diagnostics information (including cascaded peer diagnostics)
+            let diagnostics_report = diagnostics::collect_diagnostics(destination).await?;
+
+            tracing::debug!("Diagnostics report: {}", diagnostics_report);
+
+            // Send diagnostics response back to sender
+            let response = Command::diagnostics_response(diagnostics_report);
+            response.send_to(&sender_peer).await?;
+        }
+        Command::DiagnosticsResponse { report } => {
+            tracing::debug!("Received diagnostics response from {}", report.agent_name);
+
+            // Cache the response using the agent_name as the key
+            // This allows intermediate agents to retrieve it when forwarding responses
+            diagnostics::cache_diagnostics_response(report.agent_name.clone(), *report.clone())
+                .await;
+        }
         _ => {
             tracing::warn!("Command {} not recognised", command);
         }
@@ -249,7 +498,7 @@ async fn process_command(
 
 async_message_handler! {
     ///
-    /// Message handler for the Provider Agent.
+    /// Message handler for most templemeads agents
     ///
     pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
         let service_info: ServiceDetails = SERVICE_DETAILS.read().await.to_owned();
@@ -322,7 +571,10 @@ async_message_handler! {
                 let command: Command = message.into();
 
                 if (recipient != service_info.service) {
-                    return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                    // check to see if this is a virtual agent
+                    if !agent::is_virtual(&Peer::new(&recipient, &zone)).await {
+                        return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                    }
                 }
 
                 process_command(&recipient, &sender, &zone, &command, &service_info.runner).await?;

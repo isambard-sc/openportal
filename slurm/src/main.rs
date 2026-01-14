@@ -30,6 +30,9 @@ async fn main() -> Result<()> {
     // start tracing
     templemeads::config::initialise_tracing();
 
+    // start system monitoring
+    templemeads::spawn_system_monitor();
+
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
         Some("slurm".to_owned()),
@@ -81,21 +84,42 @@ async fn main() -> Result<()> {
 
     cache::set_default_node(&slurm::SlurmNode::construct(&slurm_default_node)?).await?;
 
+    // get the (optional) cluster used for this account
     let slurm_cluster = config.option("slurm-cluster", "");
 
     if !slurm_cluster.is_empty() {
         cache::set_cluster(&slurm_cluster).await?;
     }
 
+    // get the (optional) partition used for this account
+    let slurm_partition = config.option("slurm-partition", "");
+
+    if !slurm_partition.is_empty() {
+        cache::set_partition(&slurm_partition).await?;
+    }
+
+    // get the parent account that should be used for all accounts
+    let parent_account = config.option("parent-account", "root");
+    cache::set_parent_account(&parent_account).await?;
+
     let slurm_server = config.option("slurm-server", "");
 
-    // get the sacct, sacctmgr and scontrol commands - we may need these even if
+    // get the sacct, sacctmgr, scontrol and scancel commands - we may need these even if
     // we are using the REST API
     let sacct_command = config.option("sacct", "sacct");
     let sacctmgr_command = config.option("sacctmgr", "sacctmgr");
     let scontrol_command = config.option("scontrol", "scontrol");
+    let scancel_command = config.option("scancel", "scancel");
+    let max_slurm_runners: u64 = config.option("max-slurm-runners", "5").parse().unwrap_or(5);
 
-    sacctmgr::set_commands(&sacct_command, &sacctmgr_command, &scontrol_command).await;
+    sacctmgr::set_commands(
+        &sacct_command,
+        &sacctmgr_command,
+        &scontrol_command,
+        &scancel_command,
+        max_slurm_runners,
+    )
+    .await;
 
     if slurm_server.is_empty() {
         // we are using sacctmgr and the commandline to interact
@@ -113,43 +137,47 @@ async fn main() -> Result<()> {
 
                 match job.instruction() {
                     AddLocalProject(project) => {
-                        sacctmgr::add_project(&project).await?;
+                        sacctmgr::add_project(&project, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalProject(project) => {
                         // we won't remove the project for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
-                        // disable the project instead.
-                        tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", project);
+                        // disable the project instead. However, we do want to cancel
+                        // all pending jobs associated with this project.
+                        sacctmgr::cancel_pending_project_jobs(project.local_group(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for project {}", project);
                         job.completed_none()
                     },
                     AddLocalUser(user) => {
-                        sacctmgr::add_user(&user).await?;
+                        sacctmgr::add_user(&user, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalUser(mapping) => {
                         // we won't remove the user for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
                         // disable the user instead. Note that they are already
-                        // disabled in FreeIPA, so cannot submit jobs to this account
-                        tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                        // disabled in FreeIPA, so cannot submit jobs to this account.
+                        // However, we do want to cancel all pending jobs for this user.
+                        sacctmgr::cancel_pending_user_jobs(mapping.local_user(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
                     },
                     GetLocalUsageReport(mapping, dates) => {
-                        let report = sacctmgr::get_usage_report(&mapping, &dates).await?;
+                        let report = sacctmgr::get_usage_report(&mapping, &dates, job.expires()).await?;
                         job.completed(report)
                     }
                     GetLocalLimit(mapping) => {
-                        let limit = sacctmgr::get_limit(&mapping).await?;
+                        let limit = sacctmgr::get_limit(&mapping, job.expires()).await?;
                         job.completed(limit)
                     }
                     SetLocalLimit(mapping, limit) => {
-                        let limit = sacctmgr::set_limit(&mapping, &limit).await?;
+                        let limit = sacctmgr::set_limit(&mapping, &limit, job.expires()).await?;
                         job.completed(limit)
                     }
                     _ => {
                         Err(Error::InvalidInstruction(
-                            format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
+                            format!("Invalid instruction: {}. Slurm agents do not support this instruction", job.instruction()),
                         ))
                     }
                 }
@@ -191,7 +219,14 @@ async fn main() -> Result<()> {
         // connect the single shared Slurm client - this will be used in the
         // async function (we can't bind variables to async functions, or else
         // we would just pass the client with the environment)
-        slurm::connect(&slurm_server, &slurm_user, &token_command, token_lifespan).await?;
+        slurm::connect(
+            &slurm_server,
+            &slurm_user,
+            &token_command,
+            token_lifespan,
+            max_slurm_runners,
+        )
+        .await?;
 
         tracing::info!("Connected to slurm server at {}", slurm_server);
 
@@ -206,44 +241,48 @@ async fn main() -> Result<()> {
 
                 match job.instruction() {
                     AddLocalProject(project) => {
-                        slurm::add_project(&project).await?;
+                        slurm::add_project(&project, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalProject(project) => {
                         // we won't remove the project for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
-                        // disable the project instead.
-                        tracing::warn!("RemoveLocalProject instruction not implemented yet - not actually removing {}", project);
+                        // disable the project instead. However, we do want to cancel
+                        // all pending jobs associated with this project.
+                        sacctmgr::cancel_pending_project_jobs(project.local_group(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for project {}", project);
                         job.completed_none()
                     },
                     AddLocalUser(user) => {
-                        slurm::add_user(&user).await?;
+                        slurm::add_user(&user, job.expires()).await?;
                         job.completed_none()
                     },
                     RemoveLocalUser(mapping) => {
                         // we won't remove the user for now, as we want to
                         // make sure that the statistics are preserved. Will eventually
                         // disable the user instead. Note that they are already
-                        // disabled in FreeIPA, so cannot submit jobs to this account
-                        tracing::warn!("RemoveLocalUser instruction not implemented yet - not actually removing {}", mapping);
+                        // disabled in FreeIPA, so cannot submit jobs to this account.
+                        // However, we do want to cancel all pending jobs for this user.
+                        sacctmgr::cancel_pending_user_jobs(mapping.local_user(), job.expires()).await?;
+                        tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
                     },
                     GetLocalUsageReport(mapping, dates) => {
                         // use sacctmgr for now, as we need to validate the API response
-                        let report = slurm::get_usage_report(&mapping, &dates).await?;
+                        let report = slurm::get_usage_report(&mapping, &dates, job.expires()).await?;
                         job.completed(report)
                     }
                     GetLocalLimit(mapping) => {
-                        let limit = slurm::get_limit(&mapping).await?;
+                        let limit = slurm::get_limit(&mapping, job.expires()).await?;
                         job.completed(limit)
                     }
                     SetLocalLimit(mapping, limit) => {
-                        let limit = slurm::set_limit(&mapping, &limit).await?;
+                        let limit = slurm::set_limit(&mapping, &limit, job.expires()).await?;
                         job.completed(limit)
                     }
                     _ => {
                         Err(Error::InvalidInstruction(
-                            format!("Invalid instruction: {}. Slurm only supports add_local_user and remove_local_user", job.instruction()),
+                            format!("Invalid instruction: {}. Slurm agents do not support this instruction", job.instruction()),
                         ))
                     }
                 }

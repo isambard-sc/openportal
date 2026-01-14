@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent::Peer;
-use crate::board::{SyncState, Waiter};
+use crate::board::{JobAddState, SyncState, Waiter};
 use crate::command::Command as ControlCommand;
 use crate::destination::{Destination, Position};
 use crate::error::Error;
@@ -54,6 +54,7 @@ pub enum Status {
     Running,
     Complete,
     Error,
+    Duplicate,
 }
 
 impl Display for Status {
@@ -64,6 +65,7 @@ impl Display for Status {
             Status::Running => write!(f, "running"),
             Status::Complete => write!(f, "complete"),
             Status::Error => write!(f, "error"),
+            Status::Duplicate => write!(f, "duplicate"),
         }
     }
 }
@@ -78,6 +80,7 @@ impl std::str::FromStr for Status {
             "running" => Ok(Status::Running),
             "complete" => Ok(Status::Complete),
             "error" => Ok(Status::Error),
+            "duplicate" => Ok(Status::Duplicate),
             _ => Err(Error::Parse(format!("Unknown status: {}", s))),
         }
     }
@@ -128,8 +131,17 @@ impl Command {
                 Instruction::UpdateHomeDir(user, _) => Some(user),
                 Instruction::GetUserMapping(user) => Some(user),
                 Instruction::IsProtectedUser(user) => Some(user),
+                Instruction::IsExistingUser(user) => Some(user),
                 Instruction::GetHomeDir(user) => Some(user),
                 Instruction::GetLocalHomeDir(user) => Some(user.user().clone()),
+                Instruction::GetUserQuota(user, _) => Some(user),
+                Instruction::SetUserQuota(user, _, _) => Some(user),
+                Instruction::ClearUserQuota(user, _) => Some(user),
+                Instruction::GetUserQuotas(user) => Some(user),
+                Instruction::GetLocalUserQuota(user, _) => Some(user.user().clone()),
+                Instruction::SetLocalUserQuota(user, _, _) => Some(user.user().clone()),
+                Instruction::ClearLocalUserQuota(user, _) => Some(user.user().clone()),
+                Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
                 _ => None,
             };
 
@@ -147,9 +159,13 @@ impl Command {
             }
 
             let project = match instruction.clone() {
+                Instruction::CreateProject(project, _) => Some(project),
+                Instruction::UpdateProject(project, _) => Some(project),
+                Instruction::GetProject(project) => Some(project),
                 Instruction::AddProject(project) => Some(project),
                 Instruction::AddLocalProject(project) => Some(project.project().clone()),
                 Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
+                Instruction::IsExistingProject(project) => Some(project),
                 Instruction::GetUsers(project) => Some(project),
                 Instruction::RemoveProject(project) => Some(project),
                 Instruction::GetUsageReport(project, _) => Some(project),
@@ -161,6 +177,14 @@ impl Command {
                 Instruction::SetLimit(project, _) => Some(project),
                 Instruction::GetProjectDirs(project) => Some(project),
                 Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
+                Instruction::GetProjectQuota(project, _) => Some(project),
+                Instruction::SetProjectQuota(project, _, _) => Some(project),
+                Instruction::ClearProjectQuota(project, _) => Some(project),
+                Instruction::GetProjectQuotas(project) => Some(project),
+                Instruction::GetLocalProjectQuota(project, _) => Some(project.project().clone()),
+                Instruction::SetLocalProjectQuota(project, _, _) => Some(project.project().clone()),
+                Instruction::ClearLocalProjectQuota(project, _) => Some(project.project().clone()),
+                Instruction::GetLocalProjectQuotas(project) => Some(project.project().clone()),
                 _ => None,
             };
 
@@ -282,6 +306,7 @@ impl std::fmt::Display for Job {
                 Some(result) => write!(f, "{{{}: Error - {}}}", self.command, result),
                 None => write!(f, "{{{}: Unknown Error}}", self.command),
             },
+            Status::Duplicate => write!(f, "{{{}: Duplicate of {:?}}}", self.command, self.result),
         }
     }
 }
@@ -296,11 +321,11 @@ impl Job {
             id: Uuid::new_v4(),
             created: now,
             changed: now,
-            // settled on 1 minute as this makes the interface with the
+            // settled on 2 minutes as this makes the interface with the
             // user portal more responsive - any task that takes longer
-            // than a minute can have its lifetime changed using the
+            // than 2 minutes can have its lifetime changed using the
             // set_lifetime method
-            expires: now + chrono::Duration::minutes(1),
+            expires: now + chrono::Duration::minutes(2),
             version: 1,
             command: Command::parse(command, check_portal)?,
             state: Status::Created,
@@ -308,6 +333,14 @@ impl Job {
             result_type: None,
             board: None,
         })
+    }
+
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self).map_err(Error::SerdeJson)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json).map_err(Error::SerdeJson)
     }
 
     pub fn id(&self) -> Uuid {
@@ -320,6 +353,10 @@ impl Job {
 
     pub fn instruction(&self) -> Instruction {
         self.command.instruction()
+    }
+
+    pub fn expires(&self) -> &chrono::DateTime<Utc> {
+        &self.expires
     }
 
     pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
@@ -341,8 +378,20 @@ impl Job {
         self.expires < Utc::now()
     }
 
+    pub fn is_pending(&self) -> bool {
+        self.state == Status::Pending
+    }
+
     pub fn is_finished(&self) -> bool {
         self.state == Status::Complete || self.state == Status::Error
+    }
+
+    pub fn is_duplicate(&self) -> bool {
+        self.state == Status::Duplicate
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.state == Status::Running
     }
 
     pub fn state(&self) -> Status {
@@ -377,6 +426,12 @@ impl Job {
     }
 
     pub fn assert_is_for_board(&self, agent: &Peer) -> Result<(), Error> {
+        if self.is_expired() {
+            return Err(Error::Expired(
+                format!("Job {} has expired", self.id).to_owned(),
+            ));
+        }
+
         match &self.board {
             Some(b) => {
                 if b == agent {
@@ -429,6 +484,46 @@ impl Job {
         }
     }
 
+    pub fn is_duplicate_of(&self, job: &Job) -> bool {
+        self.command.destination().last() == job.command.destination().last()
+            && self.command.instruction() == job.command.instruction()
+            && job.is_pending()
+            && self.is_pending()
+    }
+
+    pub fn duplicate(&self, job: &Job) -> Result<Job, Error> {
+        if !self.is_duplicate_of(job) {
+            return Err(Error::InvalidState(
+                format!("Job {} is not a duplicate of job {}", self, job).to_owned(),
+            ));
+        }
+
+        tracing::debug!(
+            "Setting job {} as a duplicate of job {}. Repeated command: {}",
+            self.id,
+            job.id,
+            job.command
+        );
+
+        match self.state {
+            Status::Pending => Ok(Job {
+                id: self.id,
+                created: self.created,
+                changed: Utc::now(),
+                expires: self.expires,
+                version: self.version + 1,
+                command: job.command.clone(),
+                state: Status::Duplicate,
+                result: job.id.to_string().into(),
+                result_type: None,
+                board: self.board.clone(),
+            }),
+            _ => Err(Error::InvalidState(
+                format!("Cannot set duplicate on job in state: {:?}", self.state).to_owned(),
+            )),
+        }
+    }
+
     pub fn running(&self, progress: Option<String>) -> Result<Job, Error> {
         match self.state {
             Status::Pending | Status::Running => Ok(Job {
@@ -458,7 +553,7 @@ impl Job {
         }
 
         match self.state {
-            Status::Pending | Status::Running => Ok(Job {
+            Status::Duplicate | Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
@@ -522,7 +617,7 @@ impl Job {
 
     pub fn errored(&self, message: &str) -> Result<Job, Error> {
         match self.state {
-            Status::Pending | Status::Running => Ok(Job {
+            Status::Duplicate | Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
                 created: self.created,
                 changed: Utc::now(),
@@ -563,7 +658,25 @@ impl Job {
             Status::Created => Some("Created".to_owned()),
             Status::Pending => Some("Pending".to_owned()),
             Status::Complete => Some("Complete".to_owned()),
+            Status::Duplicate => Some("Pending".to_owned()),
             Status::Error => Some("Error".to_owned()),
+        }
+    }
+
+    pub fn result_json(&self) -> Result<String, Error> {
+        match self.state {
+            Status::Created => Ok("null".to_string()),
+            Status::Pending => Ok("null".to_string()),
+            Status::Duplicate => Ok("null".to_string()),
+            Status::Running => Ok("null".to_string()),
+            Status::Error => match &self.result {
+                Some(result) => Err(Error::Run(result.clone())),
+                None => Err(Error::InvalidState("Unknown error".to_owned())),
+            },
+            Status::Complete => match &self.result {
+                Some(result) => Ok(result.clone()),
+                None => Ok("{}".to_string()),
+            },
         }
     }
 
@@ -571,6 +684,7 @@ impl Job {
         match self.state {
             Status::Created => Ok("None".to_string()),
             Status::Pending => Ok("None".to_string()),
+            Status::Duplicate => Ok("None".to_string()),
             Status::Running => Ok("None".to_string()),
             Status::Error => match &self.result_type {
                 Some(t) => Ok(t.clone()),
@@ -590,6 +704,7 @@ impl Job {
         match self.state {
             Status::Created => Ok(None),
             Status::Pending => Ok(None),
+            Status::Duplicate => Ok(None),
             Status::Running => Ok(None),
             Status::Error => match &self.result {
                 Some(result) => Err(Error::Run(result.clone())),
@@ -598,6 +713,31 @@ impl Job {
             Status::Complete => match &self.result {
                 Some(result) => Ok(Some(serde_json::from_str(result)?)),
                 None => Err(Error::Unknown("No result available".to_owned())),
+            },
+        }
+    }
+
+    pub fn result_none(&self) -> Result<(), Error> {
+        match self.state {
+            Status::Created => Ok(()),
+            Status::Pending => Ok(()),
+            Status::Duplicate => Ok(()),
+            Status::Running => Ok(()),
+            Status::Error => match &self.result {
+                Some(result) => Err(Error::Run(result.clone())),
+                None => Err(Error::InvalidState("Unknown error".to_owned())),
+            },
+            Status::Complete => match self.result_type() {
+                Ok(t) => {
+                    if t == "None" {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidState(
+                            "Result type is not None for completed job".to_owned(),
+                        ))
+                    }
+                }
+                Err(e) => Err(e),
             },
         }
     }
@@ -649,18 +789,15 @@ impl Job {
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
 
-            if !board.add(&job)? {
-                // The board already contains this version of the job
-                // There is no change, so no need to send to the peer
-                // (the job has already been sent)
-                return Ok(job);
-            }
+            (job, _) = board.add(&job)?;
         }
 
         Ok(job)
     }
 
     pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
+        tracing::debug!("Put {} : {}", self.destination(), self.instruction());
+
         self.assert_is_not_expired()?;
 
         // transition the job to pending, recording where it was sent
@@ -688,10 +825,19 @@ impl Job {
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
 
-            if !board.add(&job)? {
-                // The board already contains this version of the job
-                // There is no change, so no need to send to the peer
+            let state;
+
+            (job, state) = board.add(&job)?;
+
+            if state == JobAddState::Unchanged || state == JobAddState::Duplicated {
+                // The board already contains this version of the job,
+                // or a job which is a duplicate of this one.
+                // There is no need to send to the peer
                 // (the job has already been sent)
+                if job.is_duplicate() {
+                    tracing::info!("Not sending duplicate job: {}", job.instruction());
+                }
+
                 return Ok(job);
             }
         }
@@ -702,7 +848,7 @@ impl Job {
             Err(e) => {
                 // if we can't send the command, then we need to need to add
                 // it to a queue for sending once the peer is back online
-                tracing::debug!("Error sending command to agent: {:?}", e);
+                tracing::warn!("Error sending command to agent: {:?}", e);
                 let mut board = board.write().await;
                 board.queue(ControlCommand::put(&job));
             }
@@ -741,13 +887,15 @@ impl Job {
             // blocking operation
             let mut board = board.write().await;
 
+            let (job, state) = board.add(self)?;
+
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
-            if !board.add(self)? {
+            if state != JobAddState::Unchanged {
                 // The board already contains this version of the job
                 // There is no change, so no need to send to the peer
                 // (the job has already been sent)
-                return Ok(self.clone());
+                return Ok(job);
             }
         }
 
@@ -780,7 +928,12 @@ impl Job {
             // add the job to the board - we need to set our board to the agent
             // first, so that the board can check it is correct
             job.board = Some(peer.clone());
-            if !board.add(&job)? {
+
+            let state;
+
+            (job, state) = board.add(&job)?;
+
+            if state == JobAddState::Unchanged {
                 // The board already contains this version of the job
                 // There is no change, so no need to send to the peer
                 // (the job has already been sent)
@@ -798,6 +951,145 @@ impl Job {
                 let mut board = board.write().await;
                 board.queue(ControlCommand::update(&job));
             }
+        }
+
+        Ok(job)
+    }
+
+    /// Update a job that was processed by a virtual agent
+    ///
+    /// This handles the special case where a virtual agent (virtual_peer) processes a job
+    /// on behalf of a hosting agent (hosting_peer). It:
+    /// 1. Updates the hosting agent's board directly
+    /// 2. Sends the Update message to the upstream agent (previous to the hosting agent)
+    ///
+    /// # Arguments
+    /// * `virtual_peer` - The virtual agent that processed the job (e.g., isambard-ai)
+    /// * `hosting_peer` - The agent hosting the virtual agent (e.g., waldur)
+    pub async fn virtual_update(
+        &self,
+        virtual_peer: &Peer,
+        hosting_peer: &Peer,
+    ) -> Result<Job, Error> {
+        self.assert_is_not_expired()?;
+
+        let mut job = self.clone();
+
+        // First, update the hosting agent's board directly (since it "processed" the job)
+        let board = match state::get(hosting_peer).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for hosting agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        {
+            let mut board = board.write().await;
+            job.board = Some(hosting_peer.clone());
+            match board.add(&job) {
+                Ok((_, _)) => {}
+                Err(e) => {
+                    tracing::error!(
+                        "Error updating hosting agent {} board with job {}: {:?}",
+                        hosting_peer,
+                        job,
+                        e
+                    );
+                }
+            };
+        }
+
+        // Now update the virtual agent's board
+        let board = match state::get(virtual_peer).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for virtual agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        {
+            let mut board = board.write().await;
+            job.board = Some(virtual_peer.clone());
+            match board.add(&job) {
+                Ok((_, _)) => {}
+                Err(e) => {
+                    tracing::error!(
+                        "Error updating virtual agent {} board with job {}: {:?}",
+                        virtual_peer,
+                        job,
+                        e
+                    );
+                }
+            };
+        }
+
+        // Now determine where to send the Update: to the agent upstream of the hosting agent
+        // Find the previous agent before the hosting agent in the destination chain
+        if let Some(upstream_agent) = self.destination().previous(hosting_peer.name()) {
+            let upstream_peer = Peer::new(&upstream_agent, hosting_peer.zone());
+
+            tracing::debug!(
+                "Virtual agent {} (hosted by {}) sending update to upstream agent {}",
+                virtual_peer,
+                hosting_peer,
+                upstream_peer
+            );
+
+            // now update the upstream agent's board with the updated job
+            let board = match state::get(&upstream_peer).await {
+                Ok(b) => b.board().await,
+                Err(e) => {
+                    tracing::error!(
+                        "Error getting board for upstream agent: {:?}. Is this agent known to us?",
+                        e
+                    );
+                    return Err(e);
+                }
+            };
+
+            {
+                let mut board = board.write().await;
+                job.board = Some(upstream_peer.clone());
+
+                match board.add(&job) {
+                    Ok((_, _)) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            "Error updating upstream agent {} board with job {}: {:?}",
+                            upstream_peer,
+                            job,
+                            e
+                        );
+                    }
+                };
+            }
+
+            // Send the update to the upstream agent
+            // The message should appear to come from the hosting agent
+            match ControlCommand::update(&job).send_to(&upstream_peer).await {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::debug!("Error sending command to upstream agent: {:?}", e);
+                    let mut board = board.write().await;
+                    board.queue(ControlCommand::update(&job));
+                }
+            }
+        } else {
+            // No upstream agent - the hosting agent is at the start of the chain
+            // This means the job is complete
+            tracing::error!(
+                "Virtual agent {} (hosted by {}) has no upstream agent - job complete",
+                virtual_peer,
+                hosting_peer
+            );
         }
 
         Ok(job)
@@ -893,8 +1185,8 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn wait(&self) -> Result<Job, Error> {
-        if self.is_finished() {
+    async fn _wait(&self) -> Result<Job, Error> {
+        if self.is_finished() || self.is_expired() {
             return Ok(self.clone());
         }
 
@@ -935,6 +1227,74 @@ impl Job {
         let result = waiter.result().await?;
 
         Ok(result)
+    }
+
+    pub async fn wait(&self) -> Result<Job, Error> {
+        let mut job = self._wait().await?;
+
+        // if the job is still running, then we need to wait for it to finish
+        let mut rewaits = 0;
+
+        while !job.is_finished() {
+            // wait for the job to finish
+            tracing::warn!("Wait returned even if the job is not finished: {:?}", job);
+            rewaits += 1;
+
+            if rewaits > 10 {
+                tracing::error!("Job is still not finished after 10 waits: {:?}", job);
+                return Err(Error::InvalidState(
+                    "Job is still not finished after 10 waits".to_owned(),
+                ));
+            }
+
+            job = job._wait().await?;
+        }
+
+        Ok(job)
+    }
+
+    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job>, Error> {
+        if self.is_finished() || self.is_expired() {
+            return Ok(Some(self.clone()));
+        } else if timeout_ms == 0 {
+            return Ok(Some(self.wait().await?));
+        }
+
+        let agent = match self.board {
+            Some(ref a) => a,
+            None => {
+                return Err(Error::InvalidBoard(
+                    "Job has no board, so cannot waited upon".to_owned(),
+                ))
+            }
+        };
+
+        // get a RwLock to the board from the shared state
+        let board = match state::get(agent).await {
+            Ok(b) => b.board().await,
+            Err(e) => {
+                tracing::error!(
+                    "Error getting board for agent: {:?}. Is this agent known to us?",
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        let waiter: Waiter;
+
+        // in a scope so we drop the lock asap
+        {
+            // get the mutable board from the Arc<RwLock> board - this is the
+            // blocking operation
+            let mut board = board.write().await;
+
+            // return a waiter for the job constructed from the board
+            waiter = board.get_waiter(self)?;
+        }
+
+        // wait for the job to finish
+        waiter.try_result(timeout_ms).await
     }
 }
 
@@ -1133,6 +1493,18 @@ pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
         }
     }
 
+    Ok(())
+}
+
+///
+/// Assert that the job with the specified expiry time has not expired
+///
+pub fn assert_not_expired(expiry: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    if Utc::now() > *expiry {
+        return Err(Error::Expired(
+            format!("Job expired at: {}", expiry).to_owned(),
+        ));
+    }
     Ok(())
 }
 

@@ -22,7 +22,12 @@ use tokio::net::TcpListener;
 //
 #[tracing::instrument(skip_all)]
 async fn health() -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(json!({"status": "ok"})))
+    let worker_count = crate::exchange::worker_count();
+
+    Ok(Json(json!({
+        "status": "ok",
+        "workers": worker_count
+    })))
 }
 
 ///

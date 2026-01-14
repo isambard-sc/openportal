@@ -361,7 +361,12 @@ pub async fn remove_existing_user(user: &IPAUser) -> Result<(), Error> {
 /// if it doesn't exist
 ///
 pub async fn get_group(group: &ProjectIdentifier) -> Result<Option<IPAGroup>, Error> {
+    tracing::debug!("Getting group {} from cache - awaiting lock...", group);
     let cache = CACHE.read().await;
+    tracing::debug!(
+        "Lock obtained. Cache contains {} groups",
+        cache.groups.len()
+    );
     Ok(cache.groups.get(group).cloned())
 }
 

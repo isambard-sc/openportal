@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use crate::error::Error;
 
 use crate::grammar::{
-    Date, NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping,
+    Allocation, Date, NamedType, Node, PortalIdentifier, ProjectIdentifier, UserIdentifier,
+    UserMapping,
 };
 
 impl NamedType for Usage {
@@ -109,12 +110,48 @@ impl std::fmt::Display for Usage {
 }
 
 impl Usage {
-    pub fn parse(seconds: &str) -> Result<Self, Error> {
-        let seconds = seconds
-            .parse::<u64>()
-            .with_context(|| format!("Failed to parse seconds from '{}'", seconds))?;
+    pub fn parse(duration: &str) -> Result<Self, Error> {
+        let mut units = 1; // seconds
 
-        Ok(Self { seconds })
+        let parts: Vec<&str> = duration.split_whitespace().collect();
+
+        if parts.is_empty() {
+            tracing::error!(
+                "get_limit failed to parse '{}'. No duration found",
+                duration
+            );
+            return Err(Error::Parse(format!(
+                "get_limit failed to parse '{}'. No duration found",
+                duration
+            )));
+        }
+
+        if parts.len() > 1 {
+            units = match parts[1].to_ascii_lowercase().as_str() {
+                "seconds" | "second" | "s" => 1,
+                "minutes" | "minute" | "m" => 60,
+                "hours" | "hour" | "h" => 3600,
+                "days" | "day" | "d" => 86400,
+                _ => {
+                    tracing::error!(
+                                "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
+                                &parts[1..].join(" "),
+                            );
+                    return Err(Error::Parse(format!(
+                                "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
+                                &parts[1..].join(" "),
+                            )));
+                }
+            };
+        }
+
+        let seconds = parts[0]
+            .parse::<u64>()
+            .with_context(|| format!("Failed to parse seconds from '{}'", duration))?;
+
+        Ok(Self {
+            seconds: seconds * units,
+        })
     }
 
     pub fn new(seconds: u64) -> Self {
@@ -179,6 +216,10 @@ impl Usage {
         }
     }
 
+    pub fn is_zero(&self) -> bool {
+        self.seconds == 0
+    }
+
     pub fn seconds(&self) -> u64 {
         self.seconds
     }
@@ -215,6 +256,32 @@ impl std::ops::AddAssign for Usage {
     }
 }
 
+// add the -= operator for Usage
+impl std::ops::SubAssign for Usage {
+    fn sub_assign(&mut self, other: Self) {
+        self.seconds -= other.seconds;
+    }
+}
+
+// add the *= operator for Usage
+impl std::ops::MulAssign<f64> for Usage {
+    fn mul_assign(&mut self, rhs: f64) {
+        self.seconds = (self.seconds as f64 * rhs) as u64;
+    }
+}
+
+// add the /= operator for Usage
+impl std::ops::DivAssign<f64> for Usage {
+    fn div_assign(&mut self, rhs: f64) {
+        if rhs == 0.0 {
+            self.seconds = 0;
+            return;
+        }
+
+        self.seconds = (self.seconds as f64 / rhs) as u64;
+    }
+}
+
 // add the + operator for Usage
 impl std::ops::Add for Usage {
     type Output = Self;
@@ -222,6 +289,48 @@ impl std::ops::Add for Usage {
     fn add(self, other: Self) -> Self {
         Self {
             seconds: self.seconds + other.seconds,
+        }
+    }
+}
+
+// add the - operator for Usage
+impl std::ops::Sub for Usage {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        let mut seconds = self.seconds as i64 - other.seconds as i64;
+        if seconds < 0 {
+            seconds = 0;
+        }
+
+        Self {
+            seconds: seconds as u64,
+        }
+    }
+}
+
+// add the * operator for Usage
+impl std::ops::Mul<f64> for Usage {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        Self {
+            seconds: (self.seconds as f64 * rhs) as u64,
+        }
+    }
+}
+
+// add the / operator for Usage
+impl std::ops::Div<f64> for Usage {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        if rhs == 0.0 {
+            return Self::default();
+        }
+
+        Self {
+            seconds: (self.seconds as f64 / rhs) as u64,
         }
     }
 }
@@ -258,6 +367,10 @@ impl UserUsageReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyProjectUsageReport {
     reports: HashMap<String, Usage>,
+    #[serde(default)]
+    components: HashMap<String, HashMap<String, Usage>>,
+    #[serde(default)]
+    num_jobs: u64,
     is_complete: bool,
 }
 
@@ -269,6 +382,11 @@ impl std::fmt::Display for DailyProjectUsageReport {
 
         for user in users {
             writeln!(f, "{}: {}", user, self.reports[user])?;
+        }
+
+        match self.num_jobs() {
+            0 => (),
+            n => writeln!(f, "Number of jobs: {}", n)?,
         }
 
         match self.is_complete() {
@@ -291,8 +409,90 @@ impl DailyProjectUsageReport {
         self.reports.values().cloned().sum()
     }
 
+    pub fn num_jobs(&self) -> u64 {
+        self.num_jobs
+    }
+
     pub fn add_usage(&mut self, local_user: &str, usage: Usage) {
         *self.reports.entry(local_user.to_string()).or_default() += usage;
+    }
+
+    pub fn set_usage(&mut self, local_user: &str, usage: Usage) {
+        self.reports.insert(local_user.to_string(), usage);
+    }
+
+    pub fn add_component_usage(&mut self, component: &str, local_user: &str, usage: Usage) {
+        if usage.is_zero() {
+            return;
+        }
+
+        let component_reports = self.components.entry(component.to_string()).or_default();
+
+        *component_reports.entry(local_user.to_string()).or_default() += usage;
+    }
+
+    pub fn set_component_usage(&mut self, component: &str, local_user: &str, usage: Usage) {
+        if usage.is_zero() {
+            // remove the entry if it exists
+            if let Some(component_reports) = self.components.get_mut(component) {
+                component_reports.remove(local_user);
+            }
+            return;
+        }
+
+        let component_reports = self.components.entry(component.to_string()).or_default();
+
+        component_reports.insert(local_user.to_string(), usage);
+    }
+
+    pub fn set_num_jobs(&mut self, num_jobs: u64) {
+        self.num_jobs = num_jobs;
+    }
+
+    pub fn add_unattributed_usage(&mut self, usage: Usage) {
+        self.add_usage("unknown", usage);
+    }
+
+    pub fn add_unattributed_component_usage(&mut self, component: &str, usage: Usage) {
+        self.add_component_usage(component, "unknown", usage);
+    }
+
+    pub fn set_unattributed_usage(&mut self, usage: Usage) {
+        self.set_usage("unknown", usage);
+    }
+
+    pub fn set_unattributed_component_usage(&mut self, component: &str, usage: Usage) {
+        self.set_component_usage(component, "unknown", usage);
+    }
+
+    pub fn components(&self) -> Vec<String> {
+        let mut components = self.components.keys().cloned().collect::<Vec<_>>();
+        components.sort();
+        components
+    }
+
+    pub fn get_component(&self, component: &str) -> DailyProjectUsageReport {
+        match self.components.get(component) {
+            Some(reports) => {
+                let mut report = DailyProjectUsageReport::default();
+
+                for (user, usage) in reports {
+                    report.set_usage(user, *usage);
+                }
+
+                report.set_num_jobs(self.num_jobs);
+                report.is_complete = self.is_complete;
+
+                report
+            }
+            None => {
+                let mut report = DailyProjectUsageReport::default();
+                report.set_num_jobs(self.num_jobs);
+                report.is_complete = self.is_complete;
+
+                report
+            }
+        }
     }
 
     pub fn set_complete(&mut self) {
@@ -301,6 +501,106 @@ impl DailyProjectUsageReport {
 
     pub fn is_complete(&self) -> bool {
         self.is_complete
+    }
+}
+
+impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        let mut new_report = self.clone();
+
+        for (user, usage) in other.reports {
+            new_report.add_usage(&user, usage);
+        }
+
+        // now do the same for the components
+        for (component, reports) in other.components {
+            for (user, usage) in reports {
+                new_report.add_component_usage(&component, &user, usage);
+            }
+        }
+
+        new_report.num_jobs = self.num_jobs + other.num_jobs;
+
+        new_report.is_complete = false; // combine reports are never complete
+
+        new_report
+    }
+}
+
+impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
+    fn add_assign(&mut self, other: Self) {
+        for (user, usage) in other.reports {
+            self.add_usage(&user, usage);
+        }
+
+        // now do the same for the components
+        for (component, reports) in other.components {
+            for (user, usage) in reports {
+                self.add_component_usage(&component, &user, usage);
+            }
+        }
+
+        self.num_jobs += other.num_jobs;
+
+        self.is_complete = false; // combine reports are never complete
+    }
+}
+
+impl std::ops::Mul<f64> for DailyProjectUsageReport {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for usage in new_report.reports.values_mut() {
+            *usage *= rhs;
+        }
+
+        // do the same for the component usage
+        for component_reports in new_report.components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage *= rhs;
+            }
+        }
+
+        new_report
+    }
+}
+
+impl std::ops::Div<f64> for DailyProjectUsageReport {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for usage in new_report.reports.values_mut() {
+            *usage /= rhs;
+        }
+
+        // do the same for the component usage
+        for component_reports in new_report.components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage /= rhs;
+            }
+        }
+
+        new_report
+    }
+}
+
+impl std::ops::MulAssign<f64> for DailyProjectUsageReport {
+    fn mul_assign(&mut self, rhs: f64) {
+        for usage in self.reports.values_mut() {
+            *usage *= rhs;
+        }
+    }
+}
+
+impl std::ops::DivAssign<f64> for DailyProjectUsageReport {
+    fn div_assign(&mut self, rhs: f64) {
+        for usage in self.reports.values_mut() {
+            *usage /= rhs;
+        }
     }
 }
 
@@ -326,9 +626,14 @@ impl std::fmt::Display for ProjectUsageReport {
         }
 
         for date in dates {
-            writeln!(f, "{}", date)?;
-
             let report = self.reports.get(date).cloned().unwrap_or_default();
+
+            if report.total_usage() == Usage::default() {
+                // skip days with no usage
+                continue;
+            }
+
+            writeln!(f, "{}", date)?;
 
             for user in report.local_users() {
                 if let Some(userid) = users.get(&user) {
@@ -338,12 +643,158 @@ impl std::fmt::Display for ProjectUsageReport {
                 }
             }
 
+            writeln!(f, "Number of jobs: {}", report.num_jobs())?;
             writeln!(f, "Daily total: {}", report.total_usage())?;
             writeln!(f, "----------------------------------------")?;
         }
 
         writeln!(f, "========================================")?;
+        writeln!(f, "Number of jobs: {}", self.num_jobs())?;
         writeln!(f, "Total: {}", self.total_usage())
+    }
+}
+
+impl std::ops::Add<ProjectUsageReport> for ProjectUsageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        if self.project != other.project {
+            tracing::warn!(
+                "Cannot add reports for different projects: {} and {}",
+                self.project,
+                other.project
+            );
+            return self;
+        }
+
+        let mut new_report = self.clone();
+
+        for (date, report) in other.reports {
+            match new_report.reports.get_mut(&date) {
+                Some(existing_report) => {
+                    for (user, usage) in report.clone().reports {
+                        existing_report.add_usage(&user, usage);
+                    }
+
+                    existing_report.set_num_jobs(existing_report.num_jobs() + report.num_jobs());
+
+                    // also merge component usage
+                    for (component, reports) in report.components {
+                        for (user, usage) in reports {
+                            existing_report.add_component_usage(&component, &user, usage);
+                        }
+                    }
+                }
+                None => {
+                    new_report.reports.insert(date, report);
+                }
+            }
+        }
+
+        new_report
+    }
+}
+
+impl std::ops::AddAssign<ProjectUsageReport> for ProjectUsageReport {
+    fn add_assign(&mut self, other: Self) {
+        if self.project != other.project {
+            tracing::warn!(
+                "Cannot add reports for different projects: {} and {}",
+                self.project,
+                other.project
+            );
+            return;
+        }
+
+        for (date, report) in other.reports {
+            match self.reports.get_mut(&date) {
+                Some(existing_report) => {
+                    for (user, usage) in report.clone().reports {
+                        existing_report.add_usage(&user, usage);
+                    }
+
+                    existing_report.set_num_jobs(existing_report.num_jobs() + report.num_jobs());
+
+                    // also merge component usage
+                    for (component, reports) in report.components {
+                        for (user, usage) in reports {
+                            existing_report.add_component_usage(&component, &user, usage);
+                        }
+                    }
+                }
+                None => {
+                    self.reports.insert(date, report);
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Mul<f64> for ProjectUsageReport {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage *= rhs;
+            }
+            for component_reports in report.components.values_mut() {
+                for usage in component_reports.values_mut() {
+                    *usage *= rhs;
+                }
+            }
+        }
+        new_report
+    }
+}
+
+impl std::ops::Div<f64> for ProjectUsageReport {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage /= rhs;
+            }
+            for component_reports in report.components.values_mut() {
+                for usage in component_reports.values_mut() {
+                    *usage /= rhs;
+                }
+            }
+        }
+        new_report
+    }
+}
+
+impl std::ops::MulAssign<f64> for ProjectUsageReport {
+    fn mul_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage *= rhs;
+            }
+            for component_reports in report.components.values_mut() {
+                for usage in component_reports.values_mut() {
+                    *usage *= rhs;
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::DivAssign<f64> for ProjectUsageReport {
+    fn div_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage /= rhs;
+            }
+            for component_reports in report.components.values_mut() {
+                for usage in component_reports.values_mut() {
+                    *usage /= rhs;
+                }
+            }
+        }
     }
 }
 
@@ -356,12 +807,40 @@ impl ProjectUsageReport {
         }
     }
 
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self)
+            .with_context(|| "Failed to serialize ProjectUsageReport to JSON".to_string())
+            .map_err(Error::from)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json)
+            .with_context(|| "Failed to deserialize ProjectUsageReport from JSON".to_string())
+            .map_err(Error::from)
+    }
+
     pub fn dates(&self) -> Vec<Date> {
         let mut dates: Vec<Date> = self.reports.keys().cloned().collect();
 
         dates.sort();
 
         dates
+    }
+
+    pub fn components(&self) -> Vec<String> {
+        let mut components: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for report in self.reports.values() {
+            for component in report.components() {
+                components.insert(component);
+            }
+        }
+
+        let mut components: Vec<String> = components.into_iter().collect();
+
+        components.sort();
+
+        components
     }
 
     pub fn project(&self) -> ProjectIdentifier {
@@ -404,6 +883,10 @@ impl ProjectUsageReport {
             .cloned()
             .map(|r| r.total_usage())
             .sum()
+    }
+
+    pub fn num_jobs(&self) -> u64 {
+        self.reports.values().map(|r| r.num_jobs()).sum()
     }
 
     pub fn unmapped_usage(&self) -> Usage {
@@ -466,6 +949,17 @@ impl ProjectUsageReport {
         self.reports.insert(date.clone(), report.clone());
     }
 
+    pub fn add_report(&mut self, date: &Date, report: &DailyProjectUsageReport) {
+        match self.reports.get_mut(date) {
+            Some(existing_report) => {
+                *existing_report += report.clone();
+            }
+            None => {
+                self.reports.insert(date.clone(), report.clone());
+            }
+        }
+    }
+
     pub fn get_report(&self, date: &Date) -> ProjectUsageReport {
         match self.reports.get(date) {
             Some(report) => {
@@ -488,6 +982,61 @@ impl ProjectUsageReport {
 
     pub fn is_complete(&self) -> bool {
         self.reports.values().all(|r| r.is_complete())
+    }
+
+    pub fn get_component(&self, component: &str) -> ProjectUsageReport {
+        let mut reports = HashMap::new();
+
+        for (date, daily_report) in &self.reports {
+            let component_report = daily_report.get_component(component);
+            reports.insert(date.clone(), component_report);
+        }
+
+        ProjectUsageReport {
+            project: self.project.clone(),
+            reports,
+            users: self.users.clone(),
+        }
+    }
+
+    pub fn combine(reports: &[ProjectUsageReport]) -> Result<Self, Error> {
+        if reports.is_empty() {
+            return Err(Error::InvalidState("No reports to combine".to_string()));
+        }
+
+        let mut combined = ProjectUsageReport::new(&reports[0].project);
+
+        for report in reports.iter() {
+            if report.portal() != combined.portal() {
+                return Err(Error::Incompatible(format!(
+                    "Cannot combine reports from incompatible portals: {} and {}",
+                    report.portal(),
+                    combined.portal()
+                )));
+            }
+
+            combined += report.clone();
+        }
+
+        Ok(combined)
+    }
+
+    pub fn set_day_complete(&mut self, date: &Date) {
+        if let Some(report) = self.reports.get_mut(date) {
+            report.set_complete();
+        }
+    }
+
+    pub fn set_complete(&mut self) {
+        for report in self.reports.values_mut() {
+            report.set_complete();
+        }
+    }
+
+    pub fn to_usage_report(&self) -> UsageReport {
+        let mut r = UsageReport::new(&self.project.portal_identifier());
+        r.reports.insert(self.project.clone(), self.clone());
+        r
     }
 }
 
@@ -514,12 +1063,107 @@ impl std::fmt::Display for UsageReport {
     }
 }
 
+impl std::ops::Add<UsageReport> for UsageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        if self.portal != other.portal {
+            tracing::warn!(
+                "Cannot add reports for different portals: {} and {}",
+                self.portal,
+                other.portal
+            );
+            return self;
+        }
+
+        let mut new_report = self.clone();
+        new_report += other;
+        new_report
+    }
+}
+
+impl std::ops::AddAssign<UsageReport> for UsageReport {
+    fn add_assign(&mut self, other: Self) {
+        if self.portal != other.portal {
+            tracing::warn!(
+                "Cannot add reports for different portals: {} and {}",
+                self.portal,
+                other.portal
+            );
+            return;
+        }
+
+        for report in other.reports {
+            match self.reports.get_mut(&report.0) {
+                Some(existing_report) => {
+                    *existing_report += report.1;
+                }
+                None => {
+                    self.reports.insert(report.0, report.1);
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Mul<f64> for UsageReport {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            *report = report.clone() * rhs;
+        }
+        new_report
+    }
+}
+
+impl std::ops::Div<f64> for UsageReport {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self {
+        let mut new_report = self.clone();
+        for report in new_report.reports.values_mut() {
+            *report = report.clone() / rhs;
+        }
+        new_report
+    }
+}
+
+impl std::ops::MulAssign<f64> for UsageReport {
+    fn mul_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            *report *= rhs;
+        }
+    }
+}
+
+impl std::ops::DivAssign<f64> for UsageReport {
+    fn div_assign(&mut self, rhs: f64) {
+        for report in self.reports.values_mut() {
+            *report /= rhs;
+        }
+    }
+}
+
 impl UsageReport {
     pub fn new(portal: &PortalIdentifier) -> Self {
         Self {
             portal: portal.clone(),
             reports: HashMap::new(),
         }
+    }
+
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self)
+            .with_context(|| "Failed to serialize UsageReport to JSON".to_string())
+            .map_err(Error::from)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json)
+            .with_context(|| "Failed to deserialize UsageReport from JSON".to_string())
+            .map_err(Error::from)
     }
 
     pub fn portal(&self) -> &PortalIdentifier {
@@ -532,6 +1176,22 @@ impl UsageReport {
         projects.sort_by_cached_key(|p| p.to_string());
 
         projects
+    }
+
+    pub fn components(&self) -> Vec<String> {
+        let mut components: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for report in self.reports.values() {
+            for component in report.components() {
+                components.insert(component);
+            }
+        }
+
+        let mut components: Vec<String> = components.into_iter().collect();
+
+        components.sort();
+
+        components
     }
 
     pub fn get_report(&self, project: &ProjectIdentifier) -> ProjectUsageReport {
@@ -559,11 +1219,147 @@ impl UsageReport {
         }
     }
 
+    pub fn get_component(&self, component: &str) -> UsageReport {
+        let mut reports = HashMap::new();
+
+        for (project, project_report) in &self.reports {
+            let component_report = project_report.get_component(component);
+            reports.insert(project.clone(), component_report);
+        }
+
+        UsageReport {
+            portal: self.portal.clone(),
+            reports,
+        }
+    }
+
     pub fn total_usage(&self) -> Usage {
         self.reports
             .values()
             .cloned()
             .map(|r| r.total_usage())
             .sum()
+    }
+
+    pub fn combine(reports: &[UsageReport]) -> Result<Self, Error> {
+        if reports.is_empty() {
+            return Err(Error::InvalidState("No reports to combine".to_string()));
+        }
+
+        let mut combined = UsageReport::new(&reports[0].portal);
+
+        for report in reports.iter() {
+            if report.portal() != combined.portal() {
+                return Err(Error::Incompatible(format!(
+                    "Cannot combine reports from incompatible portals: {} and {}",
+                    report.portal(),
+                    combined.portal()
+                )));
+            }
+
+            combined += report.clone();
+        }
+
+        Ok(combined)
+    }
+}
+
+impl Allocation {
+    pub fn to_node_hours(&self, node: &Node) -> Result<Usage, Error> {
+        if let Some(size) = self.size() {
+            if self.is_node_hours() {
+                return Ok(Usage::from_hours(size));
+            } else if self.is_cpu_hours() {
+                if node.cores() == 0 {
+                    return Err(Error::InvalidState(
+                        "Node has no cores, cannot convert CPU hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / node.cores() as f64));
+            } else if self.is_gpu_hours() {
+                if node.gpus() == 0 {
+                    return Err(Error::InvalidState(
+                        "Node has no GPUs, cannot convert GPU hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / node.gpus() as f64));
+            } else if self.is_core_hours() {
+                if node.cores() == 0 {
+                    return Err(Error::InvalidState(
+                        "Node has no cores, cannot convert core hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / node.cores() as f64));
+            } else if self.is_gb_hours() {
+                if node.memory_gb() == 0.0 {
+                    return Err(Error::InvalidState(
+                        "Node has no memory, cannot convert GB hours to node hours".to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / (node.memory_gb())));
+            } else if self.is_billing_hours() {
+                if node.billing() == 0 {
+                    return Err(Error::InvalidState(
+                        "Node has no billing factor, cannot convert billing hours to node hours"
+                            .to_string(),
+                    ));
+                }
+
+                return Ok(Usage::from_hours(size / (node.billing()) as f64));
+            }
+        }
+
+        Err(Error::InvalidState(format!(
+            "Cannot convert allocation '{}' to node hours.",
+            self
+        )))
+    }
+
+    pub fn to_cpu_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.cpus() as f64)
+    }
+
+    pub fn to_gpu_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.gpus() as f64)
+    }
+
+    pub fn to_core_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.cores() as f64)
+    }
+
+    pub fn to_gb_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.memory_gb())
+    }
+
+    pub fn to_billing_hours(&self, node: &Node) -> Result<Usage, Error> {
+        Ok(self.to_node_hours(node)? * node.billing() as f64)
+    }
+
+    pub fn from_node_hours(usage: &Usage) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours(), "NHR")
+    }
+
+    pub fn from_cpu_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.cpus() as f64, "NHR")
+    }
+
+    pub fn from_gpu_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.gpus() as f64, "NHR")
+    }
+
+    pub fn from_core_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.cores() as f64, "NHR")
+    }
+
+    pub fn from_gb_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.memory_gb(), "NHR")
+    }
+
+    pub fn from_billing_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
+        Allocation::from_size_and_units(usage.hours() / node.billing() as f64, "BHR")
     }
 }

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -13,8 +14,49 @@ use tokio::task::JoinSet;
 
 use crate::command::Command;
 use crate::connection::Connection;
+use crate::connection::StandbyStatus;
 use crate::error::Error;
 use crate::message::Message;
+
+///
+/// Global flag indicating whether a soft restart is in progress
+/// When true, new connections should be rejected
+///
+static SOFT_RESTART_IN_PROGRESS: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
+///
+/// Check if a soft restart is currently in progress
+///
+pub fn is_soft_restart_in_progress() -> bool {
+    SOFT_RESTART_IN_PROGRESS.load(Ordering::Acquire)
+}
+
+///
+/// RAII guard that sets the soft restart flag on creation and clears it on drop
+/// This ensures the flag is always cleared even if the restart function panics
+///
+pub struct SoftRestartGuard;
+
+impl SoftRestartGuard {
+    pub fn new() -> Self {
+        SOFT_RESTART_IN_PROGRESS.store(true, Ordering::Release);
+        tracing::debug!("Soft restart guard acquired - blocking new connections");
+        SoftRestartGuard
+    }
+}
+
+impl Default for SoftRestartGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SoftRestartGuard {
+    fn drop(&mut self) {
+        SOFT_RESTART_IN_PROGRESS.store(false, Ordering::Release);
+        tracing::debug!("Soft restart guard released - accepting connections again");
+    }
+}
 
 // We use the singleton pattern for the exchange data, as there can only
 // be one in the program, and this will let us expose the exchange functions
@@ -71,6 +113,16 @@ pub struct Exchange {
     // active watchdog checks - ensures that we don't flood the exchange
     // if a connection flaps
     watchdogs: Arc<Mutex<HashSet<String>>>,
+
+    // whether or not we are a secondary server
+    is_secondary: bool,
+
+    // a hash counting the number of standby connections
+    // per peer
+    standby_peers: HashMap<String, u32>,
+
+    // number of active worker tasks processing messages
+    worker_count: Arc<Mutex<usize>>,
 }
 
 impl Default for Exchange {
@@ -79,31 +131,118 @@ impl Default for Exchange {
     }
 }
 
+async fn increment_standby_count(name: &str, zone: &str) {
+    let key = get_key_from_str(name, zone);
+
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            tracing::error!("Error getting write lock: {}", e);
+            return;
+        }
+    };
+
+    let count = exchange.standby_peers.entry(key).or_insert(0);
+    *count += 1;
+    tracing::debug!("Incremented standby count for {}@{}: {}", name, zone, count);
+}
+
+async fn decrement_standby_count(name: &str, zone: &str) {
+    let key = get_key_from_str(name, zone);
+
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            tracing::error!("Error getting write lock: {}", e);
+            return;
+        }
+    };
+
+    if let Some(count) = exchange.standby_peers.get(&key) {
+        let new_count = count.saturating_sub(1);
+
+        if new_count == 0 {
+            exchange.standby_peers.remove(&key);
+        } else {
+            exchange.standby_peers.insert(key.clone(), new_count);
+        }
+
+        tracing::debug!(
+            "Decremented standby count for {}@{}: {}",
+            name,
+            zone,
+            new_count
+        );
+    } else {
+        tracing::debug!("No standby count for {}@{}", name, zone);
+    }
+}
+
+fn get_standby_count(exchange: &Exchange, name: &str, zone: &str) -> u32 {
+    let key = get_key_from_str(name, zone);
+    *exchange.standby_peers.get(&key).unwrap_or(&0)
+}
+
+#[derive(Default, Clone)]
+pub struct StandbyWaiter {
+    name: String,
+    zone: String,
+    dropped: bool,
+}
+
+impl StandbyWaiter {
+    pub fn new(name: &str, zone: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            zone: zone.to_string(),
+            dropped: false,
+        }
+    }
+
+    async fn terminate(&self) {
+        tracing::debug!("Terminating StandbyWaiter: {}@{}", self.name, self.zone);
+        decrement_standby_count(&self.name, &self.zone).await;
+        tracing::debug!("StandbyWaiter terminated: {}@{}", self.name, self.zone);
+    }
+}
+
+impl Drop for StandbyWaiter {
+    fn drop(&mut self) {
+        tracing::debug!("Dropping StandbyWaiter: {}@{}", self.name, self.zone);
+
+        if !self.dropped {
+            let mut this = StandbyWaiter::default();
+            std::mem::swap(self, &mut this);
+            this.dropped = true;
+            tokio::spawn(async move { this.terminate().await });
+        }
+    }
+}
+
 async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
     let mut workers = JoinSet::new();
 
-    static MAX_WORKERS: usize = 10;
+    let mut last_logged_update = chrono::Utc::now();
+    let mut last_logged_count: i64 = 0;
+
+    // Get a reference to the worker_count Arc so we can update it
+    let worker_count = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange.worker_count.clone(),
+        Err(e) => {
+            tracing::error!("Error getting worker_count reference: {}", e);
+            return Err(Error::Poison(
+                "Error getting worker_count reference".to_string(),
+            ));
+        }
+    };
 
     while let Some(mut message) = rx.recv().await {
-        // make sure we don't exceed the requested number of workers
-        if workers.len() >= MAX_WORKERS {
-            let result = workers.join_next().await;
-
-            match result {
-                Some(Ok(())) => {}
-                Some(Err(e)) => {
-                    tracing::error!("Error processing message: {}", e);
-                }
-                None => {
-                    tracing::error!("Error processing message: None");
-                }
-            }
-        }
-
+        // process and spawn a new task to handle the message first...
         let (handler, name) = match SINGLETON_EXCHANGE.read() {
             Ok(exchange) => (exchange.handler, exchange.name.clone()),
             Err(e) => {
-                return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+                tracing::error!("Error getting read lock: {}", e);
+                continue;
             }
         };
 
@@ -117,6 +256,91 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                 tracing::error!("Error processing message: {}", e);
             });
         });
+
+        // now take the opportunity to try to join any finished workers
+        while let Some(result) = workers.try_join_next() {
+            match result {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::error!("Error processing message: {}", e);
+                }
+            }
+        }
+
+        // Update the worker count in the exchange
+        if let Ok(mut count) = worker_count.lock() {
+            *count = workers.len();
+        }
+
+        if (last_logged_count - workers.len() as i64).abs() >= 10
+            || last_logged_update
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                >= 60
+        {
+            last_logged_count = workers.len() as i64;
+            last_logged_update = chrono::Utc::now();
+            tracing::info!("Number of workers: {}", workers.len());
+        }
+
+        if workers.len() > 1024 {
+            tracing::warn!(
+                "High number of workers: {}. Attempting to reduce...",
+                workers.len()
+            );
+
+            let start_reaping = chrono::Utc::now();
+            let mut last_update = start_reaping;
+
+            while workers.len() > 768 {
+                if let Some(result) = workers.try_join_next() {
+                    match result {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!("Error processing message: {}", e);
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                    // log a message every 10 seconds
+                    if last_update
+                        .signed_duration_since(chrono::Utc::now())
+                        .num_seconds()
+                        >= 10
+                    {
+                        let count = workers.len();
+                        tracing::warn!(
+                            "It has been {} seconds and there are still a high number of workers: {}. Attempting to reduce...",
+                            start_reaping.signed_duration_since(last_update).num_seconds(),
+                            count
+                        );
+                        last_update = chrono::Utc::now();
+                    }
+                }
+
+                if start_reaping
+                    .signed_duration_since(chrono::Utc::now())
+                    .num_seconds()
+                    >= 300
+                {
+                    tracing::error!(
+                        "It has been {} seconds since the last log message and there are still a high number of workers: {}.",
+                        start_reaping.signed_duration_since(last_logged_update).num_seconds(),
+                        workers.len()
+                    );
+                    tracing::error!("Something has gone wrong, so we will now abort all tasks and restart event processing.");
+
+                    workers.abort_all();
+                    workers.detach_all();
+
+                    tracing::error!(
+                        "Aborted all tasks. Number of workers is now: {}",
+                        workers.len()
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -134,8 +358,58 @@ impl Exchange {
             tx,
             handler: None,
             watchdogs: Arc::new(Mutex::new(HashSet::new())),
+            is_secondary: false,
+            standby_peers: HashMap::new(),
+            worker_count: Arc::new(Mutex::new(0)),
         }
     }
+}
+
+#[allow(dead_code)]
+pub async fn set_is_primary() -> Result<(), Error> {
+    let mut exchange = match SINGLETON_EXCHANGE.write() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
+        }
+    };
+
+    exchange.is_secondary = false;
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn set_is_secondary() -> Result<(), Error> {
+    let connections = match SINGLETON_EXCHANGE.write() {
+        Ok(mut exchange) => {
+            if exchange.is_secondary {
+                None
+            } else {
+                exchange.is_secondary = true;
+                Some(exchange.connections.clone())
+            }
+        }
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting write lock: {}", e)));
+        }
+    };
+
+    // possible race conditions here, if we are quickly re-enabled
+    // as the primary - but these will be sorted out when everything
+    // reconnects
+
+    if let Some(mut connections) = connections {
+        // if we are changing the state from primary to secondary
+        // we should disconnect all connections
+        for connection in connections.values_mut() {
+            if let Err(e) = connection.disconnect().await {
+                tracing::error!("Error disconnecting connection: {}", e);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn set_name(name: &str) -> Result<(), Error> {
@@ -164,12 +438,16 @@ pub async fn set_handler(handler: AsyncMessageHandler) -> Result<(), Error> {
     Ok(())
 }
 
+fn get_key_from_str(name: &str, zone: &str) -> String {
+    format!("{}@{}", name, zone)
+}
+
 fn get_recipient(message: &Message) -> String {
-    format!("{}@{}", message.recipient(), message.zone())
+    get_key_from_str(message.recipient(), message.zone())
 }
 
 fn get_key(connection: &Connection) -> String {
-    format!("{}@{}", connection.name(), connection.zone())
+    get_key_from_str(&connection.name(), &connection.zone())
 }
 
 pub async fn unregister(connection: &Connection) -> Result<(), Error> {
@@ -205,7 +483,48 @@ pub async fn unregister(connection: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn register(connection: Connection) -> Result<(), Error> {
+pub async fn get_standby_waiter(name: &str, zone: &str) -> Result<Arc<StandbyWaiter>, Error> {
+    increment_standby_count(name, zone).await;
+    Ok(Arc::new(StandbyWaiter::new(name, zone)))
+}
+
+pub async fn check_standby(name: &str, zone: &str) -> Result<StandbyStatus, Error> {
+    let exchange = match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange,
+        Err(e) => {
+            return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+        }
+    };
+
+    // if the number of standby connections is greater than 16 then raise
+    // an error to terminate the connection - this prevents a DoS attack
+    if get_standby_count(&exchange, name, zone) > 16 {
+        return Err(Error::TooManyStandbyConnections(format!(
+            "Too many standby connections for {}@{}",
+            name, zone
+        )));
+    }
+
+    if exchange.is_secondary {
+        return Ok(StandbyStatus::secondary_server());
+    }
+
+    if exchange
+        .connections
+        .contains_key(&get_key_from_str(name, zone))
+    {
+        // there is a connection with this name and zone, so any more
+        // connections will become secondary
+        Ok(StandbyStatus::secondary_client())
+    } else {
+        // there isn't, so this could be a primary connection
+        // (subject to the race condition - it will only become primary
+        //  if it wins the race)
+        Ok(StandbyStatus::primary())
+    }
+}
+
+async fn locked_register(connection: Connection) -> Result<bool, Error> {
     let name = connection.name();
     let zone = connection.zone();
 
@@ -237,7 +556,61 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
         )));
     }
 
-    exchange.connections.insert(key, connection);
+    // go through and see if we have any standby connections that
+    // are for keys that are alphabetically more than this one.
+    // If so, then we need to disconnect them all, as this is a
+    // standby-only agent
+    let is_standby_only = exchange
+        .standby_peers
+        .iter()
+        .any(|(k, v)| *v > 0 && k > &key);
+
+    if !is_standby_only {
+        exchange.connections.insert(key, connection);
+    }
+
+    Ok(is_standby_only)
+}
+
+pub async fn register(connection: Connection) -> Result<(), Error> {
+    let is_standby_only = locked_register(connection.clone()).await?;
+
+    if is_standby_only {
+        let mut connections = match SINGLETON_EXCHANGE.read() {
+            Ok(exchange) => exchange.connections.clone(),
+            Err(e) => {
+                return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+            }
+        };
+
+        // potential race condition here, but this will be resolved when
+        // all of the peers disconnect and reconnect
+
+        for connection in connections.values_mut() {
+            match connection.disconnect().await {
+                Ok(_) => {
+                    tracing::debug!("Disconnected connection: {}", connection.name());
+                }
+                Err(e) => {
+                    tracing::error!("Error disconnecting connection: {}", e);
+                }
+            }
+        }
+
+        // NOTE THAT WE DON'T YET REMOVE ANY SERVERS - THEY COULD STILL
+        // BE LISTENING FOR CONNECTIONS. WE DO NEED TO WORK OUT HOW
+        // TO HANDLE HA FOR SERVERS - THIS IS A WORK IN PROGRESS
+
+        // PROBABLY THE BEST ROUTE IS TO HAVE A CONTROL MESSAGE WE SEND
+        // OURSELVES THAT SWITCHES US OVER TO SECONDARY MODE - THIS WOULD
+        // AVOID HAVING TO DISCONNECT EVERYTHING ABOVE - CHALLENGE IS
+        // HOW TO SEND A MESSAGE TO SWITCH US BACK TO PRIMARY MODE
+
+        return Err(Error::PeerIsSecondary(
+            "This peer is fully secondary".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -278,7 +651,7 @@ pub fn received(message: Message) -> Result<(), Error> {
 }
 
 pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
-    let name = format!("{}@{}", peer, zone);
+    let name = get_key_from_str(peer, zone);
 
     let connection = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
@@ -358,8 +731,8 @@ pub async fn watchdog(peer: &str, zone: &str) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::UnnamedConnection(format!(
-            "Connection {}@{} not found",
-            peer, zone
+            "Connection {} not found",
+            name
         )))
     }
 }
@@ -372,7 +745,7 @@ pub async fn disconnect(peer: &str, zone: &str) -> Result<(), Error> {
         }
     }
     .connections
-    .get(&format!("{}@{}", peer, zone))
+    .get(&get_key_from_str(peer, zone))
     .cloned();
 
     if let Some(mut connection) = connection {
@@ -383,5 +756,24 @@ pub async fn disconnect(peer: &str, zone: &str) -> Result<(), Error> {
             "Connection {} not found",
             peer
         )))
+    }
+}
+
+///
+/// Get the current number of active worker tasks processing messages
+///
+pub fn worker_count() -> usize {
+    match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => match exchange.worker_count.lock() {
+            Ok(count) => *count,
+            Err(e) => {
+                tracing::error!("Error getting worker_count lock: {}", e);
+                0
+            }
+        },
+        Err(e) => {
+            tracing::error!("Error getting exchange read lock: {}", e);
+            0
+        }
     }
 }

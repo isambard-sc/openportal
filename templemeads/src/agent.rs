@@ -19,6 +19,7 @@ pub enum Type {
     Account,
     Filesystem,
     Scheduler,
+    Virtual,
 }
 
 impl std::fmt::Display for Type {
@@ -32,6 +33,7 @@ impl std::fmt::Display for Type {
             Type::Account => write!(f, "account"),
             Type::Filesystem => write!(f, "filesystem"),
             Type::Scheduler => write!(f, "scheduler"),
+            Type::Virtual => write!(f, "virtual"),
         }
     }
 }
@@ -149,6 +151,12 @@ struct Registrar {
     name: String,
     typ: Type,
     zones: Vec<String>,
+    engine: String,
+    version: String,
+    start_time: chrono::DateTime<chrono::Utc>,
+    /// Whether this agent should cascade health checks to its peers
+    /// Set to false for leaf nodes (e.g., FreeIPA) that bridge zones
+    cascade_health: bool,
 }
 
 impl Registrar {
@@ -159,15 +167,40 @@ impl Registrar {
             name: String::new(),
             typ: Type::Portal,
             zones: Vec::new(),
+            engine: String::new(),
+            version: String::new(),
+            start_time: chrono::Utc::now(),
+            cascade_health: true, // Default to cascading
         }
     }
 
-    fn register_self(&mut self, name: &str, agent_type: &Type) {
+    fn register_self(
+        &mut self,
+        name: &str,
+        agent_type: &Type,
+        engine: &str,
+        version: &str,
+        cascade_health: bool,
+    ) {
         self.name = name.to_string();
         self.typ = agent_type.clone();
+        self.engine = engine.to_string();
+        self.version = version.to_string();
+        self.start_time = chrono::Utc::now();
+        self.cascade_health = cascade_health;
     }
 
     fn register_peer(&mut self, peer: &Peer, agent_type: &Type, _engine: &str, _version: &str) {
+        if self.peers.contains_key(peer) {
+            // we cannot register a virtual agent that overwrites an existing agent
+            if agent_type == &Type::Virtual {
+                return;
+            }
+
+            // remove the old entry
+            self.remove(peer);
+        }
+
         self.peers.insert(peer.clone(), agent_type.clone());
         self.peers_by_type
             .entry(agent_type.clone())
@@ -214,6 +247,15 @@ impl Registrar {
     }
 
     ///
+    /// Return the name of the first bridge agent in the system
+    ///
+    fn bridge(&self) -> Option<Peer> {
+        self.peers_by_type
+            .get(&Type::Bridge)
+            .and_then(|v| v.first().cloned())
+    }
+
+    ///
     /// Return the name of the first account agent in the system
     ///
     fn account(&self) -> Option<Peer> {
@@ -241,14 +283,14 @@ impl Registrar {
     }
 }
 
-static REGISTAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
+static REGISTRAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
 
 ///
 /// Register that the peer agent called 'name' is of type 'agent_type'
 /// and is connecting from zone `zone`
 ///
 pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version: &str) {
-    REGISTAR
+    REGISTRAR
         .write()
         .await
         .register_peer(peer, agent_type, engine, version)
@@ -258,29 +300,119 @@ pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version
 /// Register that this agent in this process is called `name` and
 /// is of type `agent_type`
 ///
-pub async fn register_self(name: &str, agent_type: &Type) {
-    REGISTAR.write().await.register_self(name, agent_type);
+pub async fn register_self(
+    name: &str,
+    agent_type: &Type,
+    engine: &str,
+    version: &str,
+    cascade_health: bool,
+) {
+    REGISTRAR
+        .write()
+        .await
+        .register_self(name, agent_type, engine, version, cascade_health);
+}
+
+///
+/// Return a Peer that represent this agent. If 'zone' is None,
+/// then the default "local" zone is used
+///
+pub async fn get_self(zone: Option<&str>) -> Peer {
+    let registrar = REGISTRAR.read().await;
+
+    Peer::new(&registrar.name, zone.unwrap_or("local"))
+}
+
+/// Check whether this agent should cascade health checks to its peers
+pub async fn should_cascade_health() -> bool {
+    REGISTRAR.read().await.cascade_health
 }
 
 ///
 /// Remove the agent called 'name' in the zone `zone` from the registry
 ///
 pub async fn remove(peer: &Peer) {
-    REGISTAR.write().await.remove(peer)
+    REGISTRAR.write().await.remove(peer)
 }
 
 ///
 /// Return the names of all agents of a specified type
 ///
 pub async fn get_all(agent_type: &Type) -> Vec<Peer> {
-    REGISTAR.read().await.agents(agent_type)
+    REGISTRAR.read().await.agents(agent_type)
+}
+
+///
+/// Return whether or not there is a virtual agent registered
+/// with the specified name
+///
+pub async fn has_virtual(peer: &Peer) -> bool {
+    let registrar = REGISTRAR.read().await;
+
+    match registrar.peers_by_type.get(&Type::Virtual) {
+        Some(v) => v.contains(peer),
+        None => false,
+    }
 }
 
 ///
 /// Return the name of this agent
 ///
 pub async fn name() -> String {
-    REGISTAR.read().await.name.clone()
+    REGISTRAR.read().await.name.clone()
+}
+
+///
+/// Return the engine name of this agent
+///
+pub async fn engine() -> String {
+    REGISTRAR.read().await.engine.clone()
+}
+
+///
+/// Return the version of this agent
+///
+pub async fn version() -> String {
+    REGISTRAR.read().await.version.clone()
+}
+
+///
+/// Return the start time of this agent
+///
+pub async fn start_time() -> chrono::DateTime<chrono::Utc> {
+    REGISTRAR.read().await.start_time
+}
+
+///
+/// Return the agent type of this agent
+///
+pub async fn my_agent_type() -> Type {
+    REGISTRAR.read().await.typ.clone()
+}
+
+///
+/// Return all registered peers
+///
+pub async fn all_peers() -> Vec<Peer> {
+    REGISTRAR.read().await.peers.keys().cloned().collect()
+}
+
+///
+/// Return all real, non-virtual registered peers
+///
+pub async fn real_peers() -> Vec<Peer> {
+    let registrar = REGISTRAR.read().await;
+    registrar
+        .peers
+        .iter()
+        .filter_map(|(peer, agent_type)| {
+            if agent_type != &Type::Virtual {
+                Some(peer.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 ///
@@ -293,7 +425,33 @@ pub async fn portal(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.portal() {
+        match REGISTRAR.read().await.portal() {
+            Some(peer) => return Some(peer),
+            None => match now.elapsed() {
+                Ok(elapsed) => {
+                    if elapsed > wait {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            },
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+///
+/// Return the name of the first bridge agent in the system
+/// Note that this will wait for up to 30 seconds for a bridge
+/// agent to be registered before returning None
+///
+pub async fn bridge(wait: u64) -> Option<Peer> {
+    let now = std::time::SystemTime::now();
+    let wait = std::time::Duration::from_secs(wait);
+
+    loop {
+        match REGISTRAR.read().await.bridge() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -319,7 +477,7 @@ pub async fn account(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.account() {
+        match REGISTRAR.read().await.account() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -345,7 +503,7 @@ pub async fn filesystem(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.filesystem() {
+        match REGISTRAR.read().await.filesystem() {
             Some(peer) => return Some(peer),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -371,7 +529,7 @@ pub async fn scheduler(wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        match REGISTAR.read().await.scheduler() {
+        match REGISTRAR.read().await.scheduler() {
             Some(peer) => return Some(peer.clone()),
             None => match now.elapsed() {
                 Ok(elapsed) => {
@@ -393,11 +551,16 @@ pub async fn scheduler(wait: u64) -> Option<Peer> {
 /// this time.
 ///
 pub async fn wait_for(peer: &Peer, wait: u64) -> Result<(), Error> {
+    if peer.name() == name().await {
+        // we don't need to wait for ourselves
+        return Ok(());
+    }
+
     let now = std::time::SystemTime::now();
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        if REGISTAR.read().await.peers.contains_key(peer) {
+        if REGISTRAR.read().await.peers.contains_key(peer) {
             return Ok(());
         }
 
@@ -426,7 +589,46 @@ pub async fn wait_for(peer: &Peer, wait: u64) -> Result<(), Error> {
 /// Return the type of the specified agent
 ///
 pub async fn agent_type(peer: &Peer) -> Option<Type> {
-    REGISTAR.read().await.peers.get(peer).cloned()
+    let registrar = REGISTRAR.read().await;
+
+    match registrar.peers.get(peer) {
+        Some(agent_type) => Some(agent_type.clone()),
+        None => match peer.name() == registrar.name {
+            true => Some(registrar.typ.clone()),
+            false => None,
+        },
+    }
+}
+
+///
+/// Return whether or not the passed agent is itself
+///
+pub async fn is_self(peer: &Peer) -> bool {
+    let registrar = REGISTRAR.read().await;
+
+    peer.name() == registrar.name
+}
+
+///
+/// Return whether or not the passed agent is virtual. Virtual
+/// agents are either specifically added agents, or when we
+/// send a message to ourselves (a virtual agent is created
+/// per zone). Note that this will return true if the
+/// agent is itself or if this agent is a virtual agent
+///
+/// To return only non-self virtual agents, use
+/// is_virtual(peer) && !is_self(peer)
+///
+pub async fn is_virtual(peer: &Peer) -> bool {
+    let registrar = REGISTRAR.read().await;
+
+    match peer.name() {
+        n if n == registrar.name => true,
+        _ => registrar
+            .peers_by_type
+            .get(&Type::Virtual)
+            .is_some_and(|v| v.contains(peer)),
+    }
 }
 
 ///
@@ -440,7 +642,7 @@ pub async fn find(name: &str, wait: u64) -> Option<Peer> {
     let wait = std::time::Duration::from_secs(wait);
 
     loop {
-        let registrar = REGISTAR.read().await;
+        let registrar = REGISTRAR.read().await;
 
         for (peer, _) in registrar.peers.iter() {
             if peer.name() == name {
@@ -469,7 +671,7 @@ mod tests {
     /// Only used by testing to clear out the registry
     ///
     async fn clear() {
-        let mut registrar = REGISTAR.write().await;
+        let mut registrar = REGISTRAR.write().await;
 
         registrar.peers.clear();
         registrar.peers_by_type.clear();

@@ -2,9 +2,28 @@
 // SPDX-License-Identifier: MIT
 
 use crate::error::Error;
+use crate::grammar::NamedType;
 
 use serde::{Deserialize, Serialize};
 use std::cmp::{Ord, Ordering};
+
+impl NamedType for Destination {
+    fn type_name() -> &'static str {
+        "Destination"
+    }
+}
+
+impl NamedType for Destinations {
+    fn type_name() -> &'static str {
+        "Destinations"
+    }
+}
+
+impl NamedType for Vec<Destination> {
+    fn type_name() -> &'static str {
+        "Vec<Destination>"
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub struct Destination {
@@ -74,6 +93,11 @@ impl Destination {
     pub fn first(&self) -> String {
         // there are always at least two agents in a destination
         self.agents.first().unwrap_or(&"".to_string()).clone()
+    }
+
+    pub fn second(&self) -> String {
+        // there are always at least two agents in a destination
+        self.agents.get(1).unwrap_or(&"".to_string()).clone()
     }
 
     pub fn last(&self) -> String {
@@ -149,6 +173,172 @@ impl<'de> Deserialize<'de> for Destination {
             Ok(destination) => Ok(destination),
             Err(e) => Err(serde::de::Error::custom(e.to_string())),
         }
+    }
+}
+
+///
+/// This struct represents a vector of Destinations
+///
+#[derive(Clone, PartialEq, Default)]
+pub struct Destinations {
+    destinations: Vec<Destination>,
+}
+
+impl Destinations {
+    pub fn new(destinations: &[Destination]) -> Self {
+        let mut unique_destinations: Vec<Destination> = Vec::new();
+
+        // messy, but avoids the need to implement Hash and Eq for Destination
+        for dest in destinations {
+            if !unique_destinations.contains(dest) {
+                unique_destinations.push(dest.clone());
+            }
+        }
+
+        Self {
+            destinations: unique_destinations,
+        }
+    }
+
+    pub fn parse(destinations: &str) -> Result<Self, Error> {
+        // remove a `[` and `]` if they exist at the beginning and end of the string
+        let trimmed = destinations.trim();
+        let trimmed = trimmed
+            .strip_prefix('[')
+            .unwrap_or(trimmed)
+            .strip_suffix(']')
+            .unwrap_or(trimmed)
+            .trim();
+
+        let destination_strings: Vec<&str> = trimmed
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect(); // filter out empty strings
+
+        let mut destination_vec: Vec<Destination> = Vec::new();
+
+        for dest_str in destination_strings {
+            match Destination::parse(dest_str) {
+                Ok(dest) => destination_vec.push(dest),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Destinations::new(&destination_vec))
+    }
+
+    pub fn add(&self, destinations: Destinations) -> Destinations {
+        let mut new_destinations = self.destinations.clone();
+        for dest in destinations.destinations {
+            if !self.destinations.contains(&dest) {
+                new_destinations.push(dest);
+            }
+        }
+        Destinations {
+            destinations: new_destinations,
+        }
+    }
+
+    pub fn remove(&self, destinations: Destinations) -> Destinations {
+        let mut new_destinations = self.destinations.clone();
+        for dest in destinations.destinations {
+            if let Some(pos) = new_destinations.iter().position(|x| *x == dest) {
+                new_destinations.remove(pos);
+            }
+        }
+        Destinations {
+            destinations: new_destinations,
+        }
+    }
+}
+
+impl std::fmt::Debug for Destinations {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.destinations.len() {
+            0 => write!(f, "[]"),
+            1 => write!(f, "{}", self.destinations[0]),
+            _ => {
+                let dest_strings: Vec<String> =
+                    self.destinations.iter().map(|d| d.to_string()).collect();
+                write!(f, "[{}]", dest_strings.join(", "))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Destinations {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.destinations.len() {
+            0 => write!(f, "[]"),
+            1 => write!(f, "{}", self.destinations[0]),
+            _ => {
+                let dest_strings: Vec<String> =
+                    self.destinations.iter().map(|d| d.to_string()).collect();
+                write!(f, "[{}]", dest_strings.join(", "))
+            }
+        }
+    }
+}
+
+// serialise and deserialise as a single string
+impl Serialize for Destinations {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.destinations.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Destinations {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let destinations = Vec::deserialize(deserializer)?;
+        Ok(Destinations { destinations })
+    }
+}
+
+///
+/// Implement converstion to a Vec<Destination>
+///
+impl From<Destinations> for Vec<Destination> {
+    fn from(destinations: Destinations) -> Self {
+        destinations.destinations
+    }
+}
+
+///
+/// Implement traits so that this can be used as a read-only list
+///
+impl std::ops::Deref for Destinations {
+    type Target = Vec<Destination>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.destinations
+    }
+}
+
+///
+/// Implement traits so that we can look up a destination by index
+///
+impl std::ops::Index<usize> for Destinations {
+    type Output = Destination;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.destinations[index]
+    }
+}
+
+///
+/// Implement traits so that we can get the length of the destinations
+///
+impl std::ops::Index<std::ops::RangeFull> for Destinations {
+    type Output = [Destination];
+
+    fn index(&self, _index: std::ops::RangeFull) -> &Self::Output {
+        &self.destinations
     }
 }
 

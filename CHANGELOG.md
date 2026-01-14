@@ -6,8 +6,425 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-## [0.9.5] - 2025-02-20
+## [0.22.0] - 2026-01-14
+
 ### Added
+
+- Added billing TRES as a value that can be used when calculating node
+  hours. This will be the only calculation method if cpu, gpu and memory
+  are not specified when creating the default node object.
+- Added components to the usage reports. The cpu, gpu, memory and
+  billing components are now also tracked separately and available
+  in all of the usage reports.
+- Added AwardDetails and DomainPattern types, with Python bindings.
+  These are used in ProjectDetails to provide richer information about
+  a project's associated award, and about which email domains are
+  allowed to be associated with a project.
+- Added ability to set, get and clear filesystem volume quotas. Currently
+  this is only supported for Lustre, but the engine can be expanded to
+  support other filesystems. This adds new commands, e.g.
+  `set_project_quota`, `get_project_quota`, `get_project_quotas`,
+  `clear_project_quota`, `set_user_quota`, `get_user_quota`, `get_user_quotas`,
+  and `clear_user_quota`.
+- Added instructions to see if a user or project already exists, namely
+  `is_existing_user` and `is_existing_project`. This is used by the cluster
+  agent to only remove partially-added users or projects if an
+  add operation failed, and the user or project did not already exist
+  before the operation started. This adds a level of safety, as it should
+  stop the unintential removal of existing users or projects if something
+  goes wrong when talking with other agents (e.g. filesystem or scheduler)
+
+### Fixed
+
+- Fixed a bug when signing API calls that incorrectly introduced possible
+  serialisation / deserialisation issues when verifying signatures. This
+  led to some calls failing signature verification.
+
+## [0.21.1] - 2025-12-02
+
+### Fixed
+
+- Fixed the issue that prevented the results of jobs sent to virtual agents from being returned to the original sender.
+
+## [0.21.0] - 2025-11-21
+
+### Added
+
+- Implemented cascading health checks across the agent network with intelligent timeout handling (500ms or until all peers respond), automatic detection of disconnected peers, circular loop prevention via visited-chain tracking, and configurable cascade blocking for leaf nodes (FreeIPA, Filesystem). Portal-to-portal health queries are blocked to prevent cross-site information leakage. Health checks now report in-flight jobs (those passing through intermediate agents) and queued jobs (waiting for reconnection) separately from detailed job states, which are only shown for source and destination agents.
+- Added restart command functionality allowing agents to be remotely restarted via control commands.
+- Implemented soft restart functionality. Jobs are error-cancelled during restart, diagnostics data is cleared, and new job submissions are rejected with retry-able errors. Routing of restart requests respects portal and leaf node boundaries.
+- Added worker count tracking to health checks. The paddington event loop now tracks active worker tasks, exposed via the health endpoint and included in HealthInfo.
+- Implemented system resource monitoring using the sysinfo crate. Agents now track and report process memory usage, CPU usage, total system memory, and CPU core count in health checks.
+- Added background monitoring task that refreshes every 10 seconds, warning when CPU usage exceeds 90% or process memory exceeds 80% of system memory. High resource usage triggers detailed health info logging for troubleshooting.
+- Implemented job execution timing statistics. Job run times are tracked with min/max/mean/median calculations over a rolling window of 1000 jobs, exposed in health checks for performance monitoring.
+- Added diagnostics tracking with all-time counters for completed, failed, expired, and slow jobs (>10s). Historical data includes recent failures, slowest executions, and expired jobs. Diagnostics totals are exposed in health checks and cleared on soft restart.
+
+## [0.20.2] - 2025-11-15
+
+### Fixed
+
+- Updated all dependencies to their latest versions, including fixes to
+  compile with the latest PyO3 (for Python 3.14 support). Thanks to
+  @livenson for the help :-)
+
+## [0.20.1] - 2025-10-21
+
+### Fixed
+
+- Added automatic retry logic with exponential backoff to the Python bridge client
+  (`call_get` and `call_post` functions in `python/src/lib.rs`) to handle rate
+  limiting from the bridge server. The client now detects HTTP 429 (Too Many Requests)
+  responses and automatically retries with exponential backoff (100ms, 200ms, 400ms,
+  800ms, 1600ms) up to 5 times before failing. This prevents the Python client from
+  being blocked when calling the bridge server too frequently.
+
+## [0.20.0] - 2025-10-17
+
+### Added
+
+- Added support for multiple home roots in the filesystem agent. The `home-roots`
+  configuration option now accepts colon-separated paths (e.g., `/home:/scratch`),
+  and the `home-permissions` option accepts corresponding colon-separated permissions
+  (e.g., `0755:0755`). When a user is added, home directories are created in all
+  configured home roots at `{home-root}/{project}/{user}` with the appropriate
+  permissions. The `GetLocalHomeDir` instruction returns the first home directory.
+- Implemented non-destructive removal for filesystem operations. The `RemoveLocalUser`
+  and `RemoveLocalProject` instructions now move directories to `.recycle` subdirectories
+  instead of deleting them. Directory timestamps are updated to the current time when
+  recycled, enabling external cleanup processes to remove old recycled directories
+  (e.g., after 7 days).
+- Added automatic restoration from `.recycle` when creating directories. If a directory
+  exists in `.recycle`, it is restored to its original location instead of creating
+  a new directory, making the removal and recreation process fully reversible.
+- Implemented automatic cancellation of pending Slurm jobs when removing users or projects.
+  The `RemoveLocalUser` and `RemoveLocalProject` instructions now use `scancel` to cancel
+  all queued (PENDING state) jobs while leaving running jobs to complete. This ensures
+  that removed users cannot submit new jobs while preserving historical accounting data.
+  The `scancel` command is configurable via the `scancel` configuration option (default:
+  `scancel`)
+
+### Fixed
+
+- Fixed error in `sacctmgr` command related to setting limits.
+
+## [0.19.1] - 2025-10-13
+
+### Added
+
+- Added support for multiple connections to the slurm REST API server,
+  matching the behaviour and code of the freeipa agent, and similar
+  to the sacctmgr connection.
+
+### Fixed
+
+- Made the number of jobs optional in the JSON (defaults to zero) so
+  that this doesn't break backwards compatibility with agents that
+  don't send this field.
+
+## [0.19.0] - 2025-10-12
+
+### Added
+
+- Fixed timeouts of slurm accounting when large numbers of jobs are
+  run per project per day. The code automatically switches over to
+  doing houly accounting if the daily accounting takes too long.
+  In addition, accounting is now done in parallel, with multiple
+  sacct calls now allowed to be made (controlled by the
+  `max-slurm-runners` config option, default 5).
+- Added counting of the number of jobs run per day for slurm accounting,
+  and exposed the number of jobs (`num_jobs`) in `UsageReport` and
+  `ProjectUsageReport` for better tracking.
+- Added an `Hour` object that can be used to represents a specific hour
+  in a day, to make it easier to request hourly accounting data.
+  The start and end times of an hour form a half-open interval,
+  i.e. the start time is included, but the end time is not. This
+  matches the expected behaviour of the slurm `sacct` command.
+- Added the ability to run commands directly from the command line,
+  simplifying debugging and testing. This can be done using the
+  new `--one-shot` command line option, which takes an OpenPortal
+  command without a destination. For example,
+  `op-slurm run --one-shot "get_local_usage_report brics.aiproject:brics.aiproject this_month"`
+  would get the usage report for the `brics.aiproject` project for
+  the current month. Note that multiple `--one-shot` commands can
+  be added, and they will be run in sequence. There is also
+  a `--repeat N` option that can be used to repeat the
+  commands N times.
+- Added in a Claude.md file that is used by Claude code to help
+  maintain and improve the codebase.
+
+### Fixed
+
+- Fixed the `Date` start and end time to also use the same half-open
+  interval as the `Hour` object. This means that the start time
+  is included, but the end time is not. This matches the expected
+  behaviour of the slurm `sacct` command.
+- Fixed a number of minor cybersecurity issues discovered by Claude code.
+  These are adding a counter/nonce to the Bridge API server, reducing
+  the time tolerance for the API server signed time check to 5 seconds,
+  adding in rate limiting for calls to the Bridge server API,
+  adding constant-time comparison of keys to prevent timing attacks,
+  and using a command builder pattern to construct slurm commands
+  to prevent any possible injection attacks. Note that none of these
+  issues are exploitable in practice, but these changes make the
+  system more robust and secure.
+- Reduced logging verbosity when the system is under load to make logs
+  more readable.
+
+## [0.18.0] - 2025-09-29
+
+### Added
+
+- Added a `merge` function to `ProjectDetails` to simplify merges.
+- Added a `get_portal` function so that it is easier for the portal
+  connected to a python bridge to be determined.
+
+## [0.17.0] - 2025-09-23
+
+### Added
+
+- Added support for "virtual agents" which can be used to provide
+  additional agents that represent extra resources offered by a portal,
+  without the need to create full agents for those resources. This is
+  particularly useful when using remote portals that offer
+  classes of offerings under a single virtual identifier.
+- Added commands related to creation of new offerings, e.g.
+  `add_offerings`, `sync_offerings`, `remove_offerings`, and
+  `get_offerings`. Made these accessible to Python, and connected
+  them to the virtual agent model. This allows Python-based portals
+  to communicate new offerings to OpenPortal, which are spun up
+  as virtual agents. This should make it easier to manage
+  offerings that are provided by portals for portal-to-portal
+  requests, without needing to spin up full agents.
+
+## [0.16.3] - 2025-09-13
+
+### Added
+
+- Added support for connecting to multiple redundant FreeIPA servers,
+  and allowed parallelising requests across multiple servers (
+  including multiple requests to the same server). This should improve
+  the overall reliability and performance of the system.
+
+### Fixed
+
+- Optimised the algorithm for increasing and decreasing the number of
+  tokio workers to make the agents more responsive to changes in load.
+  The number of workers can grow and shrink more quickly, and are no
+  longer capped to 10 parallel workers. This removes the bottlenecks
+  observed when the message load is high.
+
+## [0.16.2] - 2025-08-12
+
+### Fixed
+
+- Fixed incorrect return type of the portal `get_usage_report` function.
+
+## [0.16.1] - 2025-08-11
+
+### Added
+
+- Added more functions to support UsageReport creation in Python,
+  plus exposed the `DailyProjectUsageReport` class.
+
+## [0.16.0] - 2025-08-08
+
+### Added
+
+- Added extra commands that can be run by the portal: `get_projects`,
+  `remove_project` and `get_usage_reports`.
+- Added ability to combine `UsageReport` and `ProjectUsageReport` objects
+  together using static `combine` functions, plus added in lots of operators
+  to add, multiply and divide usage. This should make manipulation
+  of usage reports much easier.
+
+### Fixed
+
+- Cleaned up the way that python objects are extracted in the `job.completed`
+  function.
+
+## [0.15.1] - 2025-08-04
+
+### Fixed
+
+- Fixed an issue where the order of serialisation of the members field
+  in the ProjectDetails object was not deterministic, which led to
+  failed signature validation for the bridge API calls. Now, the
+  members are always serialisaed in a sorted, deterministic order.
+
+## [0.15.0] - 2025-07-22
+
+### Added
+
+- Added an Allocation type that can be used to describe an allocation in
+  arbitrary units (e.g. node hours, GPU hours etc.). Also added a Node type
+  that can provide metadata about a node, so that we can interconvert between
+  different allocation units.
+- Updated the ProjectDetails object to use Allocation rather than Usage
+  as the allocation type. This is now under the field `allocation`, with
+  the `credits` field now not being used.
+
+## [0.14.0] - 2025-06-10
+
+### Added
+
+- Added automatic de-duplication of jobs. Now, if the board detects
+  that a job is added that is the same as one that is already being
+  processed, it will automatically mark the new job as a "duplicate",
+  and will not process it. Instead, it will copy the result from the
+  already-running job and return that result once it is ready. In this
+  way, we prevent job storms if a caller continually re-submits the
+  same job without waiting for the result. Duplicate jobs are caught
+  in the communication chain, so will not be sent on to downstream
+  peers. This makes the system more responsive and robust, as
+  now only new jobs are processed downstream, with duplicates
+  filtered out at a high level.
+- Added passing of the job expiry time to the functions called by
+  the slurm and freeipa agents. Now, these agents will abort any
+  functions calls that take too long and that whose results would
+  be ignored anyway as the calling job had expired. This prevents
+  resource starvation and denial of service / deadlocks caused
+  by floods of long-running jobs blocking the system, and causing
+  all new jobs to timeout or run slowly.
+- Added a semaphore to the function calls of the slurm and freeipa
+  agents. This semaphore ensures that only 10 jobs can be processed
+  at the same time. This reduces contention pressure on the
+  (serialised) access to the freeipa / slurm REST APIs, or to
+  running saact/mgr commands. This prevents a deadlock situation
+  where a single function calls the API or runs the command
+  one after the other, but gets blocked by a storm of new
+  jobs that hold that resource in the first call to the API
+  or command. In this case, all of the jobs would be blocking
+  each other on the first call, preventing any from making
+  subsequent calls, and thus the jobs expire (but the function
+  call would keep going). Now, only 10 function calls can be
+  made in parallel, which will reduce contention and ensure
+  that they can complete before job expiry. This, combined with
+  checking the job expiry time, should prevent flooding
+  of the system, and creating of long chains / queues of jobs
+  that never complete.
+- Added timeouts to REST API calls and for running external
+  commands. These timeouts (60 seconds) ensure that if any
+  command or REST call takes too long, then they will be terminated
+  and an error returned. This is important, as calling a REST
+  API or running a command is serialised (held behind a mutex)
+  to ensure that OpenPortal doesn't flood downstream services
+  (OpenPortal only makes one FreeIPA rest call, or one SLURM
+  call at a time). Previously, a failure of, e.g. FreeIPA,
+  could cause the freeipa agent to hang indefinitely, as the
+  REST API call would never return. Now, if the call takes
+  longer than 60 seconds, it will be aborted, and an error
+  returned. This, combined with all of the changes described
+  above should make the whole OpenPortal more robust
+  and resilient to errors and job storms.
+
+## [0.12.1] - 2025-06-04
+
+### Added
+
+- Added a "signal_url" that can be called by the bridge to signal
+  the connected web-portal that a new job has been submitted and
+  is awaiting processing. The Job ID is submitted as a query
+  parameter, providing an effective shared secret that the
+  connected web-portal can use to fetch the job from the bridge.
+- Added support for more instructions that can be sent to the
+  connected web-portal. These are `get_project_mapping`
+  and `get_usage_report`. Added in the python wrapping for
+  `DateRange.parse` so that we can easily go from the string
+  representation to the `DataRange` object.
+
+## [0.12.0] - 2025-06-03
+
+### Added
+
+- Added new commands to support the creation and updating of projects in
+  attached portals. These are `create_project`, `update_project`, and
+  `get_project`, all of which use new `ProjectDetails` and `ProjectClass`
+  objects to describe the project in more detail.
+- Added the ability for portals to send commands to other portals. This allows
+  a "higher level" portal to send `create_project` and `update_project`
+  commands to a "lower level" portal, which will create the project there.
+  Then, other commands (such as `get_usage_report` and `get_project`)
+  can be used to query and get data about projects owned by the
+  "higher level" portal.
+- Added the ability for the bridge agent connected to a portal to also
+  send `create_project`, `update_project` and `get_project` commands
+  to its attached portal. This allows the Python interface created
+  via OpenPortal to be used to create and manage projects directly
+  in the portal, without needing to use the web portal's own API.
+  This should simplify automation of project creation and management.
+- Added a bridge-side job board, so that jobs sent from a portal
+  to a bridge (so that the attached web portal can access and process
+  them) can now be accessed from Python, processed, and then the
+  results sent back to the portal. The web-portal, via a Python interface,
+  can now call `fetch_job`, `fetch_jobs` and `send_result` to
+  get any jobs sent to the bridge, and send back the results.
+- Added more functions to the Python API and made it easier to use.
+  Can now properly use the `Job` class from Python, have more
+  detail about the job status, and the `Instruction` class now
+  has functions to get the job command and arguments. This should
+  make it much easier to interface web-portals with OpenPortal
+  via the Python API, and to write Python scripts that automate
+  project creation and management.
+
+### Fixed
+
+- Fixed a bug where `job.wait()` could wake up even if the job
+  has not yet completed. This left the `result` as empty,
+  which was surprising behaviour. Now, `job.wait()` will
+  keep waiting until the job has completed - with a safeguard
+  that if it re-awakens more than 10 times it will return
+  an error. This should prevent an infinite loop. This fixes
+  issue #12.
+- Fixed a bug where FreeIPA was allowed to create user accounts
+  when the home directory was not set. Now, this will raise an
+  error. This fixes issue #13.
+
+## [0.11.0] - 2025-05-21
+
+### Added
+
+- Added support for high availability (HA) for client OpenPortal agents.
+  This allows for client agents to be run on multiple nodes, with only
+  one node being active at a time, and automatic failover to other nodes
+  if the active node fails. The failover also ensures that all client
+  connections are failed over to the same node. Note that HA for
+  server agents is not yet supported - including agents that act
+  as both servers and clients. There should still only be a single
+  instance of such agents in a network. HA for server agents
+  in planned.
+- Added command line options to support rotating of client and server
+  keys. Use the `client --rotate name --zone zone` on a server to
+  rotate the keys for the specified client in the specified zone. This
+  will write out a key rotation file, which can be passed to the
+  client via the `server --rotate filename` option.
+
+## [0.10.0] - 2025-04-01
+
+### Added
+
+- Added ability to specify the partition used for accounting for a slurm
+  account. This is useful if different services use different partitions
+  to separate out the accounting.
+- Added getting and setting of slurm limits, updating the set_limit
+  command to access a unit designator (e.g. "hours"). Defaults to
+  seconds if not specified.
+- Cleaned up the log messages so the agents are less chatty at the
+  "INFO" level, and the flow of jobs through agents is easier to follow.
+
+## [0.9.6] - 2025-03-05
+
+### Added
+
+- Added ability to control the parent account of slurm accounts that
+  are added via openportal. This defaults to "root" (the default), but
+  can be changed by setting the `parent_account` option in the
+  `op-slurm` configuration file. Note that the parent account must
+  exist already - if it doesn't, then the account creation will fail.
+
+## [0.9.5] - 2025-02-20
+
+### Added
+
 - Added an environment variable to turn on checking of the user
   class in FreeIPA. This is the double-check that isn't really needed
   and gets in the way now. The default is to not check the user
@@ -15,6 +432,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `OPENPORTAL_REQUIRE_MANAGED_CLASS` to `true` will turn on the check.
 
 ### Fixed
+
 - Made the logic for modifying users in FreeIPA more robust - now always
   re-fetch if the user is in the openportal group so that this info
   is always up to date.
@@ -24,11 +442,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   still active, but openportal would not remove them.
 
 ## [0.9.4] - 2025-02-20
+
 ### Fixed
+
 - Made sure that RUST_LOG_FORMAT is configurable from the helm chart.
 
 ## [0.9.3] - 2025-02-20
+
 ### Added
+
 - Added configurable logging - output now respects the value of the
   `RUST_LOG` environment variable, using the standard `env_logger` crate.
 - Added json logging, which is controlled by the `RUST_LOG_FORMAT` environment
@@ -39,13 +461,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   keepalive messages.
 
 ## [0.9.2] - 2025-02-19
+
 ### Fixed
+
 - Fixed incorrect handling of the `cluster` field in slurm that meant
   that race conditions prevented users and accounts from being properly
   added to multiple clusters within the same slurmd instance.
 
 ## [0.9.1] - 2025-02-18
+
 ### Added
+
 - Added a command to force a disconnect of an open connection. Changed
   the keepalive logic so that, if a keepalive message can't be sent,
   then the connection is automatically disconnected and remade. This
@@ -62,7 +488,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   doesn't impact anything external.
 
 ## [0.9.0] - 2025-02-10
+
 ### Added
+
 - Added instructions to ask for the home and project directories for a
   user and project.
 - Changed the order of creating a user account, so that now `op-freeipa`
@@ -84,19 +512,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   error.
 
 ## [0.8.3] - 2025-02-06
+
 ### Fixed
+
 - Improved logging to reduce chattiness and improve clarity
 - Reduced timeout values so that missing agents won't cause the system
   to get too stuck in loops
 
 ## [0.8.2] - 2025-02-06
+
 ### Fixed
+
 - Extra protections to ensure that agents are connected to the cluster
   before it attempts anything, and to return valid results if existing
   protected users exist
 
 ## [0.8.1] - 2025-02-06
+
 ### Fixed
+
 - Stopped the freeipa agent from removing groups! This can lead to GID
   information being lost, and is not what we want. Instead, we now
   remove the user from the group, and leave the group alone. Now, if the
@@ -104,28 +538,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   GID.
 
 ## [0.8.0] - 2025-02-05
+
 ### Added
+
 - Added a "is_protected_user" instruction, to allow querying for user accounts
   that should not be managed by OpenPortal. This is useful for accounts that
   exist and are managed by other systems, but which need to be seen by
   portals interfacing via OpenPortal
 
 ## [0.7.0] - 2025-02-04
+
 ### Added
+
 - Added in convenience functions to the Python API to make it easier
   to query dates.
 
 ## [0.6.2] - 2025-02-04
+
 ### Fixed
+
 - General bugfixes in how the slurm accounting evaluated job consumption data.
 - General bugfixes related to how agents handle mulitple slurm clusters.
 
 ## [0.6.1] - 2025-02-03
+
 ### Added
+
 - Added support for legacy BriCS accounts and projects
 
 ## [0.6.0] - 2025-01-27
+
 ### Added
+
 - Added commands to get and set usage limits. These are recorded, but
   not yet translated into slurm (that will be for a future release - currently
   they are just used to link with Waldur).
@@ -135,7 +579,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   constructors. Prettier print output too.
 
 ## [0.5.0] - 2025-01-23
+
 ### Added
+
 - Added full accounting support. Can now get accounting data from slurm
   and return this as `UsageReport` and `ProjectUsageReport` objects
   that are also accessible from Python.
@@ -144,7 +590,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   and edge cases.
 
 ## [0.4.0] - 2025-01-03
+
 ### Added
+
 - Added per-message encryption keys, using a per-connection pair of
   random salts and randomly generated additional infos per message.
   This is a breaking change in the communication format, so agents
@@ -163,7 +611,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added a check so we can't query projects from the wrong portal.
 
 ## [0.3.0] - 2024-12-23
+
 ### Added
+
 - Added a `PortalIdentifier` so that we are clean in how we identify
   the three parts; User, Project and Portal
 - Added parse pattern for all identifiers - they can now only
@@ -183,7 +633,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   This triggered the bumped minor version as the API has changed.
 
 ## [0.2.0] - 2024-12-17
+
 ### Added
+
 - Added some extra functions to the Python layer to make it easier to
   integrate OpenPortal with, e.g. Waldur. These include `is_config_loaded`
   to check if the config has been loaded, and `get` to get the
@@ -203,14 +655,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   project to a local unix group.
 
 ## [0.1.1] - 2024-12-02
+
 ### Added
+
 - Added `instance_groups` to the FreeIPA agent, so that is is possible to
   specify additional groups that a user should be added to when they are
   added from a specific instance. This is useful when multiple instances
   share the same freeipa agent, and you want to add them to different groups.
 
 ## [0.1.0] - 2024-11-26
+
 ### Added
+
 - Added full recovery support, so that agents can restore their boards
   after they restart. Also added a queue, so that messages are queued
   if the agent is down. Plus added a wait when looking for agents, so that
@@ -240,24 +696,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   value in the config file.
 
 ### Fixed
+
 - General bug fixes and cleaning of output logging to improve resilience
   and make it easier to debug issues.
 
 ## [0.0.25] - 2024-11-20
+
 ### Fixed
+
 - Fixed attestation issue for slurm container
 
 ## [0.0.24] - 2024-11-20
+
 ### Added
+
 - Added control over the lifetime of the slurm JWT token, plus a check
   to automatically refresh the token before it expires.
 
 ### Fixed
+
 - Fixed the lack of op-slurm containers and helm charts - these are now
   built automatically by GH Actions
 
 ## [0.0.23] - 2024-11-19
+
 ### Added
+
 - Added in a slurm agent as an example of an accounting agent. This can
   now create accounting accounts on slurm when a user is added to
   a cluster. The slurm account is created with the mapped username
@@ -267,7 +731,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   authentication.
 
 ## [0.0.22] - 2024-11-13
+
 ### Added
+
 - Finished the "AddLocalUser" command for the filesystem agent. User home
   dirs and project dirs are now created, following admin settings. This
   includes multiple project dirs, plus links between dirs. Multiple checks
@@ -276,7 +742,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   ensure that they aren't written to anywhere sensitive on the filesystem.
 
 ## [0.0.21] - 2024-11-12
+
 ### Added
+
 - Moved all command and grammar parsing fully over to the parse pattern.
   You cannot now create any commands that aren't valid. Added lots of
   extra tests of validity, e.g. that commands that impact users must
@@ -294,95 +762,155 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   an invisible bridge between the "normal" work and the OpenPortal world.
 
 ## [0.0.20] - 2024-11-08
+
 ### Added
+
 - Added the concept of zones. Agents can now only send messages along chains
   within the same zone. This increases security, and makes it easier to
   segment the agent peer network into different zones (with some agents
   acting as bridges between multiple zones).
 
 ## [0.0.19] - 2024-11-07
+
 ### Fixed
+
 - Made the code more robust to freeipa being cleared / having groups removed
   behind our back. Also better way to handle errors.
 
 ## [0.0.18] - 2024-11-05
+
 ### Fixed
+
 - Specified default TLS provider so that containerised services can run without
   panicing.
 
 ## [0.0.17] - 2024-11-01
+
 ### Fixed
+
 - Fixed issues with attestations that depended on releases. Need to release
   each agent separately, which this release now does.
 
 ## [0.0.16] - 2024-11-01
+
 ### Fixed
+
 - Fixed issue with attestation of OCI images
 
 ## [0.0.15] - 2024-11-01
+
 ### Fixed
+
 - Fixed issues with the helm charts and OCI images (removed `op-platform` as it
   doesn't exist!)
 
 ## [0.0.14] - 2024-11-01
+
 ### Added
+
 - Changed the names of the cluster instance and platform agents to `cluster` and `clusters`,
   as they don't need to be named after slurm (and would cause confusion with the slurm agent).
 - Added OCI images and helm charts for all agents
 - Added instructions on how to configure the freeipa agent
 
 ## [0.0.12] - 2024-10-28
+
 ### Added
+
 - Added support for keepalive messages so that connections are kept open
 
 ## [0.0.11] - 2024-10-28
+
 ### Added
+
 - Fixed bug in handling of client proxy IP - need to use IP not port ;-)
 
 ## [0.0.10] - 2024-10-25
+
 ### Added
+
 - Fixed bug in parsing header proxy IP address
 
 ## [0.0.9] - 2024-10-25
+
 ### Added
+
 - Fixed bug in parsing command line options for bridge
 - Added support for getting the client IP address from a proxy header (e.g. `X-Forwarded-For`)
 - Cleaned up port handling, so URLs with default ports don't have the ports specified
 
 ## [0.0.8] - 2024-10-24
+
 ### Added
+
 - Added names for the ports in the helm charts
 
 ## [0.0.7] - 2024-10-24
+
 ### Added
+
 - Added a healthcheck server to simplify pod healthchecks
 - Updated helm charts to use the healthcheck server, plus expose the bridge server port
 
 ## [0.0.6] - 2024-10-23
+
 ### Added
+
 - Separated out build artefacts so that they can be picked up by the rest of the build
 
 ## [0.0.5] - 2024-10-23
+
 ### Added
+
 - Fixing generation and attestation of SBOMs for container images (finally!)
 
 ## [0.0.4] - 2024-10-23
+
 ### Added
+
 - Fixing release issues, and beginning work on the workflow for the Python module
 
 ## [0.0.3] - 2024-10-23
+
 ### Added
+
 - Fixing the attestations so that SBOMs are correctly generated for container images.
 
 ## [0.0.2] - 2024-10-23
+
 ### Added
+
 - Fixing the helm charts so that they version numbers are correctly set.
 
 ## [0.0.1] - 2024-10-23
+
 ### Changed
+
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.22.0]: https://github.com/isambard-sc/openportal/releases/tag/0.22.0
+[0.21.1]: https://github.com/isambard-sc/openportal/releases/tag/0.21.1
+[0.21.0]: https://github.com/isambard-sc/openportal/releases/tag/0.21.0
+[0.20.2]: https://github.com/isambard-sc/openportal/releases/tag/0.20.2
+[0.20.1]: https://github.com/isambard-sc/openportal/releases/tag/0.20.1
+[0.20.0]: https://github.com/isambard-sc/openportal/releases/tag/0.20.0
+[0.19.1]: https://github.com/isambard-sc/openportal/releases/tag/0.19.1
+[0.19.0]: https://github.com/isambard-sc/openportal/releases/tag/0.19.0
+[0.18.0]: https://github.com/isambard-sc/openportal/releases/tag/0.18.0
+[0.17.0]: https://github.com/isambard-sc/openportal/releases/tag/0.17.0
+[0.16.3]: https://github.com/isambard-sc/openportal/releases/tag/0.16.3
+[0.16.2]: https://github.com/isambard-sc/openportal/releases/tag/0.16.2
+[0.16.1]: https://github.com/isambard-sc/openportal/releases/tag/0.16.1
+[0.16.0]: https://github.com/isambard-sc/openportal/releases/tag/0.16.0
+[0.15.1]: https://github.com/isambard-sc/openportal/releases/tag/0.15.1
+[0.15.0]: https://github.com/isambard-sc/openportal/releases/tag/0.15.0
+[0.14.0]: https://github.com/isambard-sc/openportal/releases/tag/0.14.0
+[0.12.1]: https://github.com/isambard-sc/openportal/releases/tag/0.12.1
+[0.12.0]: https://github.com/isambard-sc/openportal/releases/tag/0.12.0
+[0.11.0]: https://github.com/isambard-sc/openportal/releases/tag/0.11.0
+[0.10.0]: https://github.com/isambard-sc/openportal/releases/tag/0.10.0
+[0.9.6]: https://github.com/isambard-sc/openportal/releases/tag/0.9.6
 [0.9.5]: https://github.com/isambard-sc/openportal/releases/tag/0.9.5
 [0.9.4]: https://github.com/isambard-sc/openportal/releases/tag/0.9.4
 [0.9.3]: https://github.com/isambard-sc/openportal/releases/tag/0.9.3

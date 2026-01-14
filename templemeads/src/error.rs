@@ -37,6 +37,9 @@ pub enum Error {
     Delivery(String),
 
     #[error("{0}")]
+    Incompatible(String),
+
+    #[error("{0}")]
     IncompleteCode(String),
 
     #[error("{0}")]
@@ -56,6 +59,9 @@ pub enum Error {
 
     #[error("{0}")]
     Duplicate(String),
+
+    #[error("{0}")]
+    Failed(String),
 
     #[error("{0}")]
     Expired(String),
@@ -100,6 +106,12 @@ pub enum Error {
     State(String),
 
     #[error("{0}")]
+    NotReady(String),
+
+    #[error("{0}")]
+    Timeout(String),
+
+    #[error("{0}")]
     Unknown(String),
 
     #[error("{0}")]
@@ -110,6 +122,9 @@ pub enum Error {
 
     #[error("{0}")]
     UnmanagedGroup(String),
+
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 // implement into a paddington::Error

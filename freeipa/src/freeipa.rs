@@ -3,17 +3,22 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use chrono::Utc;
 use once_cell::sync::Lazy;
-use reqwest::{cookie::Jar, Client};
+use rand::seq::IteratorRandom;
+use rand::SeedableRng;
+use reqwest::{cookie::CookieStore, cookie::Jar, Client};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use templemeads::grammar::{
     PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
+use templemeads::job::assert_not_expired;
 use templemeads::Error;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::Mutex;
 
 use templemeads::agent::Peer;
 
@@ -34,15 +39,44 @@ async fn call_post<T>(
     func: &str,
     args: Option<Vec<String>>,
     kwargs: Option<HashMap<String, String>>,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
-    // get the auth details from the global FreeIPA client
-    let mut auth = auth().await?;
-    auth.num_reconnects = 0;
+    // record the start time for this function
+    let start_time = Utc::now();
 
-    let url = format!("{}/ipa/session/json", &auth.server);
+    // get the auth details from the global FreeIPA client
+    tracing::debug!(
+        "Call post function: {}, args = {:?}, kwargs = {:?}",
+        func,
+        args,
+        kwargs
+    );
+    tracing::debug!("Getting a connected server...");
+    let mut lock = get_connected_server(expires).await?;
+    tracing::debug!(
+        "Connected server obtained! Took {} ms",
+        (Utc::now() - start_time).num_milliseconds()
+    );
+
+    // how much time is left before we expire?
+    let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
+
+    if time_left < 5 {
+        return Err(Error::Call(
+            "Not enough time left to call FreeIPA server".to_string(),
+        ));
+    }
+
+    tracing::debug!(
+        "Calling FreeIPA function: {} - we have {} seconds left before we expire",
+        func,
+        time_left
+    );
+
+    let url = format!("{}/ipa/session/json", lock.server());
 
     // make id a random integer between 1 and 1000
     let id = rand::random::<u16>() % 1000;
@@ -59,15 +93,18 @@ where
         "id": id,
     });
 
+    // no query should take longer than 60 seconds
+    // Use a timeout to prevent deadlocks from failed servers
     let client = Client::builder()
-        .cookie_provider(Arc::clone(&auth.jar))
+        .cookie_provider(Arc::clone(lock.jar()))
         .danger_accept_invalid_certs(should_allow_invalid_certs())
+        .timeout(Duration::from_secs(time_left.min(20) as u64))
         .build()
         .context("Could not build client")?;
 
     let mut result = client
         .post(&url)
-        .header("Referer", format!("{}/ipa", &auth.server))
+        .header("Referer", format!("{}/ipa", lock.server()))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .json(&payload)
@@ -75,55 +112,80 @@ where
         .await
         .with_context(|| format!("Could not call function: {}", payload))?;
 
-    // if this is an authorisation error, try to reconnect
-    while result.status().as_u16() == 401 {
-        auth.num_reconnects += 1;
-
-        if auth.num_reconnects > 3 {
-            return Err(Error::Call(format!(
-                "Authorisation (401) error: Could not get response for function: {}. Status: {}. Response: {:?}",
-                payload,
-                result.status(),
-                    result
-                )));
-        }
-
-        tracing::error!("Authorisation (401) error. Reconnecting.");
-
-        match login(&auth.server, &auth.user, &auth.password).await {
-            Ok(jar) => {
-                auth.jar = jar;
-
-                // create a new client with the new cookies
-                let client = Client::builder()
-                    .cookie_provider(Arc::clone(&auth.jar))
-                    .danger_accept_invalid_certs(should_allow_invalid_certs())
-                    .build()
-                    .context("Could not build client")?;
-
-                // retry the call
-                result = client
-                    .post(&url)
-                    .header("Referer", format!("{}/ipa", &auth.server))
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await
-                    .with_context(|| format!("Could not call function: {}", payload))?;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Could not login to FreeIPA server: {}. Error: {}",
-                    auth.server,
-                    e
-                );
-            }
-        }
+    // write a warning if this took a long time
+    if (Utc::now() - start_time).num_seconds() > 5 {
+        tracing::warn!(
+            "FreeIPA call for server {} to function {} took {} seconds",
+            lock.server(),
+            func,
+            (Utc::now() - start_time).num_seconds()
+        );
+    } else {
+        tracing::debug!(
+            "FreeIPA call for server {} to function {} took {} ms",
+            lock.server(),
+            func,
+            (Utc::now() - start_time).num_milliseconds()
+        );
     }
 
-    // reset the number of reconnects, as we have clearly been successful
-    auth.num_reconnects = 0;
+    // if this is an authorisation error, try to reconnect
+    while result.status().as_u16() == 401 {
+        tracing::warn!("Login error: 401 - authorisation failed.");
+        lock.set_login_failed();
+
+        // try to get another lock
+        drop(lock);
+
+        assert_not_expired(expires)?;
+
+        tracing::error!("Authorisation (401) error. Reconnecting.");
+        lock = get_connected_server(expires).await?;
+
+        if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
+            tracing::info!(
+                "Call to server {} for function {} has is still running... {} seconds elapsed so far.",
+                lock.server(),
+                func,
+                (Utc::now() - start_time).num_seconds()
+            );
+        }
+
+        let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
+
+        if time_left < 5 {
+            return Err(Error::Call(
+                "Not enough time left to call FreeIPA server".to_string(),
+            ));
+        }
+
+        let client = Client::builder()
+            .cookie_provider(Arc::clone(lock.jar()))
+            .danger_accept_invalid_certs(should_allow_invalid_certs())
+            .timeout(Duration::from_secs(time_left.min(20) as u64))
+            .build()
+            .context("Could not build client")?;
+
+        // retry the call
+        result = client
+            .post(&url)
+            .header("Referer", format!("{}/ipa", lock.server()))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| format!("Could not call function: {}", payload))?;
+
+        if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
+            tracing::error!(
+                "Call to server {} for function {} has completed... {} seconds elapsed so far.",
+                lock.server(),
+                func,
+                (Utc::now() - start_time).num_seconds()
+            );
+        }
+    }
 
     if result.status().is_success() {
         let result = result
@@ -229,27 +291,200 @@ impl IPAResponse {
 }
 
 #[derive(Debug, Clone)]
-struct FreeAuth {
+struct IPAServer {
     server: String,
     jar: Arc<Jar>,
     user: String,
     password: SecretString,
-    num_reconnects: u32,
+    num_failed_reconnects: u32,
+    last_failed_reconnect: Option<chrono::DateTime<Utc>>,
 }
 
-impl FreeAuth {
-    fn default() -> Self {
-        FreeAuth {
-            server: "".to_string(),
+impl IPAServer {
+    fn new(server: &str, user: &str, password: &SecretString) -> Self {
+        IPAServer {
+            server: server.to_string(),
             jar: Arc::new(Jar::default()),
-            user: "".to_string(),
-            password: SecretString::default(),
-            num_reconnects: 0,
+            user: user.to_string(),
+            password: password.clone(),
+            num_failed_reconnects: 0,
+            last_failed_reconnect: None,
+        }
+    }
+
+    fn is_logged_in(&self) -> bool {
+        // check if the jar has a session cookie for this server
+        let url = format!("{}/ipa", &self.server);
+
+        match url.parse() {
+            Ok(url) => {
+                let cookies = self.jar.cookies(&url);
+                match cookies {
+                    Some(cookies) => cookies.to_str().unwrap_or_default().contains("ipa_session"),
+                    None => false,
+                }
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn set_login_failed(&mut self) {
+        self.num_failed_reconnects += 1;
+        self.last_failed_reconnect = Some(Utc::now());
+        self.jar = Arc::new(Jar::default());
+    }
+
+    fn set_login_success(&mut self, jar: Arc<Jar>) {
+        self.jar = jar;
+        self.num_failed_reconnects = 0;
+        self.last_failed_reconnect = None;
+    }
+
+    fn should_backoff(&self) -> bool {
+        if self.num_failed_reconnects < 3 {
+            return false;
+        }
+
+        if let Some(last_failed) = self.last_failed_reconnect {
+            let backoff_duration =
+                chrono::Duration::seconds(20 * self.num_failed_reconnects as i64);
+            Utc::now() < last_failed + backoff_duration
+        } else {
+            false
         }
     }
 }
 
-static FREEIPA_AUTH: Lazy<Mutex<FreeAuth>> = Lazy::new(|| Mutex::new(FreeAuth::default()));
+#[derive(Debug)]
+struct LockedIPAServer {
+    server: tokio::sync::OwnedMutexGuard<IPAServer>,
+}
+
+impl LockedIPAServer {
+    fn server(&self) -> &str {
+        &self.server.server
+    }
+
+    fn jar(&self) -> &Arc<Jar> {
+        &self.server.jar
+    }
+
+    fn set_login_failed(&mut self) {
+        self.server.set_login_failed();
+    }
+}
+
+static FREEIPA_SERVERS: Lazy<Mutex<Vec<Arc<Mutex<IPAServer>>>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
+pub async fn initialise_servers(
+    servers: &[String],
+    user: &str,
+    password: &SecretString,
+) -> Result<(), Error> {
+    let mut freeipa_servers = FREEIPA_SERVERS.lock().await;
+
+    // clear any existing servers
+    freeipa_servers.clear();
+
+    // now add each server
+    for server in servers {
+        let server = server.trim();
+
+        if server.is_empty() {
+            continue;
+        }
+
+        freeipa_servers.push(Arc::new(Mutex::new(IPAServer::new(server, user, password))));
+    }
+
+    Ok(())
+}
+
+async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedIPAServer, Error> {
+    // get a copy of the servers, so that we don't hold the lock while we
+    // try to connect
+    assert_not_expired(expires)?;
+
+    let freeipa_servers = FREEIPA_SERVERS.lock().await.clone();
+
+    if freeipa_servers.is_empty() {
+        return Err(Error::Call(
+            "No FreeIPA servers have been initialised".to_string(),
+        ));
+    }
+
+    let mut rng = rand::rngs::StdRng::from_os_rng();
+
+    loop {
+        let mut should_all_backoff: bool = true;
+
+        // randomise the order of the servers for each loop
+        for server in freeipa_servers
+            .iter()
+            .choose_multiple(&mut rng, freeipa_servers.len())
+        {
+            assert_not_expired(expires)?;
+
+            match server.clone().try_lock_owned() {
+                Ok(mut server) => {
+                    if server.is_logged_in() {
+                        tracing::debug!("Already logged in to FreeIPA server: {}", server.server);
+                        return Ok(LockedIPAServer { server });
+                    }
+
+                    if server.should_backoff() {
+                        tracing::warn!(
+                            "Backing off from trying to login to FreeIPA server: {}",
+                            server.server
+                        );
+                        continue;
+                    }
+
+                    should_all_backoff = false;
+
+                    tracing::info!("Logging in to FreeIPA server: {}", server.server);
+                    match login(&server.server, &server.user, &server.password, expires).await {
+                        Ok(jar) => {
+                            // update the jar in the server
+                            tracing::info!("Login successful to FreeIPA server: {}", server.server);
+                            server.set_login_success(jar);
+                            return Ok(LockedIPAServer { server });
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Could not login to FreeIPA server: {}. Error: {}",
+                                server.server,
+                                e
+                            );
+                            server.set_login_failed();
+
+                            // release the lock and try the next server
+                        }
+                    }
+                }
+                Err(_) => {
+                    // could not get the lock - this implies the server is in use
+                    should_all_backoff = false;
+                }
+            }
+        }
+
+        if should_all_backoff {
+            tracing::error!(
+                "All FreeIPA servers are backing off because of repeated login failures."
+            );
+            return Err(Error::Call(
+                "All FreeIPA servers are backing off because of repeated login failures."
+                    .to_string(),
+            ));
+        }
+
+        // wait a bit before trying again
+        assert_not_expired(expires)?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
 fn should_allow_invalid_certs() -> bool {
     match std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS") {
@@ -263,12 +498,27 @@ fn should_allow_invalid_certs() -> bool {
 /// This returns a cookie jar that will contain the resulting authorisation
 /// cookie, and which can be used for subsequent calls to the server.
 ///
-async fn login(server: &str, user: &str, password: &SecretString) -> Result<Arc<Jar>, Error> {
+async fn login(
+    server: &str,
+    user: &str,
+    password: &SecretString,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Arc<Jar>, Error> {
+    // how much time is left before we expire?
+    let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
+
+    if time_left < 5 {
+        return Err(Error::Call(
+            "Not enough time left to login to FreeIPA server".to_string(),
+        ));
+    }
+
     let jar = Arc::new(Jar::default());
 
     let client = Client::builder()
         .cookie_provider(Arc::clone(&jar))
         .danger_accept_invalid_certs(should_allow_invalid_certs())
+        .timeout(Duration::from_secs(time_left.min(10) as u64))
         .build()
         .context("Could not build client")?;
 
@@ -297,11 +547,6 @@ async fn login(server: &str, user: &str, password: &SecretString) -> Result<Arc<
             result
         ))),
     }
-}
-
-// function to return the client protected by a MutexGuard
-async fn auth<'mg>() -> Result<MutexGuard<'mg, FreeAuth>, Error> {
-    Ok(FREEIPA_AUTH.lock().await)
 }
 
 ///
@@ -1004,46 +1249,6 @@ impl IPAGroup {
     }
 }
 
-pub async fn connect(server: &str, user: &str, password: &SecretString) -> Result<(), Error> {
-    // overwrite the global FreeIPA client with a new one
-    let mut auth = FREEIPA_AUTH.lock().await;
-
-    auth.server = server.to_string();
-    auth.user = user.to_string();
-    auth.password = password.clone();
-    auth.num_reconnects = 0;
-
-    const MAX_RECONNECTS: u32 = 3;
-    const RECONNECT_WAIT: u64 = 100;
-
-    loop {
-        match login(&auth.server, &auth.user, &auth.password).await {
-            Ok(jar) => {
-                auth.jar = jar;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Could not login to FreeIPA server: {}. Error: {}",
-                    server,
-                    e
-                );
-
-                auth.num_reconnects += 1;
-
-                if auth.num_reconnects > MAX_RECONNECTS {
-                    return Err(Error::Login(format!(
-                        "Could not login to FreeIPA server: {}. Error: {}",
-                        server, e
-                    )));
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_WAIT)).await;
-            }
-        }
-    }
-}
-
 ///
 /// Return whether this is an internal reserved portal name, i.e.
 /// "openportal", "system", or "instance"
@@ -1088,7 +1293,10 @@ fn identifier_to_projectid(project: &ProjectIdentifier, legacy: bool) -> Result<
 ///
 /// Return all of the users who are part of the specified group
 ///
-async fn force_get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Error> {
+async fn force_get_users_in_group(
+    group: &IPAGroup,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Vec<IPAUser>, Error> {
     if !group.is_project_group() {
         // we only list users in project groups
         return Ok(Vec::new());
@@ -1102,7 +1310,7 @@ async fn force_get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Erro
         kwargs
     };
 
-    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
+    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs), expires).await?;
 
     // filter out users who are not enabled - we do list unmanaged users,
     // so that OpenPortal isn't repeatedly told to add users who already exist
@@ -1118,7 +1326,10 @@ async fn force_get_users_in_group(group: &IPAGroup) -> Result<Vec<IPAUser>, Erro
 /// Return the specified group from FreeIPA, or None if it does
 /// not exist
 ///
-async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Error> {
+async fn get_group(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<IPAGroup>, Error> {
     match cache::get_group(project).await? {
         Some(group) => Ok(Some(group)),
         None => {
@@ -1128,7 +1339,10 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
                 kwargs
             };
 
-            let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+            tracing::debug!("Call group_find for project: {}", project);
+            let result =
+                call_post::<IPAResponse>("group_find", None, Some(kwargs), expires).await?;
+            tracing::debug!("group_find result: {:?}", result);
 
             if is_internal_portal(&project.portal()) {
                 let internal_groups = cache::get_internal_group_ids().await?;
@@ -1178,7 +1392,7 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
                         // if this is a project group, then get and cache all users
                         // in this group
                         if group.is_project_group() {
-                            let users = force_get_users_in_group(&group).await?;
+                            let users = force_get_users_in_group(&group, expires).await?;
                             cache::set_users_in_group(&group, &users).await?;
                         }
 
@@ -1193,8 +1407,11 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
                             kwargs
                         };
 
+                        tracing::debug!("Call group_find for legacy project: {}", project);
                         let result =
-                            call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+                            call_post::<IPAResponse>("group_find", None, Some(kwargs), expires)
+                                .await?;
+                        tracing::debug!("group_find legacy result: {:?}", result);
 
                         match result.legacy_groups(&project.portal_identifier())?.first() {
                             Some(group) => {
@@ -1222,7 +1439,7 @@ async fn get_group(project: &ProjectIdentifier) -> Result<Option<IPAGroup>, Erro
                                 // if this is a project group, then get and cache all users
                                 // in this group
                                 if group.is_project_group() {
-                                    let users = force_get_users_in_group(&group).await?;
+                                    let users = force_get_users_in_group(&group, expires).await?;
                                     cache::set_users_in_group(&group, &users).await?;
                                 }
 
@@ -1253,7 +1470,10 @@ pub async fn identifier_to_userid(user: &UserIdentifier) -> Result<String, Error
 ///
 /// Force get the user - this will refresh the data from FreeIPA
 ///
-async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
+async fn force_get_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<IPAUser>, Error> {
     // only get users whose portals are not in the internal set
     if is_internal_portal(&user.portal()) {
         return Ok(None);
@@ -1266,7 +1486,7 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
         kwargs
     };
 
-    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs)).await?;
+    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs), expires).await?;
 
     match result.users(&user.project_identifier())?.first() {
         Some(user) => {
@@ -1280,7 +1500,10 @@ async fn force_get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error>
 ///
 /// Return all of the groups that the user is a member of
 ///
-async fn get_groups_for_user(user: &IPAUser) -> Result<Vec<IPAGroup>, Error> {
+async fn get_groups_for_user(
+    user: &IPAUser,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Vec<IPAGroup>, Error> {
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("user".to_string(), user.userid().to_string());
@@ -1289,7 +1512,7 @@ async fn get_groups_for_user(user: &IPAUser) -> Result<Vec<IPAGroup>, Error> {
         kwargs
     };
 
-    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs), expires).await?;
 
     let internal_groups = cache::get_internal_group_ids().await?;
 
@@ -1326,10 +1549,13 @@ async fn get_groups_for_user(user: &IPAUser) -> Result<Vec<IPAGroup>, Error> {
 /// this will only return users who are managed (part of the
 /// "openportal" group)
 ///
-async fn get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
+async fn get_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<IPAUser>, Error> {
     match cache::get_user(user).await? {
         Some(user) => Ok(Some(user.clone())),
-        None => Ok(force_get_user(user).await?),
+        None => Ok(force_get_user(user, expires).await?),
     }
 }
 
@@ -1337,9 +1563,12 @@ async fn get_user(user: &UserIdentifier) -> Result<Option<IPAUser>, Error> {
 /// Call this function to get the group - adding it to FreeIPA if
 /// it doesn't already exist
 ///
-async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Error> {
+async fn get_group_create_if_not_exists(
+    group: &IPAGroup,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAGroup, Error> {
     // check if it already exist in FreeIPA (this also checks cache)
-    if let Some(group) = get_group(group.identifier()).await? {
+    if let Some(group) = get_group(group.identifier(), expires).await? {
         cache::add_existing_group(&group).await?;
         return Ok(group);
     }
@@ -1355,7 +1584,7 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_add", None, Some(kwargs)).await {
+    match call_post::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!("Successfully created group: {}", group);
         }
@@ -1367,7 +1596,7 @@ async fn get_group_create_if_not_exists(group: &IPAGroup) -> Result<IPAGroup, Er
     // the group should now exist in FreeIPA (either we added it,
     // or another thread beat us to it - get the group as it is in
     // FreeIPA
-    match get_group(group.identifier()).await? {
+    match get_group(group.identifier(), expires).await? {
         Some(group) => Ok(group),
         None => {
             tracing::error!("Failed to add group {} to FreeIPA", group);
@@ -1445,7 +1674,11 @@ pub async fn get_primary_group_name(user: &UserIdentifier) -> Result<String, Err
 /// or removes them as necessary. Groups will match the project group,
 /// the system groups, and the openportal group.
 ///
-async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> {
+async fn sync_groups(
+    user: &IPAUser,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
     // the user probably doesn't exist, so add them, making sure they
     // are in the correct groups
     let mut groups = cache::get_system_groups().await?;
@@ -1464,7 +1697,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
     let mut group_cns = Vec::new();
 
     for group in &groups {
-        let added_group = get_group_create_if_not_exists(group).await?;
+        let added_group = get_group_create_if_not_exists(group, expires).await?;
 
         if group.identifier() != added_group.identifier() {
             tracing::error!(
@@ -1483,7 +1716,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
     }
 
     // return the user in the system - check that the groups match
-    let user = get_user(user.identifier())
+    let user = get_user(user.identifier(), expires)
         .await?
         .ok_or(Error::Call(format!(
             "User {} could not be found after adding?",
@@ -1530,7 +1763,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
+        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
             Ok(_) => tracing::info!("Successfully added user {} to group {}", userid, group_cn),
             Err(e) => {
                 // this should not happen - it indicates that the group has disappeared
@@ -1562,7 +1795,7 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
 
     // finally - re-fetch the user from FreeIPA to make sure that we have
     // the correct information
-    match force_get_user(user.identifier()).await? {
+    match force_get_user(user.identifier(), expires).await? {
         Some(user) => Ok(user),
         None => {
             tracing::warn!(
@@ -1584,12 +1817,19 @@ async fn sync_groups(user: &IPAUser, instance: &Peer) -> Result<IPAUser, Error> 
 /// Add the project to FreeIPA - this will create the group for the project
 /// if it doesn't already exist. This returns the group
 ///
-pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error> {
-    let project_group = get_group_create_if_not_exists(&IPAGroup::new(
-        &identifier_to_projectid(project, false)?,
-        project,
-        "OpenPortal-managed group",
-    )?)
+pub async fn add_project(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAGroup, Error> {
+    // ensure that we don't have too many concurrent requests
+    let project_group = get_group_create_if_not_exists(
+        &IPAGroup::new(
+            &identifier_to_projectid(project, false)?,
+            project,
+            "OpenPortal-managed group",
+        )?,
+        expires,
+    )
     .await?;
 
     Ok(project_group)
@@ -1604,8 +1844,9 @@ pub async fn add_project(project: &ProjectIdentifier) -> Result<IPAGroup, Error>
 pub async fn remove_project(
     project: &ProjectIdentifier,
     instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
-    let project_group = match get_group(project).await {
+    let project_group = match get_group(project, expires).await {
         Ok(Some(group)) => group,
         Ok(None) => {
             tracing::warn!(
@@ -1632,16 +1873,25 @@ pub async fn remove_project(
             project_group, project)));
     }
 
+    assert_not_expired(expires)?;
+
     // now get all of the users in this project and remove them as well!
-    let users = force_get_users_in_group(&project_group).await?;
+    let users = force_get_users_in_group(&project_group, expires).await?;
 
     tracing::info!(
-        "Removing group {} for project {}",
+        "Removing group {} for project {}. Users to remove: {}",
         project_group.groupid(),
-        project
+        project,
+        users
+            .iter()
+            .map(|u| u.userid())
+            .collect::<Vec<&str>>()
+            .join(", ")
     );
 
     for user in users {
+        assert_not_expired(expires)?;
+
         if !user.is_managed() {
             tracing::warn!(
                 "Ignoring user {} as they are not managed by OpenPortal",
@@ -1650,7 +1900,7 @@ pub async fn remove_project(
             continue;
         }
 
-        match remove_user(user.identifier(), instance).await {
+        match remove_user(user.identifier(), instance, expires).await {
             Ok(user) => {
                 tracing::info!("Successfully removed group user: {}", user);
             }
@@ -1671,14 +1921,14 @@ pub async fn remove_project(
     Ok(project_group)
 }
 
-async fn reenable_user(user: &IPAUser) -> Result<IPAUser, Error> {
+async fn reenable_user(user: &IPAUser, expires: &chrono::DateTime<Utc>) -> Result<IPAUser, Error> {
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("uid".to_string(), user.userid().to_string());
         kwargs
     };
 
-    match call_post::<IPAResponse>("user_enable", None, Some(kwargs)).await {
+    match call_post::<IPAResponse>("user_enable", None, Some(kwargs), expires).await {
         Ok(_) => {
             let mut user = user.clone();
             user.set_enabled();
@@ -1729,6 +1979,7 @@ pub async fn add_user(
     user: &UserIdentifier,
     instance: &Peer,
     homedir: &Option<String>,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAUser, Error> {
     // get a lock for this user, as only a single task should be adding
     // or removing this user at the same time
@@ -1755,8 +2006,12 @@ pub async fn add_user(
         };
     };
 
+    assert_not_expired(expires)?;
+
     // return the up-to-date user if they already exist
-    if let Some(mut user) = force_get_user(user).await? {
+    if let Some(mut user) = force_get_user(user, expires).await? {
+        assert_not_expired(expires)?;
+
         if !user.is_managed() {
             tracing::warn!(
                 "Ignoring request to add {} as they are not managed by OpenPortal",
@@ -1771,7 +2026,7 @@ pub async fn add_user(
 
         // make sure to re-enable if needed
         if user.is_disabled() {
-            user = match reenable_user(&user).await {
+            user = match reenable_user(&user, expires).await {
                 Ok(user) => user,
                 Err(e) => {
                     tracing::error!(
@@ -1788,7 +2043,7 @@ pub async fn add_user(
 
         if user.is_managed() && user.is_enabled() {
             // make sure that the groups are correct for the existing user
-            match sync_groups(&user, instance).await {
+            match sync_groups(&user, instance, expires).await {
                 Ok(user) => {
                     tracing::info!("Added user [cached] {}", user.identifier());
                     return Ok(user);
@@ -1812,8 +2067,12 @@ pub async fn add_user(
         // and will try to add the user from scratch
     }
 
+    assert_not_expired(expires)?;
+
     // Get the group that all managed users need to belong to
     let managed_group = get_managed_group()?;
+
+    assert_not_expired(expires)?;
 
     // The user doesn't exist, so try to add
     let mut kwargs = {
@@ -1832,7 +2091,9 @@ pub async fn add_user(
         tracing::info!("Adding user {} with home directory: {}", user, homedir);
     }
 
-    let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs)).await {
+    // we need to let the below go to completion, even if expired, as the
+    // user needs to be removed if something goes wrong
+    let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs), expires).await {
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
             result.users(&user.project_identifier())?.first().cloned().ok_or(Error::UnmanagedUser(format!(
@@ -1849,12 +2110,12 @@ pub async fn add_user(
             );
             cache::clear().await?;
 
-            match get_user(user).await? {
+            match get_user(user, expires).await? {
                 Some(mut user) => {
                     if user.is_disabled() {
                         if user.is_managed() {
                             // the user should be enabled...
-                            user = reenable_user(&user).await?;
+                            user = reenable_user(&user, expires).await?;
                         } else {
                             tracing::warn!(
                                 "User {} already exists in FreeIPA, but is not managed. \
@@ -1888,9 +2149,9 @@ pub async fn add_user(
         Err(e) => {
             // failed to add - maybe they already exist?
             tracing::error!("Could not add user: {}. Error: {}", user, e);
-            match get_user(user).await? {
+            match get_user(user, expires).await? {
                 Some(user) => {
-                    tracing::info!("User already exists: {}", user);
+                    tracing::debug!("User already exists: {}", user);
                     user
                 }
                 None => {
@@ -1908,7 +2169,7 @@ pub async fn add_user(
 
     match loop {
         // make sure that this group exists
-        let managed_group = get_group_create_if_not_exists(&managed_group).await?;
+        let managed_group = get_group_create_if_not_exists(&managed_group, expires).await?;
 
         let kwargs = {
             let mut kwargs = HashMap::new();
@@ -1917,7 +2178,7 @@ pub async fn add_user(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs)).await {
+        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 break Ok(());
             }
@@ -1950,7 +2211,7 @@ pub async fn add_user(
 
             // this failed, so we need to remove the user so that we can try again
             // BUT we can only remove the user if they aren't in any other instance groups...
-            for group in get_groups_for_user(&user).await? {
+            for group in get_groups_for_user(&user, expires).await? {
                 if group.is_instance_group() {
                     tracing::warn!(
                         "User {} is in instance group {}. Cannot remove user after failed add.",
@@ -1972,7 +2233,7 @@ pub async fn add_user(
                 kwargs
             };
 
-            match call_post::<IPAResponse>("user_disable", None, Some(kwargs)).await {
+            match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
                 Ok(_) => {
                     tracing::info!(
                         "Successfully removed user {} after failed group add",
@@ -2008,7 +2269,7 @@ pub async fn add_user(
             )));
         }
 
-        match sync_groups(&user, instance).await {
+        match sync_groups(&user, instance, expires).await {
             Ok(user) => {
                 tracing::info!("Added user: {}", user);
                 break Ok(user);
@@ -2045,7 +2306,11 @@ pub async fn add_user(
 /// something else goes wrong. Note that the user must be managed by
 /// OpenPortal, or an error will be returned
 ///
-pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUser, Error> {
+pub async fn remove_user(
+    user: &UserIdentifier,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
     // get and lock a mutex on this user, as we should only have a single
     // task adding or removing this user at once
     let now = chrono::Utc::now();
@@ -2066,13 +2331,16 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
                     )));
                 }
 
+                assert_not_expired(expires)?;
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         };
     };
 
+    assert_not_expired(expires)?;
+
     // force get this user, as we need to have up-to-date information from FreeIPA
-    let mut user = match force_get_user(user).await {
+    let mut user = match force_get_user(user, expires).await {
         Ok(Some(user)) => user,
         Ok(None) => {
             tracing::warn!(
@@ -2119,7 +2387,7 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
     // maybe don't do anything if the user isn't a member of this group
     if !user.in_group(instance_group.groupid()) {
         // check that they are in any groups...
-        let in_other_instance_groups = match get_groups_for_user(&user).await {
+        let in_other_instance_groups = match get_groups_for_user(&user, expires).await {
             Ok(groups) => !groups
                 .iter()
                 .filter(|g| g.is_instance_group())
@@ -2142,6 +2410,10 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
         }
     }
 
+    assert_not_expired(expires)?;
+
+    // don't check for expiry below as this has to run to completion
+
     // now remove the user from all of the instance groups for this peer
     let instance_groups = cache::get_instance_groups(instance).await?;
 
@@ -2153,7 +2425,7 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs)).await {
+        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 tracing::info!(
                     "Successfully removed user {} from group {}",
@@ -2181,7 +2453,7 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
     }
 
     // refetch the groups for this user, as they will have changed
-    let groups = match get_groups_for_user(&user).await {
+    let groups = match get_groups_for_user(&user, expires).await {
         Ok(groups) => groups,
         Err(e) => {
             tracing::error!("Could not get groups for user {}. Error: {}", user, e);
@@ -2234,7 +2506,7 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs)).await {
+        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 tracing::info!(
                     "Successfully removed user {} from group {}",
@@ -2270,7 +2542,7 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
     // we don't actually remove users - instead we disable them so that
     // they can't log in. This way, if the user is re-added, then they
     // will get the same UID and other details
-    match call_post::<IPAResponse>("user_disable", None, Some(kwargs)).await {
+    match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
         Ok(_) => {
             user.set_disabled();
             tracing::info!("Successfully removed user: {}", user.identifier());
@@ -2304,7 +2576,11 @@ pub async fn remove_user(user: &UserIdentifier, instance: &Peer) -> Result<IPAUs
 /// something else goes wrong. Note that the user must be managed by
 /// OpenPortal, or an error will be returned
 ///
-pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<String, Error> {
+pub async fn update_homedir(
+    user: &UserIdentifier,
+    homedir: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<String, Error> {
     let homedir = homedir.trim();
 
     if homedir.is_empty() {
@@ -2312,10 +2588,12 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
     }
 
     // get the user from FreeIPA
-    let user = get_user(user).await?.ok_or(Error::Call(format!(
+    let user = get_user(user, expires).await?.ok_or(Error::Call(format!(
         "User {} does not exist in FreeIPA?",
         user
     )))?;
+
+    assert_not_expired(expires)?;
 
     if !user.is_managed() {
         tracing::warn!(
@@ -2327,13 +2605,17 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
 
     if user.home() == homedir {
         // nothing to do
-        tracing::info!(
+        tracing::debug!(
             "Homedir for user {} is already {}. No changes needed.",
             user.identifier(),
             homedir
         );
         return Ok(user.home().to_string());
     }
+
+    assert_not_expired(expires)?;
+
+    // do not check for expiry below as this has to run to completion
 
     // now update the homedir to the passed string
     let kwargs = {
@@ -2343,7 +2625,7 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
         kwargs
     };
 
-    match call_post::<IPAResponse>("user_mod", None, Some(kwargs)).await {
+    match call_post::<IPAResponse>("user_mod", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!(
                 "Successfully updated homedir for user: {}",
@@ -2370,7 +2652,7 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
     }
 
     // now update the user in the cache
-    let user = force_get_user(user.identifier())
+    let user = force_get_user(user.identifier(), expires)
         .await?
         .ok_or(Error::Call(format!(
             "User {} does not exist in FreeIPA?",
@@ -2393,8 +2675,11 @@ pub async fn update_homedir(user: &UserIdentifier, homedir: &str) -> Result<Stri
 /// Return all of the groups that are managed by OpenPortal for the
 /// passed portal
 ///
-pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Error> {
-    tracing::info!("Getting managed groups for portal: {}", portal);
+pub async fn get_groups(
+    portal: &PortalIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Vec<IPAGroup>, Error> {
+    tracing::debug!("Getting managed groups for portal: {}", portal);
     if is_internal_portal(&portal.portal()) {
         // return an empty set of groups for internal portals
         return Ok(Vec::new());
@@ -2411,7 +2696,9 @@ pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Erro
         kwargs
     };
 
-    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs)).await?;
+    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs), expires).await?;
+
+    assert_not_expired(expires)?;
 
     // construct groups as the combination of both result.groups() and result.legacy_groups()
     let groups = result
@@ -2437,16 +2724,16 @@ pub async fn get_groups(portal: &PortalIdentifier) -> Result<Vec<IPAGroup>, Erro
 pub async fn get_users(
     project: &ProjectIdentifier,
     instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
 ) -> Result<Vec<IPAUser>, Error> {
-    tracing::info!("Getting users for project: {}", project);
-
+    tracing::debug!("Getting users for project: {}", project);
     // don't get the users for project identifiers that use internal portal names
     // as they aren't public
     if is_internal_portal(&project.portal()) {
         return Ok(Vec::new());
     }
 
-    let project_group = match get_group(project).await {
+    let project_group = match get_group(project, expires).await {
         Ok(Some(group)) => group,
         Ok(None) => {
             tracing::warn!(
@@ -2464,6 +2751,8 @@ pub async fn get_users(
         }
     };
 
+    assert_not_expired(expires)?;
+
     let instance_group = get_op_instance_group(instance)?;
     let cached_users = cache::get_users_in_group(&project_group).await?;
 
@@ -2479,9 +2768,11 @@ pub async fn get_users(
 
     // there are no users, meaning that we have not checked yet, or there
     // really are no users in this project...
-    let users = force_get_users_in_group(&project_group).await?;
+    let users = force_get_users_in_group(&project_group, expires).await?;
 
     cache::set_users_in_group(&project_group, &users).await?;
+
+    assert_not_expired(expires)?;
 
     // filter out users who are not in the instance group for this peer
     let users = users
@@ -2492,8 +2783,11 @@ pub async fn get_users(
     Ok(users)
 }
 
-pub async fn get_project_mapping(project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
-    match get_group(project).await? {
+pub async fn get_project_mapping(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<ProjectMapping, Error> {
+    match get_group(project, expires).await? {
         Some(group) => group.mapping(),
         None => Err(Error::MissingProject(format!(
             "Project {} does not exist in FreeIPA",
@@ -2502,8 +2796,11 @@ pub async fn get_project_mapping(project: &ProjectIdentifier) -> Result<ProjectM
     }
 }
 
-pub async fn get_user_mapping(user: &UserIdentifier) -> Result<UserMapping, Error> {
-    match get_user(user).await? {
+pub async fn get_user_mapping(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<UserMapping, Error> {
+    match get_user(user, expires).await? {
         Some(user) => user.mapping(),
         None => Err(Error::MissingUser(format!(
             "User {} does not exist in FreeIPA",
@@ -2512,14 +2809,43 @@ pub async fn get_user_mapping(user: &UserIdentifier) -> Result<UserMapping, Erro
     }
 }
 
-pub async fn is_protected_user(user: &UserIdentifier) -> Result<bool, Error> {
+pub async fn is_protected_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
     // need to get the up-to-date version of the user,
     // in case their details have been changed in FreeIPA
     // behind our back. Important that we don't say a user
     // isn't protected when they have been manually removed from
     // the managed group...
-    match force_get_user(user).await? {
+    match force_get_user(user, expires).await? {
         Some(user) => Ok(!user.is_managed()),
+        None => Ok(false),
+    }
+}
+
+pub async fn is_existing_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    match get_user(user, expires).await? {
+        Some(user) => {
+            if user.is_enabled() || user.is_protected() {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        None => Ok(false),
+    }
+}
+
+pub async fn is_existing_project(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    match get_group(project, expires).await? {
+        Some(_) => Ok(true),
         None => Ok(false),
     }
 }

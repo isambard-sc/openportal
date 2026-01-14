@@ -2,20 +2,23 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use std::collections::HashMap;
 
 use templemeads::agent;
 use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetHomeDir, GetLimit, GetLocalHomeDir, GetLocalProjectDirs,
-    GetProjectDirs, GetProjectMapping, GetProjects, GetUsageReport, GetUsageReports,
-    GetUserMapping, GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit,
+    AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
+    GetLocalProjectDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas,
+    GetProjects, GetUsageReport, GetUsageReports, GetUserMapping, GetUserQuota, GetUserQuotas,
+    GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
+use templemeads::storage::{Quota, Volume};
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
 
@@ -32,6 +35,9 @@ const AGENT_WAIT_TIME: u64 = 10;
 async fn main() -> Result<()> {
     // start tracing
     templemeads::config::initialise_tracing();
+
+    // start system monitoring
+    templemeads::spawn_system_monitor();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -75,7 +81,7 @@ async fn main() -> Result<()> {
             match job.instruction() {
                 GetProjects(portal) => {
                     // get the list of projects from the cluster
-                    tracing::info!("Getting list of projects for portal {}", portal);
+                    tracing::debug!("Getting list of projects for portal {}", portal);
 
                     let projects = get_projects(me.name(), &portal).await?;
 
@@ -83,7 +89,7 @@ async fn main() -> Result<()> {
                 },
                 GetUsers(project) => {
                     // get the list of users from the cluster
-                    tracing::info!("Getting list of users in project {}", project);
+                    tracing::debug!("Getting list of users in project {}", project);
 
                     let users = get_accounts(me.name(), &project).await?;
 
@@ -102,6 +108,9 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // see if the project already exists
+                    let project_exists: bool = is_existing_project(me.name(), &project).await?;
+
                     // add the project to the cluster
                     let mapping = match add_project_to_cluster(me.name(), &project).await {
                         Ok(mapping) => mapping,
@@ -110,9 +119,14 @@ async fn main() -> Result<()> {
                             // so we need to remove the project from FreeIPA
                             tracing::error!("Error adding project {} to cluster: {:?}", project, e);
 
-                            match remove_project_from_cluster(me.name(), &project).await {
-                                Ok(_) => tracing::info!("Removed partially added project {}", project),
-                                Err(e) => tracing::error!("Failed to remove partially added project {}: {:?}", project, e)
+                            // only remove the project if it didn't already exist
+                            // (this stops us removing an existing group that failed
+                            //  an update)
+                            if !project_exists {
+                                match remove_project_from_cluster(me.name(), &project).await {
+                                    Ok(_) => tracing::info!("Removed partially added project {}", project),
+                                    Err(e) => tracing::error!("Failed to remove partially added project {}: {:?}", project, e)
+                                }
                             }
 
                             return Err(e);
@@ -144,6 +158,13 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // does the user already exist?
+                    let user_exists: bool = is_existing_user(me.name(), &user).await?;
+
+                    if user_exists {
+                        tracing::info!("User {} already exists on cluster - re-adding them", user);
+                    }
+
                     // add the user to the cluster
                     let mut attempts = 0;
 
@@ -158,9 +179,15 @@ async fn main() -> Result<()> {
                                     // so we need to remove the user from FreeIPA
                                     tracing::error!("Error adding user {} to cluster: {:?}", user, e);
 
-                                    match remove_account(me.name(), &user).await {
-                                        Ok(_) => tracing::info!("Removed partially added user {}", user),
-                                        Err(e) => tracing::error!("Failed to remove partially added user {}: {:?}", user, e)
+                                    // only remove the user if they didn't already exist
+                                    // (this stops us removing an existing account that failed
+                                    //  an update)
+                                    if !user_exists {
+                                        tracing::warn!("Removing partially added user {}...", user);
+                                        match remove_account(me.name(), &user).await {
+                                            Ok(_) => tracing::info!("Removed partially added user {}", user),
+                                            Err(e) => tracing::error!("Failed to remove partially added user {}: {:?}", user, e)
+                                        }
                                     }
 
                                     return Err(e);
@@ -222,6 +249,38 @@ async fn main() -> Result<()> {
                 SetLimit(project, limit) => {
                     let limit = set_project_limit(me.name(), &project, limit).await?;
                     job.completed(limit)
+                }
+                GetProjectQuota(project, volume) => {
+                    let quota = get_project_quota(me.name(), &project, &volume).await?;
+                    job.completed(quota)
+                }
+                ClearProjectQuota(project, volume) => {
+                    clear_project_quota(me.name(), &project, &volume).await?;
+                    job.completed_none()
+                }
+                SetProjectQuota(project, volume, quota) => {
+                    let quota = set_project_quota(me.name(), &project, &volume, &quota).await?;
+                    job.completed(quota)
+                }
+                GetProjectQuotas(project) => {
+                    let quotas = get_project_quotas(me.name(), &project).await?;
+                    job.completed(quotas)
+                }
+                GetUserQuota(user, volume) => {
+                    let quota = get_user_quota(me.name(), &user, &volume).await?;
+                    job.completed(quota)
+                }
+                ClearUserQuota(user, volume) => {
+                    clear_user_quota(me.name(), &user, &volume).await?;
+                    job.completed_none()
+                }
+                SetUserQuota(user, volume, quota) => {
+                    let quota = set_user_quota(me.name(), &user, &volume, &quota).await?;
+                    job.completed(quota)
+                }
+                GetUserQuotas(user) => {
+                    let quotas = get_user_quotas(me.name(), &user).await?;
+                    job.completed(quotas)
                 }
                 GetHomeDir(user) => {
                     let mapping = get_user_mapping(me.name(), &user).await?;
@@ -373,7 +432,10 @@ async fn add_user_to_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapp
     let mapping = create_account(me, user).await?;
 
     // now create their home directories
-    let homedir = create_user_directories(me, &mapping).await?;
+    create_user_directories(me, &mapping).await?;
+
+    // get the home directory path from the filesystem
+    let homedir = get_home_dir(me, &mapping).await?;
 
     // update the home directory in the account
     update_homedir(me, user, &homedir).await?;
@@ -439,7 +501,7 @@ async fn get_projects(me: &str, portal: &PortalIdentifier) -> Result<Vec<Project
 
             match result {
                 Some(projects) => {
-                    tracing::info!("Projects retrieved from account agent: {:?}", projects);
+                    tracing::debug!("Projects retrieved from account agent: {:?}", projects);
                     Ok(projects)
                 }
                 None => {
@@ -543,12 +605,11 @@ async fn get_accounts(me: &str, project: &ProjectIdentifier) -> Result<Vec<UserM
             .put(&account)
             .await?;
 
-            // Wait for the add_job to complete
             let result = job.wait().await?.result::<Vec<UserMapping>>()?;
 
             match result {
                 Some(users) => {
-                    tracing::info!("Users retrieved from account agent: {:?}", users);
+                    tracing::debug!("Users retrieved from account agent: {:?}", users);
                     Ok(users)
                 }
                 None => {
@@ -660,7 +721,7 @@ async fn get_project_mapping(
 
             match result {
                 Some(mapping) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "Project mapping retrieved from account agent: {:?}",
                         mapping
                     );
@@ -722,7 +783,7 @@ async fn get_user_mapping(me: &str, user: &UserIdentifier) -> Result<UserMapping
     }
 }
 
-async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Result<String, Error> {
+async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Result<(), Error> {
     // find the Filesystem agent
     match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
@@ -735,20 +796,9 @@ async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?.result_none()?;
 
-            match result {
-                Some(homedir) => {
-                    tracing::info!("Directories created for project: {:?}", mapping);
-                    Ok(homedir)
-                }
-                None => {
-                    tracing::error!("Error creating the project directories: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error creating the project directories: {:?}", job).to_string(),
-                    ))
-                }
-            }
+            Ok(())
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -777,7 +827,7 @@ async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
             .await?;
 
             // Wait for the add_job to complete
-            job.wait().await?;
+            job.wait().await?.result_none()?;
 
             if job.is_error() {
                 tracing::error!("Error removing the project directories: {:?}", job);
@@ -798,7 +848,7 @@ async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
     }
 }
 
-async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<String, Error> {
+async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<(), Error> {
     // find the Filesystem agent
     match agent::filesystem(AGENT_WAIT_TIME).await {
         Some(filesystem) => {
@@ -811,20 +861,9 @@ async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<Stri
             .await?;
 
             // Wait for the add_job to complete
-            let result = job.wait().await?.result::<String>()?;
+            job.wait().await?.result_none()?;
 
-            match result {
-                Some(homedir) => {
-                    tracing::info!("Directories created for user: {:?}", mapping);
-                    Ok(homedir)
-                }
-                None => {
-                    tracing::error!("Error creating the user's directories: {:?}", job);
-                    Err(Error::Call(
-                        format!("Error creating the user's directories: {:?}", job).to_string(),
-                    ))
-                }
-            }
+            Ok(())
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -848,7 +887,7 @@ async fn delete_user_directories(me: &str, mapping: &UserMapping) -> Result<(), 
             .await?;
 
             // Wait for the add_job to complete
-            job.wait().await?;
+            job.wait().await?.result_none()?;
 
             if job.is_error() {
                 tracing::error!("Error removing the user's directories: {:?}", job);
@@ -1203,6 +1242,385 @@ pub async fn set_project_limit(
     Ok(limit)
 }
 
+async fn clear_project_quota(
+    me: &str,
+    project: &ProjectIdentifier,
+    volume: &Volume,
+) -> Result<Quota, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to clear the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} clear_local_project_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!(
+                "Error clearing quota for project {} on volume {}",
+                project,
+                volume
+            );
+            Err(Error::Call(format!(
+                "Error clearing quota for project {} on volume {}",
+                project, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn set_project_quota(
+    me: &str,
+    project: &ProjectIdentifier,
+    volume: &Volume,
+    limit: &templemeads::storage::QuotaLimit,
+) -> Result<Quota, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to set the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} set_local_project_quota {} {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume,
+            limit
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!(
+                "Error setting quota for project {} on volume {}",
+                project,
+                volume
+            );
+            Err(Error::Call(format!(
+                "Error setting quota for project {} on volume {}",
+                project, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_project_quota(
+    me: &str,
+    project: &ProjectIdentifier,
+    volume: &Volume,
+) -> Result<Quota, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_project_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::warn!(
+                "No quota found for project {} on volume {}",
+                project,
+                volume
+            );
+            Err(Error::NotFound(format!(
+                "No quota found for project {} on volume {}",
+                project, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_project_quotas(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<HashMap<Volume, Quota>, Error> {
+    // get the mapping for this project
+    let mapping = get_project_mapping(me, project).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the project quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_project_quotas {}",
+            me,
+            filesystem.name(),
+            mapping
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<HashMap<Volume, Quota>>() {
+        Ok(Some(quotas)) => Ok(quotas),
+        Ok(None) => {
+            tracing::warn!("No quotas found for project {}", project);
+            Ok(HashMap::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn clear_user_quota(
+    me: &str,
+    user: &UserIdentifier,
+    volume: &Volume,
+) -> Result<Quota, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to clear the user quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} clear_local_user_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!(
+                "Error clearing quota for user {} on volume {}",
+                user,
+                volume
+            );
+            Err(Error::Call(format!(
+                "Error clearing quota for user {} on volume {}",
+                user, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn set_user_quota(
+    me: &str,
+    user: &UserIdentifier,
+    volume: &Volume,
+    limit: &templemeads::storage::QuotaLimit,
+) -> Result<Quota, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem to set the user quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} set_local_user_quota {} {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume,
+            limit
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::error!("Error setting quota for user {} on volume {}", user, volume);
+            Err(Error::Call(format!(
+                "Error setting quota for user {} on volume {}",
+                user, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_user_quota(me: &str, user: &UserIdentifier, volume: &Volume) -> Result<Quota, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the user quota
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_user_quota {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            volume
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quota
+    match job.wait().await?.result::<Quota>() {
+        Ok(Some(quota)) => Ok(quota),
+        Ok(None) => {
+            tracing::warn!("No quota found for user {} on volume {}", user, volume);
+            Err(Error::NotFound(format!(
+                "No quota found for user {} on volume {}",
+                user, volume
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_user_quotas(me: &str, user: &UserIdentifier) -> Result<HashMap<Volume, Quota>, Error> {
+    // get the mapping for this user
+    let mapping = get_user_mapping(me, user).await?;
+
+    // find the filesystem agent
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // ask the filesystem for the user quotas
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_user_quotas {}",
+            me,
+            filesystem.name(),
+            mapping
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    // Wait for the job to complete... - get the resulting Quotas
+    match job.wait().await?.result::<HashMap<Volume, Quota>>() {
+        Ok(Some(quotas)) => Ok(quotas),
+        Ok(None) => {
+            tracing::warn!("No quotas found for user {}", user);
+            Ok(HashMap::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 async fn is_protected_user(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
     // find the Account agent
     match agent::account(AGENT_WAIT_TIME).await {
@@ -1220,12 +1638,91 @@ async fn is_protected_user(me: &str, user: &UserIdentifier) -> Result<bool, Erro
 
             match result {
                 Some(is_protected) => {
-                    tracing::info!("User is protected: {}", is_protected);
+                    tracing::debug!("User is protected: {}", is_protected);
                     Ok(is_protected)
                 }
                 None => {
-                    tracing::error!("No user found?");
-                    Err(Error::MissingUser(format!("Could not find user {}", user)))
+                    tracing::error!("No information found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find information for user {}",
+                        user
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn is_existing_user(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
+    // find the Account agent
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} is_existing_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(exists) => {
+                    tracing::debug!("User exists: {}", exists);
+                    Ok(exists)
+                }
+                None => {
+                    tracing::error!("No information found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find information for user {}",
+                        user
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No account agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no account agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn is_existing_project(me: &str, project: &ProjectIdentifier) -> Result<bool, Error> {
+    // find the Account agent
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            // send the add_job to the account agent
+            let job = Job::parse(
+                &format!("{}.{} is_existing_project {}", me, account.name(), project),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            // Wait for the add_job to complete
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(exists) => {
+                    tracing::debug!("Project exists: {}", exists);
+                    Ok(exists)
+                }
+                None => {
+                    tracing::error!("No information found?");
+                    Err(Error::MissingProject(format!(
+                        "Could not find information for project {}",
+                        project
+                    )))
                 }
             }
         }
@@ -1260,7 +1757,7 @@ async fn get_home_dir(me: &str, mapping: &UserMapping) -> Result<String, Error> 
 
             match result {
                 Some(homedir) => {
-                    tracing::info!("User homedir retrieved: {:?}", homedir);
+                    tracing::debug!("User homedir retrieved: {:?}", homedir);
                     Ok(homedir)
                 }
                 None => {
@@ -1303,7 +1800,7 @@ async fn get_project_dirs(me: &str, mapping: &ProjectMapping) -> Result<Vec<Stri
 
             match result {
                 Some(dirs) => {
-                    tracing::info!("Project directories retrieved: {:?}", dirs);
+                    tracing::debug!("Project directories retrieved: {:?}", dirs);
                     Ok(dirs)
                 }
                 None => {

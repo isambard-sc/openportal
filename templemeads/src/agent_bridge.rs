@@ -8,6 +8,7 @@ use crate::bridge_server::{
 };
 use crate::error::Error;
 use crate::handler::{process_message, set_my_service_details};
+use crate::runnable::AsyncRunnable;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -26,7 +27,7 @@ use std::path::PathBuf;
 /// This listens for requests from the bridge http server and
 /// bridges those to the other Agents in the OpenPortal system.
 ///
-pub async fn run(config: Config) -> Result<(), Error> {
+pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     if config.service.name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
@@ -38,7 +39,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
     }
 
     // pass the service details onto the handler
-    set_my_service_details(&config.service.name(), &config.agent, None).await?;
+    set_my_service_details(&config.service.name(), &config.agent, Some(runner), true).await?;
 
     // spawn the bridge server
     spawn(config.bridge).await?;
@@ -78,6 +79,7 @@ impl Defaults {
         bridge_url: Option<String>,
         bridge_ip: Option<String>,
         bridge_port: Option<u16>,
+        signal_url: Option<String>,
     ) -> Self {
         Self {
             service: ServiceDefaults::parse(
@@ -89,7 +91,7 @@ impl Defaults {
                 healthcheck_port,
                 proxy_header,
             ),
-            bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port),
+            bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port, signal_url),
         }
     }
 }
@@ -131,6 +133,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             bridge_port,
             healthcheck_port,
             proxy_header,
+            signal_url,
             force,
         }) => {
             let local_healthcheck_port;
@@ -162,6 +165,9 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                         .unwrap_or(defaults.bridge.ip())
                         .parse::<IpAddr>()?,
                     bridge_port.unwrap_or_else(|| defaults.bridge.port()),
+                    &signal_url
+                        .clone()
+                        .unwrap_or_else(|| defaults.bridge.signal_url()),
                 ),
                 agent: AgentType::Bridge,
             };
@@ -194,6 +200,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             list,
             remove,
             zone,
+            rotate,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -220,7 +227,10 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 )?;
 
                 save_config(&config, &config_file)?;
-                save_invite(&invite, &PathBuf::from(format!("./invite_{}.toml", client)))?;
+                save_invite(
+                    &invite,
+                    &PathBuf::from(format!("./invite_{}_{}.toml", invite.name(), invite.zone())),
+                )?;
 
                 tracing::info!("Client '{}' added.", client);
                 return Ok(None);
@@ -234,6 +244,20 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 return Ok(None);
             }
 
+            if let Some(client) = rotate {
+                let mut config = load_config::<Config>(&config_file)?;
+                let invite = config.service.rotate_client_keys(client, zone)?;
+
+                save_config(&config, &config_file)?;
+                save_invite(
+                    &invite,
+                    &PathBuf::from(format!("./rotate_{}_{}.toml", invite.name(), invite.zone())),
+                )?;
+
+                tracing::info!("Client '{}' rotated.", client);
+                return Ok(None);
+            }
+
             let _ = Args::command().print_help();
 
             return Ok(None);
@@ -243,6 +267,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             list,
             remove,
             zone,
+            rotate,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -267,7 +292,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 }
 
                 let mut config = load_config::<Config>(&config_file)?;
-                config.service.add_server(invite)?;
+                config.service.add_server(&invite)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' added.", server.display());
                 return Ok(None);
@@ -278,6 +303,17 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 config.service.remove_server(server, zone)?;
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' removed.", server);
+                return Ok(None);
+            }
+
+            if let Some(server) = rotate {
+                // read the invitation from the passed toml file
+                let invite = load_invite(server)?;
+
+                let mut config = load_config::<Config>(&config_file)?;
+                config.service.rotate_server_keys(&invite)?;
+                save_config(&config, &config_file)?;
+                tracing::info!("Server '{}' rotated.", server.display());
                 return Ok(None);
             }
 
@@ -362,6 +398,13 @@ enum Commands {
             help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
         )]
         zone: Option<String>,
+
+        #[arg(
+            long,
+            short = 'R',
+            help = "Name of the client whose keys are being rotated"
+        )]
+        rotate: Option<String>,
     },
 
     /// Adding and removing servers
@@ -389,6 +432,13 @@ enum Commands {
             help = "The communication zone to communicate with the service. Only services in the same zone can route messages"
         )]
         zone: Option<String>,
+
+        #[arg(
+            long,
+            short = 'R',
+            help = "File containing the rotation invite from a server which is rotating keys"
+        )]
+        rotate: Option<PathBuf>,
     },
 
     /// Initialise the Service
@@ -451,6 +501,13 @@ enum Commands {
             help = "Optional header to use for proxying requests - look in this for the client IP address"
         )]
         proxy_header: Option<String>,
+
+        #[arg(
+            long,
+            short = 's',
+            help = "URL to call to signal when a new job is available to be processed"
+        )]
+        signal_url: Option<String>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

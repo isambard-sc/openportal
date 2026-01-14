@@ -8,13 +8,16 @@ use paddington::SecretKey;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateTime, PyList, PyNone, PyString};
+use pyo3::types::{PyDate, PyDateTime, PyList, PyString, PyTzInfo};
 use pyo3::{IntoPyObject, PyResult, Python};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path;
 use std::sync::RwLock;
 use templemeads::destination;
+use templemeads::diagnostics as mod_diagnostics;
 use templemeads::grammar;
+use templemeads::health as mod_health;
 use templemeads::job;
 use templemeads::server::sign_api_call;
 use templemeads::usagereport;
@@ -93,79 +96,139 @@ fn call_get<T>(function: &str) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
-    tracing::info!("Calling get /{}", function);
+    tracing::debug!("Calling get /{}", function);
 
     let config = get_config()?;
-    let date = Utc::now();
 
-    let url = config.url.join(function).context("Could not join URL")?;
+    // Retry logic with exponential backoff for rate limiting
+    const MAX_RETRIES: u32 = 5;
+    const INITIAL_BACKOFF_MS: u64 = 100;
 
-    let auth_token = sign_api_call(&config.key, &date, "get", function, &None)?;
+    for attempt in 0..=MAX_RETRIES {
+        let date = Utc::now();
+        let url = config.url.join(function).context("Could not join URL")?;
 
-    let result = reqwest::blocking::Client::new()
-        .get(url)
-        .query(&[("openportal-version", "0.1")])
-        .header("Accept", "application/json")
-        .header("Authorization", auth_token)
-        .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-        .send()
-        .with_context(|| format!("Could not call function: {}", function))?;
+        // Generate a unique nonce for replay attack prevention
+        let nonce = uuid::Uuid::new_v4().to_string();
+        // GET requests have no body, so sign with empty slice
+        let auth_token = sign_api_call(&config.key, &date, "get", function, &[], Some(&nonce))?;
 
-    tracing::info!("Response: {:?}", result);
+        let result = reqwest::blocking::Client::new()
+            .get(url)
+            .query(&[("openportal-version", "0.1")])
+            .header("Accept", "application/json")
+            .header("Authorization", auth_token)
+            .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+            .header("X-Nonce", nonce)
+            .send()
+            .with_context(|| format!("Could not call function: {}", function))?;
 
-    if result.status().is_success() {
-        Ok(result.json::<T>().context("Could not decode from json")?)
-    } else {
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
-            function,
-            result.status(),
-            result
-        )))
+        tracing::debug!("Response: {:?}", result);
+
+        if result.status().is_success() {
+            return Ok(result.json::<T>().context("Could not decode from json")?);
+        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES
+        {
+            // Rate limited - backoff and retry
+            let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+            tracing::warn!(
+                "Rate limited on attempt {} for function: {}. Backing off for {}ms",
+                attempt + 1,
+                function,
+                backoff_ms
+            );
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        } else {
+            return Err(Error::Call(format!(
+                "Could not get response for function: {}. Status: {}. Response: {:?}",
+                function,
+                result.status(),
+                result
+            )));
+        }
     }
+
+    // If we exhausted all retries
+    Err(Error::Call(format!(
+        "Exceeded maximum retries ({}) for function: {} due to rate limiting",
+        MAX_RETRIES, function
+    )))
 }
 
 fn call_post<T>(function: &str, arguments: serde_json::Value) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
-    tracing::info!("Calling post /{} with arguments: {:?}", function, arguments);
+    tracing::debug!("Calling post /{} with arguments: {:?}", function, arguments);
 
     let config = get_config()?;
-    let date = Utc::now();
 
-    let url = config.url.join(function).context("Could not join URL")?;
+    // Retry logic with exponential backoff for rate limiting
+    const MAX_RETRIES: u32 = 5;
+    const INITIAL_BACKOFF_MS: u64 = 100;
 
-    let auth_token = sign_api_call(
-        &config.key,
-        &date,
-        "post",
-        function,
-        &Some(arguments.to_owned()),
-    )?;
+    // Serialize the arguments once to get the exact bytes we'll send
+    let body_bytes =
+        serde_json::to_vec(&arguments).with_context(|| "Could not serialize arguments to JSON")?;
 
-    let result = reqwest::blocking::Client::new()
-        .post(url)
-        .query(&[("openportal-version", "0.1")])
-        .header("Accept", "application/json")
-        .header("Authorization", auth_token)
-        .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-        .json(&arguments)
-        .send()
-        .with_context(|| format!("Could not call function: {}", function))?;
+    for attempt in 0..=MAX_RETRIES {
+        let date = Utc::now();
+        let url = config.url.join(function).context("Could not join URL")?;
 
-    tracing::info!("Response: {:?}", result);
-
-    if result.status().is_success() {
-        Ok(result.json::<T>().context("Could not decode from json")?)
-    } else {
-        Err(Error::Call(format!(
-            "Could not get response for function: {}. Status: {}. Response: {:?}",
+        // Generate a unique nonce for replay attack prevention
+        let nonce = uuid::Uuid::new_v4().to_string();
+        // Sign the exact bytes we're about to send
+        let auth_token = sign_api_call(
+            &config.key,
+            &date,
+            "post",
             function,
-            result.status(),
-            result
-        )))
+            &body_bytes,
+            Some(&nonce),
+        )?;
+
+        let result = reqwest::blocking::Client::new()
+            .post(url)
+            .query(&[("openportal-version", "0.1")])
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Authorization", auth_token)
+            .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+            .header("X-Nonce", nonce)
+            .body(body_bytes.clone())
+            .send()
+            .with_context(|| format!("Could not call function: {}", function))?;
+
+        tracing::debug!("Response: {:?}", result);
+
+        if result.status().is_success() {
+            return Ok(result.json::<T>().context("Could not decode from json")?);
+        } else if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RETRIES
+        {
+            // Rate limited - backoff and retry
+            let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+            tracing::warn!(
+                "Rate limited on attempt {} for function: {}. Backing off for {}ms",
+                attempt + 1,
+                function,
+                backoff_ms
+            );
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        } else {
+            return Err(Error::Call(format!(
+                "Could not get response for function: {}. Status: {}. Response: {:?}",
+                function,
+                result.status(),
+                result
+            )));
+        }
     }
+
+    // If we exhausted all retries
+    Err(Error::Call(format!(
+        "Exceeded maximum retries ({}) for function: {} due to rate limiting",
+        MAX_RETRIES, function
+    )))
 }
 
 ///
@@ -203,12 +266,670 @@ fn initialize_tracing() -> PyResult<()> {
 }
 
 ///
+/// The FailedJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedJobEntry(mod_diagnostics::FailedJobEntry);
+
+#[pymethods]
+impl FailedJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn error_message(&self) -> PyResult<String> {
+        Ok(self.0.error_message.clone())
+    }
+
+    #[getter]
+    fn count(&self) -> PyResult<usize> {
+        Ok(self.0.count)
+    }
+
+    #[getter]
+    fn first_seen<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.first_seen.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn last_seen<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.last_seen.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    fn __copy__(&self) -> PyResult<FailedJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<FailedJobEntry> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::FailedJobEntry> for FailedJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::FailedJobEntry) -> Self {
+        FailedJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The SlowJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlowJobEntry(mod_diagnostics::SlowJobEntry);
+
+#[pymethods]
+impl SlowJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn duration_ms(&self) -> PyResult<f64> {
+        Ok(self.0.duration_ms)
+    }
+
+    #[getter]
+    fn completed_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.completed_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    fn __copy__(&self) -> PyResult<SlowJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<SlowJobEntry> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::SlowJobEntry> for SlowJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::SlowJobEntry) -> Self {
+        SlowJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The ExpiredJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpiredJobEntry(mod_diagnostics::ExpiredJobEntry);
+
+#[pymethods]
+impl ExpiredJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn created_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.created_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn expired_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.expired_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn count(&self) -> PyResult<usize> {
+        Ok(self.0.count)
+    }
+
+    fn __copy__(&self) -> PyResult<ExpiredJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ExpiredJobEntry> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::ExpiredJobEntry> for ExpiredJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::ExpiredJobEntry) -> Self {
+        ExpiredJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The RunningJobEntry object for diagnostics reports
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningJobEntry(mod_diagnostics::RunningJobEntry);
+
+#[pymethods]
+impl RunningJobEntry {
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination.clone())
+    }
+
+    #[getter]
+    fn instruction(&self) -> PyResult<String> {
+        Ok(self.0.instruction.clone())
+    }
+
+    #[getter]
+    fn started_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.started_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn count(&self) -> PyResult<usize> {
+        Ok(self.0.count)
+    }
+
+    #[getter]
+    fn running_for_seconds(&self) -> PyResult<i64> {
+        Ok(self.0.running_for_seconds)
+    }
+
+    fn __copy__(&self) -> PyResult<RunningJobEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<RunningJobEntry> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::RunningJobEntry> for RunningJobEntry {
+    fn from(diagnostics_report: mod_diagnostics::RunningJobEntry) -> Self {
+        RunningJobEntry(diagnostics_report)
+    }
+}
+
+///
+/// The DiagnosticsReport object returned from diagnostics requests
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsReport(mod_diagnostics::DiagnosticsReport);
+
+#[pymethods]
+impl DiagnosticsReport {
+    #[getter]
+    fn agent_name(&self) -> PyResult<String> {
+        Ok(self.0.agent_name.clone())
+    }
+
+    #[getter]
+    fn generated_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.generated_at.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn failed_jobs(&self) -> PyResult<Vec<FailedJobEntry>> {
+        Ok(self.0.failed_jobs.iter().cloned().map(Into::into).collect())
+    }
+
+    #[getter]
+    fn slowest_jobs(&self) -> PyResult<Vec<SlowJobEntry>> {
+        Ok(self
+            .0
+            .slowest_jobs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[getter]
+    fn expired_jobs(&self) -> PyResult<Vec<ExpiredJobEntry>> {
+        Ok(self
+            .0
+            .expired_jobs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[getter]
+    fn running_jobs(&self) -> PyResult<Vec<RunningJobEntry>> {
+        Ok(self
+            .0
+            .running_jobs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect())
+    }
+
+    #[getter]
+    fn warnings(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.warnings.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_pretty_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<DiagnosticsReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<DiagnosticsReport> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::DiagnosticsReport> for DiagnosticsReport {
+    fn from(diagnostics_report: mod_diagnostics::DiagnosticsReport) -> Self {
+        DiagnosticsReport(diagnostics_report)
+    }
+}
+
+///
+/// Return type for the diagnostics function
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Diagnostics {
+    pub status: String,
+    #[serde(default)]
+    #[serde(rename = "report")]
+    pub diagnostics: Option<DiagnosticsReport>,
+}
+
+#[pymethods]
+impl Diagnostics {
+    #[getter]
+    fn status(&self) -> PyResult<String> {
+        Ok(self.status.clone())
+    }
+
+    #[getter]
+    fn detail(&self) -> PyResult<Option<DiagnosticsReport>> {
+        Ok(self.diagnostics.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        let mut s = format!("Diagnostics( status: {}", self.status);
+        if let Some(ref diagnostics) = self.diagnostics {
+            s.push_str(&format!(
+                ", detail:\n{}\n",
+                diagnostics.0.to_pretty_string()
+            ));
+        }
+        s.push_str(" )");
+        Ok(s)
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Diagnostics> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Diagnostics> {
+        Ok(self.clone())
+    }
+
+    fn is_healthy(&self) -> PyResult<bool> {
+        Ok(self.status == "ok")
+    }
+}
+
+///
+/// Fetch the diagnostics report from an agent in the OpenPortal system.
+///
+/// Parameters:
+/// - destination: Dot-separated path to the agent (e.g., "brics.aip2.clusters")
+///                Empty string means get the diagnostics from the bridge itself.
+///
+#[pyfunction]
+fn diagnostics(destination: &str) -> PyResult<Diagnostics> {
+    tracing::debug!("Calling /diagnostics with destination={}", destination);
+
+    let params = serde_json::json!({
+        "destination": destination,
+    });
+
+    match call_post::<Diagnostics>("diagnostics", params) {
+        Ok(response) => Ok(response),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
+/// The HealthInfo object for each of the agent health checks
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthInfo(mod_health::HealthInfo);
+
+#[pymethods]
+impl HealthInfo {
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        Ok(self.0.name.clone())
+    }
+
+    #[getter]
+    fn agent_type(&self) -> PyResult<String> {
+        Ok(self.0.agent_type.to_string())
+    }
+
+    #[getter]
+    fn connected(&self) -> PyResult<bool> {
+        Ok(self.0.connected)
+    }
+
+    #[getter]
+    fn active_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.active_jobs as u64)
+    }
+
+    #[getter]
+    fn pending_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.pending_jobs as u64)
+    }
+
+    #[getter]
+    fn running_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.running_jobs as u64)
+    }
+
+    #[getter]
+    fn completed_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.completed_jobs as u64)
+    }
+
+    #[getter]
+    fn successful_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.successful_jobs as u64)
+    }
+
+    #[getter]
+    fn expired_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.expired_jobs as u64)
+    }
+
+    #[getter]
+    fn errored_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.errored_jobs as u64)
+    }
+
+    #[getter]
+    fn duplicate_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.duplicate_jobs as u64)
+    }
+
+    #[getter]
+    fn inflight_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.inflight_jobs as u64)
+    }
+
+    #[getter]
+    fn queued_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.queued_jobs as u64)
+    }
+
+    #[getter]
+    fn worker_count(&self) -> PyResult<u64> {
+        Ok(self.0.worker_count as u64)
+    }
+
+    #[getter]
+    fn memory_bytes(&self) -> PyResult<u64> {
+        Ok(self.0.memory_bytes)
+    }
+
+    #[getter]
+    fn cpu_percent(&self) -> PyResult<f32> {
+        Ok(self.0.cpu_percent)
+    }
+
+    #[getter]
+    fn system_memory_total(&self) -> PyResult<u64> {
+        Ok(self.0.system_memory_total)
+    }
+
+    #[getter]
+    fn system_cpus(&self) -> PyResult<u32> {
+        Ok(self.0.system_cpus as u32)
+    }
+
+    #[getter]
+    fn job_time_min_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_min_ms)
+    }
+
+    #[getter]
+    fn job_time_max_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_max_ms)
+    }
+
+    #[getter]
+    fn job_time_mean_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_mean_ms)
+    }
+
+    #[getter]
+    fn job_time_median_ms(&self) -> PyResult<f64> {
+        Ok(self.0.job_time_median_ms)
+    }
+
+    #[getter]
+    fn job_time_count(&self) -> PyResult<u32> {
+        Ok(self.0.job_time_count as u32)
+    }
+
+    #[getter]
+    fn total_completed(&self) -> PyResult<u64> {
+        Ok(self.0.total_completed as u64)
+    }
+
+    #[getter]
+    fn total_failed(&self) -> PyResult<u64> {
+        Ok(self.0.total_failed as u64)
+    }
+
+    #[getter]
+    fn total_expired(&self) -> PyResult<u64> {
+        Ok(self.0.total_expired as u64)
+    }
+
+    #[getter]
+    fn total_slow(&self) -> PyResult<u64> {
+        Ok(self.0.total_slow as u64)
+    }
+
+    #[getter]
+    fn start_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.start_time.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn current_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.current_time.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn uptime_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.uptime_seconds as u64)
+    }
+
+    #[getter]
+    fn engine(&self) -> PyResult<String> {
+        Ok(self.0.engine.clone())
+    }
+
+    #[getter]
+    fn version(&self) -> PyResult<String> {
+        Ok(self.0.version.clone())
+    }
+
+    #[getter]
+    fn last_updated<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.last_updated.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn x(&self) -> PyResult<Self> {
+        // return a copy that has any children removed. This
+        // allows just the health of this single agent to be
+        // extracted (x) and printed
+        let mut clone = self.clone();
+        clone.0.peers.clear();
+        Ok(clone)
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_pretty_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<HealthInfo> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<HealthInfo> {
+        Ok(self.clone())
+    }
+
+    fn keys(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.peers.keys().cloned().collect())
+    }
+
+    fn __getitem__(&self, key: &str) -> PyResult<HealthInfo> {
+        match self.0.peers.get(key) {
+            Some(peer_health) => Ok((**peer_health).clone().into()),
+            None => Err(PyErr::new::<PyOSError, _>(format!(
+                "No peer health info for key: {}",
+                key
+            ))),
+        }
+    }
+
+    fn peers(&self) -> PyResult<HashMap<String, HealthInfo>> {
+        let mut result: HashMap<String, HealthInfo> = HashMap::new();
+        for (key, value) in &self.0.peers {
+            result.insert(key.clone(), (**value).clone().into());
+        }
+        Ok(result)
+    }
+}
+
+impl From<mod_health::HealthInfo> for HealthInfo {
+    fn from(health_info: mod_health::HealthInfo) -> Self {
+        HealthInfo(health_info)
+    }
+}
+
+///
 /// Return type for the health function
 ///
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
     pub status: String,
+    #[serde(default)]
+    pub health: Option<HealthInfo>,
 }
 
 #[pymethods]
@@ -218,8 +939,18 @@ impl Health {
         Ok(self.status.clone())
     }
 
+    #[getter]
+    fn detail(&self) -> PyResult<Option<HealthInfo>> {
+        Ok(self.health.clone())
+    }
+
     fn __str__(&self) -> PyResult<String> {
-        Ok(format!("Health( status: {} )", self.status))
+        let mut s = format!("Health( status: {}", self.status);
+        if let Some(ref health) = self.health {
+            s.push_str(&format!(", detail:\n{}\n", health.0.to_pretty_string()));
+        }
+        s.push_str(" )");
+        Ok(s)
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -237,6 +968,28 @@ impl Health {
     fn is_healthy(&self) -> PyResult<bool> {
         Ok(self.status == "ok")
     }
+
+    fn __getitem__(&self, key: &str) -> PyResult<HealthInfo> {
+        match &self.health {
+            Some(health_info) => match health_info.0.name == key {
+                true => Ok(health_info.clone()),
+                false => Err(PyErr::new::<PyOSError, _>(format!(
+                    "No health information available for key: {}",
+                    key
+                ))),
+            },
+            None => Err(PyErr::new::<PyOSError, _>(
+                "No health information available",
+            )),
+        }
+    }
+
+    fn keys(&self) -> PyResult<Vec<String>> {
+        match &self.health {
+            Some(health_info) => Ok(vec![health_info.0.name.clone()]),
+            None => Ok(vec![]),
+        }
+    }
 }
 
 ///
@@ -244,8 +997,81 @@ impl Health {
 ///
 #[pyfunction]
 fn health() -> PyResult<Health> {
-    tracing::info!("Calling /health");
+    tracing::debug!("Calling /health");
     match call_get::<Health>("health") {
+        Ok(response) => Ok(response),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
+/// Return type for the restart function
+///
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestartResponse {
+    pub status: String,
+    pub message: String,
+}
+
+#[pymethods]
+impl RestartResponse {
+    #[getter]
+    fn status(&self) -> PyResult<String> {
+        Ok(self.status.clone())
+    }
+
+    #[getter]
+    fn message(&self) -> PyResult<String> {
+        Ok(self.message.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!(
+            "RestartResponse( status: {}, message: {} )",
+            self.status, self.message
+        ))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<RestartResponse> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<RestartResponse> {
+        Ok(self.clone())
+    }
+
+    fn is_ok(&self) -> PyResult<bool> {
+        Ok(self.status == "ok")
+    }
+}
+
+///
+/// Restart an agent in the OpenPortal system.
+///
+/// Parameters:
+/// - restart_type: Type of restart ("soft", "hard", etc.)
+/// - destination: Dot-separated path to the agent (e.g., "brics.aip2.clusters")
+///                Empty string means restart the bridge itself
+///
+#[pyfunction]
+fn restart(restart_type: &str, destination: &str) -> PyResult<RestartResponse> {
+    tracing::debug!(
+        "Calling /restart with type={}, destination={}",
+        restart_type,
+        destination
+    );
+
+    let params = serde_json::json!({
+        "restart_type": restart_type,
+        "destination": destination,
+    });
+
+    match call_post::<RestartResponse>("restart", params) {
         Ok(response) => Ok(response),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -292,6 +1118,20 @@ impl Job {
         }
     }
 
+    fn to_json(&self) -> PyResult<String> {
+        self.0
+            .to_json()
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match job::Job::from_json(json) {
+            Ok(job) => Ok(job.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     #[getter]
     fn id(&self) -> PyResult<Uuid> {
         Ok(self.0.id().into())
@@ -318,6 +1158,11 @@ impl Job {
     }
 
     #[getter]
+    fn is_duplicate(&self) -> PyResult<bool> {
+        Ok(self.0.is_duplicate())
+    }
+
+    #[getter]
     fn state(&self) -> PyResult<Status> {
         Ok(self.0.state().into())
     }
@@ -327,7 +1172,7 @@ impl Job {
         PyDateTime::from_timestamp(
             py,
             self.0.created().timestamp() as f64,
-            Some(&pyo3::types::timezone_utc(py)),
+            PyTzInfo::utc(py).ok().as_deref(),
         )
     }
 
@@ -336,7 +1181,7 @@ impl Job {
         PyDateTime::from_timestamp(
             py,
             self.0.changed().timestamp() as f64,
-            Some(&pyo3::types::timezone_utc(py)),
+            PyTzInfo::utc(py).ok().as_deref(),
         )
     }
 
@@ -409,6 +1254,111 @@ impl Job {
         self.is_finished()
     }
 
+    fn completed(&self, py: Python<'_>, result: Py<PyAny>) -> PyResult<Job> {
+        macro_rules! try_extract {
+            ($type:ty, $transform:expr) => {
+                if let Ok(val) = result.extract::<$type>(py) {
+                    let inner_result = $transform(val);
+                    return match self.0.completed(inner_result) {
+                        Ok(result) => Ok(result.into()),
+                        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                    };
+                }
+            };
+        }
+
+        // Single value extractions
+        try_extract!(bool, |v| v);
+        try_extract!(String, |v| v);
+        try_extract!(UserIdentifier, |v: UserIdentifier| v.0.clone());
+        try_extract!(ProjectIdentifier, |v: ProjectIdentifier| v.0.clone());
+        try_extract!(PortalIdentifier, |v: PortalIdentifier| v.0.clone());
+        try_extract!(UserMapping, |v: UserMapping| v.0.clone());
+        try_extract!(ProjectMapping, |v: ProjectMapping| v.0.clone());
+        try_extract!(UsageReport, |v: UsageReport| v.0.clone());
+        try_extract!(ProjectUsageReport, |v: ProjectUsageReport| v.0.clone());
+        try_extract!(Usage, |v: Usage| v.0);
+        try_extract!(DateRange, |v: DateRange| v.0.clone());
+        try_extract!(ProjectTemplate, |v: ProjectTemplate| v.0.clone());
+        try_extract!(ProjectDetails, |v: ProjectDetails| v.0.clone());
+        try_extract!(StorageSize, |v: StorageSize| v.0);
+        try_extract!(StorageUsage, |v: StorageUsage| v.0);
+        try_extract!(QuotaLimit, |v: QuotaLimit| v.0.clone());
+        try_extract!(Quota, |v: Quota| v.0.clone());
+        try_extract!(Volume, |v: Volume| v.0.clone());
+
+        try_extract!(Vec<UserIdentifier>, |v: Vec<UserIdentifier>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<ProjectIdentifier>, |v: Vec<ProjectIdentifier>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<PortalIdentifier>, |v: Vec<PortalIdentifier>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<ProjectMapping>, |v: Vec<ProjectMapping>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<UserMapping>, |v: Vec<UserMapping>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<String>, |v| v);
+        try_extract!(Vec<Usage>, |v: Vec<Usage>| {
+            v.into_iter().map(|item| item.0).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<StorageSize>, |v: Vec<StorageSize>| {
+            v.into_iter().map(|item| item.0).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<StorageUsage>, |v: Vec<StorageUsage>| {
+            v.into_iter().map(|item| item.0).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<QuotaLimit>, |v: Vec<QuotaLimit>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<Quota>, |v: Vec<Quota>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+        try_extract!(Vec<Volume>, |v: Vec<Volume>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
+
+        // HashMap types - need to extract from PyDict and manually convert
+        if let Ok(dict) = result.bind(py).cast::<pyo3::types::PyDict>() {
+            let mut map: std::collections::HashMap<
+                templemeads::storage::Volume,
+                templemeads::storage::Quota,
+            > = std::collections::HashMap::new();
+            let mut is_volume_quota_dict = true;
+
+            for (key, value) in dict.iter() {
+                if let (Ok(k), Ok(v)) = (key.extract::<Volume>(), value.extract::<Quota>()) {
+                    map.insert(k.0.clone(), v.0.clone());
+                } else {
+                    is_volume_quota_dict = false;
+                    break;
+                }
+            }
+
+            if is_volume_quota_dict && !map.is_empty() {
+                return match self.0.completed(map) {
+                    Ok(result) => Ok(result.into()),
+                    Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+            }
+        }
+
+        Err(PyErr::new::<PyOSError, _>("Could not extract result type"))
+    }
+
+    fn errored(&self, error: &str) -> PyResult<Job> {
+        let result = match self.0.errored(error) {
+            Ok(result) => result,
+            Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        };
+
+        Ok(result.into())
+    }
+
     #[getter]
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if !self.is_finished()? {
@@ -433,7 +1383,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(PyString::new(py, &result).into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "bool" => {
@@ -444,10 +1394,10 @@ impl Job {
 
                 match result {
                     Some(result) => Ok((result as u64).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
-            "None" => Ok(PyNone::get(py).as_ref().clone()),
+            "None" => Ok(py.None().into_bound(py)),
             "UserIdentifier" => {
                 let result = match self.0.result::<grammar::UserIdentifier>() {
                     Ok(result) => result,
@@ -456,7 +1406,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(UserIdentifier::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectIdentifier" => {
@@ -469,7 +1419,7 @@ impl Job {
                     Some(result) => Ok(ProjectIdentifier::from(result)
                         .into_pyobject(py)?
                         .into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "PortalIdentifier" => {
@@ -482,7 +1432,7 @@ impl Job {
                     Some(result) => {
                         Ok(PortalIdentifier::from(result).into_pyobject(py)?.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "UserMapping" => {
@@ -493,7 +1443,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(UserMapping::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectMapping" => {
@@ -504,7 +1454,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(ProjectMapping::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "UsageReport" => {
@@ -515,7 +1465,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(UsageReport::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "ProjectUsageReport" => {
@@ -528,7 +1478,7 @@ impl Job {
                     Some(result) => Ok(ProjectUsageReport::from(result)
                         .into_pyobject(py)?
                         .into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Usage" => {
@@ -539,7 +1489,7 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(Usage::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "DateRange" => {
@@ -550,7 +1500,29 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(DateRange::from(result).into_pyobject(py)?.into_any()),
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "ProjectDetails" => {
+                let result = match self.0.result::<grammar::ProjectDetails>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectDetails::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "ProjectTemplate" => {
+                let result = match self.0.result::<grammar::ProjectTemplate>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectTemplate::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<String>" => {
@@ -567,7 +1539,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<UserIdentifier>" => {
@@ -584,7 +1556,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<UserMapping>" => {
@@ -601,7 +1573,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<ProjectIdentifier>" => {
@@ -618,7 +1590,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<ProjectMapping>" => {
@@ -635,7 +1607,7 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             "Vec<PortalIdentifier>" => {
@@ -652,7 +1624,170 @@ impl Job {
                         }
                         Ok(list.into_any())
                     }
-                    None => Ok(PyNone::get(py).as_ref().clone()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "StorageSize" => {
+                let result = match self.0.result::<templemeads::storage::StorageSize>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(StorageSize::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "StorageUsage" => {
+                let result = match self.0.result::<templemeads::storage::StorageUsage>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(StorageUsage::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "QuotaLimit" => {
+                let result = match self.0.result::<templemeads::storage::QuotaLimit>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(QuotaLimit::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Quota" => {
+                let result = match self.0.result::<templemeads::storage::Quota>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(Quota::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Volume" => {
+                let result = match self.0.result::<templemeads::storage::Volume>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(Volume::from(result).into_pyobject(py)?.into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<StorageSize>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::StorageSize>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(StorageSize::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<StorageUsage>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::StorageUsage>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(StorageUsage::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<QuotaLimit>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::QuotaLimit>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(QuotaLimit::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<Quota>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::Quota>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(Quota::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<Volume>" => {
+                let result = match self.0.result::<Vec<templemeads::storage::Volume>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(Volume::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "HashMap<Volume, Quota>" => {
+                let result = match self.0.result::<std::collections::HashMap<
+                    templemeads::storage::Volume,
+                    templemeads::storage::Quota,
+                >>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let dict = pyo3::types::PyDict::new(py);
+                        for (key, value) in result {
+                            dict.set_item(
+                                Volume::from(key).into_pyobject(py)?,
+                                Quota::from(value).into_pyobject(py)?,
+                            )?;
+                        }
+                        Ok(dict.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
                 }
             }
             _ => Err(PyErr::new::<PyOSError, _>(format!(
@@ -676,6 +1811,14 @@ impl DateRange {
     #[new]
     fn new(start_date: chrono::NaiveDate, end_date: chrono::NaiveDate) -> PyResult<Self> {
         Ok(grammar::DateRange::from_chrono(&start_date, &end_date).into())
+    }
+
+    #[staticmethod]
+    fn parse(date_range: String) -> PyResult<Self> {
+        match grammar::DateRange::parse(&date_range) {
+            Ok(date_range) => Ok(date_range.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
     }
 
     #[staticmethod]
@@ -850,6 +1993,326 @@ impl From<grammar::DateRange> for DateRange {
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct Node(grammar::Node);
+
+#[pymethods]
+impl Node {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(grammar::Node::new().into())
+    }
+
+    #[staticmethod]
+    fn construct(
+        cpus: u32,
+        cores_per_cpu: u32,
+        gpus: u32,
+        memory_mb: u32,
+        billing: u32,
+    ) -> PyResult<Self> {
+        Ok(grammar::Node::construct(cpus, cores_per_cpu, gpus, memory_mb, billing).into())
+    }
+
+    #[getter]
+    fn cpus(&self) -> PyResult<u32> {
+        Ok(self.0.cpus())
+    }
+
+    #[getter]
+    fn cores_per_cpu(&self) -> PyResult<u32> {
+        Ok(self.0.cores_per_cpu())
+    }
+
+    #[getter]
+    fn cores(&self) -> PyResult<u32> {
+        Ok(self.0.cores())
+    }
+
+    #[getter]
+    fn gpus(&self) -> PyResult<u32> {
+        Ok(self.0.gpus())
+    }
+
+    #[getter]
+    fn memory_mb(&self) -> PyResult<u32> {
+        Ok(self.0.memory_mb())
+    }
+
+    #[getter]
+    fn memory_gb(&self) -> PyResult<f64> {
+        Ok(self.0.memory_gb())
+    }
+
+    #[getter]
+    fn billing(&self) -> PyResult<u32> {
+        Ok(self.0.billing())
+    }
+
+    #[setter]
+    fn set_cpus(&mut self, cpus: u32) -> PyResult<()> {
+        self.0.set_cpus(cpus);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_cores_per_cpu(&mut self, cores_per_cpu: u32) -> PyResult<()> {
+        self.0.set_cores_per_cpu(cores_per_cpu);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_gpus(&mut self, gpus: u32) -> PyResult<()> {
+        self.0.set_gpus(gpus);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_memory_mb(&mut self, memory_mb: u32) -> PyResult<()> {
+        self.0.set_memory_mb(memory_mb);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_billing(&mut self, billing: u32) -> PyResult<()> {
+        self.0.set_billing(billing);
+        Ok(())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Node> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Node> {
+        Ok(self.clone())
+    }
+}
+
+impl From<grammar::Node> for Node {
+    fn from(node: grammar::Node) -> Self {
+        Node(node)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Allocation(grammar::Allocation);
+
+#[pymethods]
+impl Allocation {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(grammar::Allocation::new().into())
+    }
+
+    #[staticmethod]
+    fn parse(allocation: String) -> PyResult<Self> {
+        match grammar::Allocation::parse(&allocation) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_size_and_units(size: f64, units: &str) -> PyResult<Self> {
+        match grammar::Allocation::from_size_and_units(size, units) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_string(allocation: &str) -> PyResult<Allocation> {
+        match grammar::Allocation::parse(allocation) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_string(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    #[getter]
+    fn size(&self) -> PyResult<Option<f64>> {
+        Ok(self.0.size())
+    }
+
+    #[getter]
+    fn units(&self) -> PyResult<Option<String>> {
+        Ok(self.0.units())
+    }
+
+    #[staticmethod]
+    fn canonicalize(units: &str) -> PyResult<String> {
+        Ok(grammar::Allocation::canonicalize(units))
+    }
+
+    #[getter]
+    fn is_empty(&self) -> PyResult<bool> {
+        Ok(self.0.is_empty())
+    }
+
+    #[getter]
+    fn is_node_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_node_hours())
+    }
+
+    #[getter]
+    fn is_core_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_core_hours())
+    }
+
+    #[getter]
+    fn is_gpu_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_gpu_hours())
+    }
+
+    #[getter]
+    fn is_cpu_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_cpu_hours())
+    }
+
+    #[getter]
+    fn is_gb_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_gb_hours())
+    }
+
+    #[getter]
+    fn is_billing_hours(&self) -> PyResult<bool> {
+        Ok(self.0.is_billing_hours())
+    }
+
+    fn to_node_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_node_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_core_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_core_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_gpu_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_gpu_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_cpu_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_cpu_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_gb_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_gb_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_billing_hours(&self, node: &Node) -> PyResult<Usage> {
+        match self.0.to_billing_hours(&node.0) {
+            Ok(usage) => Ok(usage.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_node_hours(usage: &Usage) -> PyResult<Self> {
+        match grammar::Allocation::from_node_hours(&usage.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_cpu_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_cpu_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_core_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_core_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_gpu_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_gpu_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_gb_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_gb_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_billing_hours(usage: &Usage, node: &Node) -> PyResult<Self> {
+        match grammar::Allocation::from_billing_hours(&usage.0, &node.0) {
+            Ok(allocation) => Ok(allocation.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Allocation> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Allocation> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Allocation, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+}
+
+impl From<grammar::Allocation> for Allocation {
+    fn from(allocation: grammar::Allocation) -> Self {
+        Allocation(allocation)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Usage(usagereport::Usage);
 
 #[pymethods]
@@ -944,6 +2407,46 @@ impl Usage {
     fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Usage> {
         Ok(self.clone())
     }
+
+    fn __add__(&self, other: &Usage) -> PyResult<Self> {
+        Ok(Self(self.0 + other.0))
+    }
+
+    fn __sub__(&self, other: &Usage) -> PyResult<Self> {
+        Ok(Self(self.0 - other.0))
+    }
+
+    fn __mul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0 * other))
+    }
+
+    fn __div__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0 / other))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0 * other))
+    }
+
+    fn __iadd__(&mut self, other: &Usage) -> PyResult<()> {
+        self.0 += other.0;
+        Ok(())
+    }
+
+    fn __isub__(&mut self, other: &Usage) -> PyResult<()> {
+        self.0 -= other.0;
+        Ok(())
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
+    }
 }
 
 impl From<usagereport::Usage> for Usage {
@@ -963,6 +2466,21 @@ impl UsageReport {
         Ok(Self(usagereport::UsageReport::new(&portal.0)))
     }
 
+    fn to_json(&self) -> PyResult<String> {
+        match self.0.to_json() {
+            Ok(json) => Ok(json),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match usagereport::UsageReport::from_json(json) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -979,6 +2497,37 @@ impl UsageReport {
         Ok(self.clone())
     }
 
+    fn __add__(&self, other: &UsageReport) -> PyResult<Self> {
+        Ok(Self(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: &UsageReport) -> PyResult<()> {
+        self.0 += other.0.clone();
+        Ok(())
+    }
+
+    fn __mul__(&self, factor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * factor))
+    }
+
+    fn __div__(&self, divisor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() / divisor))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * other))
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
+    }
+
     #[getter]
     fn portal(&self) -> PyResult<PortalIdentifier> {
         Ok(self.0.portal().clone().into())
@@ -989,13 +2538,34 @@ impl UsageReport {
         Ok(self.0.projects().iter().map(|p| p.clone().into()).collect())
     }
 
+    #[getter]
+    fn components(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.components().iter().map(|c| c.to_string()).collect())
+    }
+
     fn get_report(&self, project: &ProjectIdentifier) -> PyResult<ProjectUsageReport> {
         Ok(self.0.get_report(&project.0).into())
+    }
+
+    fn get_component(&self, component: &str) -> PyResult<UsageReport> {
+        Ok(self.0.get_component(component).into())
     }
 
     #[getter]
     fn total_usage(&self) -> PyResult<Usage> {
         Ok(self.0.total_usage().into())
+    }
+
+    #[staticmethod]
+    fn combine(reports: Py<PyAny>, py: Python) -> PyResult<Self> {
+        let reports: Vec<UsageReport> = reports.extract(py)?;
+
+        let reports: Vec<usagereport::UsageReport> = reports.iter().map(|r| r.0.clone()).collect();
+
+        match usagereport::UsageReport::combine(&reports) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
     }
 }
 
@@ -1016,6 +2586,21 @@ impl ProjectUsageReport {
         Ok(Self(usagereport::ProjectUsageReport::new(&project.0)))
     }
 
+    fn to_json(&self) -> PyResult<String> {
+        match self.0.to_json() {
+            Ok(json) => Ok(json),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match usagereport::ProjectUsageReport::from_json(json) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn __str__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
@@ -1032,6 +2617,37 @@ impl ProjectUsageReport {
         Ok(self.clone())
     }
 
+    fn __add__(&self, other: &ProjectUsageReport) -> PyResult<Self> {
+        Ok(Self(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: &ProjectUsageReport) -> PyResult<()> {
+        self.0 += other.0.clone();
+        Ok(())
+    }
+
+    fn __mul__(&self, factor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * factor))
+    }
+
+    fn __div__(&self, divisor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() / divisor))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * other))
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
+    }
+
     #[getter]
     fn dates<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDate>>> {
         let mut dates = Vec::new();
@@ -1041,6 +2657,11 @@ impl ProjectUsageReport {
         }
 
         Ok(dates)
+    }
+
+    #[getter]
+    fn components(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.components().iter().map(|c| c.to_string()).collect())
     }
 
     #[getter]
@@ -1069,6 +2690,11 @@ impl ProjectUsageReport {
     }
 
     #[getter]
+    fn num_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.num_jobs())
+    }
+
+    #[getter]
     fn unmapped_usage(&self) -> PyResult<Usage> {
         Ok(self.0.unmapped_usage().into())
     }
@@ -1085,11 +2711,221 @@ impl ProjectUsageReport {
     fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectUsageReport> {
         Ok(self.0.get_report(&grammar::Date::from_chrono(&date)).into())
     }
+
+    fn get_component(&self, component: &str) -> PyResult<ProjectUsageReport> {
+        Ok(self.0.get_component(component).into())
+    }
+
+    #[staticmethod]
+    fn combine(reports: Py<PyAny>, py: Python) -> PyResult<Self> {
+        let reports: Vec<ProjectUsageReport> = reports.extract(py)?;
+
+        let reports: Vec<usagereport::ProjectUsageReport> =
+            reports.iter().map(|r| r.0.clone()).collect();
+
+        match usagereport::ProjectUsageReport::combine(&reports) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn add_mapping(&mut self, user: &UserMapping) -> PyResult<()> {
+        match self.0.add_mapping(&user.0) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn add_mappings(&mut self, users: Py<PyAny>, py: Python) -> PyResult<()> {
+        let mappings: Vec<UserMapping> = users.extract(py)?;
+        let mappings: Vec<grammar::UserMapping> = mappings.iter().map(|m| m.0.clone()).collect();
+
+        match self.0.add_mappings(&mappings) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn set_report(
+        &mut self,
+        date: chrono::NaiveDate,
+        report: &DailyProjectUsageReport,
+    ) -> PyResult<()> {
+        self.0
+            .set_report(&grammar::Date::from_chrono(&date), &report.0);
+        Ok(())
+    }
+
+    fn add_report(
+        &mut self,
+        date: chrono::NaiveDate,
+        report: &DailyProjectUsageReport,
+    ) -> PyResult<()> {
+        self.0
+            .add_report(&grammar::Date::from_chrono(&date), &report.0);
+        Ok(())
+    }
+
+    fn set_complete(&mut self) -> PyResult<()> {
+        self.0.set_complete();
+        Ok(())
+    }
+
+    fn set_day_complete(&mut self, date: chrono::NaiveDate) -> PyResult<()> {
+        self.0.set_day_complete(&grammar::Date::from_chrono(&date));
+        Ok(())
+    }
+
+    fn to_usage_report(&self) -> UsageReport {
+        self.0.to_usage_report().into()
+    }
 }
 
 impl From<usagereport::ProjectUsageReport> for ProjectUsageReport {
     fn from(project_usage_report: usagereport::ProjectUsageReport) -> Self {
         ProjectUsageReport(project_usage_report)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DailyProjectUsageReport(usagereport::DailyProjectUsageReport);
+
+#[pymethods]
+impl DailyProjectUsageReport {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(Self(usagereport::DailyProjectUsageReport::default()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<DailyProjectUsageReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<DailyProjectUsageReport> {
+        Ok(self.clone())
+    }
+
+    fn __add__(&self, other: &DailyProjectUsageReport) -> PyResult<Self> {
+        Ok(Self(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: &DailyProjectUsageReport) -> PyResult<()> {
+        self.0 += other.0.clone();
+        Ok(())
+    }
+
+    fn __mul__(&self, factor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * factor))
+    }
+
+    fn __div__(&self, divisor: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() / divisor))
+    }
+
+    fn __rmul__(&self, other: f64) -> PyResult<Self> {
+        Ok(Self(self.0.clone() * other))
+    }
+
+    fn __imul__(&mut self, other: f64) -> PyResult<()> {
+        self.0 *= other;
+        Ok(())
+    }
+
+    fn __idiv__(&mut self, other: f64) -> PyResult<()> {
+        self.0 /= other;
+        Ok(())
+    }
+
+    fn usage(&self, user: &str) -> PyResult<Usage> {
+        Ok(self.0.usage(user).into())
+    }
+
+    #[getter]
+    fn num_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.num_jobs())
+    }
+
+    fn local_users(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.local_users().clone())
+    }
+
+    #[getter]
+    fn components(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.components().clone())
+    }
+
+    #[getter]
+    fn total_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_usage().into())
+    }
+
+    fn add_usage(&mut self, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.add_usage(user, usage.0);
+        Ok(())
+    }
+
+    fn add_unattributed_usage(&mut self, usage: &Usage) -> PyResult<()> {
+        self.0.add_unattributed_usage(usage.0);
+        Ok(())
+    }
+
+    fn add_component_usage(&mut self, component: &str, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.add_component_usage(component, user, usage.0);
+        Ok(())
+    }
+
+    fn add_unattributed_component_usage(&mut self, component: &str, usage: &Usage) -> PyResult<()> {
+        self.0.add_unattributed_component_usage(component, usage.0);
+        Ok(())
+    }
+
+    fn set_usage(&mut self, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.set_usage(user, usage.0);
+        Ok(())
+    }
+
+    fn set_unattributed_usage(&mut self, usage: &Usage) -> PyResult<()> {
+        self.0.set_unattributed_usage(usage.0);
+        Ok(())
+    }
+
+    fn set_component_usage(&mut self, component: &str, user: &str, usage: &Usage) -> PyResult<()> {
+        self.0.set_component_usage(component, user, usage.0);
+        Ok(())
+    }
+
+    fn set_unattributed_component_usage(&mut self, component: &str, usage: &Usage) -> PyResult<()> {
+        self.0.set_unattributed_component_usage(component, usage.0);
+        Ok(())
+    }
+
+    fn set_complete(&mut self) -> PyResult<()> {
+        self.0.set_complete();
+        Ok(())
+    }
+
+    fn get_component(&self, component: &str) -> PyResult<DailyProjectUsageReport> {
+        Ok(self.0.get_component(component).into())
+    }
+
+    #[getter]
+    fn is_complete(&self) -> PyResult<bool> {
+        Ok(self.0.is_complete())
+    }
+}
+
+impl From<usagereport::DailyProjectUsageReport> for DailyProjectUsageReport {
+    fn from(daily_project_usage_report: usagereport::DailyProjectUsageReport) -> Self {
+        DailyProjectUsageReport(daily_project_usage_report)
     }
 }
 
@@ -1179,6 +3015,16 @@ impl Instruction {
             CompareOp::Ne => Ok(self.0 != other.0),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    #[getter]
+    fn command(&self) -> PyResult<String> {
+        Ok(self.0.command())
+    }
+
+    #[getter]
+    fn arguments(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.arguments().clone())
     }
 }
 
@@ -1284,6 +3130,36 @@ impl Status {
             CompareOp::Ne => Ok(self.0 != other.0),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    #[staticmethod]
+    fn created() -> PyResult<Status> {
+        Ok(Status(job::Status::Created))
+    }
+
+    #[staticmethod]
+    fn pending() -> PyResult<Status> {
+        Ok(Status(job::Status::Pending))
+    }
+
+    #[staticmethod]
+    fn running() -> PyResult<Status> {
+        Ok(Status(job::Status::Running))
+    }
+
+    #[staticmethod]
+    fn complete() -> PyResult<Status> {
+        Ok(Status(job::Status::Complete))
+    }
+
+    #[staticmethod]
+    fn error() -> PyResult<Status> {
+        Ok(Status(job::Status::Error))
+    }
+
+    #[staticmethod]
+    fn duplicate() -> PyResult<Status> {
+        Ok(Status(job::Status::Duplicate))
     }
 }
 
@@ -1588,6 +3464,466 @@ impl From<grammar::ProjectMapping> for ProjectMapping {
     }
 }
 
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DomainPattern(grammar::DomainPattern);
+
+#[pymethods]
+impl DomainPattern {
+    #[new]
+    fn new(pattern: &str) -> PyResult<Self> {
+        match grammar::DomainPattern::parse(pattern) {
+            Ok(domain_pattern) => Ok(Self(domain_pattern)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.pattern())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<DomainPattern> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<DomainPattern> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &DomainPattern, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn pattern(&self) -> PyResult<String> {
+        Ok(self.0.pattern())
+    }
+
+    fn matches(&self, domain: &str) -> PyResult<bool> {
+        Ok(self.0.matches(domain))
+    }
+}
+
+impl From<grammar::DomainPattern> for DomainPattern {
+    fn from(domain_pattern: grammar::DomainPattern) -> Self {
+        DomainPattern(domain_pattern)
+    }
+}
+
+/// Helper enum to accept either a DomainPattern or a string in Python
+#[derive(FromPyObject)]
+enum DomainPatternOrStr {
+    Pattern(DomainPattern),
+    Str(String),
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AwardDetails(grammar::AwardDetails);
+
+#[pymethods]
+impl AwardDetails {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(Self(grammar::AwardDetails::new()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<AwardDetails> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<AwardDetails> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &AwardDetails, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn award_id(&self) -> PyResult<Option<String>> {
+        Ok(self.0.id())
+    }
+
+    #[setter]
+    fn set_award_id(&mut self, award_id: &str) -> PyResult<()> {
+        self.0.set_id(award_id);
+        Ok(())
+    }
+
+    fn clear_award_id(&mut self) -> PyResult<()> {
+        self.0.clear_id();
+        Ok(())
+    }
+
+    #[getter]
+    fn link(&self) -> PyResult<Option<String>> {
+        Ok(self.0.link())
+    }
+
+    #[setter]
+    fn set_link(&mut self, link: &str) -> PyResult<()> {
+        self.0
+            .set_link(link)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn clear_link(&mut self) -> PyResult<()> {
+        self.0.clear_link();
+        Ok(())
+    }
+}
+
+impl From<grammar::AwardDetails> for AwardDetails {
+    fn from(award_details: grammar::AwardDetails) -> Self {
+        AwardDetails(award_details)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectTemplate(grammar::ProjectTemplate);
+
+#[pymethods]
+impl ProjectTemplate {
+    #[new]
+    fn new(class: &str) -> PyResult<Self> {
+        match grammar::ProjectTemplate::parse(class) {
+            Ok(project_class) => Ok(Self(project_class)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectTemplate> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectTemplate> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &ProjectTemplate, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+}
+
+impl From<grammar::ProjectTemplate> for ProjectTemplate {
+    fn from(project_class: grammar::ProjectTemplate) -> Self {
+        ProjectTemplate(project_class)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectDetails(grammar::ProjectDetails);
+
+#[pymethods]
+impl ProjectDetails {
+    #[new]
+    fn new(details: &str) -> PyResult<Self> {
+        match grammar::ProjectDetails::parse(details) {
+            Ok(project_details) => Ok(Self(project_details)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn to_json(&self) -> PyResult<String> {
+        Ok(self.0.to_json())
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match grammar::ProjectDetails::from_json(json) {
+            Ok(project_details) => Ok(Self(project_details)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectDetails> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectDetails> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &ProjectDetails, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> PyResult<Option<String>> {
+        Ok(self.0.name())
+    }
+
+    #[setter]
+    fn set_name(&mut self, name: &str) -> PyResult<()> {
+        self.0.set_name(name);
+        Ok(())
+    }
+
+    fn clear_name(&mut self) -> PyResult<()> {
+        self.0.clear_name();
+        Ok(())
+    }
+
+    #[getter]
+    fn project_template(&self) -> PyResult<Option<ProjectTemplate>> {
+        Ok(self.0.template().map(|pc| pc.into()))
+    }
+
+    #[setter]
+    fn set_project_template(&mut self, template: &ProjectTemplate) -> PyResult<()> {
+        self.0.set_template(template.0.clone());
+        Ok(())
+    }
+
+    fn clear_project_template(&mut self) -> PyResult<()> {
+        self.0.clear_template();
+        Ok(())
+    }
+
+    #[getter]
+    fn key(&self) -> PyResult<Option<String>> {
+        Ok(self.0.key())
+    }
+
+    #[setter]
+    fn set_key(&mut self, key: &str) -> PyResult<()> {
+        self.0.set_key(key);
+        Ok(())
+    }
+
+    fn clear_key(&mut self) -> PyResult<()> {
+        self.0.clear_key();
+        Ok(())
+    }
+
+    #[getter]
+    fn description(&self) -> PyResult<Option<String>> {
+        Ok(self.0.description())
+    }
+
+    #[setter]
+    fn set_description(&mut self, description: &str) -> PyResult<()> {
+        self.0.set_description(description);
+        Ok(())
+    }
+
+    fn clear_description(&mut self) -> PyResult<()> {
+        self.0.clear_description();
+        Ok(())
+    }
+
+    #[getter]
+    fn members(&self) -> PyResult<Option<HashMap<String, String>>> {
+        Ok(self.0.members())
+    }
+
+    #[setter]
+    fn set_members(&mut self, members: HashMap<String, String>) -> PyResult<()> {
+        self.0.set_members(members);
+        Ok(())
+    }
+
+    fn clear_members(&mut self) -> PyResult<()> {
+        self.0.clear_members();
+        Ok(())
+    }
+
+    fn add_member(&mut self, username: &str, role: &str) -> PyResult<()> {
+        self.0.add_member(username, role);
+        Ok(())
+    }
+
+    fn remove_member(&mut self, username: &str) -> PyResult<()> {
+        self.0.remove_member(username);
+        Ok(())
+    }
+
+    #[getter]
+    fn start_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+        Ok(self.0.start_date().map(|date| date.to_chrono()))
+    }
+
+    #[setter]
+    fn set_start_date(&mut self, start_date: Option<chrono::NaiveDate>) -> PyResult<()> {
+        if let Some(date) = start_date {
+            self.0.set_start_date(grammar::Date::from_chrono(&date));
+        } else {
+            self.0.clear_start_date();
+        }
+        Ok(())
+    }
+
+    fn clear_start_date(&mut self) -> PyResult<()> {
+        self.0.clear_start_date();
+        Ok(())
+    }
+
+    #[getter]
+    fn end_date(&self) -> PyResult<Option<chrono::NaiveDate>> {
+        Ok(self.0.end_date().map(|date| date.to_chrono()))
+    }
+
+    #[setter]
+    fn set_end_date(&mut self, end_date: Option<chrono::NaiveDate>) -> PyResult<()> {
+        if let Some(date) = end_date {
+            self.0.set_end_date(grammar::Date::from_chrono(&date));
+        } else {
+            self.0.clear_end_date();
+        }
+        Ok(())
+    }
+
+    fn clear_end_date(&mut self) -> PyResult<()> {
+        self.0.clear_end_date();
+        Ok(())
+    }
+
+    #[getter]
+    fn allocation(&self) -> PyResult<Option<Allocation>> {
+        Ok(self.0.allocation().map(|allocation| allocation.into()))
+    }
+
+    #[setter]
+    fn set_allocation(&mut self, allocation: Option<Allocation>) -> PyResult<()> {
+        if let Some(allocation) = allocation {
+            self.0.set_allocation(allocation.0);
+        } else {
+            self.0.clear_allocation();
+        }
+        Ok(())
+    }
+
+    fn clear_allocation(&mut self) -> PyResult<()> {
+        self.0.clear_allocation();
+        Ok(())
+    }
+
+    #[getter]
+    fn award(&self) -> PyResult<Option<AwardDetails>> {
+        Ok(self.0.award().map(|award| award.into()))
+    }
+
+    #[setter]
+    fn set_award(&mut self, award: Option<AwardDetails>) -> PyResult<()> {
+        if let Some(award) = award {
+            self.0.set_award(award.0);
+        } else {
+            self.0.clear_award();
+        }
+        Ok(())
+    }
+
+    fn clear_award(&mut self) -> PyResult<()> {
+        self.0.clear_award();
+        Ok(())
+    }
+
+    #[getter]
+    fn allowed_domains(&self) -> PyResult<Option<Vec<DomainPattern>>> {
+        Ok(self
+            .0
+            .allowed_domains()
+            .map(|domains| domains.iter().map(|d| d.clone().into()).collect()))
+    }
+
+    fn add_allowed_domain(&mut self, domain: DomainPatternOrStr) -> PyResult<()> {
+        let domain_pattern = match domain {
+            DomainPatternOrStr::Pattern(p) => p.0,
+            DomainPatternOrStr::Str(s) => grammar::DomainPattern::parse(&s)
+                .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))?,
+        };
+        self.0.add_allowed_domain(domain_pattern);
+        Ok(())
+    }
+
+    #[setter]
+    fn set_allowed_domains(&mut self, domains: Option<Vec<DomainPatternOrStr>>) -> PyResult<()> {
+        if let Some(domains) = domains {
+            let parsed_domains: Result<Vec<grammar::DomainPattern>, PyErr> = domains
+                .into_iter()
+                .map(|d| match d {
+                    DomainPatternOrStr::Pattern(p) => Ok(p.0),
+                    DomainPatternOrStr::Str(s) => grammar::DomainPattern::parse(&s)
+                        .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                })
+                .collect();
+            self.0.set_allowed_domains(parsed_domains?);
+        } else {
+            self.0.clear_allowed_domains();
+        }
+        Ok(())
+    }
+
+    fn clear_allowed_domains(&mut self) -> PyResult<()> {
+        self.0.clear_allowed_domains();
+        Ok(())
+    }
+
+    fn is_domain_allowed(&self, domain: &str) -> PyResult<bool> {
+        Ok(self.0.is_domain_allowed(domain))
+    }
+
+    fn merge(&self, other: &ProjectDetails) -> PyResult<ProjectDetails> {
+        match self.0.merge(&other.0) {
+            Ok(merged) => Ok(merged.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+}
+
+impl From<grammar::ProjectDetails> for ProjectDetails {
+    fn from(project_details: grammar::ProjectDetails) -> Self {
+        ProjectDetails(project_details)
+    }
+}
+
 ///
 /// Run the passed command on the OpenPortal system.
 /// This will return a Job object that can be used to query the
@@ -1654,17 +3990,587 @@ fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
     }
 }
 
+///
+/// Fetch all of the jobs that OpenPortal has passed back to us
+/// to run
+///
+#[pyfunction]
+fn fetch_jobs() -> PyResult<Vec<Job>> {
+    match call_get::<Vec<job::Job>>("fetch_jobs") {
+        Ok(response) => Ok(response.into_iter().map(|j| j.into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
+    let uid: uuid::Uuid = match job_id.extract::<Uuid>(py) {
+        Ok(uid) => uid.0,
+        Err(_) => match job_id.extract::<Job>(py) {
+            Ok(job) => job.0.id(),
+            Err(_) => match job_id.extract::<String>(py) {
+                Ok(uid) => uuid::Uuid::parse_str(&uid)
+                    .map_err(|_| PyErr::new::<PyOSError, _>("Job ID must be a string or a Uuid"))?,
+                Err(_) => {
+                    return Err(PyErr::new::<PyOSError, _>(
+                        "Job ID must be a string or a Uuid",
+                    ))
+                }
+            },
+        },
+    };
+
+    match call_post::<job::Job>("fetch_job", serde_json::json!(uid)) {
+        Ok(response) => Ok(response.into()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn add_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
+    let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
+
+    match call_post::<destination::Destinations>(
+        "add_offerings",
+        serde_json::json!(destination::Destinations::new(&offerings)),
+    ) {
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn remove_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
+    let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
+
+    match call_post::<destination::Destinations>(
+        "remove_offerings",
+        serde_json::json!(destination::Destinations::new(&offerings)),
+    ) {
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn get_offerings() -> PyResult<Vec<Destination>> {
+    match call_get::<Vec<destination::Destination>>("get_offerings") {
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+#[pyfunction]
+fn sync_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
+    let offerings: Vec<destination::Destination> = offerings.into_iter().map(|d| d.0).collect();
+
+    match call_post::<destination::Destinations>(
+        "sync_offerings",
+        serde_json::json!(destination::Destinations::new(&offerings)),
+    ) {
+        Ok(offerings) => Ok(offerings.iter().map(|d| d.clone().into()).collect()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+// ============================================================================
+// Storage type wrappers
+// ============================================================================
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageSize(templemeads::storage::StorageSize);
+
+#[pymethods]
+impl StorageSize {
+    #[new]
+    fn new(bytes: u64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_bytes(bytes)))
+    }
+
+    #[staticmethod]
+    fn from_bytes(bytes: u64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_bytes(bytes)))
+    }
+
+    #[staticmethod]
+    fn from_kilobytes(kb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_kilobytes(kb)))
+    }
+
+    #[staticmethod]
+    fn from_megabytes(mb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_megabytes(mb)))
+    }
+
+    #[staticmethod]
+    fn from_gigabytes(gb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_gigabytes(gb)))
+    }
+
+    #[staticmethod]
+    fn from_terabytes(tb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_terabytes(tb)))
+    }
+
+    #[staticmethod]
+    fn from_petabytes(pb: f64) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageSize::from_petabytes(pb)))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::StorageSize::parse(s) {
+            Ok(size) => Ok(Self(size)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<StorageSize> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<StorageSize> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &StorageSize, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Lt => Ok(self.0.as_bytes() < other.0.as_bytes()),
+            CompareOp::Le => Ok(self.0.as_bytes() <= other.0.as_bytes()),
+            CompareOp::Gt => Ok(self.0.as_bytes() > other.0.as_bytes()),
+            CompareOp::Ge => Ok(self.0.as_bytes() >= other.0.as_bytes()),
+        }
+    }
+
+    #[getter]
+    fn bytes(&self) -> PyResult<u64> {
+        Ok(self.0.as_bytes())
+    }
+
+    #[setter]
+    fn set_bytes(&mut self, bytes: u64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_bytes(bytes);
+        Ok(())
+    }
+
+    #[getter]
+    fn kilobytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_kilobytes())
+    }
+
+    #[setter]
+    fn set_kilobytes(&mut self, kb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_kilobytes(kb);
+        Ok(())
+    }
+
+    #[getter]
+    fn megabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_megabytes())
+    }
+
+    #[setter]
+    fn set_megabytes(&mut self, mb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_megabytes(mb);
+        Ok(())
+    }
+
+    #[getter]
+    fn gigabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_gigabytes())
+    }
+
+    #[setter]
+    fn set_gigabytes(&mut self, gb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_gigabytes(gb);
+        Ok(())
+    }
+
+    #[getter]
+    fn terabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_terabytes())
+    }
+
+    #[setter]
+    fn set_terabytes(&mut self, tb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_terabytes(tb);
+        Ok(())
+    }
+
+    #[getter]
+    fn petabytes(&self) -> PyResult<f64> {
+        Ok(self.0.as_petabytes())
+    }
+
+    #[setter]
+    fn set_petabytes(&mut self, pb: f64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageSize::from_petabytes(pb);
+        Ok(())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("StorageSize(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::StorageSize> for StorageSize {
+    fn from(size: templemeads::storage::StorageSize) -> Self {
+        StorageSize(size)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageUsage(templemeads::storage::StorageUsage);
+
+#[pymethods]
+impl StorageUsage {
+    #[new]
+    fn new(size: &StorageSize) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::StorageUsage::new(size.0)))
+    }
+
+    fn __copy__(&self) -> PyResult<StorageUsage> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<StorageUsage> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &StorageUsage, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Lt => Ok(self.0.as_bytes() < other.0.as_bytes()),
+            CompareOp::Le => Ok(self.0.as_bytes() <= other.0.as_bytes()),
+            CompareOp::Gt => Ok(self.0.as_bytes() > other.0.as_bytes()),
+            CompareOp::Ge => Ok(self.0.as_bytes() >= other.0.as_bytes()),
+        }
+    }
+
+    #[getter]
+    fn size(&self) -> PyResult<StorageSize> {
+        Ok(StorageSize(self.0.into_size()))
+    }
+
+    #[setter]
+    fn set_size(&mut self, size: &StorageSize) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageUsage::new(size.0);
+        Ok(())
+    }
+
+    #[getter]
+    fn bytes(&self) -> PyResult<u64> {
+        Ok(self.0.as_bytes())
+    }
+
+    #[setter]
+    fn set_bytes(&mut self, bytes: u64) -> PyResult<()> {
+        self.0 = templemeads::storage::StorageUsage::new(
+            templemeads::storage::StorageSize::from_bytes(bytes),
+        );
+        Ok(())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("StorageUsage(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::StorageUsage> for StorageUsage {
+    fn from(usage: templemeads::storage::StorageUsage) -> Self {
+        StorageUsage(usage)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QuotaLimit(templemeads::storage::QuotaLimit);
+
+#[pymethods]
+impl QuotaLimit {
+    #[staticmethod]
+    fn limited(size: &StorageSize) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::QuotaLimit::Limited(size.0)))
+    }
+
+    #[staticmethod]
+    fn unlimited() -> PyResult<Self> {
+        Ok(Self(templemeads::storage::QuotaLimit::Unlimited))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::QuotaLimit::parse(s) {
+            Ok(limit) => Ok(Self(limit)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<QuotaLimit> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<QuotaLimit> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &QuotaLimit, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    fn is_unlimited(&self) -> PyResult<bool> {
+        Ok(self.0.is_unlimited())
+    }
+
+    fn is_limited(&self) -> PyResult<bool> {
+        Ok(self.0.is_limited())
+    }
+
+    #[getter]
+    fn size(&self) -> PyResult<Option<StorageSize>> {
+        Ok(self.0.size().map(|s| s.into()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("QuotaLimit(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::QuotaLimit> for QuotaLimit {
+    fn from(limit: templemeads::storage::QuotaLimit) -> Self {
+        QuotaLimit(limit)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Quota(templemeads::storage::Quota);
+
+#[pymethods]
+impl Quota {
+    #[staticmethod]
+    fn limited(limit: &StorageSize) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Quota::limited(limit.0)))
+    }
+
+    #[staticmethod]
+    fn unlimited() -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Quota::unlimited()))
+    }
+
+    #[staticmethod]
+    fn with_usage(limit: &QuotaLimit, usage: &StorageUsage) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Quota::with_usage(
+            limit.0.clone(),
+            usage.0,
+        )))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::Quota::parse(s) {
+            Ok(quota) => Ok(Self(quota)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<Quota> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Quota> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Quota, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn limit(&self) -> PyResult<QuotaLimit> {
+        Ok(QuotaLimit(self.0.limit().clone()))
+    }
+
+    #[setter]
+    fn set_limit(&mut self, limit: &QuotaLimit) -> PyResult<()> {
+        self.0.set_limit(limit.0.clone());
+        Ok(())
+    }
+
+    #[getter]
+    fn usage(&self) -> PyResult<Option<StorageUsage>> {
+        Ok(self.0.usage().map(|u| u.into()))
+    }
+
+    #[setter]
+    fn set_usage(&mut self, usage: &StorageUsage) -> PyResult<()> {
+        self.0.set_usage(usage.0);
+        Ok(())
+    }
+
+    fn is_unlimited(&self) -> PyResult<bool> {
+        Ok(self.0.is_unlimited())
+    }
+
+    fn is_over_quota(&self) -> PyResult<bool> {
+        Ok(self.0.is_over_quota())
+    }
+
+    fn percentage_used(&self) -> PyResult<Option<f64>> {
+        Ok(self.0.percentage_used())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("Quota(\"{}\")", self.0))
+    }
+}
+
+impl From<templemeads::storage::Quota> for Quota {
+    fn from(quota: templemeads::storage::Quota) -> Self {
+        Quota(quota)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Volume(templemeads::storage::Volume);
+
+#[pymethods]
+impl Volume {
+    #[new]
+    fn new(name: &str) -> PyResult<Self> {
+        Ok(Self(templemeads::storage::Volume::new(name)))
+    }
+
+    #[staticmethod]
+    fn parse(s: &str) -> PyResult<Self> {
+        match templemeads::storage::Volume::parse(s) {
+            Ok(volume) => Ok(Self(volume)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __copy__(&self) -> PyResult<Volume> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Volume> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Volume, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        Ok(self.0.name().to_string())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("Volume(\"{}\")", self.0))
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
+}
+
+impl From<templemeads::storage::Volume> for Volume {
+    fn from(volume: templemeads::storage::Volume) -> Self {
+        Volume(volume)
+    }
+}
+
+#[pyfunction]
+fn get_portal() -> PyResult<PortalIdentifier> {
+    match call_get::<grammar::PortalIdentifier>("get_portal") {
+        Ok(portal) => Ok(portal.into()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
+/// Send back the result of us running a job that was passed to us by
+/// OpenPortal.
+///
+#[pyfunction]
+fn send_result(job: Job) -> PyResult<()> {
+    match call_post::<Health>("send_result", serde_json::json!(job.0)) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 #[pymodule]
 fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(add_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_job, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_jobs, m)?)?;
+    m.add_function(wrap_pyfunction!(get, m)?)?;
+    m.add_function(wrap_pyfunction!(get_offerings, m)?)?;
+    m.add_function(wrap_pyfunction!(get_portal, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics, m)?)?;
+    m.add_function(wrap_pyfunction!(health, m)?)?;
     m.add_function(wrap_pyfunction!(is_config_loaded, m)?)?;
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
-    m.add_function(wrap_pyfunction!(health, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_offerings, m)?)?;
+    m.add_function(wrap_pyfunction!(restart, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
+    m.add_function(wrap_pyfunction!(send_result, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
-    m.add_function(wrap_pyfunction!(get, m)?)?;
+    m.add_function(wrap_pyfunction!(sync_offerings, m)?)?;
 
     m.add_class::<Health>()?;
+    m.add_class::<RestartResponse>()?;
+    m.add_class::<Diagnostics>()?;
+    m.add_class::<DiagnosticsReport>()?;
+    m.add_class::<FailedJobEntry>()?;
+    m.add_class::<SlowJobEntry>()?;
+    m.add_class::<ExpiredJobEntry>()?;
+    m.add_class::<RunningJobEntry>()?;
     m.add_class::<Job>()?;
     m.add_class::<UserIdentifier>()?;
     m.add_class::<ProjectIdentifier>()?;
@@ -1676,9 +4582,21 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Instruction>()?;
     m.add_class::<Status>()?;
     m.add_class::<DateRange>()?;
+    m.add_class::<Node>()?;
+    m.add_class::<Allocation>()?;
     m.add_class::<Usage>()?;
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;
+    m.add_class::<DailyProjectUsageReport>()?;
+    m.add_class::<DomainPattern>()?;
+    m.add_class::<AwardDetails>()?;
+    m.add_class::<ProjectDetails>()?;
+    m.add_class::<ProjectTemplate>()?;
+    m.add_class::<StorageSize>()?;
+    m.add_class::<StorageUsage>()?;
+    m.add_class::<QuotaLimit>()?;
+    m.add_class::<Quota>()?;
+    m.add_class::<Volume>()?;
 
     Ok(())
 }

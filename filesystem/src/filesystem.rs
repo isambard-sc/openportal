@@ -7,7 +7,7 @@ use templemeads::Error;
 
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nix::unistd::{Gid, Group, Uid, User};
@@ -58,14 +58,8 @@ pub async fn clean_and_check_permissions(permissions: &str) -> Result<u32, Error
 /// such as /etc, /var, /usr, /bin, /sbin, /lib, /lib64, /boot, /root,
 /// /dev, /proc, /sys, /run, /tmp, or /.
 ///
-pub async fn clean_and_check_path(path: &str, check_exists: bool) -> Result<String, Error> {
-    let mut path = path.trim();
-
-    while path.ends_with("/") {
-        path = path.trim_end_matches('/');
-    }
-
-    let mut path = Path::new(path).to_owned();
+pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<PathBuf, Error> {
+    let mut path = path.to_owned();
 
     // convert into a path
     if check_exists {
@@ -104,23 +98,23 @@ pub async fn clean_and_check_path(path: &str, check_exists: bool) -> Result<Stri
         )));
     }
 
-    Ok(path.to_string_lossy().to_string())
+    Ok(path)
 }
 
-async fn create_dir(
-    dir: &str,
+pub async fn create_dir(
+    path: &std::path::Path,
     username: &str,
     groupname: &str,
     permissions: &str,
 ) -> Result<(), Error> {
-    let dir = clean_and_check_path(dir, false).await?;
+    let path = clean_and_check_path(path, false).await?;
 
     // convert the permissions into a u32
     let permissions = clean_and_check_permissions(permissions).await?;
 
     tracing::info!(
         "Creating directory '{}' for user '{}' and group '{}' with permissions '{}'",
-        dir,
+        path.to_string_lossy(),
         username,
         groupname,
         unix_mode::to_string(permissions)
@@ -165,8 +159,6 @@ async fn create_dir(
     };
 
     // check to see if the directory already exists
-    let path = Path::new(&dir);
-
     if path.exists() {
         // directory already exists - check it has the right permissions
         // and user / group ownership
@@ -177,7 +169,7 @@ async fn create_dir(
             // ownership is wrong
             tracing::error!(
                 "Directory '{}' already exists, but has the wrong ownership. Expected '{}', got '{}'",
-                    dir, uid, Uid::from_raw(metadata.uid())
+                    path.to_string_lossy(), uid, Uid::from_raw(metadata.uid())
                 );
         }
 
@@ -185,7 +177,7 @@ async fn create_dir(
             // ownership is wrong
             tracing::error!(
                 "Directory '{}' already exists, but has the wrong group ownership. Expected '{}', got '{}'",
-                    dir, gid, Gid::from_raw(metadata.gid())
+                    path.to_string_lossy(), gid, Gid::from_raw(metadata.gid())
                 );
         }
 
@@ -194,7 +186,7 @@ async fn create_dir(
             // permissions are wrong
             tracing::error!(
                 "Directory '{}' already exists, but has the wrong permissions. Expected '{}', got '{}'",
-                    dir, unix_mode::to_string(permissions),
+                    path.to_string_lossy(), unix_mode::to_string(permissions),
                     unix_mode::to_string(metadata.permissions().mode())
                 );
         }
@@ -204,6 +196,12 @@ async fn create_dir(
         // as we should assume that another process has already beaten
         // us to creating the directory
         tracing::info!("Directory already exists with required permissions.");
+        return Ok(());
+    }
+
+    // Check if this directory exists in .recycle - if so, restore it
+    if let Some(recycle_path) = check_recycle(&path).await? {
+        restore_from_recycle(&recycle_path, &path).await?;
         return Ok(());
     }
 
@@ -227,87 +225,50 @@ async fn create_dir(
     };
 
     // create the directory
-    std::fs::create_dir(path).with_context(|| format!("Could not create directory '{}'", dir))?;
+    std::fs::create_dir(&path)
+        .with_context(|| format!("Could not create directory '{}'", path.to_string_lossy()))?;
 
     // set the ownership and permissions
-    nix::unistd::chown(path, Some(uid), Some(gid))
-        .with_context(|| format!("Could not set ownership on directory '{}'", dir))?;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(permissions))
-        .with_context(|| format!("Could not set permissions on directory '{}'", dir))?;
+    nix::unistd::chown(&path, Some(uid), Some(gid)).with_context(|| {
+        format!(
+            "Could not set ownership on directory '{}'",
+            path.to_string_lossy()
+        )
+    })?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(permissions)).with_context(
+        || {
+            format!(
+                "Could not set permissions on directory '{}'",
+                path.to_string_lossy()
+            )
+        },
+    )?;
 
     Ok(())
 }
 
-///
-/// Create the user's home directory at 'homedir'. The directory
-/// should be created for the user 'username' and group 'groupname',
-/// with unix permissions in 'permissions' (as a string, e.g. "0755")
-/// An optional config script can be passed as 'config_script'. If this
-/// is passed, then it is executed with the argument being the path
-/// to the newly created home directory.
-///
-pub async fn create_home_dir(
-    dir: &str,
-    username: &str,
-    groupname: &str,
-    permissions: &str,
-) -> Result<(), Error> {
-    create_dir(dir, username, groupname, permissions).await
-}
+pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
+    let link = clean_and_check_path(link, false).await?;
+    let path = clean_and_check_path(path, true).await?;
 
-///
-/// Create the project directory at 'projectdir'. The directory
-/// should be created for the group 'groupname', with unix permissions
-/// in 'permissions' (as a string, e.g. "0755"). An optional config
-/// script can be passed as 'config_script'. If this is passed, then
-/// it is executed with the argument being the path to the newly
-/// created project directory.
-///
-pub async fn create_project_dir(
-    dir: &str,
-    groupname: &str,
-    permissions: &str,
-) -> Result<(), Error> {
-    create_dir(dir, "root", groupname, permissions).await
-}
+    tracing::info!(
+        "Creating link from '{}' to '{}'",
+        path.to_string_lossy(),
+        link.to_string_lossy()
+    );
 
-pub async fn get_project_link(link: &str, project: &str) -> Result<String, Error> {
-    // replace either {PROJECT} or {project} with the value of project
-    let link = link
-        .replace("{PROJECT}", project)
-        .replace("{project}", project);
-
-    clean_and_check_path(&link, false).await
-}
-
-pub async fn create_project_link(dir: &str, link: &str, project: &str) -> Result<(), Error> {
-    // replace either {PROJECT} or {project} with the value of project
-    let link = link
-        .replace("{PROJECT}", project)
-        .replace("{project}", project);
-
-    let link = clean_and_check_path(&link, false).await?;
-
-    let dir = clean_and_check_path(dir, true).await?;
-
-    tracing::info!("Creating link from '{}' to '{}'", dir, link);
-
-    // check to see if the link already exists
-    let path = Path::new(&link);
-
-    if path.exists() {
+    if link.exists() {
         // link already exists - check it is a link to the correct directory
-        let metadata = path.symlink_metadata()?;
+        let metadata = link.symlink_metadata()?;
 
         if metadata.file_type().is_symlink() {
             // check the link points to the correct directory
-            let target = path.read_link()?.canonicalize()?;
+            let target = link.read_link()?.canonicalize()?;
 
-            if target != Path::new(&dir) {
+            if target != path {
                 tracing::error!(
                     "Link '{}' already exists, but points to the wrong directory. Expected '{}', got '{}'",
-                        link, dir, target.to_string_lossy()
+                        link.to_string_lossy(), path.to_string_lossy(), target.to_string_lossy()
                 );
             }
 
@@ -317,13 +278,180 @@ pub async fn create_project_link(dir: &str, link: &str, project: &str) -> Result
             // us to creating the link
             return Ok(());
         } else {
-            tracing::error!("Link '{}' already exists, but is not a symlink", link);
+            tracing::error!(
+                "Link '{}' already exists, but is not a symlink",
+                link.to_string_lossy()
+            );
         }
     }
 
     // create the link
-    std::os::unix::fs::symlink(&dir, path)
-        .with_context(|| format!("Could not create link '{}' to '{}'", link, dir))?;
+    std::os::unix::fs::symlink(&path, &link).with_context(|| {
+        format!(
+            "Could not create link '{}' to '{}'",
+            link.to_string_lossy(),
+            path.to_string_lossy()
+        )
+    })?;
+
+    Ok(())
+}
+
+///
+/// Check if a directory exists in the .recycle subdirectory of its parent.
+/// Returns Some(recycle_path) if found, None otherwise.
+///
+async fn check_recycle(path: &Path) -> Result<Option<PathBuf>, Error> {
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let dir_name = match path.file_name() {
+        Some(n) => n.to_string_lossy(),
+        None => return Ok(None),
+    };
+
+    let recycle_path = parent.join(".recycle").join(dir_name.as_ref());
+
+    if recycle_path.exists() {
+        Ok(Some(recycle_path))
+    } else {
+        Ok(None)
+    }
+}
+
+///
+/// Restore a directory from .recycle by moving it back to its original location.
+/// This is used when recreating a directory that was previously recycled.
+///
+async fn restore_from_recycle(recycle: &Path, target: &Path) -> Result<(), Error> {
+    tracing::info!(
+        "Restoring '{}' from recycle to '{}'",
+        recycle.to_string_lossy(),
+        target.to_string_lossy()
+    );
+
+    if !recycle.exists() {
+        return Err(Error::State(format!(
+            "Recycle path '{}' does not exist",
+            recycle.to_string_lossy()
+        )));
+    }
+
+    if target.exists() {
+        return Err(Error::State(format!(
+            "Target path '{}' already exists, cannot restore from recycle",
+            target.to_string_lossy()
+        )));
+    }
+
+    // Move the directory from recycle back to its original location
+    std::fs::rename(recycle, target).with_context(|| {
+        format!(
+            "Could not restore '{}' from recycle to '{}'",
+            recycle.to_string_lossy(),
+            target.to_string_lossy()
+        )
+    })?;
+
+    tracing::info!("Successfully restored directory from recycle");
+    Ok(())
+}
+
+///
+/// Move a directory to the .recycle subdirectory of its parent and update its timestamp.
+/// This is a non-destructive way to "remove" directories - they can be restored later
+/// or permanently deleted by a separate cleanup process.
+///
+pub async fn recycle_dir(path: &Path) -> Result<(), Error> {
+    let path = clean_and_check_path(path, false).await?;
+
+    if !path.exists() {
+        tracing::warn!(
+            "Directory '{}' does not exist, nothing to recycle",
+            path.to_string_lossy()
+        );
+        return Ok(());
+    }
+
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => {
+            return Err(Error::State(format!(
+                "Cannot recycle root directory '{}'",
+                path.to_string_lossy()
+            )))
+        }
+    };
+
+    let dir_name = match path.file_name() {
+        Some(n) => n,
+        None => {
+            return Err(Error::State(format!(
+                "Cannot determine directory name for '{}'",
+                path.to_string_lossy()
+            )))
+        }
+    };
+
+    // Create .recycle directory if it doesn't exist
+    let recycle_parent = parent.join(".recycle");
+    if !recycle_parent.exists() {
+        tracing::info!(
+            "Creating recycle directory '{}'",
+            recycle_parent.to_string_lossy()
+        );
+        std::fs::create_dir(&recycle_parent).with_context(|| {
+            format!(
+                "Could not create recycle directory '{}'",
+                recycle_parent.to_string_lossy()
+            )
+        })?;
+    }
+
+    let recycle_path = recycle_parent.join(dir_name);
+
+    // If something already exists in recycle with this name, we need to handle it
+    if recycle_path.exists() {
+        tracing::warn!(
+            "Recycle path '{}' already exists. Removing old recycled directory.",
+            recycle_path.to_string_lossy()
+        );
+        std::fs::remove_dir_all(&recycle_path).with_context(|| {
+            format!(
+                "Could not remove old recycled directory '{}'",
+                recycle_path.to_string_lossy()
+            )
+        })?;
+    }
+
+    tracing::info!(
+        "Moving '{}' to recycle '{}'",
+        path.to_string_lossy(),
+        recycle_path.to_string_lossy()
+    );
+
+    // Move the directory to recycle
+    std::fs::rename(&path, &recycle_path).with_context(|| {
+        format!(
+            "Could not move '{}' to recycle '{}'",
+            path.to_string_lossy(),
+            recycle_path.to_string_lossy()
+        )
+    })?;
+
+    // Update the timestamp to current time using filetime crate
+    // This sets both access and modification times to current time
+    let now = filetime::FileTime::now();
+
+    match filetime::set_file_times(&recycle_path, now, now) {
+        Ok(_) => tracing::info!("Successfully recycled directory with updated timestamp"),
+        Err(e) => {
+            tracing::warn!("Could not update timestamp on recycled directory: {}", e);
+            // Don't fail here - the directory was successfully recycled
+        }
+    }
 
     Ok(())
 }

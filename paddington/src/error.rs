@@ -29,6 +29,15 @@ pub enum Error {
     InvalidPeer(String),
 
     #[error("{0}")]
+    ServerIsSecondary(String),
+
+    #[error("{0}")]
+    ClientIsSecondary(String),
+
+    #[error("{0}")]
+    PeerIsSecondary(String),
+
+    #[error("{0}")]
     NotExists(String),
 
     #[error("{0}")]
@@ -47,6 +56,9 @@ pub enum Error {
     Send(String),
 
     #[error("{0}")]
+    TooManyStandbyConnections(String),
+
+    #[error("{0}")]
     UnknownPeer(String),
 
     #[error("{0}")]
@@ -54,4 +66,7 @@ pub enum Error {
 
     #[error("{0}")]
     Incompatible(String),
+
+    #[error("{0}")]
+    Unavailable(String),
 }

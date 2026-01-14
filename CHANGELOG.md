@@ -6,28 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.22.0] - 2026-01-14
+
 ### Added
 
 - Added billing TRES as a value that can be used when calculating node
   hours. This will be the only calculation method if cpu, gpu and memory
   are not specified when creating the default node object.
-
 - Added components to the usage reports. The cpu, gpu, memory and
   billing components are now also tracked separately and available
   in all of the usage reports.
-
 - Added AwardDetails and DomainPattern types, with Python bindings.
   These are used in ProjectDetails to provide richer information about
   a project's associated award, and about which email domains are
   allowed to be associated with a project.
-
 - Added ability to set, get and clear filesystem volume quotas. Currently
   this is only supported for Lustre, but the engine can be expanded to
   support other filesystems. This adds new commands, e.g.
   `set_project_quota`, `get_project_quota`, `get_project_quotas`,
   `clear_project_quota`, `set_user_quota`, `get_user_quota`, `get_user_quotas`,
   and `clear_user_quota`.
-
 - Added instructions to see if a user or project already exists, namely
   `is_existing_user` and `is_existing_project`. This is used by the cluster
   agent to only remove partially-added users or projects if an
@@ -891,6 +889,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.22.0]: https://github.com/isambard-sc/openportal/releases/tag/0.22.0
 [0.21.1]: https://github.com/isambard-sc/openportal/releases/tag/0.21.1
 [0.21.0]: https://github.com/isambard-sc/openportal/releases/tag/0.21.0
 [0.20.2]: https://github.com/isambard-sc/openportal/releases/tag/0.20.2

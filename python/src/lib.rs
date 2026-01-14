@@ -168,8 +168,8 @@ where
     const INITIAL_BACKOFF_MS: u64 = 100;
 
     // Serialize the arguments once to get the exact bytes we'll send
-    let body_bytes = serde_json::to_vec(&arguments)
-        .with_context(|| "Could not serialize arguments to JSON")?;
+    let body_bytes =
+        serde_json::to_vec(&arguments).with_context(|| "Could not serialize arguments to JSON")?;
 
     for attempt in 0..=MAX_RETRIES {
         let date = Utc::now();

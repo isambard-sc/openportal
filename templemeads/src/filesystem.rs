@@ -4,8 +4,8 @@
 use crate::agent::Type as AgentType;
 use crate::agent_core::Config;
 use crate::error::Error;
-use crate::job::{Envelope, Job};
 use crate::handler::{process_message, set_my_service_details};
+use crate::job::{Envelope, Job};
 use crate::runnable::AsyncRunnable;
 
 use serde::{Deserialize, Serialize};

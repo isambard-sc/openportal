@@ -2456,7 +2456,7 @@ impl Display for SlurmJob {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, node_info: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, requested_nodes: {}, requested_cpus: {}, requested_gpus: {}, requested_memory: {}, energy: {}, billing: {}, requested_billing: {} }}",
+            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, node_info: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, requested_nodes: {}, requested_cpus: {}, requested_gpus: {}, requested_memory: {}, energy: {}, billing: {}, requested_billing: {}, node_fraction: {}, billed_node_seconds: {} }}",
             self.id(),
             self.user(),
             self.account(),
@@ -2478,7 +2478,9 @@ impl Display for SlurmJob {
             self.requested_memory(),
             self.energy(),
             self.billing(),
-            self.requested_billing()
+            self.requested_billing(),
+            self.node_fraction(),
+            self.billed_node_seconds()
         )
     }
 }
@@ -2972,6 +2974,7 @@ impl SlurmJob {
                                 }
 
                                 if job.duration().num_seconds() > 0 {
+                                    tracing::debug!("Recording job {}", job);
                                     slurm_jobs.push(job)
                                 }
                             }

@@ -1053,8 +1053,7 @@ async fn get_hourly_report(
             .run_json(&cmd, std::time::Duration::from_secs(120))
             .await?;
 
-        let jobs =
-            parse_jobs_blocking(response, start_time, end_time, slurm_nodes.clone()).await?;
+        let jobs = parse_jobs_blocking(response, start_time, end_time, slurm_nodes.clone()).await?;
 
         tracing::debug!(
             "Got {} jobs for project {} on {}",
@@ -1314,53 +1313,27 @@ pub async fn get_usage_report(
         None => "".to_string(),
     };
 
-    // we now request the data day by day - do this in parallel
-    let mut tasks = Vec::new();
-
+    // Process days sequentially to avoid stack overflow from too many spawned tasks
     for day in dates.days() {
         if day.day().start_time().and_utc() > now {
             // we can't get the usage for this day yet as it is in the future
             continue;
         }
 
-        let expires = *expires;
-        let project = project.clone();
-        let account = account.clone();
-        let slurm_nodes = slurm_nodes.clone();
-        let cluster = cluster.clone();
-        let partition_command = partition_command.clone();
-        let day = day.clone();
-        let day2 = day.clone();
-
-        tasks.push((
-            tokio::spawn(Box::pin(async move {
-                get_daily_report(
-                    &expires,
-                    &project,
-                    &day,
-                    &account,
-                    &slurm_nodes,
-                    &cluster,
-                    &partition_command,
-                )
-                .await
-            })),
-            day2,
-        ));
-    }
-
-    for (task, day) in tasks {
-        let daily_report = match task.await {
-            Ok(report) => match report {
-                Ok(report) => report,
-                Err(e) => {
-                    tracing::warn!("Could not get daily report: {}", e);
-                    // we will return an empty report for this day
-                    DailyProjectUsageReport::default()
-                }
-            },
+        let daily_report = match get_daily_report(
+            expires,
+            project,
+            &day,
+            &account,
+            &slurm_nodes,
+            &cluster,
+            &partition_command,
+        )
+        .await
+        {
+            Ok(report) => report,
             Err(e) => {
-                tracing::warn!("Could not get daily report: {}", e);
+                tracing::warn!("Could not get daily report for {}: {}", day, e);
                 // we will return an empty report for this day
                 DailyProjectUsageReport::default()
             }

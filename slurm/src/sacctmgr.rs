@@ -188,14 +188,19 @@ impl LockedRunner {
         let output = self.run(cmd, timeout).await?;
 
         // Use spawn_blocking for JSON parsing to avoid stack overflow
-        // on large JSON responses - blocking threads have larger stacks
+        // on large JSON responses - blocking threads have larger stacks.
+        // Also use stacker to dynamically grow the stack if needed.
         let cmd_debug = format!("{:?}", cmd);
         let parse_result = tokio::task::spawn_blocking(move || {
-            let start_time = chrono::Utc::now();
-            let result: Result<serde_json::Value, _> = serde_json::from_str(&output);
-            let end_time = chrono::Utc::now();
-            let duration_ms = (end_time - start_time).num_milliseconds();
-            (result, duration_ms, output)
+            // Use stacker to grow the stack if we're running low
+            // Request at least 2MB of stack, grow by 4MB if needed
+            stacker::maybe_grow(2 * 1024 * 1024, 4 * 1024 * 1024, || {
+                let start_time = chrono::Utc::now();
+                let result: Result<serde_json::Value, _> = serde_json::from_str(&output);
+                let end_time = chrono::Utc::now();
+                let duration_ms = (end_time - start_time).num_milliseconds();
+                (result, duration_ms, output)
+            })
         })
         .await;
 
@@ -227,7 +232,8 @@ impl LockedRunner {
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Parse jobs from JSON response using spawn_blocking to avoid stack overflow
-/// on large responses with many jobs
+/// on large responses with many jobs. Uses stacker to dynamically grow the
+/// stack if needed.
 async fn parse_jobs_blocking(
     response: serde_json::Value,
     start_time: chrono::DateTime<Utc>,
@@ -235,7 +241,11 @@ async fn parse_jobs_blocking(
     slurm_nodes: SlurmNodes,
 ) -> Result<Vec<SlurmJob>, Error> {
     let result = tokio::task::spawn_blocking(move || {
-        SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)
+        // Use stacker to grow the stack if we're running low
+        // Request at least 2MB of stack, grow by 4MB if needed
+        stacker::maybe_grow(2 * 1024 * 1024, 4 * 1024 * 1024, || {
+            SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)
+        })
     })
     .await;
 

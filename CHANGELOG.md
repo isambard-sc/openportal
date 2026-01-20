@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Fixed a stack overflow bug in the slurm agent caused by infinite recursion
+  when logging SlurmJob objects. The Display implementation for SlurmJob
+  called billed_node_seconds(), which called billed_node_fraction(), which
+  logged self using Display, causing infinite recursion. The fix logs just
+  the job ID instead of the full object.
+
+### Changed
+
+- Added separate priority runner pool for time-sensitive slurm commands.
+  Commands like adding/removing users, getting/setting limits, and cancelling
+  jobs now use a dedicated pool of runners that won't be blocked by
+  long-running usage report queries (sacct). This ensures that priority
+  operations remain responsive even when multiple usage reports are being
+  generated.
+
 ## [0.22.0] - 2026-01-14
 
 ### Added

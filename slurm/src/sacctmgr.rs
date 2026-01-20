@@ -187,42 +187,25 @@ impl LockedRunner {
     ) -> Result<serde_json::Value, Error> {
         let output = self.run(cmd, timeout).await?;
 
-        // Use spawn_blocking for JSON parsing to avoid stack overflow
-        // on large JSON responses - blocking threads have larger stacks.
-        // Also use stacker to dynamically grow the stack if needed.
-        let cmd_debug = format!("{:?}", cmd);
-        let parse_result = tokio::task::spawn_blocking(move || {
-            // Use stacker to grow the stack if we're running low
-            // Request at least 2MB of stack, grow by 4MB if needed
-            stacker::maybe_grow(2 * 1024 * 1024, 4 * 1024 * 1024, || {
-                let start_time = chrono::Utc::now();
-                let result: Result<serde_json::Value, _> = serde_json::from_str(&output);
+        let start_time = chrono::Utc::now();
+        match serde_json::from_str(&output) {
+            Ok(output) => {
                 let end_time = chrono::Utc::now();
                 let duration_ms = (end_time - start_time).num_milliseconds();
-                (result, duration_ms, output)
-            })
-        })
-        .await;
 
-        match parse_result {
-            Ok((Ok(json), duration_ms, _)) => {
                 if duration_ms > 5000 {
                     tracing::warn!(
-                        "Parsing JSON output of command '{}' took {} seconds",
-                        cmd_debug,
+                        "Parsing JSON output of command '{:?}' took {} seconds",
+                        cmd,
                         duration_ms as f64 / 1000.0
                     );
                 }
-                Ok(json)
+                Ok(output)
             }
-            Ok((Err(e), _, output)) => {
+            Err(e) => {
                 tracing::error!("Could not parse json: {}", e);
                 tracing::error!("Output: {:?}", output);
                 Err(Error::Call("Could not parse json".to_string()))
-            }
-            Err(e) => {
-                tracing::error!("JSON parsing task failed: {}", e);
-                Err(Error::Call("JSON parsing task failed".to_string()))
             }
         }
     }
@@ -230,33 +213,6 @@ impl LockedRunner {
 
 /// The default timeout (30 seconds)
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Parse jobs from JSON response using spawn_blocking to avoid stack overflow
-/// on large responses with many jobs. Uses stacker to dynamically grow the
-/// stack if needed.
-async fn parse_jobs_blocking(
-    response: serde_json::Value,
-    start_time: chrono::DateTime<Utc>,
-    end_time: chrono::DateTime<Utc>,
-    slurm_nodes: SlurmNodes,
-) -> Result<Vec<SlurmJob>, Error> {
-    let result = tokio::task::spawn_blocking(move || {
-        // Use stacker to grow the stack if we're running low
-        // Request at least 2MB of stack, grow by 4MB if needed
-        stacker::maybe_grow(2 * 1024 * 1024, 4 * 1024 * 1024, || {
-            SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)
-        })
-    })
-    .await;
-
-    match result {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            tracing::error!("Job parsing task failed: {}", e);
-            Err(Error::Call("Job parsing task failed".to_string()))
-        }
-    }
-}
 
 // function to return the runner protected by a MutexGuard - this ensures
 // that we can only run a small number of slurm commands at a time, thereby not
@@ -1063,7 +1019,7 @@ async fn get_hourly_report(
             .run_json(&cmd, std::time::Duration::from_secs(120))
             .await?;
 
-        let jobs = parse_jobs_blocking(response, start_time, end_time, slurm_nodes.clone()).await?;
+        let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
 
         tracing::debug!(
             "Got {} jobs for project {} on {}",
@@ -1201,8 +1157,7 @@ async fn get_daily_report(
 
     match response {
         Ok(response) => {
-            let jobs =
-                parse_jobs_blocking(response, start_time, end_time, slurm_nodes.clone()).await?;
+            let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
 
             tracing::debug!(
                 "Got {} jobs for project {} on {}",
@@ -1323,27 +1278,53 @@ pub async fn get_usage_report(
         None => "".to_string(),
     };
 
-    // Process days sequentially to avoid stack overflow from too many spawned tasks
+    // we now request the data day by day - do this in parallel
+    let mut tasks = Vec::new();
+
     for day in dates.days() {
         if day.day().start_time().and_utc() > now {
             // we can't get the usage for this day yet as it is in the future
             continue;
         }
 
-        let daily_report = match get_daily_report(
-            expires,
-            project,
-            &day,
-            &account,
-            &slurm_nodes,
-            &cluster,
-            &partition_command,
-        )
-        .await
-        {
-            Ok(report) => report,
+        let expires = *expires;
+        let project = project.clone();
+        let account = account.clone();
+        let slurm_nodes = slurm_nodes.clone();
+        let cluster = cluster.clone();
+        let partition_command = partition_command.clone();
+        let day = day.clone();
+        let day2 = day.clone();
+
+        tasks.push((
+            tokio::spawn(async move {
+                get_daily_report(
+                    &expires,
+                    &project,
+                    &day,
+                    &account,
+                    &slurm_nodes,
+                    &cluster,
+                    &partition_command,
+                )
+                .await
+            }),
+            day2,
+        ));
+    }
+
+    for (task, day) in tasks {
+        let daily_report = match task.await {
+            Ok(report) => match report {
+                Ok(report) => report,
+                Err(e) => {
+                    tracing::warn!("Could not get daily report: {}", e);
+                    // we will return an empty report for this day
+                    DailyProjectUsageReport::default()
+                }
+            },
             Err(e) => {
-                tracing::warn!("Could not get daily report for {}: {}", day, e);
+                tracing::warn!("Could not get daily report: {}", e);
                 // we will return an empty report for this day
                 DailyProjectUsageReport::default()
             }

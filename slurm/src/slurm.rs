@@ -3126,11 +3126,13 @@ impl SlurmJob {
         // node fraction. This indicates that slurm accepted a job that requested too few resources,
         // and then had to uprate it to the actual amount
         if requested_node_fraction < actual_node_fraction {
+            // Note: we log the job id instead of self to avoid infinite recursion,
+            // since Display::fmt calls billed_node_seconds which calls this function
             tracing::warn!(
-                "Job used more resources than requested: {} > {}: {}",
+                "Job {} used more resources than requested: {} > {}",
+                self.id,
                 actual_node_fraction,
-                requested_node_fraction,
-                self
+                requested_node_fraction
             );
         }
 

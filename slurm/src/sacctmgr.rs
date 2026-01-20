@@ -1297,7 +1297,7 @@ pub async fn get_usage_report(
         let day2 = day.clone();
 
         tasks.push((
-            tokio::spawn(async move {
+            tokio::spawn(Box::pin(async move {
                 get_daily_report(
                     &expires,
                     &project,
@@ -1308,7 +1308,7 @@ pub async fn get_usage_report(
                     &partition_command,
                 )
                 .await
-            }),
+            })),
             day2,
         ));
     }

@@ -326,7 +326,10 @@ async fn force_add_slurm_account(
         ],
     )?;
 
-    priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     Ok(account.clone())
 }
@@ -351,7 +354,11 @@ async fn get_account_from_slurm(
         ],
     )?;
 
-    let response = match priority_runner(expires).await?.run_json(&cmd, DEFAULT_TIMEOUT).await {
+    let response = match priority_runner(expires)
+        .await?
+        .run_json(&cmd, DEFAULT_TIMEOUT)
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -676,7 +683,10 @@ async fn add_account_association(
         ],
     )?;
 
-    priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     Ok(())
 }
@@ -728,7 +738,10 @@ async fn add_user_association(
             ],
         )?;
 
-        priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+        priority_runner(expires)
+            .await?
+            .run(&cmd, DEFAULT_TIMEOUT)
+            .await?;
 
         // update the user
         user = match get_user_from_slurm(user.name(), expires).await? {
@@ -762,7 +775,10 @@ async fn add_user_association(
             ],
         )?;
 
-        priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+        priority_runner(expires)
+            .await?
+            .run(&cmd, DEFAULT_TIMEOUT)
+            .await?;
 
         // update the user
         user = match get_user_from_slurm(user.name(), expires).await? {
@@ -844,7 +860,10 @@ async fn get_user_create_if_not_exists(
         ],
     )?;
 
-    priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     // now load the user from slurm to make sure it exists
     let slurm_user = match get_user(user.local_user(), expires).await? {
@@ -935,7 +954,10 @@ pub async fn find_cluster() -> Result<(), Error> {
         ],
     )?;
 
-    let clusters = priority_runner(&expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    let clusters = priority_runner(&expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     // the output is the list of clusters, one per line, separated by '|', where
     // the cluster name is the first column
@@ -1629,7 +1651,10 @@ pub async fn set_limit(
                     ],
                 )?;
 
-                priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+                priority_runner(expires)
+                    .await?
+                    .run(&cmd, DEFAULT_TIMEOUT)
+                    .await?;
             }
 
             // now we've made the change, save the account to the cache
@@ -1669,7 +1694,11 @@ pub async fn cancel_pending_user_jobs(
         ],
     )?;
 
-    match priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await {
+    match priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await
+    {
         Ok(output) => {
             if !output.is_empty() {
                 tracing::info!("scancel output: {}", output);
@@ -1709,7 +1738,11 @@ pub async fn cancel_pending_project_jobs(
         ],
     )?;
 
-    match priority_runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await {
+    match priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await
+    {
         Ok(output) => {
             if !output.is_empty() {
                 tracing::info!("scancel output: {}", output);

@@ -187,25 +187,37 @@ impl LockedRunner {
     ) -> Result<serde_json::Value, Error> {
         let output = self.run(cmd, timeout).await?;
 
-        let start_time = chrono::Utc::now();
-        match serde_json::from_str(&output) {
-            Ok(output) => {
-                let end_time = chrono::Utc::now();
-                let duration_ms = (end_time - start_time).num_milliseconds();
+        // Use spawn_blocking for JSON parsing to avoid stack overflow
+        // on large JSON responses - blocking threads have larger stacks
+        let cmd_debug = format!("{:?}", cmd);
+        let parse_result = tokio::task::spawn_blocking(move || {
+            let start_time = chrono::Utc::now();
+            let result: Result<serde_json::Value, _> = serde_json::from_str(&output);
+            let end_time = chrono::Utc::now();
+            let duration_ms = (end_time - start_time).num_milliseconds();
+            (result, duration_ms, output)
+        })
+        .await;
 
+        match parse_result {
+            Ok((Ok(json), duration_ms, _)) => {
                 if duration_ms > 5000 {
                     tracing::warn!(
-                        "Parsing JSON output of command '{:?}' took {} seconds",
-                        cmd,
+                        "Parsing JSON output of command '{}' took {} seconds",
+                        cmd_debug,
                         duration_ms as f64 / 1000.0
                     );
                 }
-                Ok(output)
+                Ok(json)
             }
-            Err(e) => {
+            Ok((Err(e), _, output)) => {
                 tracing::error!("Could not parse json: {}", e);
                 tracing::error!("Output: {:?}", output);
                 Err(Error::Call("Could not parse json".to_string()))
+            }
+            Err(e) => {
+                tracing::error!("JSON parsing task failed: {}", e);
+                Err(Error::Call("JSON parsing task failed".to_string()))
             }
         }
     }
@@ -213,6 +225,28 @@ impl LockedRunner {
 
 /// The default timeout (30 seconds)
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Parse jobs from JSON response using spawn_blocking to avoid stack overflow
+/// on large responses with many jobs
+async fn parse_jobs_blocking(
+    response: serde_json::Value,
+    start_time: chrono::DateTime<Utc>,
+    end_time: chrono::DateTime<Utc>,
+    slurm_nodes: SlurmNodes,
+) -> Result<Vec<SlurmJob>, Error> {
+    let result = tokio::task::spawn_blocking(move || {
+        SlurmJob::get_consumers(&response, &start_time, &end_time, &slurm_nodes)
+    })
+    .await;
+
+    match result {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            tracing::error!("Job parsing task failed: {}", e);
+            Err(Error::Call("Job parsing task failed".to_string()))
+        }
+    }
+}
 
 // function to return the runner protected by a MutexGuard - this ensures
 // that we can only run a small number of slurm commands at a time, thereby not
@@ -1019,7 +1053,8 @@ async fn get_hourly_report(
             .run_json(&cmd, std::time::Duration::from_secs(120))
             .await?;
 
-        let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
+        let jobs =
+            parse_jobs_blocking(response, start_time, end_time, slurm_nodes.clone()).await?;
 
         tracing::debug!(
             "Got {} jobs for project {} on {}",
@@ -1157,7 +1192,8 @@ async fn get_daily_report(
 
     match response {
         Ok(response) => {
-            let jobs = SlurmJob::get_consumers(&response, &start_time, &end_time, slurm_nodes)?;
+            let jobs =
+                parse_jobs_blocking(response, start_time, end_time, slurm_nodes.clone()).await?;
 
             tracing::debug!(
                 "Got {} jobs for project {} on {}",

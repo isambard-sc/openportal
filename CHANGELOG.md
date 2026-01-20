@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.22.1] - 2026-01-20
+
 ### Fixed
 
 - Fixed a stack overflow bug in the slurm agent caused by infinite recursion
@@ -906,6 +908,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.22.1]: https://github.com/isambard-sc/openportal/releases/tag/0.22.1
 [0.22.0]: https://github.com/isambard-sc/openportal/releases/tag/0.22.0
 [0.21.1]: https://github.com/isambard-sc/openportal/releases/tag/0.21.1
 [0.21.0]: https://github.com/isambard-sc/openportal/releases/tag/0.21.0

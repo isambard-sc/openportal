@@ -6,13 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.22.2] - 2026-01-21
+
 ### Fixed
 
 - Fixed Lustre quota parsing failing when usage exceeds the quota limit.
   Lustre's `lfs quota` command appends a `*` suffix to values that exceed
   quota (e.g., `2000*` instead of `2000`). The parser now strips this suffix
   before parsing the numeric value.
-
 - Fixed HA standby-only logic incorrectly triggering for agents that act as
   servers. The standby-only shutdown behavior now only applies to client-only
   agents. Agents that also accept server connections (indicated by calling
@@ -26,7 +27,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   variants are automatically normalized to lowercase `{project}` and `{user}`
   during validation. This prevents configuration errors from placeholder
   case mismatches.
-
 - Added validation to ensure user and project volume subpaths contain the
   required `{project}` placeholder. Invalid configurations now fail early
   with a descriptive error message.
@@ -933,6 +933,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.22.2]: https://github.com/isambard-sc/openportal/releases/tag/0.22.2
 [0.22.1]: https://github.com/isambard-sc/openportal/releases/tag/0.22.1
 [0.22.0]: https://github.com/isambard-sc/openportal/releases/tag/0.22.0
 [0.21.1]: https://github.com/isambard-sc/openportal/releases/tag/0.21.1

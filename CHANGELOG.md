@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Fixed Lustre quota parsing failing when usage exceeds the quota limit.
+  Lustre's `lfs quota` command appends a `*` suffix to values that exceed
+  quota (e.g., `2000*` instead of `2000`). The parser now strips this suffix
+  before parsing the numeric value.
+
+- Fixed HA standby-only logic incorrectly triggering for agents that act as
+  servers. The standby-only shutdown behavior now only applies to client-only
+  agents. Agents that also accept server connections (indicated by calling
+  `set_is_server()`) will no longer incorrectly enter standby mode based on
+  peer connection status.
+
+### Changed
+
+- Volume configuration subpath templates now accept case-insensitive
+  placeholders. `{PROJECT}`, `{Project}`, `{USER}`, `{User}`, and other case
+  variants are automatically normalized to lowercase `{project}` and `{user}`
+  during validation. This prevents configuration errors from placeholder
+  case mismatches.
+
+- Added validation to ensure user and project volume subpaths contain the
+  required `{project}` placeholder. Invalid configurations now fail early
+  with a descriptive error message.
+
 ## [0.22.1] - 2026-01-20
 
 ### Fixed

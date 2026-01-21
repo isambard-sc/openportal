@@ -117,6 +117,10 @@ pub struct Exchange {
     // whether or not we are a secondary server
     is_secondary: bool,
 
+    // whether or not this agent is client-only (no server connections expected)
+    // HA standby-only logic only applies to client-only agents
+    is_client_only: bool,
+
     // a hash counting the number of standby connections
     // per peer
     standby_peers: HashMap<String, u32>,
@@ -359,9 +363,14 @@ impl Exchange {
             handler: None,
             watchdogs: Arc::new(Mutex::new(HashSet::new())),
             is_secondary: false,
+            is_client_only: true,
             standby_peers: HashMap::new(),
             worker_count: Arc::new(Mutex::new(0)),
         }
+    }
+
+    pub fn is_client_only(&self) -> bool {
+        self.is_client_only
     }
 }
 
@@ -410,6 +419,23 @@ pub async fn set_is_secondary() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+///
+/// Mark this agent as having server connections (not client-only).
+/// This disables the HA standby-only logic that would otherwise cause
+/// the agent to shut down when it receives secondary status from a peer.
+///
+pub fn set_is_server() {
+    match SINGLETON_EXCHANGE.write() {
+        Ok(mut exchange) => {
+            exchange.is_client_only = false;
+            tracing::debug!("Agent marked as server - HA standby-only logic disabled");
+        }
+        Err(e) => {
+            tracing::error!("Error getting write lock in set_is_server: {}", e);
+        }
+    }
 }
 
 pub async fn set_name(name: &str) -> Result<(), Error> {
@@ -556,14 +582,19 @@ async fn locked_register(connection: Connection) -> Result<bool, Error> {
         )));
     }
 
-    // go through and see if we have any standby connections that
+    // For client-only agents: check if we have any standby connections that
     // are for keys that are alphabetically more than this one.
     // If so, then we need to disconnect them all, as this is a
-    // standby-only agent
-    let is_standby_only = exchange
-        .standby_peers
-        .iter()
-        .any(|(k, v)| *v > 0 && k > &key);
+    // standby-only agent.
+    //
+    // This logic only applies to client-only agents. Agents that also act
+    // as servers cannot reliably determine HA status from peer responses,
+    // so they should not enter standby-only mode based on this check.
+    let is_standby_only = exchange.is_client_only()
+        && exchange
+            .standby_peers
+            .iter()
+            .any(|(k, v)| *v > 0 && k > &key);
 
     if !is_standby_only {
         exchange.connections.insert(key, connection);

@@ -18,6 +18,72 @@ use templemeads::Error;
 
 use crate::quotaengine::QuotaEngineConfig;
 
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+/// Regex to match {project} in any case (case-insensitive)
+static PROJECT_PLACEHOLDER_RE: Lazy<Option<Regex>> =
+    Lazy::new(|| Regex::new(r"(?i)\{project\}").ok());
+
+/// Regex to match {user} in any case (case-insensitive)
+static USER_PLACEHOLDER_RE: Lazy<Option<Regex>> = Lazy::new(|| Regex::new(r"(?i)\{user\}").ok());
+
+/// Sanitize a subpath template by normalizing placeholder case variants.
+///
+/// This function converts any case variants of `{project}` and `{user}` to their
+/// lowercase canonical forms. For example, `{PROJECT}`, `{Project}`, `{USER}`, etc.
+/// are all converted to `{project}` and `{user}` respectively.
+///
+/// # Arguments
+/// * `subpath` - The subpath template to sanitize
+///
+/// # Returns
+/// The sanitized subpath with normalized placeholders
+fn sanitize_subpath(subpath: &str) -> String {
+    let mut result = subpath.to_string();
+
+    if let Some(re) = PROJECT_PLACEHOLDER_RE.as_ref() {
+        result = re.replace_all(&result, "{project}").into_owned();
+    }
+
+    if let Some(re) = USER_PLACEHOLDER_RE.as_ref() {
+        result = re.replace_all(&result, "{user}").into_owned();
+    }
+
+    result
+}
+
+/// Validate that a subpath template contains required placeholders.
+///
+/// # Arguments
+/// * `subpath` - The subpath template to validate
+/// * `require_project` - Whether `{project}` placeholder is required
+/// * `require_user` - Whether `{user}` placeholder is required
+///
+/// # Returns
+/// Ok(()) if validation passes, or an Error describing the issue
+fn validate_subpath_placeholders(
+    subpath: &str,
+    require_project: bool,
+    require_user: bool,
+) -> Result<(), Error> {
+    if require_project && !subpath.contains("{project}") {
+        return Err(Error::Misconfigured(format!(
+            "Subpath '{}' must contain {{project}} placeholder",
+            subpath
+        )));
+    }
+
+    if require_user && !subpath.contains("{user}") {
+        return Err(Error::Misconfigured(format!(
+            "Subpath '{}' must contain {{user}} placeholder",
+            subpath
+        )));
+    }
+
+    Ok(())
+}
+
 /// Helper function for default user subpath template
 fn default_user_subpath() -> String {
     "{project}/{user}".to_string()
@@ -104,8 +170,10 @@ impl FilesystemConfig {
                     )));
                 }
             }
+        }
 
-            // Validate array lengths match
+        // Validate user volumes (sanitize subpaths and check constraints)
+        for (_, vol) in &mut self.user_volumes {
             vol.validate()?;
         }
 
@@ -119,8 +187,10 @@ impl FilesystemConfig {
                     )));
                 }
             }
+        }
 
-            // Validate array lengths match
+        // Validate project volumes (sanitize subpaths and check constraints)
+        for (_, vol) in &mut self.project_volumes {
             vol.validate()?;
         }
 
@@ -389,7 +459,24 @@ pub struct UserVolumeConfig {
 }
 
 impl UserVolumeConfig {
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&mut self) -> Result<(), Error> {
+        // Sanitize the subpath to normalize placeholder case variants
+        // e.g., {PROJECT} -> {project}, {USER} -> {user}
+        let original_subpath = self.subpath.clone();
+        self.subpath = sanitize_subpath(&self.subpath);
+
+        if self.subpath != original_subpath {
+            tracing::info!(
+                "Sanitized user volume subpath '{}' -> '{}'",
+                original_subpath,
+                self.subpath
+            );
+        }
+
+        // Validate that the subpath contains {project} placeholder
+        // {user} is optional for user volumes (some setups may use flat directories)
+        validate_subpath_placeholders(&self.subpath, true, false)?;
+
         let num_roots = self.roots.len();
 
         if num_roots == 0 {
@@ -562,7 +649,37 @@ pub struct ProjectVolumeConfig {
 }
 
 impl ProjectVolumeConfig {
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&mut self) -> Result<(), Error> {
+        // Sanitize the subpath to normalize placeholder case variants
+        // e.g., {PROJECT} -> {project}
+        let original_subpath = self.subpath.clone();
+        self.subpath = sanitize_subpath(&self.subpath);
+
+        if self.subpath != original_subpath {
+            tracing::info!(
+                "Sanitized project volume subpath '{}' -> '{}'",
+                original_subpath,
+                self.subpath
+            );
+        }
+
+        // Validate that the subpath contains {project} placeholder
+        validate_subpath_placeholders(&self.subpath, true, false)?;
+
+        // Also sanitize link templates if present
+        for link in &mut self.links {
+            let original_link = link.clone();
+            *link = sanitize_subpath(link);
+
+            if *link != original_link {
+                tracing::info!(
+                    "Sanitized project volume link '{}' -> '{}'",
+                    original_link,
+                    link
+                );
+            }
+        }
+
         let num_roots = self.roots.len();
 
         if num_roots == 0 {
@@ -676,4 +793,88 @@ impl ProjectVolumeConfig {
 pub enum StringOrVec {
     Single(String),
     Vec(Vec<String>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_subpath_lowercase_unchanged() {
+        assert_eq!(sanitize_subpath("{project}/{user}"), "{project}/{user}");
+        assert_eq!(sanitize_subpath("{project}"), "{project}");
+        assert_eq!(sanitize_subpath("{user}"), "{user}");
+    }
+
+    #[test]
+    fn test_sanitize_subpath_uppercase_converted() {
+        assert_eq!(sanitize_subpath("{PROJECT}/{USER}"), "{project}/{user}");
+        assert_eq!(sanitize_subpath("{PROJECT}"), "{project}");
+        assert_eq!(sanitize_subpath("{USER}"), "{user}");
+    }
+
+    #[test]
+    fn test_sanitize_subpath_mixed_case_converted() {
+        assert_eq!(sanitize_subpath("{Project}/{User}"), "{project}/{user}");
+        assert_eq!(sanitize_subpath("{PROJECT}/{user}"), "{project}/{user}");
+        assert_eq!(sanitize_subpath("{project}/{USER}"), "{project}/{user}");
+        assert_eq!(sanitize_subpath("{PrOjEcT}/{UsEr}"), "{project}/{user}");
+    }
+
+    #[test]
+    fn test_sanitize_subpath_with_path_components() {
+        assert_eq!(
+            sanitize_subpath("/home/{PROJECT}/{USER}"),
+            "/home/{project}/{user}"
+        );
+        assert_eq!(
+            sanitize_subpath("/scratch/{Project}/data/{User}"),
+            "/scratch/{project}/data/{user}"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_subpath_no_placeholders() {
+        assert_eq!(sanitize_subpath("/static/path"), "/static/path");
+        assert_eq!(sanitize_subpath(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_subpath_multiple_occurrences() {
+        assert_eq!(
+            sanitize_subpath("{PROJECT}/{PROJECT}"),
+            "{project}/{project}"
+        );
+        assert_eq!(sanitize_subpath("{USER}/{USER}"), "{user}/{user}");
+    }
+
+    #[test]
+    fn test_validate_subpath_placeholders_project_required() {
+        assert!(validate_subpath_placeholders("{project}/{user}", true, false).is_ok());
+        assert!(validate_subpath_placeholders("{project}", true, false).is_ok());
+        assert!(validate_subpath_placeholders("{user}", true, false).is_err());
+        assert!(validate_subpath_placeholders("/static/path", true, false).is_err());
+    }
+
+    #[test]
+    fn test_validate_subpath_placeholders_user_required() {
+        assert!(validate_subpath_placeholders("{project}/{user}", false, true).is_ok());
+        assert!(validate_subpath_placeholders("{user}", false, true).is_ok());
+        assert!(validate_subpath_placeholders("{project}", false, true).is_err());
+        assert!(validate_subpath_placeholders("/static/path", false, true).is_err());
+    }
+
+    #[test]
+    fn test_validate_subpath_placeholders_both_required() {
+        assert!(validate_subpath_placeholders("{project}/{user}", true, true).is_ok());
+        assert!(validate_subpath_placeholders("{project}", true, true).is_err());
+        assert!(validate_subpath_placeholders("{user}", true, true).is_err());
+    }
+
+    #[test]
+    fn test_validate_subpath_placeholders_neither_required() {
+        assert!(validate_subpath_placeholders("{project}/{user}", false, false).is_ok());
+        assert!(validate_subpath_placeholders("/static/path", false, false).is_ok());
+        assert!(validate_subpath_placeholders("", false, false).is_ok());
+    }
 }

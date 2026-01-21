@@ -73,6 +73,10 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     // set the name of the service in the exchange
     exchange::set_name(&config.name()).await?;
 
+    // mark this agent as having server connections, which disables
+    // the HA standby-only logic (only applicable to client-only agents)
+    exchange::set_is_server();
+
     // spawn the healthcheck server if enabled
     if let Some(healthcheck_port) = config.healthcheck_port() {
         healthcheck::spawn(config.ip(), healthcheck_port).await?;

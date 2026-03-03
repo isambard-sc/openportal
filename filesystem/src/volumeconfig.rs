@@ -173,7 +173,7 @@ impl FilesystemConfig {
         }
 
         // Validate user volumes (sanitize subpaths and check constraints)
-        for (_, vol) in &mut self.user_volumes {
+        for vol in self.user_volumes.values_mut() {
             vol.validate()?;
         }
 
@@ -190,7 +190,7 @@ impl FilesystemConfig {
         }
 
         // Validate project volumes (sanitize subpaths and check constraints)
-        for (_, vol) in &mut self.project_volumes {
+        for vol in self.project_volumes.values_mut() {
             vol.validate()?;
         }
 

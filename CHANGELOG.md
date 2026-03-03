@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Fixed get_users and get_projects commands so that they only return the
+  active users and projects for the specified portal for the specified
+  instance. Previously, get_users would return users that may not have
+  been fully added (preventing fixing this in case the user addition failed),
+  and get_projects returned all projects in FreeIPA related to OpenPortal,
+  for that portal, even if they were for different instances.
+
 ## [0.22.2] - 2026-01-21
 
 ### Fixed

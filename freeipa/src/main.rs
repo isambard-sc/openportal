@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 GetProjects(portal) => {
-                    let groups = freeipa::get_groups(&portal, job.expires()).await?;
+                    let groups = freeipa::get_groups(&portal, &sender, job.expires()).await?;
                     job.completed(groups.iter().map(|g| g.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddProject(project) => {

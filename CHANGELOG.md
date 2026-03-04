@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-### Changed
+## [0.22.3] - 2026-03-04
+
+### Changed
 
 - Added `--sender` and `--zone` options to the `--one-shot` commands, so that
   you can set the sender and zone for the command. This is useful for testing
@@ -14,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   FreeIPA. Also added `--one-shot` support to the accounting / freeipa
   agent.
 
-### Fixed
+### Fixed
 
 - Fixed get_users and get_projects commands so that they only return the
   active users and projects for the specified portal for the specified
@@ -950,6 +952,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.22.3]: https://github.com/isambard-sc/openportal/releases/tag/0.22.3
 [0.22.2]: https://github.com/isambard-sc/openportal/releases/tag/0.22.2
 [0.22.1]: https://github.com/isambard-sc/openportal/releases/tag/0.22.1
 [0.22.0]: https://github.com/isambard-sc/openportal/releases/tag/0.22.0

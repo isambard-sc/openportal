@@ -36,6 +36,12 @@ where
 
     #[serde(skip)]
     one_shot_commands: Option<Vec<String>>,
+
+    #[serde(skip)]
+    one_shot_sender: Option<String>,
+
+    #[serde(skip)]
+    one_shot_zone: Option<String>,
 }
 
 impl<T> Config<T>
@@ -49,6 +55,8 @@ where
             agent_config: T::default(),
             extras: HashMap::new(),
             one_shot_commands: None,
+            one_shot_sender: None,
+            one_shot_zone: None,
         }
     }
 
@@ -82,6 +90,20 @@ where
 
     pub fn one_shot_commands(&self) -> &Option<Vec<String>> {
         &self.one_shot_commands
+    }
+
+    pub fn one_shot_sender(&self) -> String {
+        match &self.one_shot_sender {
+            Some(sender) => sender.clone(),
+            None => "oneshot".to_string(),
+        }
+    }
+
+    pub fn one_shot_zone(&self) -> String {
+        match &self.one_shot_zone {
+            Some(zone) => zone.clone(),
+            None => "one-shot".to_string(),
+        }
     }
 }
 
@@ -202,6 +224,8 @@ where
                 agent_config: defaults.agent_config.clone(),
                 extras: defaults.extras.clone(),
                 one_shot_commands: None,
+                one_shot_sender: None,
+                one_shot_zone: None,
             };
 
             if config_file.try_exists()? {
@@ -388,6 +412,8 @@ where
         Some(Commands::Run {
             one_shot_commands,
             repeat,
+            sender,
+            zone,
         }) => {
             let mut config = load_config::<Config<T>>(&config_file)?;
             tracing::info!("Loaded config from {}", &config_file.display());
@@ -401,6 +427,8 @@ where
                     .collect();
 
                 config.one_shot_commands = Some(one_shot_commands.clone());
+                config.one_shot_sender = sender.clone();
+                config.one_shot_zone = zone.clone();
             }
 
             return Ok(Some(config));
@@ -590,5 +618,17 @@ enum Commands {
             help = "Repeat the one-shot command(s) this number of times (default: 1)."
         )]
         repeat: Option<u32>,
+        #[arg(
+            long = "sender",
+            short = 's',
+            help = "The sender to use for the one-shot command(s) (default: oneshot)."
+        )]
+        sender: Option<String>,
+        #[arg(
+            long = "zone",
+            short = 'z',
+            help = "The zone to use for the one-shot command(s) (default: one-shot)."
+        )]
+        zone: Option<String>,
     },
 }

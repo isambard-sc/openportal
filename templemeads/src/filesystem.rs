@@ -42,15 +42,21 @@ where
             tracing::info!("Executing one-shot command: {}", one_shot_command);
 
             let job = Job::parse(
-                format!("oneshot.{} {}", config.service().name(), one_shot_command).as_str(),
+                format!(
+                    "{}.{} {}",
+                    config.one_shot_sender(),
+                    config.service().name(),
+                    one_shot_command
+                )
+                .as_str(),
                 false,
             )?
             .pending()?;
 
             let envelope = Envelope::new(
                 &config.service().name(),
-                &config.service().name(),
-                "one-shot",
+                &config.one_shot_sender(),
+                &config.one_shot_zone(),
                 &job,
             );
 

@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     templemeads::spawn_system_monitor();
 
     // create the OpenPortal paddington defaults
-    let defaults = Defaults::parse(
+    let defaults: Defaults = Defaults::parse(
         Some("freeipa".to_owned()),
         Some(
             dirs::config_local_dir()

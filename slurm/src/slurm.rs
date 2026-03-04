@@ -3140,23 +3140,84 @@ impl SlurmJob {
     }
 
     pub fn billed_node_seconds(&self) -> u64 {
-        (self.duration().num_seconds() as f64 * self.billed_node_fraction()) as u64
+        let billed_seconds =
+            (self.duration().num_seconds() as f64 * self.billed_node_fraction()) as u64;
+
+        if billed_seconds == 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has a non-zero duration but zero billed node seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            billed_seconds
+        }
     }
 
     pub fn cpu_seconds(&self) -> u64 {
-        self.cpus * self.duration().num_seconds() as u64
+        let cpu_seconds = self.cpus * self.duration().num_seconds() as u64;
+
+        if cpu_seconds == 0 && self.cpus > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero cpus and duration but zero cpu seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            cpu_seconds
+        }
     }
 
     pub fn gpu_seconds(&self) -> u64 {
-        self.gpus * self.duration().num_seconds() as u64
+        let gpu_seconds = self.gpus * self.duration().num_seconds() as u64;
+
+        if gpu_seconds == 0 && self.gpus > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero gpus and duration but zero gpu seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            gpu_seconds
+        }
     }
 
     pub fn memory_seconds(&self) -> u64 {
-        self.memory * self.duration().num_seconds() as u64
+        let memory_seconds = self.memory * self.duration().num_seconds() as u64;
+
+        if memory_seconds == 0 && self.memory > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero memory and duration but zero memory seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            memory_seconds
+        }
     }
 
     pub fn billing_seconds(&self) -> u64 {
-        self.billing * self.duration().num_seconds() as u64
+        let billing_seconds = self.billing * self.duration().num_seconds() as u64;
+
+        if billing_seconds == 0 && self.billing > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero billing and duration but zero billing seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            billing_seconds
+        }
     }
 }
 

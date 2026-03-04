@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Changed
+
+- Added `--sender` and `--zone` options to the `--one-shot` commands, so that
+  you can set the sender and zone for the command. This is useful for testing
+  commands that include the sender information, e.g. those involving
+  FreeIPA. Also added `--one-shot` support to the accounting / freeipa
+  agent.
+
 ### Fixed
 
 - Fixed get_users and get_projects commands so that they only return the

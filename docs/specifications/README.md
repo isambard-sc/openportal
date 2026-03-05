@@ -128,3 +128,21 @@ The complete configuration reference for all eight agent types. Covers:
 
 See [agent-configuration.md](agent-configuration.md) for how to initialise,
 wire together, and run agents in a real deployment.
+
+---
+
+### [notes.md](notes.md)
+**Errata, provisional schemas, and operational notes**
+
+Records known gaps in the formal specifications, provisional or still-evolving
+schemas, and operational observations that do not fit neatly into the other
+documents. Covers:
+
+- Known errata (e.g. `GetUserDirs` / `GetLocalUserDirs` missing from the
+  instruction parser)
+- Provisional `HealthInfo` and `DiagnosticsReport` schemas
+- Duplicate job detection and resolution behaviour
+- Job expiry behaviour
+- Virtual agent mechanism (`sync_offerings`)
+- Operational troubleshooting notes (connection failures, key rotation, health
+  cascade timing, slow job threshold, diagnostics path format)

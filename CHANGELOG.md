@@ -11,6 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Ensured that any slurm job that would round down to zero usage would be billed
   at least 1 node second. This ensures that super small jobs are still
   billed.
+- Added protocol specifications and docs into docs/specifications, with
+  links from the README. This should make it easier for
+  developers to understand the protocol and to implement new agents.
 
 ## [0.22.3] - 2026-03-04
 

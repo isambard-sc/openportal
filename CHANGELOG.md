@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - Ensured that any slurm job that would round down to zero usage would be billed
   at least 1 node second. This ensures that super small jobs are still
-  billed, and won't round down to zero usage.
+  billed.
 
 ## [0.22.3] - 2026-03-04
 

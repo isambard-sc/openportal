@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.22.4] - 2026-03-05
+
 ### Changed
 
 - Ensured that any slurm job that would round down to zero usage would be billed
@@ -961,6 +963,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.22.4]: https://github.com/isambard-sc/openportal/releases/tag/0.22.4
 [0.22.3]: https://github.com/isambard-sc/openportal/releases/tag/0.22.3
 [0.22.2]: https://github.com/isambard-sc/openportal/releases/tag/0.22.2
 [0.22.1]: https://github.com/isambard-sc/openportal/releases/tag/0.22.1

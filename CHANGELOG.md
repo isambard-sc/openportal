@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Changed
+
+- Extended documentation: added `docs/bridge/README.md` (bridge and Python
+  example), `docs/specifications/python-api.md` (full Python API reference),
+  and updated the specifications index with links to both.
+- Fixed several issues in the existing docs: corrected a copy-paste error in
+  the `cmdline` example (portal config was showing cluster config), replaced
+  a stale note about config encryption with current information, fixed a
+  dangling link to the (now created) bridge example, corrected several typos,
+  added the `slurm` agent to the agent type list in `docs/README.md`, added
+  cross-links between the specifications and narrative documentation, and
+  expanded the root `README.md` with an agent type table and description.
+
 ## [0.22.4] - 2026-03-05
 
 ### Changed

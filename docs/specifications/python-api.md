@@ -117,6 +117,7 @@ Represents a unit of work in the OpenPortal system.
 | `is_error` | `bool` | `True` if the job failed with an error |
 | `is_expired` | `bool` | `True` if the job expired before completion |
 | `is_duplicate` | `bool` | `True` if the job was detected as a duplicate of another pending job |
+| `result` | `Any` | The deserialized job result once finished. Raises `OSError` if the job is not yet finished, or if the job is in an error state (use `error_message` instead). Returns `None` if the job completed with no result value. |
 | `error_message` | `str` | Error description if `is_error`, otherwise `""` |
 | `progress_message` | `str` | In-progress status message if set, otherwise `""` |
 

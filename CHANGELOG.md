@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- Added `SECURITY.md` with vulnerability reporting contact, supported version
+  policy, scope definition, and link to the security model specification.
+- Added `CONTRIBUTING.md` covering bug reporting, dev setup, code standards,
+  and pull request guidelines.
+- Added `CODE_OF_CONDUCT.md` (adapted from Contributor Covenant v2.1).
+- Added root `LICENSE` file (MIT) for tool and platform compatibility.
+
 ### Changed
 
 - Extended documentation: added `docs/bridge/README.md` (bridge and Python

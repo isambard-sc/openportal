@@ -56,7 +56,7 @@ file to invite the `cluster`. By default this invitation will be in the
 current directory and called `invitation.toml`.
 
 Next, you need to start the `cluster` agent. You can do this using
-the `cluster` argument, specifyig the path to the invitation file
+the `cluster` argument, specifying the path to the invitation file
 via the `--invitation` argument. Either;
 
 ```bash

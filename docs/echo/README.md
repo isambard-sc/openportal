@@ -33,7 +33,7 @@ This example implements two services:
 2. and the `echo-client` service, which initiates a connection to
    the `echo-server` service.
 
-You fist need to start the `echo-server` service. You can do this using
+You first need to start the `echo-server` service. You can do this using
 the `server` argument. Either;
 
 ```bash
@@ -466,7 +466,7 @@ implemented in templemeads) to handle recovery.
 Finally, if the service does exit, e.g. by crashing or being killed,
 then on restarting, it will automatically try to reconnect to all
 of its peer services. This means that a keepalive process, e.g.
-using kubernetes pods or systemd daeamons, could be used to ensure
+using kubernetes pods or systemd daemons, could be used to ensure
 that the service automatically restarts and recovers from most
 outages.
 

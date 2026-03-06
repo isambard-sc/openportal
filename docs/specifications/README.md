@@ -10,6 +10,9 @@ its components. The documents are ordered from the highest level of abstraction
 (what instructions agents send each other) down to the lowest (how bytes are
 encrypted on the wire).
 
+For a narrative introduction to OpenPortal — its design philosophy, agent
+types, and worked examples — see the [docs overview](../README.md).
+
 ---
 
 ## Documents
@@ -65,6 +68,20 @@ provisioned using the invite file mechanism. Also covers:
 - Zone isolation
 - The per-agent trust topology
 - Memory safety guarantees (`SecretBox`, `Zeroize`)
+
+---
+
+### [python-api.md](python-api.md)
+**OpenPortal Python API reference**
+
+Documents the `openportal` Python module — the compiled Rust/pyo3 extension
+that portal software uses to interact with OpenPortal via the bridge agent.
+Covers initialisation, all top-level functions (`run`, `status`, `fetch_jobs`,
+`send_result`, `health`, `diagnostics`, `sync_offerings`, etc.), and every
+exported class (`Job`, `Status`, `Health`, `Diagnostics`, `Destination`,
+`UserIdentifier`, `ProjectDetails`, usage/storage types). Includes usage
+patterns for both the portal → OpenPortal direction and the OpenPortal →
+portal callback direction.
 
 ---
 

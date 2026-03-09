@@ -371,6 +371,15 @@ username. Appears as a value inside `ProjectUsageReport.reports`.
     }
   },
   "num_jobs":    15,
+  "total_wait_seconds": 1800,
+  "user_job_counts": {
+    "alice_hpc": 10,
+    "bob_hpc":   5
+  },
+  "user_wait_seconds": {
+    "alice_hpc": 1200,
+    "bob_hpc":   600
+  },
   "is_complete": true
 }
 ```
@@ -379,8 +388,18 @@ username. Appears as a value inside `ProjectUsageReport.reports`.
 |-------|------|-------------|
 | `reports` | object | Map of local username → `Usage`. The key `"unknown"` is used for usage that cannot be attributed to a named user |
 | `components` | object | (Optional, defaults to `{}`) Map of component name → (local username → `Usage`). Components are sub-categories of usage such as scheduler partitions or queue names |
-| `num_jobs` | integer | Number of jobs that ran during this day |
+| `num_jobs` | integer | Total number of jobs that started during this day (scalar total across all users) |
+| `total_wait_seconds` | integer | Total queue wait time in seconds across all jobs that started this day (scalar total across all users). Defaults to `0` if absent (backwards-compatible) |
+| `user_job_counts` | object | (Optional, defaults to `{}`) Map of local username → number of jobs started by that user. Defaults to empty if absent (backwards-compatible) |
+| `user_wait_seconds` | object | (Optional, defaults to `{}`) Map of local username → total queue wait seconds for that user's jobs. Defaults to empty if absent (backwards-compatible) |
 | `is_complete` | boolean | `true` if all usage data for the day has been collected; `false` for partial/aggregated data |
+
+**Backwards compatibility:** `total_wait_seconds`, `user_job_counts`, and
+`user_wait_seconds` were added in a later release. Older serialised data will
+lack these fields; readers should treat absent fields as `0` / empty map
+respectively (which is the behaviour of `#[serde(default)]`). The scalar
+totals `num_jobs` and `total_wait_seconds` must equal the sums across the
+per-user maps when both are present.
 
 ---
 
@@ -405,6 +424,9 @@ Compute usage for a single project over a date range, indexed by calendar date.
         }
       },
       "num_jobs": 10,
+      "total_wait_seconds": 1500,
+      "user_job_counts": {"alice_hpc": 7, "bob_hpc": 3},
+      "user_wait_seconds": {"alice_hpc": 1050, "bob_hpc": 450},
       "is_complete": true
     },
     "2024-01-16": {
@@ -413,6 +435,9 @@ Compute usage for a single project over a date range, indexed by calendar date.
       },
       "components": {},
       "num_jobs": 2,
+      "total_wait_seconds": 240,
+      "user_job_counts": {"alice_hpc": 2},
+      "user_wait_seconds": {"alice_hpc": 240},
       "is_complete": true
     }
   },
@@ -458,6 +483,9 @@ active projects.
           "reports": {"alice_hpc": {"seconds": 7200}},
           "components": {},
           "num_jobs": 5,
+          "total_wait_seconds": 600,
+          "user_job_counts": {"alice_hpc": 5},
+          "user_wait_seconds": {"alice_hpc": 600},
           "is_complete": true
         }
       },

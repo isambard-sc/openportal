@@ -2886,9 +2886,26 @@ impl DailyProjectUsageReport {
         Ok(self.0.num_jobs())
     }
 
+    fn num_jobs_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.num_jobs_for_user(user))
+    }
+
     #[getter]
     fn total_wait_seconds(&self) -> PyResult<u64> {
         Ok(self.0.total_wait_seconds())
+    }
+
+    fn wait_seconds_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.wait_seconds_for_user(user))
+    }
+
+    fn average_wait_seconds_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.average_wait_seconds_for_user(user))
+    }
+
+    #[getter]
+    fn is_consistent(&self) -> PyResult<bool> {
+        Ok(self.0.is_consistent())
     }
 
     #[getter]

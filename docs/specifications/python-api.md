@@ -235,11 +235,85 @@ JSON schema.
 
 ---
 
-### `UsageReport` / `ProjectUsageReport` / `DailyProjectUsageReport`
+### `Usage`
 
-Usage accounting types. `UsageReport` is keyed by `ProjectIdentifier`;
-`ProjectUsageReport` is keyed by `UserIdentifier`; `DailyProjectUsageReport`
-breaks usage down by day. All support `+`, `-`, `*`, `/` arithmetic operators.
+A compute-time quantity (internally stored as an integer number of seconds).
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `seconds` | `int` | Raw value in seconds |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `in_hours` | `() → str` | Return a human-readable string with all values expressed in hours (e.g. `"2.000 hours"`). Useful for consistent unit display when comparing across days. |
+
+`str(usage)` auto-scales to the most appropriate unit (seconds, minutes, or
+hours) with up to 3 decimal places, e.g. `"2.000 hours"`, `"40.433 minutes"`,
+`"1 second"`.
+
+---
+
+### `DailyProjectUsageReport`
+
+Compute usage for a single project on a single calendar day, broken down by
+local username. Arithmetic operators (`+`, `+=`) are supported for merging
+reports.
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `num_jobs` | `int` | Total number of jobs that started on this day (scalar total across all users) |
+| `total_wait_seconds` | `int` | Total queue wait time in seconds for all jobs that started on this day |
+| `average_wait_seconds` | `float` | Mean queue wait time in seconds per job (`0.0` if `num_jobs == 0`) |
+| `is_complete` | `bool` | `True` if all usage data for the day has been collected |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `num_jobs_for_user` | `(user: str) → int` | Number of jobs started by the named local user. Returns `0` for unknown users or legacy data without per-user counts. |
+| `wait_seconds_for_user` | `(user: str) → int` | Total queue wait seconds for the named local user. Returns `0` for unknown users or legacy data. |
+| `average_wait_seconds_for_user` | `(user: str) → float` | Mean queue wait seconds per job for the named local user. Returns `0.0` if the user has no jobs or data is unavailable. |
+| `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user job counts and average wait times. |
+
+`str(report)` auto-scales usage units per user and includes per-user job
+counts and average wait times.
+
+---
+
+### `ProjectUsageReport`
+
+Compute usage for a single project over a date range, indexed by calendar
+date. Arithmetic operators (`+`, `+=`) are supported.
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `total_wait_seconds` | `int` | Total queue wait time in seconds across all days in this report |
+| `average_wait_seconds` | `float` | Mean queue wait time in seconds per job across the whole report (`0.0` if no jobs) |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `daily_reports` | `(with_usage_only: bool = True) → list[DailyProjectUsageReport]` | Return the daily reports sorted by date. If `with_usage_only=True` (default), only days with non-zero usage are returned; pass `False` to include all days. |
+| `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user breakdowns, job counts, and average wait times. |
+
+`str(report)` auto-scales usage units per user per day.
+
+---
+
+### `UsageReport`
+
+Portal-level aggregate report containing `ProjectUsageReport` objects for all
+active projects. Arithmetic operators (`+`, `+=`) are supported.
+
 See [json-types.md](json-types.md) for full schemas.
 
 ---

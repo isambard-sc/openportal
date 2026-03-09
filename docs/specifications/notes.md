@@ -13,22 +13,7 @@ the formal specification documents.
 
 ## 1. Errata and Known Gaps
 
-### 1.1 `GetUserDirs` and `GetLocalUserDirs` missing from instruction parser
-
-The instructions `get_user_dirs` and `get_local_user_dirs` exist in the
-`Instruction` enum and have `Display` implementations (so they can be
-serialised as strings), but neither has a corresponding case in
-`Instruction::parse()`. As a result, these instructions cannot currently be
-parsed from a command string sent over the wire.
-
-This is a known omission and **will be fixed in a later update**. Until then,
-these instructions cannot be invoked through the standard command protocol.
-
-**Affected source:** `templemeads/src/grammar.rs`, `Instruction::parse()`
-
----
-
-### 1.2 `HealthInfo` schema (provisional — still evolving)
+### 1.1 `HealthInfo` schema (provisional — still evolving)
 
 The `HealthInfo` struct is returned by the `HealthResponse` Templemeads command
 and exposed through the bridge API's `GET /health` endpoint. Its schema is
@@ -108,7 +93,7 @@ The current schema is:
 
 ---
 
-### 1.3 `DiagnosticsReport` schema (provisional — still evolving)
+### 1.2 `DiagnosticsReport` schema (provisional — still evolving)
 
 The `DiagnosticsReport` struct is returned by the `DiagnosticsResponse`
 Templemeads command and exposed through the bridge API's `POST /diagnostics`

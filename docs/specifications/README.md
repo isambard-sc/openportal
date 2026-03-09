@@ -155,8 +155,6 @@ Records known gaps in the formal specifications, provisional or still-evolving
 schemas, and operational observations that do not fit neatly into the other
 documents. Covers:
 
-- Known errata (e.g. `GetUserDirs` / `GetLocalUserDirs` missing from the
-  instruction parser)
 - Provisional `HealthInfo` and `DiagnosticsReport` schemas
 - Duplicate job detection and resolution behaviour
 - Job expiry behaviour

@@ -48,6 +48,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `docs/specifications/python-api.md` to document all new fields and
   methods, including backwards-compatibility notes.
 
+### Fixed
+
+- Added missing parse arms for `get_user_dirs` and `get_local_user_dirs` in
+  `Instruction::parse()` (`templemeads/src/grammar.rs`). These instructions
+  were already fully implemented (enum variants, `Display`, argument
+  serialisation) but could not be parsed from a command string, making them
+  unreachable over the wire. Removed the corresponding errata entry from
+  `docs/specifications/notes.md`.
+
 ### Changed
 
 - Extended documentation: added `docs/bridge/README.md` (bridge and Python

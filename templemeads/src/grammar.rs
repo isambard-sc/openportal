@@ -3838,6 +3838,19 @@ impl Instruction {
                     )))
                 }
             },
+            "get_user_dirs" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::GetUserDirs(user)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_user_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_user_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
             "get_local_home_dir" => match UserMapping::parse(&parts[1..].join(" ")) {
                 Ok(mapping) => Ok(Instruction::GetLocalHomeDir(mapping)),
                 Err(_) => {
@@ -3860,6 +3873,19 @@ impl Instruction {
                     );
                     Err(Error::Parse(format!(
                         "get_local_project_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_local_user_dirs" => match UserMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Ok(Instruction::GetLocalUserDirs(mapping)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_local_user_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_local_user_dirs failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }

@@ -10,9 +10,10 @@ use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
-    GetLocalProjectDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas,
-    GetProjects, GetUsageReport, GetUsageReports, GetUserMapping, GetUserQuota, GetUserQuotas,
-    GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
+    GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota,
+    GetProjectQuotas, GetProjects, GetUsageReport, GetUsageReports, GetUserDirs, GetUserMapping,
+    GetUserQuota, GetUserQuotas, GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit,
+    SetProjectQuota, SetUserQuota,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
@@ -292,12 +293,21 @@ async fn main() -> Result<()> {
                     let dirs = get_project_dirs(me.name(), &mapping).await?;
                     job.completed(dirs)
                 }
+                GetUserDirs(user) => {
+                    let mapping = get_user_mapping(me.name(), &user).await?;
+                    let dirs = get_user_dirs(me.name(), &mapping).await?;
+                    job.completed(dirs)
+                }
                 GetLocalHomeDir(mapping) => {
                     let homedir = get_home_dir(me.name(), &mapping).await?;
                     job.completed(homedir)
                 }
                 GetLocalProjectDirs(mapping) => {
                     let dirs = get_project_dirs(me.name(), &mapping).await?;
+                    job.completed(dirs)
+                }
+                GetLocalUserDirs(mapping) => {
+                    let dirs = get_user_dirs(me.name(), &mapping).await?;
                     job.completed(dirs)
                 }
                 _ => {
@@ -1807,6 +1817,49 @@ async fn get_project_dirs(me: &str, mapping: &ProjectMapping) -> Result<Vec<Stri
                     tracing::error!("No directories found?");
                     Err(Error::MissingProject(format!(
                         "Could not find directories for project {}",
+                        mapping
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No filesystem agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_user_dirs(me: &str, mapping: &UserMapping) -> Result<Vec<String>, Error> {
+    // find the Filesystem agent
+    match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => {
+            // send the job to the filesystem agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} get_local_user_dirs {}",
+                    me,
+                    filesystem.name(),
+                    mapping
+                ),
+                false,
+            )?
+            .put(&filesystem)
+            .await?;
+
+            // Wait for the job to complete
+            let result = job.wait().await?.result::<Vec<String>>()?;
+
+            match result {
+                Some(dirs) => {
+                    tracing::debug!("User directories retrieved: {:?}", dirs);
+                    Ok(dirs)
+                }
+                None => {
+                    tracing::error!("No directories found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find directories for user {}",
                         mapping
                     )))
                 }

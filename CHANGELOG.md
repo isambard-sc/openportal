@@ -8,12 +8,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Job accounting improvements for the Slurm agent:
+  - Jobs are now counted only on the day they **start**, preventing
+    multi-day jobs from being double-counted in daily usage reports.
+  - Added `submit_time` and `original_start_time` fields to `SlurmJob` so
+    queue wait time can be computed. `original_start_time` records the
+    true start time before any day-boundary clamping.
+  - `SlurmJob::wait_time()` returns the time between job submission and
+    start (clamped to zero for jobs that started immediately).
+  - `DailyProjectUsageReport` gains per-user job counts
+    (`user_job_counts`) and per-user queue wait time (`user_wait_seconds`),
+    alongside the existing scalar totals `num_jobs` and the new
+    `total_wait_seconds`. New accessors: `num_jobs_for_user`,
+    `wait_seconds_for_user`, `average_wait_seconds_for_user`,
+    `average_wait_seconds`, `is_consistent`.
+  - `ProjectUsageReport` gains `total_wait_seconds`, `average_wait_seconds`,
+    and `daily_reports(with_usage_only)`.
+  - All new fields use `#[serde(default)]` so they are fully
+    backwards-compatible with JSON produced by older releases.
+  - Runtime consistency check in the Slurm sacctmgr path: local shadow
+    counters are compared against the report's scalar totals after each
+    daily report is built; a warning is logged if they diverge.
+- `Usage`, `DailyProjectUsageReport`, and `ProjectUsageReport` now have an
+  `in_hours()` method that returns a human-readable string with all values
+  expressed in hours — useful for comparing across days with consistent
+  units.
+- `Usage::Display` now auto-scales to seconds/minutes/hours, limits output
+  to 3 decimal places, and uses correct singular/plural forms
+  (e.g. `"1 second"`, `"1 job"` instead of `"1 seconds"`, `"1 jobs"`).
+- Display output for `DailyProjectUsageReport` and `ProjectUsageReport`
+  now includes per-user job counts and average queue wait times inline.
+- All new Rust functionality exposed through the Python bindings:
+  `DailyProjectUsageReport.total_wait_seconds`, `average_wait_seconds`,
+  `num_jobs_for_user()`, `wait_seconds_for_user()`,
+  `average_wait_seconds_for_user()`, `is_consistent`, `in_hours()`;
+  `ProjectUsageReport.total_wait_seconds`, `average_wait_seconds`,
+  `daily_reports()`, `in_hours()`; `Usage.in_hours()`.
+- Updated `docs/specifications/json-types.md` and
+  `docs/specifications/python-api.md` to document all new fields and
+  methods, including backwards-compatibility notes.
 - Added `SECURITY.md` with vulnerability reporting contact, supported version
   policy, scope definition, and link to the security model specification.
 - Added `CONTRIBUTING.md` covering bug reporting, dev setup, code standards,
   and pull request guidelines.
 - Added `CODE_OF_CONDUCT.md` (adapted from Contributor Covenant v2.1).
 - Added root `LICENSE` file (MIT) for tool and platform compatibility.
+
+### Fixed
+
+- Added missing parse arms for `get_user_dirs` and `get_local_user_dirs` in
+  `Instruction::parse()` (`templemeads/src/grammar.rs`). These instructions
+  were already fully implemented (enum variants, `Display`, argument
+  serialisation) but could not be parsed from a command string, making them
+  unreachable over the wire. Removed the corresponding errata entry from
+  `docs/specifications/notes.md`.
 
 ### Changed
 

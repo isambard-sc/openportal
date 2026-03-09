@@ -1028,6 +1028,7 @@ async fn get_hourly_report(
     let mut daily_report = DailyProjectUsageReport::default();
     let mut total_usage: u64 = 0;
     let mut num_jobs: u64 = 0;
+    let mut total_wait_seconds: u64 = 0;
 
     // we need to get the report hour by hour from slurm, as users may have
     // run very large numbers of jobs in a day, and sacct may time out
@@ -1040,11 +1041,19 @@ async fn get_hourly_report(
                 hourly_report.len()
             );
 
-            num_jobs += hourly_report.len() as u64;
+            let hour_start_time = hour.start_time().and_utc();
 
             for job in hourly_report {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                if job.original_start_time() >= &hour_start_time {
+                    num_jobs += 1;
+                    total_wait_seconds += job.wait_time().num_seconds() as u64;
+                    daily_report.add_jobs(job.user(), 1);
+                    daily_report
+                        .add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
+                }
             }
 
             continue;
@@ -1116,15 +1125,19 @@ async fn get_hourly_report(
             }
         }
 
-        num_jobs += jobs.len() as u64;
-
         for job in jobs {
             total_usage += job.billed_node_seconds();
             daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+            // only count wait time for jobs that started in this hour
+            if job.original_start_time() >= &start_time {
+                num_jobs += 1;
+                total_wait_seconds += job.wait_time().num_seconds() as u64;
+                daily_report.add_jobs(job.user(), 1);
+                daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
+            }
         }
     }
-
-    daily_report.set_num_jobs(num_jobs);
 
     tracing::debug!(
         "Got {} jobs consuming {} seconds for project {} on {}",
@@ -1133,6 +1146,21 @@ async fn get_hourly_report(
         project.project(),
         day
     );
+
+    // runtime consistency check: local shadow counters must match the report's scalar totals
+    if daily_report.num_jobs() != num_jobs || daily_report.total_wait_seconds() != total_wait_seconds {
+        tracing::warn!(
+            "Job count/wait time inconsistency for project {} on {}: \
+             local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
+             This may indicate a bug.",
+            project.project(),
+            day,
+            num_jobs,
+            total_wait_seconds,
+            daily_report.num_jobs(),
+            daily_report.total_wait_seconds()
+        );
+    }
 
     // check that the total usage in the daily report matches the total usage calculated manually
     if daily_report.total_usage().seconds() != total_usage {
@@ -1246,12 +1274,20 @@ async fn get_daily_report(
 
             let mut daily_report = DailyProjectUsageReport::default();
             let mut total_usage: u64 = 0;
-
-            daily_report.set_num_jobs(jobs.len() as u64);
+            let mut num_jobs_started: u64 = 0;
+            let mut total_wait_seconds: u64 = 0;
 
             for job in jobs {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                // only count jobs and wait time for jobs that started in this day
+                if job.original_start_time() >= &start_time {
+                    num_jobs_started += 1;
+                    total_wait_seconds += job.wait_time().num_seconds() as u64;
+                    daily_report.add_jobs(job.user(), 1);
+                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
+                }
 
                 // also add in all of the components
                 daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
@@ -1265,6 +1301,23 @@ async fn get_daily_report(
                     "billing",
                     job.user(),
                     Usage::new(job.billing_seconds()),
+                );
+            }
+
+            // runtime consistency check
+            if daily_report.num_jobs() != num_jobs_started
+                || daily_report.total_wait_seconds() != total_wait_seconds
+            {
+                tracing::warn!(
+                    "Job count/wait time inconsistency for project {} on {}: \
+                     local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
+                     This may indicate a bug.",
+                    project.project(),
+                    day,
+                    num_jobs_started,
+                    total_wait_seconds,
+                    daily_report.num_jobs(),
+                    daily_report.total_wait_seconds()
                 );
             }
 

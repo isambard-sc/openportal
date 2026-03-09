@@ -142,6 +142,8 @@ impl Command {
                 Instruction::SetLocalUserQuota(user, _, _) => Some(user.user().clone()),
                 Instruction::ClearLocalUserQuota(user, _) => Some(user.user().clone()),
                 Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
+                Instruction::GetUserDirs(user) => Some(user),
+                Instruction::GetLocalUserDirs(user) => Some(user.user().clone()),
                 _ => None,
             };
 

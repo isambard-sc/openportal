@@ -87,25 +87,43 @@ impl std::iter::Sum for Usage {
 
 impl std::fmt::Display for Usage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Returns "unit" or "units" depending on whether the value rounds to 1.000 at 3dp.
+        fn unit(value: f64, singular: &'static str, plural: &'static str) -> &'static str {
+            if (value - 1.0).abs() < 0.0005 {
+                singular
+            } else {
+                plural
+            }
+        }
         match self.seconds() >= 60 {
             true => match self.minutes() >= 60.0 {
                 true => match self.hours() >= 24.0 {
                     true => match self.days() >= 7.0 {
                         true => match self.weeks() >= 4.5 {
                             true => match self.months() >= 12.0 {
-                                true => write!(f, "{:.2} years", self.years()),
-                                false => write!(f, "{:.2} months", self.months()),
+                                true => write!(f, "{:.3} {}", self.years(), unit(self.years(), "year", "years")),
+                                false => write!(f, "{:.3} {}", self.months(), unit(self.months(), "month", "months")),
                             },
-                            false => write!(f, "{:.2} weeks", self.weeks()),
+                            false => write!(f, "{:.3} {}", self.weeks(), unit(self.weeks(), "week", "weeks")),
                         },
-                        false => write!(f, "{:.2} days", self.days()),
+                        false => write!(f, "{:.3} {}", self.days(), unit(self.days(), "day", "days")),
                     },
-                    false => write!(f, "{:.2} hours", self.hours()),
+                    false => write!(f, "{:.3} {}", self.hours(), unit(self.hours(), "hour", "hours")),
                 },
-                false => write!(f, "{} minutes", self.minutes()),
+                false => write!(f, "{:.3} {}", self.minutes(), unit(self.minutes(), "minute", "minutes")),
             },
-            false => write!(f, "{} seconds", self.seconds()),
+            false => write!(f, "{} {}", self.seconds(), if self.seconds() == 1 { "second" } else { "seconds" }),
         }
+    }
+}
+
+/// Display adapter that always formats a [`Usage`] value in hours.
+/// Obtained via [`Usage::in_hours`].
+pub struct UsageHoursDisplay(Usage);
+
+impl std::fmt::Display for UsageHoursDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:.3} hours", self.0.hours())
     }
 }
 
@@ -156,6 +174,12 @@ impl Usage {
 
     pub fn new(seconds: u64) -> Self {
         Self { seconds }
+    }
+
+    /// Returns a display adapter that formats this value in hours only,
+    /// e.g. `format!("{}", usage.in_hours())` → `"1.500 hours"`.
+    pub fn in_hours(&self) -> UsageHoursDisplay {
+        UsageHoursDisplay(*self)
     }
 
     pub fn from_seconds(seconds: u64) -> Self {
@@ -369,8 +393,19 @@ pub struct DailyProjectUsageReport {
     reports: HashMap<String, Usage>,
     #[serde(default)]
     components: HashMap<String, HashMap<String, Usage>>,
+    /// Per-user job counts. Empty when reading data from older instances.
+    #[serde(default)]
+    user_job_counts: HashMap<String, u64>,
+    /// Per-user wait seconds. Empty when reading data from older instances.
+    #[serde(default)]
+    user_wait_seconds: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_job_counts when populated, otherwise
+    /// carries the value from older instances that lack per-user maps.
     #[serde(default)]
     num_jobs: u64,
+    /// Scalar total — equals sum of user_wait_seconds when populated.
+    #[serde(default)]
+    total_wait_seconds: u64,
     is_complete: bool,
 }
 
@@ -381,17 +416,93 @@ impl std::fmt::Display for DailyProjectUsageReport {
         users.sort();
 
         for user in users {
-            writeln!(f, "{}: {}", user, self.reports[user])?;
+            let jobs = self.num_jobs_for_user(user);
+            if jobs > 0 {
+                writeln!(
+                    f,
+                    "{}: {} | {} {} | Average wait: {}",
+                    user,
+                    self.reports[user],
+                    jobs,
+                    if jobs == 1 { "job" } else { "jobs" },
+                    Usage::new(self.average_wait_seconds_for_user(user))
+                )?;
+            } else {
+                writeln!(f, "{}: {}", user, self.reports[user])?;
+            }
         }
 
         match self.num_jobs() {
             0 => (),
-            n => writeln!(f, "Number of jobs: {}", n)?,
+            n => {
+                if self.total_wait_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Number of jobs: {} | Average wait: {}",
+                        n,
+                        Usage::new(self.total_wait_seconds() / n)
+                    )?;
+                } else {
+                    writeln!(f, "Number of jobs: {}", n)?;
+                }
+            }
         }
 
         match self.is_complete() {
             true => writeln!(f, "Total: {}", self.total_usage()),
             false => writeln!(f, "Total: {} - incomplete", self.total_usage()),
+        }
+    }
+}
+
+/// Display adapter that formats all [`Usage`] values in a
+/// [`DailyProjectUsageReport`] in hours. Obtained via
+/// [`DailyProjectUsageReport::in_hours`].
+pub struct DailyProjectUsageReportHoursDisplay<'a>(&'a DailyProjectUsageReport);
+
+impl std::fmt::Display for DailyProjectUsageReportHoursDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let report = self.0;
+        let mut users = report.reports.keys().collect::<Vec<_>>();
+
+        users.sort();
+
+        for user in users {
+            let jobs = report.num_jobs_for_user(user);
+            if jobs > 0 {
+                writeln!(
+                    f,
+                    "{}: {} | {} {} | Average wait: {}",
+                    user,
+                    report.reports[user].in_hours(),
+                    jobs,
+                    if jobs == 1 { "job" } else { "jobs" },
+                    Usage::new(report.average_wait_seconds_for_user(user)).in_hours()
+                )?;
+            } else {
+                writeln!(f, "{}: {}", user, report.reports[user].in_hours())?;
+            }
+        }
+
+        match report.num_jobs() {
+            0 => (),
+            n => {
+                if report.total_wait_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Number of jobs: {} | Average wait: {}",
+                        n,
+                        Usage::new(report.total_wait_seconds() / n).in_hours()
+                    )?;
+                } else {
+                    writeln!(f, "Number of jobs: {}", n)?;
+                }
+            }
+        }
+
+        match report.is_complete() {
+            true => writeln!(f, "Total: {}", report.total_usage().in_hours()),
+            false => writeln!(f, "Total: {} - incomplete", report.total_usage().in_hours()),
         }
     }
 }
@@ -445,8 +556,61 @@ impl DailyProjectUsageReport {
         component_reports.insert(local_user.to_string(), usage);
     }
 
-    pub fn set_num_jobs(&mut self, num_jobs: u64) {
-        self.num_jobs = num_jobs;
+    /// Add jobs attributed to a specific user. Updates both the per-user map
+    /// and the scalar total so both are always consistent.
+    pub fn add_jobs(&mut self, user: &str, count: u64) {
+        *self.user_job_counts.entry(user.to_string()).or_default() += count;
+        self.num_jobs += count;
+    }
+
+    /// Add wait seconds attributed to a specific user. Updates both the
+    /// per-user map and the scalar total.
+    pub fn add_wait_seconds(&mut self, user: &str, seconds: u64) {
+        *self.user_wait_seconds.entry(user.to_string()).or_default() += seconds;
+        self.total_wait_seconds += seconds;
+    }
+
+    pub fn num_jobs_for_user(&self, user: &str) -> u64 {
+        self.user_job_counts.get(user).copied().unwrap_or(0)
+    }
+
+    pub fn wait_seconds_for_user(&self, user: &str) -> u64 {
+        self.user_wait_seconds.get(user).copied().unwrap_or(0)
+    }
+
+    pub fn average_wait_seconds_for_user(&self, user: &str) -> u64 {
+        let jobs = self.num_jobs_for_user(user);
+        match jobs {
+            0 => 0,
+            n => self.wait_seconds_for_user(user) / n,
+        }
+    }
+
+    /// Returns true if the scalar totals equal the sums of the per-user maps.
+    /// Always true for legacy data (both maps empty, scalars may be non-zero).
+    pub fn is_consistent(&self) -> bool {
+        if self.user_job_counts.is_empty() && self.user_wait_seconds.is_empty() {
+            return true; // legacy data — no maps to check against
+        }
+        let jobs_sum: u64 = self.user_job_counts.values().sum();
+        let wait_sum: u64 = self.user_wait_seconds.values().sum();
+        jobs_sum == self.num_jobs && wait_sum == self.total_wait_seconds
+    }
+
+    pub fn total_wait_seconds(&self) -> u64 {
+        self.total_wait_seconds
+    }
+
+    pub fn average_wait_seconds(&self) -> u64 {
+        match self.num_jobs {
+            0 => 0,
+            n => self.total_wait_seconds / n,
+        }
+    }
+
+    /// Returns a display adapter that formats all usage values in hours only.
+    pub fn in_hours(&self) -> DailyProjectUsageReportHoursDisplay {
+        DailyProjectUsageReportHoursDisplay(self)
     }
 
     pub fn add_unattributed_usage(&mut self, usage: Usage) {
@@ -480,14 +644,20 @@ impl DailyProjectUsageReport {
                     report.set_usage(user, *usage);
                 }
 
-                report.set_num_jobs(self.num_jobs);
+                report.user_job_counts = self.user_job_counts.clone();
+                report.user_wait_seconds = self.user_wait_seconds.clone();
+                report.num_jobs = self.num_jobs;
+                report.total_wait_seconds = self.total_wait_seconds;
                 report.is_complete = self.is_complete;
 
                 report
             }
             None => {
                 let mut report = DailyProjectUsageReport::default();
-                report.set_num_jobs(self.num_jobs);
+                report.user_job_counts = self.user_job_counts.clone();
+                report.user_wait_seconds = self.user_wait_seconds.clone();
+                report.num_jobs = self.num_jobs;
+                report.total_wait_seconds = self.total_wait_seconds;
                 report.is_complete = self.is_complete;
 
                 report
@@ -521,7 +691,14 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             }
         }
 
+        for (user, count) in &other.user_job_counts {
+            *new_report.user_job_counts.entry(user.clone()).or_default() += count;
+        }
+        for (user, secs) in &other.user_wait_seconds {
+            *new_report.user_wait_seconds.entry(user.clone()).or_default() += secs;
+        }
         new_report.num_jobs = self.num_jobs + other.num_jobs;
+        new_report.total_wait_seconds = self.total_wait_seconds + other.total_wait_seconds;
 
         new_report.is_complete = false; // combine reports are never complete
 
@@ -542,7 +719,14 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             }
         }
 
+        for (user, count) in &other.user_job_counts {
+            *self.user_job_counts.entry(user.clone()).or_default() += count;
+        }
+        for (user, secs) in &other.user_wait_seconds {
+            *self.user_wait_seconds.entry(user.clone()).or_default() += secs;
+        }
         self.num_jobs += other.num_jobs;
+        self.total_wait_seconds += other.total_wait_seconds;
 
         self.is_complete = false; // combine reports are never complete
     }
@@ -636,21 +820,151 @@ impl std::fmt::Display for ProjectUsageReport {
             writeln!(f, "{}", date)?;
 
             for user in report.local_users() {
-                if let Some(userid) = users.get(&user) {
-                    writeln!(f, "  {}: {}", userid, report.usage(&user))?;
+                let jobs = report.num_jobs_for_user(&user);
+                let usage_str = report.usage(&user).to_string();
+                let label = match users.get(&user) {
+                    Some(userid) => format!("  {}", userid),
+                    None => format!("  {} - unknown", user),
+                };
+                if jobs > 0 {
+                    writeln!(
+                        f,
+                        "{}: {} | {} {} | Average wait: {}",
+                        label,
+                        usage_str,
+                        jobs,
+                        if jobs == 1 { "job" } else { "jobs" },
+                        Usage::new(report.average_wait_seconds_for_user(&user))
+                    )?;
                 } else {
-                    writeln!(f, "  {} - unknown: {}", user, report.usage(&user))?;
+                    writeln!(f, "{}: {}", label, usage_str)?;
                 }
             }
 
-            writeln!(f, "Number of jobs: {}", report.num_jobs())?;
+            match report.num_jobs() {
+                0 => (),
+                n => {
+                    if report.total_wait_seconds() > 0 {
+                        writeln!(
+                            f,
+                            "Number of jobs: {} | Average wait: {}",
+                            n,
+                            Usage::new(report.total_wait_seconds() / n)
+                        )?;
+                    } else {
+                        writeln!(f, "Number of jobs: {}", n)?;
+                    }
+                }
+            }
             writeln!(f, "Daily total: {}", report.total_usage())?;
             writeln!(f, "----------------------------------------")?;
         }
 
         writeln!(f, "========================================")?;
-        writeln!(f, "Number of jobs: {}", self.num_jobs())?;
+        match self.num_jobs() {
+            0 => (),
+            n => {
+                if self.total_wait_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Number of jobs: {} | Average wait: {}",
+                        n,
+                        Usage::new(self.total_wait_seconds() / n)
+                    )?;
+                } else {
+                    writeln!(f, "Number of jobs: {}", n)?;
+                }
+            }
+        }
         writeln!(f, "Total: {}", self.total_usage())
+    }
+}
+
+/// Display adapter that formats all [`Usage`] values in a
+/// [`ProjectUsageReport`] in hours. Obtained via
+/// [`ProjectUsageReport::in_hours`].
+pub struct ProjectUsageReportHoursDisplay<'a>(&'a ProjectUsageReport);
+
+impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let report = self.0;
+        writeln!(f, "{}", report.project())?;
+
+        let mut dates = report.reports.keys().collect::<Vec<_>>();
+        dates.sort();
+
+        let mut users = HashMap::new();
+        for (user, local_user) in &report.users {
+            users.insert(local_user, user);
+        }
+
+        for date in dates {
+            let daily = report.reports.get(date).cloned().unwrap_or_default();
+
+            if daily.total_usage() == Usage::default() {
+                continue;
+            }
+
+            writeln!(f, "{}", date)?;
+
+            for user in daily.local_users() {
+                let jobs = daily.num_jobs_for_user(&user);
+                let usage_str = daily.usage(&user).in_hours().to_string();
+                let label = match users.get(&user) {
+                    Some(userid) => format!("  {}", userid),
+                    None => format!("  {} - unknown", user),
+                };
+                if jobs > 0 {
+                    writeln!(
+                        f,
+                        "{}: {} | {} {} | Average wait: {}",
+                        label,
+                        usage_str,
+                        jobs,
+                        if jobs == 1 { "job" } else { "jobs" },
+                        Usage::new(daily.average_wait_seconds_for_user(&user)).in_hours()
+                    )?;
+                } else {
+                    writeln!(f, "{}: {}", label, usage_str)?;
+                }
+            }
+
+            match daily.num_jobs() {
+                0 => (),
+                n => {
+                    if daily.total_wait_seconds() > 0 {
+                        writeln!(
+                            f,
+                            "Number of jobs: {} | Average wait: {}",
+                            n,
+                            Usage::new(daily.total_wait_seconds() / n).in_hours()
+                        )?;
+                    } else {
+                        writeln!(f, "Number of jobs: {}", n)?;
+                    }
+                }
+            }
+            writeln!(f, "Daily total: {}", daily.total_usage().in_hours())?;
+            writeln!(f, "----------------------------------------")?;
+        }
+
+        writeln!(f, "========================================")?;
+        match report.num_jobs() {
+            0 => (),
+            n => {
+                if report.total_wait_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Number of jobs: {} | Average wait: {}",
+                        n,
+                        Usage::new(report.total_wait_seconds() / n).in_hours()
+                    )?;
+                } else {
+                    writeln!(f, "Number of jobs: {}", n)?;
+                }
+            }
+        }
+        writeln!(f, "Total: {}", report.total_usage().in_hours())
     }
 }
 
@@ -671,20 +985,7 @@ impl std::ops::Add<ProjectUsageReport> for ProjectUsageReport {
 
         for (date, report) in other.reports {
             match new_report.reports.get_mut(&date) {
-                Some(existing_report) => {
-                    for (user, usage) in report.clone().reports {
-                        existing_report.add_usage(&user, usage);
-                    }
-
-                    existing_report.set_num_jobs(existing_report.num_jobs() + report.num_jobs());
-
-                    // also merge component usage
-                    for (component, reports) in report.components {
-                        for (user, usage) in reports {
-                            existing_report.add_component_usage(&component, &user, usage);
-                        }
-                    }
-                }
+                Some(existing_report) => *existing_report += report,
                 None => {
                     new_report.reports.insert(date, report);
                 }
@@ -708,20 +1009,7 @@ impl std::ops::AddAssign<ProjectUsageReport> for ProjectUsageReport {
 
         for (date, report) in other.reports {
             match self.reports.get_mut(&date) {
-                Some(existing_report) => {
-                    for (user, usage) in report.clone().reports {
-                        existing_report.add_usage(&user, usage);
-                    }
-
-                    existing_report.set_num_jobs(existing_report.num_jobs() + report.num_jobs());
-
-                    // also merge component usage
-                    for (component, reports) in report.components {
-                        for (user, usage) in reports {
-                            existing_report.add_component_usage(&component, &user, usage);
-                        }
-                    }
-                }
+                Some(existing_report) => *existing_report += report,
                 None => {
                     self.reports.insert(date, report);
                 }
@@ -887,6 +1175,39 @@ impl ProjectUsageReport {
 
     pub fn num_jobs(&self) -> u64 {
         self.reports.values().map(|r| r.num_jobs()).sum()
+    }
+
+    pub fn total_wait_seconds(&self) -> u64 {
+        self.reports.values().map(|r| r.total_wait_seconds()).sum()
+    }
+
+    pub fn average_wait_seconds(&self) -> u64 {
+        let num_jobs = self.num_jobs();
+        match num_jobs {
+            0 => 0,
+            n => self.total_wait_seconds() / n,
+        }
+    }
+
+    /// Returns a display adapter that formats all usage values in hours only.
+    pub fn in_hours(&self) -> ProjectUsageReportHoursDisplay {
+        ProjectUsageReportHoursDisplay(self)
+    }
+
+    pub fn daily_reports(&self, with_usage_only: bool) -> Vec<DailyProjectUsageReport> {
+        let mut dates: Vec<&Date> = self.reports.keys().collect();
+        dates.sort();
+
+        dates
+            .into_iter()
+            .filter_map(|date| {
+                let report = self.reports.get(date)?;
+                if with_usage_only && report.total_usage() == Usage::default() {
+                    return None;
+                }
+                Some(report.clone())
+            })
+            .collect()
     }
 
     pub fn unmapped_usage(&self) -> Usage {

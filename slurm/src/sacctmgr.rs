@@ -1028,6 +1028,7 @@ async fn get_hourly_report(
     let mut daily_report = DailyProjectUsageReport::default();
     let mut total_usage: u64 = 0;
     let mut num_jobs: u64 = 0;
+    let mut total_wait_seconds: u64 = 0;
 
     // we need to get the report hour by hour from slurm, as users may have
     // run very large numbers of jobs in a day, and sacct may time out
@@ -1040,11 +1041,20 @@ async fn get_hourly_report(
                 hourly_report.len()
             );
 
-            num_jobs += hourly_report.len() as u64;
+            let hour_start_time = hour.start_time().and_utc();
+
+            num_jobs += hourly_report
+                .iter()
+                .filter(|j| j.original_start_time() >= &hour_start_time)
+                .count() as u64;
 
             for job in hourly_report {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                if job.original_start_time() >= &hour_start_time {
+                    total_wait_seconds += job.wait_time().num_seconds() as u64;
+                }
             }
 
             continue;
@@ -1116,15 +1126,24 @@ async fn get_hourly_report(
             }
         }
 
-        num_jobs += jobs.len() as u64;
+        num_jobs += jobs
+            .iter()
+            .filter(|j| j.original_start_time() >= &start_time)
+            .count() as u64;
 
         for job in jobs {
             total_usage += job.billed_node_seconds();
             daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+            // only count wait time for jobs that started in this hour
+            if job.original_start_time() >= &start_time {
+                total_wait_seconds += job.wait_time().num_seconds() as u64;
+            }
         }
     }
 
     daily_report.set_num_jobs(num_jobs);
+    daily_report.set_total_wait_seconds(total_wait_seconds);
 
     tracing::debug!(
         "Got {} jobs consuming {} seconds for project {} on {}",
@@ -1246,12 +1265,22 @@ async fn get_daily_report(
 
             let mut daily_report = DailyProjectUsageReport::default();
             let mut total_usage: u64 = 0;
+            let mut total_wait_seconds: u64 = 0;
 
-            daily_report.set_num_jobs(jobs.len() as u64);
+            let num_jobs_started = jobs
+                .iter()
+                .filter(|j| j.original_start_time() >= &start_time)
+                .count() as u64;
+            daily_report.set_num_jobs(num_jobs_started);
 
             for job in jobs {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                // only count wait time for jobs that started in this day
+                if job.original_start_time() >= &start_time {
+                    total_wait_seconds += job.wait_time().num_seconds() as u64;
+                }
 
                 // also add in all of the components
                 daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
@@ -1267,6 +1296,8 @@ async fn get_daily_report(
                     Usage::new(job.billing_seconds()),
                 );
             }
+
+            daily_report.set_total_wait_seconds(total_wait_seconds);
 
             // check that the total usage in the daily report matches the total usage calculated manually
             if daily_report.total_usage().seconds() != total_usage {

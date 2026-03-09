@@ -2400,6 +2400,10 @@ impl Usage {
         self.__str__()
     }
 
+    fn in_hours(&self) -> PyResult<String> {
+        Ok(self.0.in_hours().to_string())
+    }
+
     fn __copy__(&self) -> PyResult<Usage> {
         Ok(self.clone())
     }
@@ -2609,6 +2613,10 @@ impl ProjectUsageReport {
         self.__str__()
     }
 
+    fn in_hours(&self) -> PyResult<String> {
+        Ok(self.0.in_hours().to_string())
+    }
+
     fn __copy__(&self) -> PyResult<ProjectUsageReport> {
         Ok(self.clone())
     }
@@ -2695,6 +2703,16 @@ impl ProjectUsageReport {
     }
 
     #[getter]
+    fn total_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.total_wait_seconds())
+    }
+
+    #[getter]
+    fn average_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.average_wait_seconds())
+    }
+
+    #[getter]
     fn unmapped_usage(&self) -> PyResult<Usage> {
         Ok(self.0.unmapped_usage().into())
     }
@@ -2766,6 +2784,16 @@ impl ProjectUsageReport {
         Ok(())
     }
 
+    #[pyo3(signature = (with_usage_only = true))]
+    fn daily_reports(&self, with_usage_only: bool) -> PyResult<Vec<DailyProjectUsageReport>> {
+        Ok(self
+            .0
+            .daily_reports(with_usage_only)
+            .into_iter()
+            .map(|r| r.into())
+            .collect())
+    }
+
     fn set_complete(&mut self) -> PyResult<()> {
         self.0.set_complete();
         Ok(())
@@ -2804,6 +2832,10 @@ impl DailyProjectUsageReport {
 
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
+    }
+
+    fn in_hours(&self) -> PyResult<String> {
+        Ok(self.0.in_hours().to_string())
     }
 
     fn __copy__(&self) -> PyResult<DailyProjectUsageReport> {
@@ -2852,6 +2884,16 @@ impl DailyProjectUsageReport {
     #[getter]
     fn num_jobs(&self) -> PyResult<u64> {
         Ok(self.0.num_jobs())
+    }
+
+    #[getter]
+    fn total_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.total_wait_seconds())
+    }
+
+    #[getter]
+    fn average_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.average_wait_seconds())
     }
 
     fn local_users(&self) -> PyResult<Vec<String>> {

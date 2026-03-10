@@ -3496,6 +3496,14 @@ impl UserIdentifier {
     fn __repr__(&self) -> PyResult<String> {
         self.__str__()
     }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
 }
 
 impl From<grammar::UserIdentifier> for UserIdentifier {
@@ -3556,6 +3564,14 @@ impl ProjectIdentifier {
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
 }
 
 impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
@@ -3605,6 +3621,14 @@ impl PortalIdentifier {
             CompareOp::Ne => Ok(self.0 != other.0),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        Ok(hasher.finish())
     }
 }
 

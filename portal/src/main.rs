@@ -12,13 +12,14 @@ use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
     AddOfferings, CreateProject, GetOfferings, GetProject, GetProjectMapping, GetProjects,
-    GetUsageReport, GetUsageReports, RemoveOfferings, RemoveProject, Submit, SyncOfferings,
-    UpdateProject,
+    GetStorageReport, GetUsageReport, GetUsageReports, RemoveOfferings, RemoveProject, Submit,
+    SyncOfferings, UpdateProject,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
 };
 use templemeads::job::{send_queued, Envelope, Job};
+use templemeads::storagereport::ProjectStorageReport;
 use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
 
@@ -134,6 +135,12 @@ async fn main() -> Result<()> {
                     // that this portal has access to
                     job.completed(
                         get_usage_reports(&me, &resource, &portal, &dates).await?)
+                }
+                GetStorageReport(project) => {
+                    tracing::debug!("Getting storage report for {}", project);
+
+                    job.completed(
+                        get_storage_report(&me, &resource, &project).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -861,6 +868,52 @@ pub async fn get_usage_report(
                     Err(Error::MissingProject(
                         "No usage report retrieved by bridge agent".to_string(),
                     ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the storage report for an existing project (reflects current state)
+///
+pub async fn get_storage_report(
+    me: &str,
+    resource: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectStorageReport, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_storage_report {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<ProjectStorageReport>()?;
+
+            match result {
+                Some(report) => {
+                    tracing::debug!("Storage report retrieved by bridge agent: {:?}", report);
+                    Ok(report)
+                }
+                None => {
+                    tracing::warn!("No storage report retrieved?");
+                    Ok(ProjectStorageReport::new(project))
                 }
             }
         }

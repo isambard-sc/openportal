@@ -11,15 +11,16 @@ use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
     GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota,
-    GetProjectQuotas, GetProjects, GetUsageReport, GetUsageReports, GetUserDirs, GetUserMapping,
-    GetUserQuota, GetUserQuotas, GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit,
-    SetProjectQuota, SetUserQuota,
+    GetProjectQuotas, GetProjects, GetStorageReport, GetUsageReport, GetUsageReports, GetUserDirs,
+    GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers, IsProtectedUser, RemoveProject,
+    RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::storage::{Quota, Volume};
+use templemeads::storagereport::ProjectStorageReport;
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
 
@@ -241,6 +242,10 @@ async fn main() -> Result<()> {
                 }
                 GetUsageReports(portal, dates) => {
                     let report = get_usage_reports(me.name(), &portal, &dates).await?;
+                    job.completed(report)
+                }
+                GetStorageReport(project) => {
+                    let report = get_storage_report(me.name(), &project).await?;
                     job.completed(report)
                 }
                 GetLimit(project) => {
@@ -1174,6 +1179,50 @@ async fn get_usage_reports(
         let project_report = get_usage_report(me, &project, dates).await?;
         report.set_report(project_report)?;
     }
+
+    Ok(report)
+}
+
+async fn get_storage_report(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectStorageReport, Error> {
+    let mut report = ProjectStorageReport::new(project);
+
+    // Fetch project-level quotas from the filesystem agent
+    match get_project_quotas(me, project).await {
+        Ok(quotas) => {
+            report.set_project_quotas(quotas);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to get project quotas for {}: {}", project, e);
+        }
+    }
+
+    // Fetch all users in this project
+    let accounts = match get_accounts(me, project).await {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            tracing::warn!("Failed to get accounts for {}: {}", project, e);
+            vec![]
+        }
+    };
+
+    // Fetch per-user quotas for each member
+    for mapping in &accounts {
+        let user = mapping.user();
+        match get_user_quotas(me, user).await {
+            Ok(quotas) => {
+                report.add_user_quotas(user, quotas);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get user quotas for {}: {}", user, e);
+            }
+        }
+    }
+
+    // Add portal-user → local-username mappings
+    report.add_mappings(&accounts)?;
 
     Ok(report)
 }

@@ -2572,6 +2572,10 @@ pub enum Instruction {
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
 
+    /// An instruction to get the storage report for a single
+    /// project (reflects current state — no date range needed)
+    GetStorageReport(ProjectIdentifier),
+
     /// An instruction to get the usage report for a single
     /// project in the specified date range
     GetUsageReport(ProjectIdentifier, DateRange),
@@ -2925,6 +2929,34 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_usage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_storage_report" => {
+                if parts.len() < 2 {
+                    tracing::error!(
+                        "get_storage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "get_storage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => Ok(Instruction::GetStorageReport(project)),
+                    Err(e) => {
+                        tracing::error!(
+                            "get_storage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_storage_report failed to parse '{}': {}",
                             &parts[1..].join(" "),
                             e
                         )))
@@ -3967,6 +3999,7 @@ impl Instruction {
             Instruction::GetLocalUserDirs(_) => "get_local_user_dirs".to_string(),
             Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
             Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
+            Instruction::GetStorageReport(_) => "get_storage_report".to_string(),
             Instruction::GetUsageReport(_, _) => "get_usage_report".to_string(),
             Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
             Instruction::SetLimit(_, _) => "set_limit".to_string(),
@@ -4049,6 +4082,7 @@ impl Instruction {
             Instruction::UpdateHomeDir(user, homedir) => {
                 vec![user.to_string(), homedir.clone()]
             }
+            Instruction::GetStorageReport(project) => vec![project.to_string()],
             Instruction::GetUsageReport(project, date_range) => {
                 vec![project.to_string(), date_range.to_string()]
             }
@@ -4122,6 +4156,9 @@ impl std::fmt::Display for Instruction {
             Instruction::GetProjectMapping(project) => write!(f, "get_project_mapping {}", project),
             Instruction::GetLocalUsageReport(mapping, date_range) => {
                 write!(f, "get_local_usage_report {} {}", mapping, date_range)
+            }
+            Instruction::GetStorageReport(project) => {
+                write!(f, "get_storage_report {}", project)
             }
             Instruction::GetUsageReport(project, date_range) => {
                 write!(f, "get_usage_report {} {}", project, date_range)

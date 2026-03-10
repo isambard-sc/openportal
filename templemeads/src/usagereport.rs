@@ -101,18 +101,54 @@ impl std::fmt::Display for Usage {
                     true => match self.days() >= 7.0 {
                         true => match self.weeks() >= 4.5 {
                             true => match self.months() >= 12.0 {
-                                true => write!(f, "{:.3} {}", self.years(), unit(self.years(), "year", "years")),
-                                false => write!(f, "{:.3} {}", self.months(), unit(self.months(), "month", "months")),
+                                true => write!(
+                                    f,
+                                    "{:.3} {}",
+                                    self.years(),
+                                    unit(self.years(), "year", "years")
+                                ),
+                                false => write!(
+                                    f,
+                                    "{:.3} {}",
+                                    self.months(),
+                                    unit(self.months(), "month", "months")
+                                ),
                             },
-                            false => write!(f, "{:.3} {}", self.weeks(), unit(self.weeks(), "week", "weeks")),
+                            false => write!(
+                                f,
+                                "{:.3} {}",
+                                self.weeks(),
+                                unit(self.weeks(), "week", "weeks")
+                            ),
                         },
-                        false => write!(f, "{:.3} {}", self.days(), unit(self.days(), "day", "days")),
+                        false => {
+                            write!(f, "{:.3} {}", self.days(), unit(self.days(), "day", "days"))
+                        }
                     },
-                    false => write!(f, "{:.3} {}", self.hours(), unit(self.hours(), "hour", "hours")),
+                    false => write!(
+                        f,
+                        "{:.3} {}",
+                        self.hours(),
+                        unit(self.hours(), "hour", "hours")
+                    ),
                 },
-                false => write!(f, "{:.3} {}", self.minutes(), unit(self.minutes(), "minute", "minutes")),
+                false => write!(
+                    f,
+                    "{:.3} {}",
+                    self.minutes(),
+                    unit(self.minutes(), "minute", "minutes")
+                ),
             },
-            false => write!(f, "{} {}", self.seconds(), if self.seconds() == 1 { "second" } else { "seconds" }),
+            false => write!(
+                f,
+                "{} {}",
+                self.seconds(),
+                if self.seconds() == 1 {
+                    "second"
+                } else {
+                    "seconds"
+                }
+            ),
         }
     }
 }
@@ -635,6 +671,10 @@ impl DailyProjectUsageReport {
         components
     }
 
+    // disable the clippy field_reassign_with_default warning
+    // It is more robust to create a default and then overwrite
+    // the fields that need to change via a clone
+    #[allow(clippy::field_reassign_with_default)]
     pub fn get_component(&self, component: &str) -> DailyProjectUsageReport {
         match self.components.get(component) {
             Some(reports) => {
@@ -695,7 +735,10 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             *new_report.user_job_counts.entry(user.clone()).or_default() += count;
         }
         for (user, secs) in &other.user_wait_seconds {
-            *new_report.user_wait_seconds.entry(user.clone()).or_default() += secs;
+            *new_report
+                .user_wait_seconds
+                .entry(user.clone())
+                .or_default() += secs;
         }
         new_report.num_jobs = self.num_jobs + other.num_jobs;
         new_report.total_wait_seconds = self.total_wait_seconds + other.total_wait_seconds;

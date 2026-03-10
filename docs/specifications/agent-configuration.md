@@ -376,6 +376,67 @@ op-freeipa secret --key freeipa-password --value 'secret'
 
 ---
 
+### 3.6.1 Local Account (`op-localaccount`)
+
+The local account agent manages user and project accounts using standard Unix
+commands (`useradd`, `groupadd`, etc.). It implements the same Account agent
+interface as `op-freeipa` but is intended for testing — particularly inside a
+Slurm Docker container where the commands can be prefixed with
+`docker exec slurmctld` to run with the necessary privileges.
+
+| Default | Value |
+|---------|-------|
+| Name | `localaccount` |
+| Config file | `~/.config/openportal/localaccount-config.toml` |
+| WebSocket port | `8047` |
+| Agent type | `Account` |
+
+**Optional extras:**
+
+| Key | Set via | Default | Description |
+|-----|---------|---------|-------------|
+| `useradd` | `extra` | `"useradd"` | Command to add a user. |
+| `userdel` | `extra` | `"userdel"` | Command to remove a user. |
+| `groupadd` | `extra` | `"groupadd"` | Command to add a group. |
+| `groupdel` | `extra` | `"groupdel"` | Command to remove a group. |
+| `usermod` | `extra` | `"usermod"` | Command to modify a user. |
+| `getent` | `extra` | `"getent"` | Command to query the user/group database. |
+| `managed-group` | `extra` | `"openportal"` | Name of the Unix group added to every managed user (used to distinguish agent-created users from pre-existing system accounts). |
+| `system-groups` | `extra` | `""` | Comma-separated list of Unix groups to add all managed users to. |
+| `instance-groups` | `extra` | `""` | Per-instance group mappings. Format: `"instance:group,instance:group2,..."` |
+
+All command strings may include a full prefix such as
+`"docker exec slurmctld useradd"` to redirect execution into a container.
+
+**Example setup (Slurm Docker container):**
+
+```bash
+op-localaccount init --service localaccount --url wss://localhost:8047
+op-localaccount extra --key useradd   --value "docker exec slurmctld useradd"
+op-localaccount extra --key userdel   --value "docker exec slurmctld userdel"
+op-localaccount extra --key groupadd  --value "docker exec slurmctld groupadd"
+op-localaccount extra --key groupdel  --value "docker exec slurmctld groupdel"
+op-localaccount extra --key usermod   --value "docker exec slurmctld usermod"
+op-localaccount extra --key getent    --value "docker exec slurmctld getent"
+```
+
+**Group management:**
+
+For each user, the agent ensures the following groups exist before adding the
+user to them:
+
+1. The project group (e.g. `brics.aiproject`)
+2. The managed group (default `openportal`)
+3. An auto-generated per-instance group `op-<instance-name>` (non-alphanumeric
+   characters replaced with `_`)
+4. Any groups listed in `system-groups`
+5. Any groups listed in `instance-groups` for the relevant instance
+
+**Typical peer relationships:**
+- **Server:** one `cluster` (instance) agent
+
+---
+
 ### 3.7 Filesystem (`op-filesystem`)
 
 The filesystem agent creates and manages user and project directories on a
@@ -388,8 +449,20 @@ shared filesystem, and optionally manages storage quotas.
 | WebSocket port | `8047` |
 | Agent type | `Filesystem` |
 
-Unlike other agents, the filesystem agent uses a **typed config block** (not
+Unlike most agents, the filesystem agent uses a **typed config block** (not
 `extras`) embedded directly in the TOML file. The config is described below.
+
+One optional extra *is* supported:
+
+| Key | Set via | Default | Description |
+|-----|---------|---------|-------------|
+| `exec-prefix` | `extra` | `""` | Space-separated command prefix prepended to all filesystem operations (mkdir, chown, chmod, mv, ln, touch, rm). When set, every operation runs via an external command instead of native Rust stdlib. Example: `"docker exec slurmctld"`. Leave empty (default) to use native Rust calls. |
+
+**Example (redirect filesystem operations into a Slurm container):**
+
+```bash
+op-filesystem extra --key exec-prefix --value "docker exec slurmctld"
+```
 
 #### 3.7.1 Filesystem Config Structure
 
@@ -487,10 +560,10 @@ Arithmetic expressions in `{...}` are evaluated: `{GID+1000}`, `{UID-100000}`.
 Literals outside braces are appended: `"{UID-100000}01"` for UID 100125 →
 `12501`.
 
-**Typical peer relationships:**
+**Typical peer relationships (filesystem agent):**
 - **Server:** one `cluster` (instance) agent
 
-**Example full config:**
+**Example full config (Lustre):**
 
 ```toml
 [quota_engines.lustre]
@@ -518,6 +591,102 @@ permissions  = "2770"
 quota_engine = "lustre"
 default_quota = "1.00 TB"
 mount_point  = "/mnt/lustre"
+```
+
+#### 3.7.5 Linux Quota Engine
+
+Uses the standard Linux `setquota` / `repquota` utilities to manage per-user
+and per-group quotas on any filesystem that supports the kernel quota interface
+(ext4, xfs, etc.). Both commands are configurable so they can be prefixed for
+container execution.
+
+> **Note:** Linux quotas require a real Linux kernel with `quotactl` support.
+> Overlay filesystems (e.g. Docker on Mac) do not support this engine.
+> Use the Fake engine (§3.7.6) for local Mac/Docker testing instead.
+
+```toml
+[quota_engines.linuxquota]
+type       = "linux"
+filesystem = "/dev/sda1"         # device or mount point
+setquota   = "docker exec slurmctld setquota"   # optional, default "setquota"
+repquota   = "docker exec slurmctld repquota"   # optional, default "repquota"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `filesystem` | (required) | Filesystem device or mount point to manage quotas on (as seen inside the container when using exec-prefix). |
+| `setquota` | `"setquota"` | Command to set quotas. May include an exec prefix. |
+| `repquota` | `"repquota"` | Command to report quotas. May include an exec prefix. |
+
+Block limits are specified in kilobytes (`0` = unlimited). Inode limits use the
+per-volume `default_inode_limit` setting (`0` = unlimited).
+
+**Example full config (Linux quotas, Slurm container):**
+
+```toml
+[quota_engines.linuxquota]
+type       = "linux"
+filesystem = "/home"
+setquota   = "docker exec slurmctld setquota"
+repquota   = "docker exec slurmctld repquota"
+
+[user_volumes.home]
+roots        = ["/home"]
+subpath      = "{project}/{user}"
+permissions  = "0755"
+is_home      = true
+quota_engine = "linuxquota"
+default_quota = "100.00 GB"
+mount_point  = "/home"
+```
+
+---
+
+#### 3.7.6 Fake Quota Engine
+
+A test-only quota engine that stores quota limits as plain-text files on the
+agent host and measures disk usage with `du`.  No real quota enforcement
+happens — it just records the configured limits and reports current usage
+against them.  Useful for testing the full OpenPortal quota plumbing on Mac /
+Docker setups where real quota filesystems are unavailable.
+
+```toml
+[quota_engines.fakequota]
+type      = "fake"
+quota_dir = "/tmp/openportal-fakequota"   # host-side directory for limit files
+du        = "docker exec slurmctld du"    # optional, default "du"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `quota_dir` | `"/tmp/openportal-fakequota"` | Host-side directory where quota limit files are written by this agent. Created automatically if absent. |
+| `du` | `"du"` | Command used to measure disk usage (`du -sk`). May include an exec prefix to run inside a container. |
+
+Quota limit files are named `user_<local-user>` and `group_<local-group>` and
+contain a single quota size string (e.g. `100 GB` or `unlimited`).
+
+**Example full config (fake quotas, Mac + Docker testing):**
+
+```toml
+[quota_engines.fakequota]
+type      = "fake"
+quota_dir = "/tmp/openportal-fakequota"
+du        = "docker exec slurmctld du"
+
+[user_volumes.home]
+roots        = ["/home"]
+subpath      = "{project}/{user}"
+permissions  = "0755"
+is_home      = true
+quota_engine = "fakequota"
+default_quota = "100.00 GB"
+
+[project_volumes.projects]
+roots        = ["/projects"]
+subpath      = "{project}"
+permissions  = "2770"
+quota_engine = "fakequota"
+default_quota = "1.00 TB"
 ```
 
 ---

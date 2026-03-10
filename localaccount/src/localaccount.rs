@@ -43,6 +43,10 @@ impl Commands {
         s.split_whitespace().map(|p| p.to_owned()).collect()
     }
 
+    // ignore too many arguments warning for this constructor,
+    // since it's more ergonomic to construct the Commands struct directly
+    // from the config file with all fields specified.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         useradd: &str,
         userdel: &str,
@@ -422,8 +426,7 @@ pub async fn update_homedir(
 
     tracing::info!("Updating home directory for {}: {}", local_user, homedir);
 
-    let (exit_code, _, stderr) =
-        run_command(&cmds.usermod, &["-d", homedir, &local_user]).await?;
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-d", homedir, &local_user]).await?;
 
     if exit_code != 0 {
         return Err(Error::Call(format!(
@@ -507,8 +510,7 @@ pub async fn get_users(
     let group_name = identifier_to_projectid(project);
     let cmds = get_commands()?;
 
-    let (exit_code, stdout, stderr) =
-        run_command(&cmds.getent, &["group", &group_name]).await?;
+    let (exit_code, stdout, stderr) = run_command(&cmds.getent, &["group", &group_name]).await?;
 
     match exit_code {
         0 => {}
@@ -658,8 +660,7 @@ pub async fn is_protected_user(
     let local_user = identifier_to_userid(user);
     let cmds = get_commands()?;
 
-    let (exit_code, stdout, _) =
-        run_command(&cmds.getent, &["group", &cmds.managed_group]).await?;
+    let (exit_code, stdout, _) = run_command(&cmds.getent, &["group", &cmds.managed_group]).await?;
 
     if exit_code != 0 {
         // Managed group doesn't exist — user must be unmanaged/protected.

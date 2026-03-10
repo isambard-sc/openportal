@@ -14,6 +14,7 @@ use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::storage::{Quota, QuotaLimit, Volume};
 use templemeads::Error;
 
+use crate::fakequotaengine::{FakeEngine, FakeQuotaEngineConfig};
 use crate::linuxquotaengine::{LinuxEngine, LinuxQuotaEngineConfig};
 use crate::lustreengine::{LustreEngine, LustreEngineConfig};
 use crate::volumeconfig::{ProjectVolumeConfig, UserVolumeConfig};
@@ -29,6 +30,8 @@ pub enum QuotaEngineConfig {
     Lustre(LustreEngineConfig),
     #[serde(rename = "linux")]
     Linux(LinuxQuotaEngineConfig),
+    #[serde(rename = "fake")]
+    Fake(FakeQuotaEngineConfig),
     // Future backends can be added here:
     // Ceph(CephEngineConfig),
     // Vast(VastEngineConfig),
@@ -46,6 +49,10 @@ impl QuotaEngineConfig {
             }
             QuotaEngineConfig::Linux(config) => {
                 let engine = LinuxEngine::new(config.clone())?;
+                engine.initialize().await
+            }
+            QuotaEngineConfig::Fake(config) => {
+                let engine = FakeEngine::new(config.clone())?;
                 engine.initialize().await
             }
         }
@@ -71,6 +78,12 @@ impl QuotaEngineConfig {
             }
             QuotaEngineConfig::Linux(config) => {
                 let engine = LinuxEngine::new(config.clone())?;
+                engine
+                    .set_user_quota(mapping, volume, volume_config, limit, expires)
+                    .await
+            }
+            QuotaEngineConfig::Fake(config) => {
+                let engine = FakeEngine::new(config.clone())?;
                 engine
                     .set_user_quota(mapping, volume, volume_config, limit, expires)
                     .await
@@ -102,6 +115,12 @@ impl QuotaEngineConfig {
                     .set_project_quota(mapping, volume, volume_config, limit, expires)
                     .await?)
             }
+            QuotaEngineConfig::Fake(config) => {
+                let engine = FakeEngine::new(config.clone())?;
+                Ok(engine
+                    .set_project_quota(mapping, volume, volume_config, limit, expires)
+                    .await?)
+            }
         }
     }
 
@@ -124,6 +143,12 @@ impl QuotaEngineConfig {
             }
             QuotaEngineConfig::Linux(config) => {
                 let engine = LinuxEngine::new(config.clone())?;
+                Ok(engine
+                    .get_user_quota(mapping, volume, volume_config, expires)
+                    .await?)
+            }
+            QuotaEngineConfig::Fake(config) => {
+                let engine = FakeEngine::new(config.clone())?;
                 Ok(engine
                     .get_user_quota(mapping, volume, volume_config, expires)
                     .await?)
@@ -154,6 +179,12 @@ impl QuotaEngineConfig {
                     .get_project_quota(mapping, volume, volume_config, expires)
                     .await?)
             }
+            QuotaEngineConfig::Fake(config) => {
+                let engine = FakeEngine::new(config.clone())?;
+                Ok(engine
+                    .get_project_quota(mapping, volume, volume_config, expires)
+                    .await?)
+            }
         }
     }
 
@@ -176,6 +207,12 @@ impl QuotaEngineConfig {
             }
             QuotaEngineConfig::Linux(config) => {
                 let engine = LinuxEngine::new(config.clone())?;
+                engine
+                    .clear_user_quota(mapping, volume, volume_config, expires)
+                    .await
+            }
+            QuotaEngineConfig::Fake(config) => {
+                let engine = FakeEngine::new(config.clone())?;
                 engine
                     .clear_user_quota(mapping, volume, volume_config, expires)
                     .await
@@ -206,6 +243,12 @@ impl QuotaEngineConfig {
                     .clear_project_quota(mapping, volume, volume_config, expires)
                     .await
             }
+            QuotaEngineConfig::Fake(config) => {
+                let engine = FakeEngine::new(config.clone())?;
+                engine
+                    .clear_project_quota(mapping, volume, volume_config, expires)
+                    .await
+            }
         }
     }
 
@@ -228,6 +271,10 @@ impl QuotaEngineConfig {
             QuotaEngineConfig::Linux(_config) => {
                 // Linux quota engine requires no per-volume configuration beyond
                 // the filesystem path already stored in the engine config.
+                Ok(())
+            }
+            QuotaEngineConfig::Fake(_config) => {
+                // Fake quota engine requires no per-volume configuration.
                 Ok(())
             }
         }

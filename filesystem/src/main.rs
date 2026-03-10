@@ -21,6 +21,7 @@ use templemeads::storagereport::ProjectStorageReport;
 use templemeads::Error;
 
 mod cache;
+mod fakequotaengine;
 mod filesystem;
 mod linuxquotaengine;
 mod lustreengine;

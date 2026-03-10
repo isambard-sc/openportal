@@ -47,12 +47,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Updated `docs/specifications/json-types.md` and
   `docs/specifications/python-api.md` to document all new fields and
   methods, including backwards-compatibility notes.
+- Storage quota reporting: new point-in-time storage report for projects
+  and portals, complementing the existing time-ranged usage reports:
+  - New `templemeads/src/storagereport.rs` containing `ProjectStorageReport`
+    and `StorageReport` types (with `NamedType` implementations for result
+    dispatch). `ProjectStorageReport` captures project-level and per-user
+    quotas across all volumes, plus the user identifier→local username
+    mapping. `StorageReport` is the portal-level aggregate.
+  - Three new `Instruction` variants in `templemeads/src/grammar.rs`:
+    `GetStorageReport(ProjectIdentifier)`,
+    `GetStorageReports(PortalIdentifier)`, and
+    `GetLocalStorageReport(ProjectMapping)`.
+  - `get_storage_report <project_id>` and `get_storage_reports <portal_id>`
+    commands handled by the portal, bridge, and cluster agents.
+  - `get_local_storage_report <project_mapping>` is an internal instruction
+    sent by the cluster instance agent to the filesystem agent. The
+    filesystem agent builds the full `ProjectStorageReport` locally: it
+    fetches project and per-user quotas from the filesystem, and calls back
+    to the sender (cluster) with `get_users <project_id>` to obtain the
+    project member list. This keeps the business logic in the agent that
+    owns the quota data and reduces inter-agent round trips.
+  - Python bindings in `python/src/lib.rs`: `ProjectStorageReport` and
+    `StorageReport` exposed as PyO3 classes with `project`, `generated_at`,
+    `project_quotas`, `user_quotas`, `users`, `portal`, `projects`,
+    `get_report()`, `is_empty()`, `to_json()`, `from_json()`, and standard
+    `__str__`/`__repr__`/`__copy__`/`__deepcopy__` methods.
+  - `docs/specifications/instruction-protocol.md`: new "Storage Reporting
+    Instructions" section documenting all three commands.
+  - `docs/specifications/json-types.md`: full JSON schemas for
+    `ProjectStorageReport` and `StorageReport`, plus new entries in the
+    `result_type` reference table.
+  - `docs/specifications/python-api.md`: `ProjectStorageReport` and
+    `StorageReport` class references with property tables and usage example.
 - Added `SECURITY.md` with vulnerability reporting contact, supported version
   policy, scope definition, and link to the security model specification.
 - Added `CONTRIBUTING.md` covering bug reporting, dev setup, code standards,
   and pull request guidelines.
 - Added `CODE_OF_CONDUCT.md` (adapted from Contributor Covenant v2.1).
 - Added root `LICENSE` file (MIT) for tool and platform compatibility.
+- New `op-localaccount` agent (`localaccount/`) — an Account agent that
+  implements the full Account instruction set (`AddUser`, `RemoveUser`,
+  `AddProject`, `RemoveProject`, `GetUsers`, `GetProjects`,
+  `GetUserMapping`, `GetProjectMapping`, `IsExistingUser`,
+  `IsExistingProject`, `IsProtectedUser`, `UpdateHomeDir`) using standard
+  Unix commands (`useradd`, `userdel`, `groupadd`, `groupdel`, `usermod`,
+  `getent`). All commands are individually configurable so they can be
+  prefixed for container execution (e.g.
+  `useradd = "docker exec slurmctld useradd"`). Intended for testing
+  without a FreeIPA installation.
+  - All required groups are created before the user is added: project
+    group, managed group (`openportal` by default), an auto-generated
+    per-instance group (`op-<instance-name>`), plus any extra groups
+    specified via the `system-groups` and `instance-groups` config keys.
+  - Home directory is obtained by calling back to the instance agent
+    (`get_local_home_dir`), matching the protocol used by `op-freeipa`.
+  - Documented in `docs/specifications/agent-configuration.md` §3.6.1.
+- `op-filesystem` exec-prefix support: a new optional `exec-prefix` extra
+  redirects all filesystem operations (mkdir, chown, chmod, mv, ln -s,
+  touch, rm -rf, test, readlink) through an external command prefix
+  instead of the native Rust stdlib/nix calls. Setting
+  `exec-prefix = "docker exec slurmctld"` lets the filesystem agent run
+  on the host while performing all operations inside a container.
+  Documented in `docs/specifications/agent-configuration.md` §3.7.
+- New `linux` quota engine (`filesystem/src/linuxquotaengine.rs`) for
+  `op-filesystem`. Uses the standard `setquota` / `repquota` utilities to
+  manage per-user and per-group quotas on any Linux filesystem that
+  supports the kernel quota interface (ext4, xfs, etc.). Both commands
+  are configurable for container execution. Configure with
+  `type = "linux"` in a `[quota_engines.*]` block.
+  Documented in `docs/specifications/agent-configuration.md` §3.7.5.
+- New `fake` quota engine (`filesystem/src/fakequotaengine.rs`) for
+  `op-filesystem`. Designed for local testing on Mac / Docker where real
+  quota filesystems are unavailable. Quota limits are persisted as
+  plain-text files in a configurable `quota_dir` on the agent host; disk
+  usage is measured with `du -sk` (configurable for container execution).
+  No quota enforcement happens — it reports the stored limit against real
+  `du` usage, which is sufficient to exercise the full portal-to-filesystem
+  quota plumbing. Configure with `type = "fake"` in a `[quota_engines.*]`
+  block. Documented in `docs/specifications/agent-configuration.md` §3.7.6.
 
 ### Fixed
 

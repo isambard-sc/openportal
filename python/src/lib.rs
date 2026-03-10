@@ -1504,9 +1504,7 @@ impl Job {
                 };
 
                 match result {
-                    Some(result) => Ok(StorageReport::from(result)
-                        .into_pyobject(py)?
-                        .into_any()),
+                    Some(result) => Ok(StorageReport::from(result).into_pyobject(py)?.into_any()),
                     None => Ok(py.None().into_bound(py)),
                 }
             }
@@ -2923,10 +2921,7 @@ impl ProjectStorageReport {
                     Quota::from(quota.clone()).into_pyobject(py)?,
                 )?;
             }
-            outer.set_item(
-                UserIdentifier::from(user.clone()).into_pyobject(py)?,
-                inner,
-            )?;
+            outer.set_item(UserIdentifier::from(user.clone()).into_pyobject(py)?, inner)?;
         }
         Ok(outer)
     }

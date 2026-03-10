@@ -65,13 +65,10 @@ async fn run_remote(prefix: &[String], args: &[&str]) -> Result<(i32, String, St
         cmd.arg(a);
     }
 
-    let output = cmd.output().await.map_err(|e| {
-        Error::State(format!(
-            "Failed to spawn '{}': {}",
-            prefix.join(" "),
-            e
-        ))
-    })?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| Error::State(format!("Failed to spawn '{}': {}", prefix.join(" "), e)))?;
 
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -515,16 +512,12 @@ async fn create_link_remote(path: &Path, link: &Path, prefix: &[String]) -> Resu
             // Link exists and is correct (or we've warned above).
             return Ok(());
         } else {
-            tracing::error!(
-                "Link '{}' already exists but is not a symlink",
-                link_str
-            );
+            tracing::error!("Link '{}' already exists but is not a symlink", link_str);
         }
     }
 
     // ln -s path link
-    let (exit_code, _, stderr) =
-        run_remote(prefix, &["ln", "-s", &path_str, &link_str]).await?;
+    let (exit_code, _, stderr) = run_remote(prefix, &["ln", "-s", &path_str, &link_str]).await?;
     if exit_code != 0 {
         return Err(Error::State(format!(
             "ln -s '{}' '{}' failed: exit code {}, stderr: {}",
@@ -559,10 +552,7 @@ async fn check_recycle_native(path: &Path) -> Result<Option<PathBuf>, Error> {
     }
 }
 
-async fn check_recycle_remote(
-    path: &Path,
-    prefix: &[String],
-) -> Result<Option<PathBuf>, Error> {
+async fn check_recycle_remote(path: &Path, prefix: &[String]) -> Result<Option<PathBuf>, Error> {
     let parent = match path.parent() {
         Some(p) => p,
         None => return Ok(None),
@@ -634,8 +624,7 @@ async fn restore_from_recycle_remote(
         target_str
     );
 
-    let (exit_code, _, stderr) =
-        run_remote(prefix, &["mv", &recycle_str, &target_str]).await?;
+    let (exit_code, _, stderr) = run_remote(prefix, &["mv", &recycle_str, &target_str]).await?;
     if exit_code != 0 {
         return Err(Error::State(format!(
             "mv '{}' '{}' failed: exit code {}, stderr: {}",
@@ -789,8 +778,7 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
             "Creating recycle directory (remote): '{}'",
             recycle_parent_str
         );
-        let (exit_code, _, stderr) =
-            run_remote(prefix, &["mkdir", &recycle_parent_str]).await?;
+        let (exit_code, _, stderr) = run_remote(prefix, &["mkdir", &recycle_parent_str]).await?;
         if exit_code != 0 {
             return Err(Error::State(format!(
                 "mkdir '{}' failed: exit code {}, stderr: {}",
@@ -808,8 +796,7 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
             "Recycle path '{}' already exists (remote). Removing.",
             recycle_path_str
         );
-        let (exit_code, _, stderr) =
-            run_remote(prefix, &["rm", "-rf", &recycle_path_str]).await?;
+        let (exit_code, _, stderr) = run_remote(prefix, &["rm", "-rf", &recycle_path_str]).await?;
         if exit_code != 0 {
             return Err(Error::State(format!(
                 "rm -rf '{}' failed: exit code {}, stderr: {}",
@@ -825,8 +812,7 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
     );
 
     // Move the directory to recycle.
-    let (exit_code, _, stderr) =
-        run_remote(prefix, &["mv", &path_str, &recycle_path_str]).await?;
+    let (exit_code, _, stderr) = run_remote(prefix, &["mv", &path_str, &recycle_path_str]).await?;
     if exit_code != 0 {
         return Err(Error::State(format!(
             "mv '{}' '{}' failed: exit code {}, stderr: {}",

@@ -149,11 +149,7 @@ impl FakeEngine {
 
     /// Run `du -sk <dir>` and return the result in bytes.
     /// Returns 0 if the directory does not exist or `du` fails.
-    async fn du_bytes(
-        &self,
-        dir: &str,
-        expires: &chrono::DateTime<Utc>,
-    ) -> Result<u64, Error> {
+    async fn du_bytes(&self, dir: &str, expires: &chrono::DateTime<Utc>) -> Result<u64, Error> {
         assert_not_expired(expires)?;
 
         let parts: Vec<&str> = self.config.du.split_whitespace().collect();
@@ -196,9 +192,7 @@ impl FakeEngine {
         let mut total_bytes: u64 = 0;
         for path_config in volume_config.path_configs() {
             if let Ok(path) = path_config.path(mapping.clone().into()) {
-                let bytes = self
-                    .du_bytes(&path.to_string_lossy(), expires)
-                    .await?;
+                let bytes = self.du_bytes(&path.to_string_lossy(), expires).await?;
                 total_bytes = total_bytes.saturating_add(bytes);
             }
         }
@@ -215,9 +209,7 @@ impl FakeEngine {
         let mut total_bytes: u64 = 0;
         for path_config in volume_config.path_configs() {
             if let Ok(path) = path_config.path(mapping.clone().into()) {
-                let bytes = self
-                    .du_bytes(&path.to_string_lossy(), expires)
-                    .await?;
+                let bytes = self.du_bytes(&path.to_string_lossy(), expires).await?;
                 total_bytes = total_bytes.saturating_add(bytes);
             }
         }

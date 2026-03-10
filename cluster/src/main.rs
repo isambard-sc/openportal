@@ -12,9 +12,8 @@ use templemeads::grammar::Instruction::{
     AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
     GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota,
     GetProjectQuotas, GetProjects, GetStorageReport, GetStorageReports, GetUsageReport,
-    GetUsageReports, GetUserDirs,
-    GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers, IsProtectedUser, RemoveProject,
-    RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
+    GetUsageReports, GetUserDirs, GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers,
+    IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
@@ -1223,10 +1222,7 @@ async fn get_storage_report(
     }
 }
 
-async fn get_storage_reports(
-    me: &str,
-    portal: &PortalIdentifier,
-) -> Result<StorageReport, Error> {
+async fn get_storage_reports(me: &str, portal: &PortalIdentifier) -> Result<StorageReport, Error> {
     let projects = get_projects(me, portal).await?;
 
     let mut report = StorageReport::new(portal);

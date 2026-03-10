@@ -13,8 +13,7 @@ use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
     AddOfferings, CreateProject, GetOfferings, GetProject, GetProjectMapping, GetProjects,
     GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, RemoveOfferings,
-    RemoveProject, Submit,
-    SyncOfferings, UpdateProject,
+    RemoveProject, Submit, SyncOfferings, UpdateProject,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,

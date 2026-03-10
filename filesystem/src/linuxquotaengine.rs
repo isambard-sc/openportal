@@ -199,7 +199,10 @@ impl LinuxEngine {
         }
 
         // Name not found in output — no quota has been set; treat as unlimited / no usage.
-        Ok(Quota::with_usage(QuotaLimit::Unlimited, StorageUsage::from(0)))
+        Ok(Quota::with_usage(
+            QuotaLimit::Unlimited,
+            StorageUsage::from(0),
+        ))
     }
 
     // -----------------------------------------------------------------------

@@ -1051,8 +1051,7 @@ async fn get_hourly_report(
                     num_jobs += 1;
                     total_wait_seconds += job.wait_time().num_seconds() as u64;
                     daily_report.add_jobs(job.user(), 1);
-                    daily_report
-                        .add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
+                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
                 }
             }
 
@@ -1148,7 +1147,9 @@ async fn get_hourly_report(
     );
 
     // runtime consistency check: local shadow counters must match the report's scalar totals
-    if daily_report.num_jobs() != num_jobs || daily_report.total_wait_seconds() != total_wait_seconds {
+    if daily_report.num_jobs() != num_jobs
+        || daily_report.total_wait_seconds() != total_wait_seconds
+    {
         tracing::warn!(
             "Job count/wait time inconsistency for project {} on {}: \
              local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \

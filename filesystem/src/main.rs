@@ -75,6 +75,24 @@ async fn main() -> Result<()> {
 
     cache::set_filesystem_config(config.agent_config.clone()).await?;
 
+    // Optional exec prefix for redirecting filesystem operations into a
+    // container or remote host.  When set, every mkdir/chown/chmod/mv/ln-s
+    // call is prefixed with these tokens instead of using the Rust stdlib.
+    // Example: exec-prefix = "docker exec slurmctld"
+    // Leave unset (or empty) to use native Rust calls (production default).
+    let exec_prefix_str = config.option("exec-prefix", "");
+    let exec_prefix = if exec_prefix_str.is_empty() {
+        None
+    } else {
+        Some(
+            exec_prefix_str
+                .split_whitespace()
+                .map(|s| s.to_owned())
+                .collect::<Vec<String>>(),
+        )
+    };
+    filesystem::set_exec_prefix(exec_prefix)?;
+
     async_runnable! {
         ///
         /// Runnable function that will be called when a job is received

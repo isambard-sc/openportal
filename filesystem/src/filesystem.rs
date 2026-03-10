@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use templemeads::Error;
 
 use std::os::unix::fs::MetadataExt;
@@ -15,6 +15,104 @@ use nix::unistd::{Gid, Group, Uid, User};
 use tokio::sync::Mutex;
 
 static FS_LOCK: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
+
+///
+/// Optional exec prefix for all filesystem operations. When set, every
+/// operation that would normally use a Rust stdlib call is instead performed
+/// by running an external command prefixed with these tokens.
+///
+/// Example: ["docker", "exec", "slurmctld"] causes mkdir, chown, chmod, etc.
+/// to be executed inside the named container.
+///
+/// When not set (None), all operations use native Rust stdlib / nix calls.
+///
+static EXEC_PREFIX: OnceCell<Option<Vec<String>>> = OnceCell::new();
+
+///
+/// Configure the exec prefix for remote filesystem operations.
+/// Pass None to use native Rust calls (the default / production behaviour).
+/// Pass Some(prefix) to redirect every operation through external commands.
+///
+/// Must be called once before any filesystem operations are performed.
+///
+pub fn set_exec_prefix(prefix: Option<Vec<String>>) -> Result<()> {
+    EXEC_PREFIX
+        .set(prefix)
+        .map_err(|_| anyhow::anyhow!("exec-prefix has already been set"))
+}
+
+/// Return the exec prefix if one has been configured.
+fn get_exec_prefix() -> Option<&'static [String]> {
+    EXEC_PREFIX.get().and_then(|p| p.as_deref())
+}
+
+///
+/// Run an external command built from a pre-tokenised prefix plus
+/// additional arguments.  Returns (exit_code, stdout, stderr).
+///
+async fn run_remote(prefix: &[String], args: &[&str]) -> Result<(i32, String, String), Error> {
+    if prefix.is_empty() {
+        return Err(Error::State("Empty exec-prefix".to_owned()));
+    }
+
+    tracing::debug!("Remote: {} {}", prefix.join(" "), args.join(" "));
+
+    let mut cmd = tokio::process::Command::new(&prefix[0]);
+    for p in &prefix[1..] {
+        cmd.arg(p);
+    }
+    for a in args {
+        cmd.arg(a);
+    }
+
+    let output = cmd.output().await.map_err(|e| {
+        Error::State(format!(
+            "Failed to spawn '{}': {}",
+            prefix.join(" "),
+            e
+        ))
+    })?;
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    tracing::debug!(
+        "Remote exit_code={}, stdout={:?}, stderr={:?}",
+        exit_code,
+        stdout.trim(),
+        stderr.trim()
+    );
+
+    Ok((exit_code, stdout, stderr))
+}
+
+/// Test whether a path exists on the remote system (`test -e`).
+async fn remote_exists(prefix: &[String], path: &Path) -> Result<bool, Error> {
+    let path_str = path.to_string_lossy();
+    let (exit_code, _, _) = run_remote(prefix, &["test", "-e", &path_str]).await?;
+    Ok(exit_code == 0)
+}
+
+/// Test whether a path is a symlink on the remote system (`test -L`).
+async fn remote_is_symlink(prefix: &[String], path: &Path) -> Result<bool, Error> {
+    let path_str = path.to_string_lossy();
+    let (exit_code, _, _) = run_remote(prefix, &["test", "-L", &path_str]).await?;
+    Ok(exit_code == 0)
+}
+
+/// Read a symlink target on the remote system (`readlink`).
+async fn remote_readlink(prefix: &[String], path: &Path) -> Result<String, Error> {
+    let path_str = path.to_string_lossy();
+    let (exit_code, stdout, stderr) = run_remote(prefix, &["readlink", &path_str]).await?;
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "readlink '{}' failed: {}",
+            path_str, stderr
+        )));
+    }
+    Ok(stdout.trim().to_owned())
+}
 
 ///
 /// Clean and check the passed file / directory permissions. This function
@@ -120,6 +218,18 @@ pub async fn create_dir(
         unix_mode::to_string(permissions)
     );
 
+    match get_exec_prefix() {
+        Some(prefix) => create_dir_remote(&path, username, groupname, permissions, prefix).await,
+        None => create_dir_native(&path, username, groupname, permissions).await,
+    }
+}
+
+async fn create_dir_native(
+    path: &Path,
+    username: &str,
+    groupname: &str,
+    permissions: u32,
+) -> Result<(), Error> {
     // convert the username into a uid
     let uid = match User::from_name(username) {
         Ok(user) => match user {
@@ -200,8 +310,8 @@ pub async fn create_dir(
     }
 
     // Check if this directory exists in .recycle - if so, restore it
-    if let Some(recycle_path) = check_recycle(&path).await? {
-        restore_from_recycle(&recycle_path, &path).await?;
+    if let Some(recycle_path) = check_recycle_native(path).await? {
+        restore_from_recycle_native(&recycle_path, path).await?;
         return Ok(());
     }
 
@@ -225,17 +335,17 @@ pub async fn create_dir(
     };
 
     // create the directory
-    std::fs::create_dir(&path)
+    std::fs::create_dir(path)
         .with_context(|| format!("Could not create directory '{}'", path.to_string_lossy()))?;
 
     // set the ownership and permissions
-    nix::unistd::chown(&path, Some(uid), Some(gid)).with_context(|| {
+    nix::unistd::chown(path, Some(uid), Some(gid)).with_context(|| {
         format!(
             "Could not set ownership on directory '{}'",
             path.to_string_lossy()
         )
     })?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(permissions)).with_context(
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(permissions)).with_context(
         || {
             format!(
                 "Could not set permissions on directory '{}'",
@@ -247,10 +357,93 @@ pub async fn create_dir(
     Ok(())
 }
 
-pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
-    let link = clean_and_check_path(link, false).await?;
-    let path = clean_and_check_path(path, true).await?;
+async fn create_dir_remote(
+    path: &Path,
+    username: &str,
+    groupname: &str,
+    permissions: u32,
+    prefix: &[String],
+) -> Result<(), Error> {
+    let path_str = path.to_string_lossy();
 
+    // Check if the directory already exists on the remote.
+    if remote_exists(prefix, path).await? {
+        tracing::info!("Directory already exists (remote): {}", path_str);
+        return Ok(());
+    }
+
+    // Check if this directory exists in .recycle - if so, restore it.
+    if let Some(recycle_path) = check_recycle_remote(path, prefix).await? {
+        restore_from_recycle_remote(&recycle_path, path, prefix).await?;
+        return Ok(());
+    }
+
+    // Serialise directory creation with the same lock used by the native path.
+    let now = chrono::Utc::now();
+    let _guard = loop {
+        match FS_LOCK.try_lock() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 15 {
+                    return Err(Error::State(
+                        "Could not acquire filesystem lock after 15 seconds".to_string(),
+                    ));
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
+    };
+
+    // mkdir
+    let (exit_code, _, stderr) = run_remote(prefix, &["mkdir", &path_str]).await?;
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "mkdir '{}' failed: exit code {}, stderr: {}",
+            path_str, exit_code, stderr
+        )));
+    }
+
+    // chown user:group path
+    let owner = format!("{}:{}", username, groupname);
+    let (exit_code, _, stderr) = run_remote(prefix, &["chown", &owner, &path_str]).await?;
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "chown '{}' '{}' failed: exit code {}, stderr: {}",
+            owner, path_str, exit_code, stderr
+        )));
+    }
+
+    // chmod mode path  (e.g. "0755")
+    let mode_str = format!("{:04o}", permissions);
+    let (exit_code, _, stderr) = run_remote(prefix, &["chmod", &mode_str, &path_str]).await?;
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "chmod '{}' '{}' failed: exit code {}, stderr: {}",
+            mode_str, path_str, exit_code, stderr
+        )));
+    }
+
+    Ok(())
+}
+
+pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
+    match get_exec_prefix() {
+        Some(prefix) => {
+            // In remote mode skip the local path-existence check; validate
+            // only the security constraints (no /etc, /tmp, …).
+            let link = clean_and_check_path(link, false).await?;
+            let path = clean_and_check_path(path, false).await?;
+            create_link_remote(&path, &link, prefix).await
+        }
+        None => {
+            let link = clean_and_check_path(link, false).await?;
+            let path = clean_and_check_path(path, true).await?;
+            create_link_native(&path, &link).await
+        }
+    }
+}
+
+async fn create_link_native(path: &Path, link: &Path) -> Result<(), Error> {
     tracing::info!(
         "Creating link from '{}' to '{}'",
         path.to_string_lossy(),
@@ -286,7 +479,7 @@ pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
     }
 
     // create the link
-    std::os::unix::fs::symlink(&path, &link).with_context(|| {
+    std::os::unix::fs::symlink(path, link).with_context(|| {
         format!(
             "Could not create link '{}' to '{}'",
             link.to_string_lossy(),
@@ -297,11 +490,56 @@ pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+async fn create_link_remote(path: &Path, link: &Path, prefix: &[String]) -> Result<(), Error> {
+    let path_str = path.to_string_lossy();
+    let link_str = link.to_string_lossy();
+
+    tracing::info!(
+        "Creating link (remote) from '{}' to '{}'",
+        path_str,
+        link_str
+    );
+
+    if remote_exists(prefix, link).await? {
+        if remote_is_symlink(prefix, link).await? {
+            // Check the target matches.
+            let target = remote_readlink(prefix, link).await?;
+            if target != path_str.as_ref() {
+                tracing::error!(
+                    "Link '{}' already exists, but points to '{}' not '{}'",
+                    link_str,
+                    target,
+                    path_str
+                );
+            }
+            // Link exists and is correct (or we've warned above).
+            return Ok(());
+        } else {
+            tracing::error!(
+                "Link '{}' already exists but is not a symlink",
+                link_str
+            );
+        }
+    }
+
+    // ln -s path link
+    let (exit_code, _, stderr) =
+        run_remote(prefix, &["ln", "-s", &path_str, &link_str]).await?;
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "ln -s '{}' '{}' failed: exit code {}, stderr: {}",
+            path_str, link_str, exit_code, stderr
+        )));
+    }
+
+    Ok(())
+}
+
 ///
 /// Check if a directory exists in the .recycle subdirectory of its parent.
 /// Returns Some(recycle_path) if found, None otherwise.
 ///
-async fn check_recycle(path: &Path) -> Result<Option<PathBuf>, Error> {
+async fn check_recycle_native(path: &Path) -> Result<Option<PathBuf>, Error> {
     let parent = match path.parent() {
         Some(p) => p,
         None => return Ok(None),
@@ -321,11 +559,34 @@ async fn check_recycle(path: &Path) -> Result<Option<PathBuf>, Error> {
     }
 }
 
+async fn check_recycle_remote(
+    path: &Path,
+    prefix: &[String],
+) -> Result<Option<PathBuf>, Error> {
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let dir_name = match path.file_name() {
+        Some(n) => n.to_string_lossy(),
+        None => return Ok(None),
+    };
+
+    let recycle_path = parent.join(".recycle").join(dir_name.as_ref());
+
+    if remote_exists(prefix, &recycle_path).await? {
+        Ok(Some(recycle_path))
+    } else {
+        Ok(None)
+    }
+}
+
 ///
 /// Restore a directory from .recycle by moving it back to its original location.
 /// This is used when recreating a directory that was previously recycled.
 ///
-async fn restore_from_recycle(recycle: &Path, target: &Path) -> Result<(), Error> {
+async fn restore_from_recycle_native(recycle: &Path, target: &Path) -> Result<(), Error> {
     tracing::info!(
         "Restoring '{}' from recycle to '{}'",
         recycle.to_string_lossy(),
@@ -359,6 +620,33 @@ async fn restore_from_recycle(recycle: &Path, target: &Path) -> Result<(), Error
     Ok(())
 }
 
+async fn restore_from_recycle_remote(
+    recycle: &Path,
+    target: &Path,
+    prefix: &[String],
+) -> Result<(), Error> {
+    let recycle_str = recycle.to_string_lossy();
+    let target_str = target.to_string_lossy();
+
+    tracing::info!(
+        "Restoring (remote) '{}' from recycle to '{}'",
+        recycle_str,
+        target_str
+    );
+
+    let (exit_code, _, stderr) =
+        run_remote(prefix, &["mv", &recycle_str, &target_str]).await?;
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "mv '{}' '{}' failed: exit code {}, stderr: {}",
+            recycle_str, target_str, exit_code, stderr
+        )));
+    }
+
+    tracing::info!("Successfully restored directory from recycle (remote)");
+    Ok(())
+}
+
 ///
 /// Move a directory to the .recycle subdirectory of its parent and update its timestamp.
 /// This is a non-destructive way to "remove" directories - they can be restored later
@@ -367,6 +655,13 @@ async fn restore_from_recycle(recycle: &Path, target: &Path) -> Result<(), Error
 pub async fn recycle_dir(path: &Path) -> Result<(), Error> {
     let path = clean_and_check_path(path, false).await?;
 
+    match get_exec_prefix() {
+        Some(prefix) => recycle_dir_remote(&path, prefix).await,
+        None => recycle_dir_native(&path).await,
+    }
+}
+
+async fn recycle_dir_native(path: &Path) -> Result<(), Error> {
     if !path.exists() {
         tracing::warn!(
             "Directory '{}' does not exist, nothing to recycle",
@@ -433,7 +728,7 @@ pub async fn recycle_dir(path: &Path) -> Result<(), Error> {
     );
 
     // Move the directory to recycle
-    std::fs::rename(&path, &recycle_path).with_context(|| {
+    std::fs::rename(path, &recycle_path).with_context(|| {
         format!(
             "Could not move '{}' to recycle '{}'",
             path.to_string_lossy(),
@@ -442,15 +737,117 @@ pub async fn recycle_dir(path: &Path) -> Result<(), Error> {
     })?;
 
     // Update the timestamp to current time using filetime crate
-    // This sets both access and modification times to current time
     let now = filetime::FileTime::now();
-
     match filetime::set_file_times(&recycle_path, now, now) {
         Ok(_) => tracing::info!("Successfully recycled directory with updated timestamp"),
         Err(e) => {
             tracing::warn!("Could not update timestamp on recycled directory: {}", e);
             // Don't fail here - the directory was successfully recycled
         }
+    }
+
+    Ok(())
+}
+
+async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error> {
+    let path_str = path.to_string_lossy();
+
+    if !remote_exists(prefix, path).await? {
+        tracing::warn!(
+            "Directory '{}' does not exist (remote), nothing to recycle",
+            path_str
+        );
+        return Ok(());
+    }
+
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => {
+            return Err(Error::State(format!(
+                "Cannot recycle root directory '{}'",
+                path_str
+            )))
+        }
+    };
+
+    let dir_name = match path.file_name() {
+        Some(n) => n.to_string_lossy(),
+        None => {
+            return Err(Error::State(format!(
+                "Cannot determine directory name for '{}'",
+                path_str
+            )))
+        }
+    };
+
+    // Create .recycle directory if it doesn't exist on the remote.
+    let recycle_parent = parent.join(".recycle");
+    let recycle_parent_str = recycle_parent.to_string_lossy();
+
+    if !remote_exists(prefix, &recycle_parent).await? {
+        tracing::info!(
+            "Creating recycle directory (remote): '{}'",
+            recycle_parent_str
+        );
+        let (exit_code, _, stderr) =
+            run_remote(prefix, &["mkdir", &recycle_parent_str]).await?;
+        if exit_code != 0 {
+            return Err(Error::State(format!(
+                "mkdir '{}' failed: exit code {}, stderr: {}",
+                recycle_parent_str, exit_code, stderr
+            )));
+        }
+    }
+
+    let recycle_path = recycle_parent.join(dir_name.as_ref());
+    let recycle_path_str = recycle_path.to_string_lossy();
+
+    // If something already exists in recycle with this name, remove it.
+    if remote_exists(prefix, &recycle_path).await? {
+        tracing::warn!(
+            "Recycle path '{}' already exists (remote). Removing.",
+            recycle_path_str
+        );
+        let (exit_code, _, stderr) =
+            run_remote(prefix, &["rm", "-rf", &recycle_path_str]).await?;
+        if exit_code != 0 {
+            return Err(Error::State(format!(
+                "rm -rf '{}' failed: exit code {}, stderr: {}",
+                recycle_path_str, exit_code, stderr
+            )));
+        }
+    }
+
+    tracing::info!(
+        "Moving (remote) '{}' to recycle '{}'",
+        path_str,
+        recycle_path_str
+    );
+
+    // Move the directory to recycle.
+    let (exit_code, _, stderr) =
+        run_remote(prefix, &["mv", &path_str, &recycle_path_str]).await?;
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "mv '{}' '{}' failed: exit code {}, stderr: {}",
+            path_str, recycle_path_str, exit_code, stderr
+        )));
+    }
+
+    // Update the timestamp (touch).
+    match run_remote(prefix, &["touch", &recycle_path_str]).await {
+        Ok((0, _, _)) => {
+            tracing::info!("Successfully recycled directory (remote) with updated timestamp")
+        }
+        Ok((code, _, err)) => tracing::warn!(
+            "Could not update timestamp on recycled directory (remote): exit code {}, {}",
+            code,
+            err
+        ),
+        Err(e) => tracing::warn!(
+            "Could not update timestamp on recycled directory (remote): {}",
+            e
+        ),
     }
 
     Ok(())

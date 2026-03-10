@@ -4,15 +4,15 @@
 use anyhow::Result;
 use chrono::Utc;
 
+use templemeads::agent;
 use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::agent;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota,
-    GetLocalHomeDir, GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas,
-    GetLocalStorageReport, GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas,
-    RemoveLocalProject, RemoveLocalUser, SetLocalProjectQuota, SetLocalUserQuota,
+    AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
+    GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalStorageReport,
+    GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
+    SetLocalProjectQuota, SetLocalUserQuota,
 };
 use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::job::{Envelope, Job};
@@ -784,7 +784,7 @@ pub async fn get_local_storage_report(
     expires: &chrono::DateTime<Utc>,
 ) -> Result<ProjectStorageReport, Error> {
     let project = mapping.project();
-    let mut report = ProjectStorageReport::new(&project);
+    let mut report = ProjectStorageReport::new(project);
 
     // Fetch project-level quotas locally
     match get_project_quotas(mapping, expires).await {

@@ -5,7 +5,7 @@
 
 members = [
     "bridge", "cluster", "clusters",
-    "filesystem", "freeipa", "paddington", "portal",
+    "filesystem", "freeipa", "localaccount", "paddington", "portal",
     "provider", "python", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
     "docs/cmdline/cluster"

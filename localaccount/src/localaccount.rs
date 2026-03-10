@@ -4,6 +4,8 @@
 use anyhow::Result;
 use chrono::Utc;
 use once_cell::sync::OnceCell;
+use std::collections::HashMap;
+use templemeads::agent::Peer;
 use templemeads::grammar::{
     PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
@@ -25,7 +27,15 @@ pub struct Commands {
     groupdel: Vec<String>,
     usermod: Vec<String>,
     getent: Vec<String>,
+    /// Group that all users managed by this agent are added to, used to
+    /// distinguish managed users from pre-existing system accounts.
     managed_group: String,
+    /// Extra Unix groups added to every managed user, regardless of instance.
+    /// Configured via `system-groups = "groupA,groupB"` in the config file.
+    system_groups: Vec<String>,
+    /// Extra Unix groups added only to users managed for a specific instance.
+    /// Configured via `instance-groups = "instanceA:groupX,instanceA:groupY,instanceB:groupZ"`.
+    instance_groups: HashMap<String, Vec<String>>,
 }
 
 impl Commands {
@@ -41,6 +51,8 @@ impl Commands {
         usermod: &str,
         getent: &str,
         managed_group: &str,
+        system_groups: Vec<String>,
+        instance_groups: HashMap<String, Vec<String>>,
     ) -> Self {
         Self {
             useradd: Self::parse_cmd(useradd),
@@ -50,6 +62,8 @@ impl Commands {
             usermod: Self::parse_cmd(usermod),
             getent: Self::parse_cmd(getent),
             managed_group: managed_group.to_owned(),
+            system_groups,
+            instance_groups,
         }
     }
 }
@@ -138,25 +152,111 @@ pub fn get_primary_group_name(user: &UserIdentifier) -> String {
 }
 
 ///
-/// Ensure the managed group (default: "openportal") exists, creating it
-/// if necessary. All users created by this agent are added to this group
-/// so that is_protected_user can distinguish managed from unmanaged users.
+/// Return the name of the auto-generated per-instance group for the
+/// given instance peer.  Mirrors freeipa's get_op_instance_group naming:
+/// "op-{peer}" with all non-alphanumeric characters replaced by "_".
 ///
-async fn ensure_managed_group(expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+fn instance_group_name(instance: &Peer) -> String {
+    format!("op-{}", instance)
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
+///
+/// Ensure the named Unix group exists, creating it with groupadd if not.
+/// Idempotent: succeeds silently if the group already exists (exit code 9).
+///
+async fn ensure_group_exists(
+    group_name: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
     assert_not_expired(expires)?;
 
     let cmds = get_commands()?;
-    let managed_group = cmds.managed_group.clone();
 
-    let (exit_code, _, _) = run_command(&cmds.getent, &["group", &managed_group]).await?;
-    if exit_code != 0 {
-        let (gc_exit, _, stderr) = run_command(&cmds.groupadd, &[&managed_group]).await?;
-        if gc_exit != 0 && gc_exit != 9 {
+    let (exit_code, _, _) = run_command(&cmds.getent, &["group", group_name]).await?;
+    if exit_code == 0 {
+        return Ok(());
+    }
+
+    let (gc_exit, _, stderr) = run_command(&cmds.groupadd, &[group_name]).await?;
+    match gc_exit {
+        0 => tracing::info!("Created group: {}", group_name),
+        9 => tracing::debug!("Group already exists: {}", group_name),
+        _ => {
             return Err(Error::Call(format!(
-                "Failed to create managed group '{}': exit code {}, stderr: {}",
-                managed_group, gc_exit, stderr
+                "groupadd failed for '{}': exit code {}, stderr: {}",
+                group_name, gc_exit, stderr
             )));
         }
+    }
+
+    Ok(())
+}
+
+///
+/// Ensure the user is a member of all groups they should belong to, creating
+/// any groups that do not yet exist.  The full set of groups is:
+///
+///   - project group  ({portal}.{project})
+///   - managed group  (default: "openportal")
+///   - auto instance group  (op-{instance}, sanitised)
+///   - system groups  (from config `system-groups`)
+///   - per-instance groups  (from config `instance-groups` for this peer)
+///
+async fn sync_groups(
+    local_user: &str,
+    user: &UserIdentifier,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    assert_not_expired(expires)?;
+
+    let cmds = get_commands()?;
+
+    let mut groups: Vec<String> = Vec::new();
+
+    // 1. Project group — the group that represents this user's project.
+    groups.push(identifier_to_projectid(&user.project_identifier()));
+
+    // 2. Managed group — marks the user as managed by this agent.
+    groups.push(cmds.managed_group.clone());
+
+    // 3. Per-instance group — one group per instance that this user belongs to.
+    groups.push(instance_group_name(instance));
+
+    // 4. System groups — extra groups applied to all managed users.
+    groups.extend(cmds.system_groups.clone());
+
+    // 5. Instance-specific groups — extra groups for this particular instance.
+    if let Some(ig) = cmds.instance_groups.get(instance.name()) {
+        groups.extend(ig.clone());
+    }
+
+    // Deduplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    groups.retain(|g| seen.insert(g.clone()));
+
+    // Ensure every group exists before we try to add the user to it.
+    for group in &groups {
+        ensure_group_exists(group, expires).await?;
+    }
+
+    let groups_str = groups.join(",");
+    tracing::info!("Syncing user '{}' into groups: {}", local_user, groups_str);
+
+    let (exit_code, _, stderr) =
+        run_command(&cmds.usermod, &["-aG", &groups_str, local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -aG failed for '{}': exit code {}, stderr: {}",
+            local_user, exit_code, stderr
+        )));
     }
 
     Ok(())
@@ -173,26 +273,10 @@ pub async fn add_project(
     assert_not_expired(expires)?;
 
     let group_name = identifier_to_projectid(project);
-    let cmds = get_commands()?;
 
     tracing::info!("Adding project group: {}", group_name);
 
-    let (exit_code, _, stderr) = run_command(&cmds.groupadd, &[&group_name]).await?;
-
-    match exit_code {
-        0 => {
-            tracing::info!("Project group created: {}", group_name);
-        }
-        9 => {
-            tracing::info!("Project group already exists: {}", group_name);
-        }
-        _ => {
-            return Err(Error::Call(format!(
-                "groupadd failed for '{}': exit code {}, stderr: {}",
-                group_name, exit_code, stderr
-            )));
-        }
-    }
+    ensure_group_exists(&group_name, expires).await?;
 
     ProjectMapping::new(project, &group_name).map_err(|e| Error::Call(e.to_string()))
 }
@@ -233,14 +317,16 @@ pub async fn remove_project(
 }
 
 ///
-/// Add a user to the local system. The user is added with the project
-/// group as a supplementary group (so they appear in `getent group`
-/// output) and the managed group as a supplementary group (so
-/// is_protected_user can identify them as managed). The supplied
-/// homedir is used; if None a default of /home/{local_user} is used.
+/// Add a user to the local system for the given instance.
+///
+/// All required groups (project, managed, per-instance, system, and any
+/// instance-specific groups from config) are created if they do not yet
+/// exist, then the user is added to all of them.  The supplied homedir is
+/// used; if None a default of /home/{local_user} is used.
 ///
 pub async fn add_user(
     user: &UserIdentifier,
+    instance: &Peer,
     homedir: &Option<String>,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
@@ -250,47 +336,23 @@ pub async fn add_user(
     let local_group = get_primary_group_name(user);
     let cmds = get_commands()?;
 
-    ensure_managed_group(expires).await?;
-
     let default_home = format!("/home/{}", local_user);
     let homedir_str = homedir.as_deref().unwrap_or(&default_home);
 
-    // Add user to both the project group and the managed group as
-    // supplementary groups. We do not set a primary group, so useradd
-    // will create a user-private group, which avoids the primary-group
-    // exclusion from `getent group` member lists.
-    let supplementary_groups = format!("{},{}", local_group, cmds.managed_group);
-
-    let args: Vec<&str> = vec![
-        "-G",
-        &supplementary_groups,
-        "-d",
-        homedir_str,
-        "-m",
-        "-s",
-        "/bin/bash",
-        &local_user,
-    ];
-
     tracing::info!("Adding user: {}", local_user);
 
-    let (exit_code, _, stderr) = run_command(&cmds.useradd, &args).await?;
+    let (exit_code, _, stderr) = run_command(
+        &cmds.useradd,
+        &["-d", homedir_str, "-m", "-s", "/bin/bash", &local_user],
+    )
+    .await?;
 
     match exit_code {
         0 => {
             tracing::info!("User created: {}", local_user);
         }
         9 => {
-            // User already exists — make sure they are in the right groups.
-            tracing::warn!("User already exists: {}", local_user);
-            let (mod_exit, _, mod_stderr) =
-                run_command(&cmds.usermod, &["-aG", &supplementary_groups, &local_user]).await?;
-            if mod_exit != 0 {
-                return Err(Error::Call(format!(
-                    "usermod failed for existing user '{}': exit code {}, stderr: {}",
-                    local_user, mod_exit, mod_stderr
-                )));
-            }
+            tracing::warn!("User already exists, will sync groups: {}", local_user);
         }
         _ => {
             return Err(Error::Call(format!(
@@ -299,6 +361,9 @@ pub async fn add_user(
             )));
         }
     }
+
+    // Now create all required groups and add the user to them.
+    sync_groups(&local_user, user, instance, expires).await?;
 
     UserMapping::new(user, &local_user, &local_group).map_err(|e| Error::Call(e.to_string()))
 }
@@ -357,7 +422,8 @@ pub async fn update_homedir(
 
     tracing::info!("Updating home directory for {}: {}", local_user, homedir);
 
-    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-d", homedir, &local_user]).await?;
+    let (exit_code, _, stderr) =
+        run_command(&cmds.usermod, &["-d", homedir, &local_user]).await?;
 
     if exit_code != 0 {
         return Err(Error::Call(format!(
@@ -441,7 +507,8 @@ pub async fn get_users(
     let group_name = identifier_to_projectid(project);
     let cmds = get_commands()?;
 
-    let (exit_code, stdout, stderr) = run_command(&cmds.getent, &["group", &group_name]).await?;
+    let (exit_code, stdout, stderr) =
+        run_command(&cmds.getent, &["group", &group_name]).await?;
 
     match exit_code {
         0 => {}
@@ -591,7 +658,8 @@ pub async fn is_protected_user(
     let local_user = identifier_to_userid(user);
     let cmds = get_commands()?;
 
-    let (exit_code, stdout, _) = run_command(&cmds.getent, &["group", &cmds.managed_group]).await?;
+    let (exit_code, stdout, _) =
+        run_command(&cmds.getent, &["group", &cmds.managed_group]).await?;
 
     if exit_code != 0 {
         // Managed group doesn't exist — user must be unmanaged/protected.

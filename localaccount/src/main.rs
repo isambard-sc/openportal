@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use std::collections::HashMap;
 
 mod localaccount;
 
@@ -73,9 +74,18 @@ async fn main() -> Result<()> {
     let usermod = config.option("usermod", "usermod");
     let getent = config.option("getent", "getent");
 
-    // The managed group is used to distinguish users created by this agent
-    // from pre-existing system users. All managed users are added to it.
+    // The managed group distinguishes users created by this agent from
+    // pre-existing system users.  All managed users are added to it.
     let managed_group = config.option("managed-group", "openportal");
+
+    // Optional extra groups added to every managed user, regardless of instance.
+    // Format: comma-separated group names, e.g. "users,staff"
+    let system_groups = parse_group_list(&config.option("system-groups", ""));
+
+    // Optional extra groups added per instance.
+    // Format: comma-separated "instance:group" pairs, e.g.
+    //   "slurmcluster:slurm,slurmcluster:mpi,othercluster:gpu"
+    let instance_groups = parse_instance_groups(&config.option("instance-groups", ""));
 
     localaccount::initialise_commands(localaccount::Commands::new(
         &useradd,
@@ -85,6 +95,8 @@ async fn main() -> Result<()> {
         &usermod,
         &getent,
         &managed_group,
+        system_groups,
+        instance_groups,
     ))?;
 
     async_runnable! {
@@ -120,7 +132,7 @@ async fn main() -> Result<()> {
                     let local_group = localaccount::get_primary_group_name(&user);
                     let mapping = UserMapping::new(&user, &local_user, &local_group)?;
                     let homedir = get_home_dir(me.name(), &sender, &mapping, job.expires()).await?;
-                    let mapping = localaccount::add_user(&user, &Some(homedir), job.expires()).await?;
+                    let mapping = localaccount::add_user(&user, &sender, &Some(homedir), job.expires()).await?;
                     job.completed(mapping)
                 },
                 RemoveUser(user) => {
@@ -203,4 +215,39 @@ async fn get_home_dir(
             "No home directory found".to_string(),
         ))
     }
+}
+
+///
+/// Parse a comma-separated list of group names.
+/// e.g. "users,staff,wheel" → vec!["users", "staff", "wheel"]
+///
+fn parse_group_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|g| g.trim().to_owned())
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+///
+/// Parse instance-specific group assignments.
+/// Format: "instance:group" pairs separated by commas.
+/// e.g. "slurmcluster:slurm,slurmcluster:mpi,gpu-cluster:cuda"
+/// → {"slurmcluster": ["slurm", "mpi"], "gpu-cluster": ["cuda"]}
+///
+fn parse_instance_groups(s: &str) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in s.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if let Some(colon) = entry.find(':') {
+            let instance = entry[..colon].trim().to_owned();
+            let group = entry[colon + 1..].trim().to_owned();
+            if !instance.is_empty() && !group.is_empty() {
+                map.entry(instance).or_default().push(group);
+            }
+        }
+    }
+    map
 }

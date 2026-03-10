@@ -581,6 +581,47 @@ Returns: `ProjectUsageReport`
 
 ---
 
+### Storage Reporting Instructions
+
+These instructions return point-in-time snapshots of storage quota and usage
+across all volumes for a project. Unlike usage reports they have no date range —
+they always reflect the current state.
+
+#### `get_storage_report`
+
+Get the storage quota report for a project across all volumes and all users.
+
+```
+get_storage_report <project_id>
+```
+
+Returns: `ProjectStorageReport`
+
+#### `get_storage_reports`
+
+Get storage quota reports for all active projects in a portal.
+
+```
+get_storage_reports <portal_id>
+```
+
+Returns: `StorageReport`
+
+#### `get_local_storage_report`
+
+Get a local storage quota report for a locally mapped project. Sent by the
+cluster instance agent to the filesystem agent. The filesystem agent fetches
+project and per-user quotas locally, calling back to the sender with
+`get_users <project_id>` to obtain the member list.
+
+```
+get_local_storage_report <project_mapping>
+```
+
+Returns: `ProjectStorageReport`
+
+---
+
 ### Compute Limit Instructions
 
 #### `set_limit`
@@ -850,6 +891,9 @@ Returns: `Destinations`
 | `get_usage_report` | `<project_id> [<date_range>]` | `ProjectUsageReport` | Usage report for project |
 | `get_usage_reports` | `<portal_id> [<date_range>]` | `Vec<ProjectUsageReport>` | Usage reports for all portal projects |
 | `get_local_usage_report` | `<project_mapping> [<date_range>]` | `ProjectUsageReport` | Local usage report |
+| `get_storage_report` | `<project_id>` | `ProjectStorageReport` | Current storage quota report for project |
+| `get_storage_reports` | `<portal_id>` | `StorageReport` | Current storage quota reports for all portal projects |
+| `get_local_storage_report` | `<project_mapping>` | `ProjectStorageReport` | Local storage quota report (filesystem agent only) |
 | `set_limit` | `<project_id> <seconds>` | — | Set compute limit for project |
 | `get_limit` | `<project_id>` | `Usage` | Get compute limit for project |
 | `set_local_limit` | `<project_mapping> <seconds>` | — | Set local compute limit |
@@ -921,6 +965,12 @@ set_local_project_quota myproject.waldur:hpc_myproject scratch 2TB
 
 # Get all quotas for a user
 get_user_quotas alice.myproject.waldur
+
+# Get a point-in-time storage report for a project (all volumes, all users)
+get_storage_report myproject.waldur
+
+# Get storage reports for all projects in a portal
+get_storage_reports waldur
 ```
 
 ---
@@ -930,7 +980,8 @@ get_user_quotas alice.myproject.waldur
 - The canonical implementation is in `templemeads/src/grammar.rs` (`Instruction` enum,
   `Instruction::parse()`, and `Instruction::fmt()`).
 - Supporting types are in `templemeads/src/storage.rs` (`Volume`, `QuotaLimit`,
-  `StorageSize`) and `templemeads/src/usagereport.rs` (`Usage`).
+  `StorageSize`), `templemeads/src/usagereport.rs` (`Usage`), and
+  `templemeads/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`).
 - Routing types (`Destination`, `Destinations`) are in
   `templemeads/src/destination.rs`.
 - Instructions are serialised to/from JSON transparently as their string
@@ -939,3 +990,7 @@ get_user_quotas alice.myproject.waldur
 - Two instructions (`get_user_dirs`, `get_local_user_dirs`) exist in the enum and
   are emitted by `Display` but are not yet handled by `parse()`, meaning they
   cannot be deserialised from a string.
+- `get_local_storage_report` is an internal instruction: it is sent by the cluster
+  instance agent to the filesystem agent and is not intended to be issued by
+  external callers. The filesystem agent calls back to the sender with `get_users`
+  to retrieve the project member list.

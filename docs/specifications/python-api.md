@@ -127,7 +127,7 @@ Represents a unit of work in the OpenPortal system.
 |---|---|---|
 | `update` | `() → None` | Refresh this job in-place by fetching its latest status from the bridge. No-op if already finished. |
 | `wait` | `(max_ms: int = 1000) → bool` | Block until the job is finished or `max_ms` milliseconds elapse. Pass a negative value to wait indefinitely. Returns `True` if the job is now finished. |
-| `completed` | `(result) → Job` | Return a new copy of this job marked as complete with the given result. `result` may be a `str`, `bool`, `UserIdentifier`, `ProjectIdentifier`, `ProjectDetails`, `ProjectUsageReport`, `UsageReport`, `Quota`, `Volume`, `StorageSize`, `StorageUsage`, `QuotaLimit`, `ProjectTemplate`, `DateRange`, or a `list` or `dict` of those types. Used when handling bridge-board jobs. |
+| `completed` | `(result) → Job` | Return a new copy of this job marked as complete with the given result. `result` may be a `str`, `bool`, `UserIdentifier`, `ProjectIdentifier`, `ProjectDetails`, `ProjectUsageReport`, `UsageReport`, `ProjectStorageReport`, `StorageReport`, `Quota`, `Volume`, `StorageSize`, `StorageUsage`, `QuotaLimit`, `ProjectTemplate`, `DateRange`, or a `list` or `dict` of those types. Used when handling bridge-board jobs. |
 | `errored` | `(error: str) → Job` | Return a new copy of this job marked as failed with the given error message. Used when handling bridge-board jobs. |
 | `to_json` | `() → str` | Serialise the job to a JSON string. |
 | `from_json` | `(json: str) → Job` | *(static)* Deserialise a job from a JSON string. |
@@ -315,6 +315,73 @@ Portal-level aggregate report containing `ProjectUsageReport` objects for all
 active projects. Arithmetic operators (`+`, `+=`) are supported.
 
 See [json-types.md](json-types.md) for full schemas.
+
+---
+
+### `ProjectStorageReport`
+
+Returned by `job.result` after a `get_storage_report` or `get_local_storage_report`
+call. Reflects the current (point-in-time) storage quota state for a single project.
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `project` | `ProjectIdentifier` | The project this report covers |
+| `generated_at` | `datetime` | UTC timestamp when the report was generated |
+| `project_quotas` | `dict[Volume, Quota]` | Project-level quotas keyed by volume |
+| `user_quotas` | `dict[UserIdentifier, dict[Volume, Quota]]` | Per-user quotas keyed by user identifier then volume |
+| `users` | `dict[UserIdentifier, str]` | Map of portal user identifier → local username |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `is_empty` | `() → bool` | `True` if both `project_quotas` and `user_quotas` are empty |
+| `to_json` | `() → str` | Serialise to a JSON string |
+| `from_json` | `(json: str) → ProjectStorageReport` | *(static)* Deserialise from a JSON string |
+
+`str(report)` returns a human-readable multi-line summary.
+
+**Example:**
+
+```python
+job = openportal.run("portal.provider.clusters.mycluster get_storage_report myproject.myportal",
+                     max_ms=30_000)
+if job.is_finished and not job.is_error:
+    report = job.result   # ProjectStorageReport
+    for volume, quota in report.project_quotas.items():
+        print(f"  {volume}: {quota}")
+    for user, vol_quotas in report.user_quotas.items():
+        local = report.users.get(user, "unknown")
+        for volume, quota in vol_quotas.items():
+            print(f"  {user} ({local}) — {volume}: {quota}")
+```
+
+---
+
+### `StorageReport`
+
+Returned by `job.result` after a `get_storage_reports` call. Portal-level
+aggregate of `ProjectStorageReport` objects for all active projects.
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `portal` | `PortalIdentifier` | The portal this report covers |
+| `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `get_report` | `(project: ProjectIdentifier) → ProjectStorageReport` | Return the storage report for `project`, or an empty report if not present |
+| `is_empty` | `() → bool` | `True` if there are no project reports |
+| `to_json` | `() → str` | Serialise to a JSON string |
+| `from_json` | `(json: str) → StorageReport` | *(static)* Deserialise from a JSON string |
+
+`str(report)` returns a human-readable multi-line summary.
 
 ---
 

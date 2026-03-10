@@ -509,6 +509,105 @@ active projects.
 
 ---
 
+### `ProjectStorageReport`
+
+Returned by: `get_storage_report`, `get_local_storage_report`
+
+A point-in-time snapshot of storage quota data for a single project across all
+volumes. There is no date range — the report always reflects the current state at
+the moment it was generated.
+
+```json
+{
+  "project":       "myproject.waldur",
+  "generated_at":  "2024-03-10T14:23:00Z",
+  "project_quotas": {
+    "home":    {"limit": "unlimited"},
+    "scratch": {"limit": "10.00 TB", "usage": "3.45 TB"},
+    "project": {"limit": "20.00 TB", "usage": "8.12 TB"}
+  },
+  "user_quotas": {
+    "alice.myproject.waldur": {
+      "home":    {"limit": "100.00 GB", "usage": "42.00 GB"},
+      "scratch": {"limit": "2.00 TB",   "usage": "0.87 TB"}
+    },
+    "bob.myproject.waldur": {
+      "home":    {"limit": "100.00 GB", "usage": "10.00 GB"}
+    }
+  },
+  "users": {
+    "alice.myproject.waldur": "alice_hpc",
+    "bob.myproject.waldur":   "bob_hpc"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `project` | string | `ProjectIdentifier` in `project.portal` format |
+| `generated_at` | string | ISO 8601 UTC timestamp when the report was generated |
+| `project_quotas` | object | Map of volume name → `Quota`. Contains project-level quotas across all volumes |
+| `user_quotas` | object | Map of `UserIdentifier` string → (volume name → `Quota`). Per-user quota data; absent if no per-user quotas are configured |
+| `users` | object | Map of `UserIdentifier` string → local username string. Provides the mapping used to translate local usernames back to OpenPortal identifiers |
+
+**Empty report (no quota data available):**
+
+```json
+{
+  "project":        "myproject.waldur",
+  "generated_at":   "2024-03-10T14:23:00Z",
+  "project_quotas": {},
+  "user_quotas":    {},
+  "users":          {}
+}
+```
+
+---
+
+### `StorageReport`
+
+Returned by: `get_storage_reports`
+
+Portal-level aggregate report containing `ProjectStorageReport` objects for all
+active projects.
+
+```json
+{
+  "portal": "waldur",
+  "reports": {
+    "myproject.waldur": {
+      "project":        "myproject.waldur",
+      "generated_at":   "2024-03-10T14:23:00Z",
+      "project_quotas": {
+        "scratch": {"limit": "10.00 TB", "usage": "3.45 TB"}
+      },
+      "user_quotas": {
+        "alice.myproject.waldur": {
+          "scratch": {"limit": "2.00 TB", "usage": "0.87 TB"}
+        }
+      },
+      "users": {
+        "alice.myproject.waldur": "alice_hpc"
+      }
+    },
+    "otherproject.waldur": {
+      "project":        "otherproject.waldur",
+      "generated_at":   "2024-03-10T14:23:01Z",
+      "project_quotas": {},
+      "user_quotas":    {},
+      "users":          {}
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `portal` | string | `PortalIdentifier` — the portal this report covers |
+| `reports` | object | Map of `ProjectIdentifier` string → `ProjectStorageReport` |
+
+---
+
 ### `Destinations`
 
 Returned by: `get_offerings`
@@ -547,6 +646,8 @@ structure:
 | `"HashMap<Volume, Quota>"` | Object: volume → Quota | `get_*_quotas` |
 | `"ProjectUsageReport"` | Object (see above) | `get_usage_report`, `get_local_usage_report` |
 | `"UsageReport"` | Object (see above) | `get_usage_reports` |
+| `"ProjectStorageReport"` | Object (see above) | `get_storage_report`, `get_local_storage_report` |
+| `"StorageReport"` | Object (see above) | `get_storage_reports` |
 | `"Destinations"` | String | `get_offerings` |
 | `"Error"` | plain-text string | Any failed job |
 
@@ -575,5 +676,6 @@ structure:
 - Source files: `templemeads/src/job.rs` (`Job`, `Status`),
   `templemeads/src/usagereport.rs` (`Usage`, `UserUsageReport`,
   `DailyProjectUsageReport`, `ProjectUsageReport`, `UsageReport`),
+  `templemeads/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`),
   `templemeads/src/storage.rs` (`StorageSize`, `QuotaLimit`, `Quota`, `Volume`),
   `templemeads/src/grammar.rs` (`ProjectDetails`, identifiers and mappings).

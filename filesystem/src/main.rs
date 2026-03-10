@@ -7,15 +7,17 @@ use chrono::Utc;
 use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
+use templemeads::agent;
 use templemeads::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
-    GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalUserDirs,
-    GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
-    SetLocalProjectQuota, SetLocalUserQuota,
+    AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota,
+    GetLocalHomeDir, GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas,
+    GetLocalStorageReport, GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas,
+    RemoveLocalProject, RemoveLocalUser, SetLocalProjectQuota, SetLocalUserQuota,
 };
 use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::job::{Envelope, Job};
 use templemeads::storage::Quota;
+use templemeads::storagereport::ProjectStorageReport;
 use templemeads::Error;
 
 mod cache;
@@ -80,9 +82,17 @@ async fn main() -> Result<()> {
         ///
         pub async fn filesystem_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
         {
+            let me = envelope.recipient();
+            let sender = envelope.sender();
             let job = envelope.job();
 
             match job.instruction() {
+                GetLocalStorageReport(mapping) => {
+                    let report = get_local_storage_report(
+                        me.name(), &sender, &mapping, job.expires()
+                    ).await?;
+                    job.completed(report)
+                },
                 AddLocalProject(mapping) => {
                     create_project_dirs_and_links(&mapping, job.expires()).await?;
                     job.completed_none()
@@ -758,4 +768,70 @@ pub async fn get_user_quotas(
     }
 
     Ok(quotas)
+}
+
+///
+/// Build a ProjectStorageReport for the given project mapping.
+///
+/// The sender (cluster agent) is called back with get_users to retrieve
+/// the list of users in the project. All quota queries are then handled
+/// locally by this filesystem agent.
+///
+pub async fn get_local_storage_report(
+    me: &str,
+    sender: &agent::Peer,
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<ProjectStorageReport, Error> {
+    let project = mapping.project();
+    let mut report = ProjectStorageReport::new(&project);
+
+    // Fetch project-level quotas locally
+    match get_project_quotas(mapping, expires).await {
+        Ok(quotas) => {
+            report.set_project_quotas(quotas);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to get project quotas for {}: {}", mapping, e);
+        }
+    }
+
+    // Call back to the sender (cluster agent) to get the users for this project
+    let user_mappings: Vec<UserMapping> = {
+        let job = Job::parse(
+            &format!("{}.{} get_users {}", me, sender.name(), project),
+            false,
+        )?
+        .put(sender)
+        .await?;
+
+        match job.wait().await?.result::<Vec<UserMapping>>()? {
+            Some(users) => users,
+            None => {
+                tracing::warn!("No users returned for project {}", project);
+                vec![]
+            }
+        }
+    };
+
+    // Fetch per-user quotas locally for each user in the project
+    for user_mapping in &user_mappings {
+        match get_user_quotas(user_mapping, expires).await {
+            Ok(quotas) => {
+                report.add_user_quotas(user_mapping.user(), quotas);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get user quotas for {}: {}",
+                    user_mapping.local_user(),
+                    e
+                );
+            }
+        }
+    }
+
+    // Record portal-user → local-username mappings
+    report.add_mappings(&user_mappings)?;
+
+    Ok(report)
 }

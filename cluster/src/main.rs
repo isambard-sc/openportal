@@ -11,7 +11,8 @@ use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
     GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota,
-    GetProjectQuotas, GetProjects, GetStorageReport, GetUsageReport, GetUsageReports, GetUserDirs,
+    GetProjectQuotas, GetProjects, GetStorageReport, GetStorageReports, GetUsageReport,
+    GetUsageReports, GetUserDirs,
     GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers, IsProtectedUser, RemoveProject,
     RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
 };
@@ -20,7 +21,7 @@ use templemeads::grammar::{
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::storage::{Quota, Volume};
-use templemeads::storagereport::ProjectStorageReport;
+use templemeads::storagereport::{ProjectStorageReport, StorageReport};
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
 
@@ -246,6 +247,10 @@ async fn main() -> Result<()> {
                 }
                 GetStorageReport(project) => {
                     let report = get_storage_report(me.name(), &project).await?;
+                    job.completed(report)
+                }
+                GetStorageReports(portal) => {
+                    let report = get_storage_reports(me.name(), &portal).await?;
                     job.completed(report)
                 }
                 GetLimit(project) => {
@@ -1187,42 +1192,49 @@ async fn get_storage_report(
     me: &str,
     project: &ProjectIdentifier,
 ) -> Result<ProjectStorageReport, Error> {
-    let mut report = ProjectStorageReport::new(project);
+    let mapping = get_project_mapping(me, project).await?;
 
-    // Fetch project-level quotas from the filesystem agent
-    match get_project_quotas(me, project).await {
-        Ok(quotas) => {
-            report.set_project_quotas(quotas);
-        }
-        Err(e) => {
-            tracing::warn!("Failed to get project quotas for {}: {}", project, e);
-        }
-    }
-
-    // Fetch all users in this project
-    let accounts = match get_accounts(me, project).await {
-        Ok(accounts) => accounts,
-        Err(e) => {
-            tracing::warn!("Failed to get accounts for {}: {}", project, e);
-            vec![]
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
         }
     };
 
-    // Fetch per-user quotas for each member
-    for mapping in &accounts {
-        let user = mapping.user();
-        match get_user_quotas(me, user).await {
-            Ok(quotas) => {
-                report.add_user_quotas(user, quotas);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to get user quotas for {}: {}", user, e);
-            }
-        }
-    }
+    // Delegate to the filesystem agent, which will call back with get_users
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_storage_report {}",
+            me,
+            filesystem.name(),
+            mapping
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
 
-    // Add portal-user → local-username mappings
-    report.add_mappings(&accounts)?;
+    match job.wait().await?.result::<ProjectStorageReport>()? {
+        Some(report) => Ok(report),
+        None => Ok(ProjectStorageReport::new(project)),
+    }
+}
+
+async fn get_storage_reports(
+    me: &str,
+    portal: &PortalIdentifier,
+) -> Result<StorageReport, Error> {
+    let projects = get_projects(me, portal).await?;
+
+    let mut report = StorageReport::new(portal);
+
+    for project in projects {
+        let project_report = get_storage_report(me, project.project()).await?;
+        report.set_report(project_report)?;
+    }
 
     Ok(report)
 }

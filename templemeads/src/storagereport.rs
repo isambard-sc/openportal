@@ -8,8 +8,20 @@ use std::collections::HashMap;
 
 use crate::error::Error;
 
-use crate::grammar::{NamedType, ProjectIdentifier, UserIdentifier, UserMapping};
+use crate::grammar::{NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping};
 use crate::storage::{Quota, Volume};
+
+impl NamedType for StorageReport {
+    fn type_name() -> &'static str {
+        "StorageReport"
+    }
+}
+
+impl NamedType for Vec<StorageReport> {
+    fn type_name() -> &'static str {
+        "Vec<StorageReport>"
+    }
+}
 
 impl NamedType for ProjectStorageReport {
     fn type_name() -> &'static str {
@@ -177,6 +189,99 @@ impl std::fmt::Display for ProjectStorageReport {
                         }
                     }
                 }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// A portal-level storage report containing per-project storage reports for
+/// all projects associated with a portal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageReport {
+    portal: PortalIdentifier,
+    reports: HashMap<ProjectIdentifier, ProjectStorageReport>,
+}
+
+impl StorageReport {
+    /// Create a new, empty report for the given portal.
+    pub fn new(portal: &PortalIdentifier) -> Self {
+        Self {
+            portal: portal.clone(),
+            reports: HashMap::new(),
+        }
+    }
+
+    /// Return the portal identifier.
+    pub fn portal(&self) -> &PortalIdentifier {
+        &self.portal
+    }
+
+    /// Return the sorted list of projects with reports.
+    pub fn projects(&self) -> Vec<ProjectIdentifier> {
+        let mut projects: Vec<ProjectIdentifier> = self.reports.keys().cloned().collect();
+        projects.sort_by_cached_key(|p| p.to_string());
+        projects
+    }
+
+    /// Return the storage report for a project, or an empty report if not present.
+    pub fn get_report(&self, project: &ProjectIdentifier) -> ProjectStorageReport {
+        self.reports
+            .get(project)
+            .cloned()
+            .unwrap_or_else(|| ProjectStorageReport::new(project))
+    }
+
+    /// Add or replace the per-project report. Returns an error if the project
+    /// does not belong to this portal.
+    pub fn set_report(&mut self, report: ProjectStorageReport) -> Result<(), Error> {
+        if report.project().portal_identifier() != *self.portal() {
+            return Err(Error::InvalidState(format!(
+                "Report for wrong portal: {}. This report is for {}",
+                report.project().portal_identifier(),
+                self.portal
+            )));
+        }
+        self.reports.insert(report.project().clone(), report);
+        Ok(())
+    }
+
+    /// Return true if there are no project reports.
+    pub fn is_empty(&self) -> bool {
+        self.reports.is_empty()
+    }
+
+    /// Serialise to a JSON string.
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self)
+            .context("Failed to serialise StorageReport to JSON")
+            .map_err(Error::from)
+    }
+
+    /// Deserialise from a JSON string.
+    pub fn from_json(json: &str) -> Result<Self, Error> {
+        serde_json::from_str(json)
+            .context("Failed to deserialise StorageReport from JSON")
+            .map_err(Error::from)
+    }
+}
+
+impl std::fmt::Display for StorageReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        writeln!(f, "Storage report for portal {}", self.portal)?;
+
+        if self.reports.is_empty() {
+            return writeln!(f, "  (no project reports)");
+        }
+
+        let mut projects = self.reports.keys().collect::<Vec<_>>();
+        projects.sort_by_cached_key(|p| p.to_string());
+
+        for project in projects {
+            if let Some(report) = self.reports.get(project) {
+                writeln!(f, "{}", report)?;
+                writeln!(f, "----------------------------------------")?;
             }
         }
 

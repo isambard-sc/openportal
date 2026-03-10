@@ -1279,6 +1279,7 @@ impl Job {
         try_extract!(UsageReport, |v: UsageReport| v.0.clone());
         try_extract!(ProjectUsageReport, |v: ProjectUsageReport| v.0.clone());
         try_extract!(ProjectStorageReport, |v: ProjectStorageReport| v.0.clone());
+        try_extract!(StorageReport, |v: StorageReport| v.0.clone());
         try_extract!(Usage, |v: Usage| v.0);
         try_extract!(DateRange, |v: DateRange| v.0.clone());
         try_extract!(ProjectTemplate, |v: ProjectTemplate| v.0.clone());
@@ -1491,6 +1492,19 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(ProjectStorageReport::from(result)
+                        .into_pyobject(py)?
+                        .into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "StorageReport" => {
+                let result = match self.0.result::<storagereport::StorageReport>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(StorageReport::from(result)
                         .into_pyobject(py)?
                         .into_any()),
                     None => Ok(py.None().into_bound(py)),
@@ -2937,6 +2951,73 @@ impl ProjectStorageReport {
 impl From<storagereport::ProjectStorageReport> for ProjectStorageReport {
     fn from(report: storagereport::ProjectStorageReport) -> Self {
         ProjectStorageReport(report)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageReport(storagereport::StorageReport);
+
+#[pymethods]
+impl StorageReport {
+    #[new]
+    fn new(portal: &PortalIdentifier) -> PyResult<Self> {
+        Ok(Self(storagereport::StorageReport::new(&portal.0)))
+    }
+
+    fn to_json(&self) -> PyResult<String> {
+        match self.0.to_json() {
+            Ok(json) => Ok(json),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match storagereport::StorageReport::from_json(json) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<StorageReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<StorageReport> {
+        Ok(self.clone())
+    }
+
+    #[getter]
+    fn portal(&self) -> PyResult<PortalIdentifier> {
+        Ok(self.0.portal().clone().into())
+    }
+
+    #[getter]
+    fn projects(&self) -> PyResult<Vec<ProjectIdentifier>> {
+        Ok(self.0.projects().iter().map(|p| p.clone().into()).collect())
+    }
+
+    fn get_report(&self, project: &ProjectIdentifier) -> PyResult<ProjectStorageReport> {
+        Ok(self.0.get_report(&project.0).into())
+    }
+
+    fn is_empty(&self) -> PyResult<bool> {
+        Ok(self.0.is_empty())
+    }
+}
+
+impl From<storagereport::StorageReport> for StorageReport {
+    fn from(report: storagereport::StorageReport) -> Self {
+        StorageReport(report)
     }
 }
 
@@ -4773,6 +4854,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ProjectUsageReport>()?;
     m.add_class::<DailyProjectUsageReport>()?;
     m.add_class::<ProjectStorageReport>()?;
+    m.add_class::<StorageReport>()?;
     m.add_class::<DomainPattern>()?;
     m.add_class::<AwardDetails>()?;
     m.add_class::<ProjectDetails>()?;

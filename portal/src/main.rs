@@ -12,14 +12,15 @@ use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
     AddOfferings, CreateProject, GetOfferings, GetProject, GetProjectMapping, GetProjects,
-    GetStorageReport, GetUsageReport, GetUsageReports, RemoveOfferings, RemoveProject, Submit,
+    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, RemoveOfferings,
+    RemoveProject, Submit,
     SyncOfferings, UpdateProject,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
 };
 use templemeads::job::{send_queued, Envelope, Job};
-use templemeads::storagereport::ProjectStorageReport;
+use templemeads::storagereport::{ProjectStorageReport, StorageReport};
 use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
 
@@ -141,6 +142,12 @@ async fn main() -> Result<()> {
 
                     job.completed(
                         get_storage_report(&me, &resource, &project).await?)
+                }
+                GetStorageReports(portal) => {
+                    tracing::debug!("Getting storage reports for portal {}", portal);
+
+                    job.completed(
+                        get_storage_reports(&me, &resource, &portal).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -914,6 +921,52 @@ pub async fn get_storage_report(
                 None => {
                     tracing::warn!("No storage report retrieved?");
                     Ok(ProjectStorageReport::new(project))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the storage reports for all projects managed by the specified portal
+///
+pub async fn get_storage_reports(
+    me: &str,
+    resource: &str,
+    portal: &PortalIdentifier,
+) -> Result<StorageReport, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_storage_reports {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    portal
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<StorageReport>()?;
+
+            match result {
+                Some(report) => {
+                    tracing::debug!("Storage reports retrieved by bridge agent: {:?}", report);
+                    Ok(report)
+                }
+                None => {
+                    tracing::warn!("No storage reports retrieved?");
+                    Ok(StorageReport::new(portal))
                 }
             }
         }

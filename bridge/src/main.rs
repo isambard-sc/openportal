@@ -11,8 +11,8 @@ use templemeads::agent::bridge::{process_args, run, Defaults};
 use templemeads::async_runnable;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
-    CreateProject, GetProject, GetProjectMapping, GetProjects, GetStorageReport, GetUsageReport,
-    GetUsageReports, RemoveProject, SyncOfferings, UpdateProject,
+    CreateProject, GetProject, GetProjectMapping, GetProjects, GetStorageReport, GetStorageReports,
+    GetUsageReport, GetUsageReports, RemoveProject, SyncOfferings, UpdateProject,
 };
 use templemeads::job::{send_queued, Envelope, Job};
 use templemeads::server;
@@ -382,6 +382,39 @@ async fn main() -> Result<()> {
                 GetStorageReport(project) => {
                     // get the storage report for the project from the cluster
                     tracing::debug!("Getting storage report for {}", project);
+
+                    let board = server::get_board().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    // now signal the web-portal connected to the bridge
+                    // that this job is ready to be processed
+                    let signal_url = board.read().await.signal_url();
+
+                    match signal_web_portal(&signal_url, &job).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // remove the job from the board as it will not be processed
+                            board.write().await.remove(&job)?;
+                            return job.errored(
+                                &format!("Failed to signal web portal: {}", e),
+                            );
+                        }
+                    }
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
+                }
+                GetStorageReports(portal) => {
+                    // get the storage reports for the portal from the cluster
+                    tracing::debug!("Getting storage reports for {}", portal);
 
                     let board = server::get_board().await?;
 

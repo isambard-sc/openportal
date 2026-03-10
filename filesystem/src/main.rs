@@ -22,6 +22,7 @@ use templemeads::Error;
 
 mod cache;
 mod filesystem;
+mod linuxquotaengine;
 mod lustreengine;
 mod quotaengine;
 mod volumeconfig;

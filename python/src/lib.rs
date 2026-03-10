@@ -20,6 +20,7 @@ use templemeads::grammar;
 use templemeads::health as mod_health;
 use templemeads::job;
 use templemeads::server::sign_api_call;
+use templemeads::storagereport;
 use templemeads::usagereport;
 use templemeads::Error;
 use url::Url;
@@ -1277,6 +1278,7 @@ impl Job {
         try_extract!(ProjectMapping, |v: ProjectMapping| v.0.clone());
         try_extract!(UsageReport, |v: UsageReport| v.0.clone());
         try_extract!(ProjectUsageReport, |v: ProjectUsageReport| v.0.clone());
+        try_extract!(ProjectStorageReport, |v: ProjectStorageReport| v.0.clone());
         try_extract!(Usage, |v: Usage| v.0);
         try_extract!(DateRange, |v: DateRange| v.0.clone());
         try_extract!(ProjectTemplate, |v: ProjectTemplate| v.0.clone());
@@ -1476,6 +1478,19 @@ impl Job {
 
                 match result {
                     Some(result) => Ok(ProjectUsageReport::from(result)
+                        .into_pyobject(py)?
+                        .into_any()),
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "ProjectStorageReport" => {
+                let result = match self.0.result::<storagereport::ProjectStorageReport>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => Ok(ProjectStorageReport::from(result)
                         .into_pyobject(py)?
                         .into_any()),
                     None => Ok(py.None().into_bound(py)),
@@ -2812,6 +2827,116 @@ impl ProjectUsageReport {
 impl From<usagereport::ProjectUsageReport> for ProjectUsageReport {
     fn from(project_usage_report: usagereport::ProjectUsageReport) -> Self {
         ProjectUsageReport(project_usage_report)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectStorageReport(storagereport::ProjectStorageReport);
+
+#[pymethods]
+impl ProjectStorageReport {
+    #[new]
+    fn new(project: &ProjectIdentifier) -> PyResult<Self> {
+        Ok(Self(storagereport::ProjectStorageReport::new(&project.0)))
+    }
+
+    fn to_json(&self) -> PyResult<String> {
+        match self.0.to_json() {
+            Ok(json) => Ok(json),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match storagereport::ProjectStorageReport::from_json(json) {
+            Ok(report) => Ok(report.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<ProjectStorageReport> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectStorageReport> {
+        Ok(self.clone())
+    }
+
+    #[getter]
+    fn project(&self) -> PyResult<ProjectIdentifier> {
+        Ok(self.0.project().clone().into())
+    }
+
+    #[getter]
+    fn generated_at<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.generated_at().timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn project_quotas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        for (volume, quota) in self.0.project_quotas() {
+            dict.set_item(
+                Volume::from(volume.clone()).into_pyobject(py)?,
+                Quota::from(quota.clone()).into_pyobject(py)?,
+            )?;
+        }
+        Ok(dict)
+    }
+
+    #[getter]
+    fn user_quotas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let outer = pyo3::types::PyDict::new(py);
+        for (user, quotas) in self.0.user_quotas() {
+            let inner = pyo3::types::PyDict::new(py);
+            for (volume, quota) in quotas {
+                inner.set_item(
+                    Volume::from(volume.clone()).into_pyobject(py)?,
+                    Quota::from(quota.clone()).into_pyobject(py)?,
+                )?;
+            }
+            outer.set_item(
+                UserIdentifier::from(user.clone()).into_pyobject(py)?,
+                inner,
+            )?;
+        }
+        Ok(outer)
+    }
+
+    #[getter]
+    fn users<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        for (user, local_username) in self.0.users() {
+            dict.set_item(
+                UserIdentifier::from(user.clone()).into_pyobject(py)?,
+                local_username.into_pyobject(py)?,
+            )?;
+        }
+        Ok(dict)
+    }
+
+    fn is_empty(&self) -> PyResult<bool> {
+        Ok(self.0.is_empty())
+    }
+}
+
+impl From<storagereport::ProjectStorageReport> for ProjectStorageReport {
+    fn from(report: storagereport::ProjectStorageReport) -> Self {
+        ProjectStorageReport(report)
     }
 }
 
@@ -4647,6 +4772,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<UsageReport>()?;
     m.add_class::<ProjectUsageReport>()?;
     m.add_class::<DailyProjectUsageReport>()?;
+    m.add_class::<ProjectStorageReport>()?;
     m.add_class::<DomainPattern>()?;
     m.add_class::<AwardDetails>()?;
     m.add_class::<ProjectDetails>()?;

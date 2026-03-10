@@ -26,7 +26,7 @@ impl NamedType for Vec<ProjectStorageReport> {
 /// A report of the storage quotas and usage for a single project,
 /// including per-user quotas. The report reflects the state at the
 /// time it was generated (stored in `generated_at`).
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectStorageReport {
     /// The project this report is for
     project: ProjectIdentifier,

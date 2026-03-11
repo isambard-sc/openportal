@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Changed
+
+- Slurm job wait time (`SlurmJob::wait_time()`) is now computed from
+  Slurm's `time.eligible` timestamp rather than `time.submission`. The
+  eligible time is when the job first became runnable (after any holds,
+  `--dependency`, or `--begin` constraints are resolved), which is a more
+  accurate measure of scheduler queue wait time than the raw submission
+  timestamp. The internal field has been renamed from `submit_time` to
+  `eligible_time` accordingly. For jobs with no holds or dependencies the
+  two values are identical.
+
 ### Fixed
 
 - `op-localaccount`: `userdel` no longer passes `-r`, so the user's home

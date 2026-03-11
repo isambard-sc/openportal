@@ -423,7 +423,7 @@ where
                 let mut one_shot_commands = one_shot_commands.clone();
                 one_shot_commands = one_shot_commands
                     .into_iter()
-                    .flat_map(|cmd| std::iter::repeat(cmd).take(repeat as usize))
+                    .flat_map(|cmd| std::iter::repeat_n(cmd, repeat as usize))
                     .collect();
 
                 config.one_shot_commands = Some(one_shot_commands.clone());

@@ -411,19 +411,7 @@ async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
         for path_config in volume_config.path_configs() {
             if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
                 tracing::info!("    - Link path to remove: {}", link_path.to_string_lossy());
-                if link_path.exists() && link_path.is_symlink() {
-                    tracing::info!("      - Removing symlink '{}'", link_path.to_string_lossy());
-                    match std::fs::remove_file(&link_path) {
-                        Ok(_) => tracing::info!("Successfully removed symlink"),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Could not remove symlink '{}': {}",
-                                link_path.to_string_lossy(),
-                                e
-                            )
-                        }
-                    }
-                }
+                filesystem::remove_link(&link_path).await?;
             }
 
             match path_config.path(mapping.clone().into()) {

@@ -3184,7 +3184,7 @@ impl SlurmJob {
 
     pub fn billed_node_seconds(&self) -> u64 {
         let billed_seconds =
-            (self.duration().num_seconds() as f64 * self.billed_node_fraction()) as u64;
+            (self.duration().num_seconds() as f64 * self.billed_node_fraction()).ceil() as u64;
 
         if billed_seconds == 0 && self.duration().num_seconds() > 0 {
             tracing::warn!(

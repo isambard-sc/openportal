@@ -645,7 +645,7 @@ impl DailyProjectUsageReport {
     }
 
     /// Returns a display adapter that formats all usage values in hours only.
-    pub fn in_hours(&self) -> DailyProjectUsageReportHoursDisplay {
+    pub fn in_hours(&self) -> DailyProjectUsageReportHoursDisplay<'_> {
         DailyProjectUsageReportHoursDisplay(self)
     }
 
@@ -1233,7 +1233,7 @@ impl ProjectUsageReport {
     }
 
     /// Returns a display adapter that formats all usage values in hours only.
-    pub fn in_hours(&self) -> ProjectUsageReportHoursDisplay {
+    pub fn in_hours(&self) -> ProjectUsageReportHoursDisplay<'_> {
         ProjectUsageReportHoursDisplay(self)
     }
 

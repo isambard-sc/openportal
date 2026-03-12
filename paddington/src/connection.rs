@@ -967,6 +967,7 @@ impl Connection {
     /// This function will handle the handshake and then enter an event
     /// loop to handle the sending and receiving of messages.
     ///
+    #[allow(clippy::result_large_err)]
     pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
         // Reject new connections during soft restart
         if crate::exchange::is_soft_restart_in_progress() {

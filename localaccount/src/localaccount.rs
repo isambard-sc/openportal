@@ -373,8 +373,11 @@ pub async fn add_user(
 }
 
 ///
-/// Remove a user from the local system (and remove their home directory).
+/// Remove a user from the local system.
 /// Idempotent: succeeds silently if the user did not exist.
+/// Note: the home directory is intentionally NOT removed here — home directories
+/// are managed separately by the filesystem agent, which recycles them rather
+/// than deleting them.
 ///
 pub async fn remove_user(
     user: &UserIdentifier,
@@ -391,7 +394,7 @@ pub async fn remove_user(
 
     tracing::info!("Removing user: {}", local_user);
 
-    let (exit_code, _, stderr) = run_command(&cmds.userdel, &["-r", &local_user]).await?;
+    let (exit_code, _, stderr) = run_command(&cmds.userdel, &[&local_user]).await?;
 
     match exit_code {
         0 => {

@@ -1209,11 +1209,7 @@ impl ProjectUsageReport {
     }
 
     pub fn total_usage(&self) -> Usage {
-        self.reports
-            .values()
-            .cloned()
-            .map(|r| r.total_usage())
-            .sum()
+        self.reports.values().map(|r| r.total_usage()).sum()
     }
 
     pub fn num_jobs(&self) -> u64 {
@@ -1262,7 +1258,6 @@ impl ProjectUsageReport {
 
         self.reports
             .values()
-            .cloned()
             .map(|r| {
                 r.local_users()
                     .into_iter()
@@ -1598,11 +1593,7 @@ impl UsageReport {
     }
 
     pub fn total_usage(&self) -> Usage {
-        self.reports
-            .values()
-            .cloned()
-            .map(|r| r.total_usage())
-            .sum()
+        self.reports.values().map(|r| r.total_usage()).sum()
     }
 
     pub fn combine(reports: &[UsageReport]) -> Result<Self, Error> {

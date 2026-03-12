@@ -440,6 +440,50 @@ pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
     }
 }
 
+///
+/// Remove a symlink. Silently does nothing if the path does not exist or is
+/// not a symlink. In prefix/remote mode the check and removal run on the
+/// remote system via the exec prefix.
+///
+pub async fn remove_link(link: &Path) -> Result<(), Error> {
+    let link = clean_and_check_path(link, false).await?;
+
+    match get_exec_prefix() {
+        Some(prefix) => {
+            if !remote_is_symlink(prefix, &link).await? {
+                return Ok(());
+            }
+            let link_str = link.to_string_lossy();
+            tracing::info!("Removing symlink (remote): '{}'", link_str);
+            let (exit_code, _, stderr) = run_remote(prefix, &["rm", "-f", &link_str]).await?;
+            if exit_code != 0 {
+                tracing::warn!(
+                    "Could not remove symlink (remote) '{}': exit code {}, stderr: {}",
+                    link_str,
+                    exit_code,
+                    stderr
+                );
+            }
+        }
+        None => {
+            if !link.is_symlink() {
+                return Ok(());
+            }
+            tracing::info!("Removing symlink: '{}'", link.to_string_lossy());
+            match std::fs::remove_file(&link) {
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    "Could not remove symlink '{}': {}",
+                    link.to_string_lossy(),
+                    e
+                ),
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn create_link_native(path: &Path, link: &Path) -> Result<(), Error> {
     tracing::info!(
         "Creating link from '{}' to '{}'",

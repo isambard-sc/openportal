@@ -2436,7 +2436,7 @@ pub struct SlurmJob {
     node_info: SlurmNode,
     start_time: chrono::DateTime<chrono::Utc>,
     original_start_time: chrono::DateTime<chrono::Utc>,
-    submit_time: chrono::DateTime<chrono::Utc>,
+    eligible_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
     duration: u64,
     state: String,
@@ -2623,19 +2623,19 @@ impl SlurmJob {
             }
         };
 
-        let submit_time = match time.get("submission") {
-            Some(submit_time) => match submit_time.as_i64() {
-                Some(submit_time) => match chrono::Utc.timestamp_opt(submit_time, 0).single() {
-                    Some(submit_time) => submit_time,
+        let eligible_time = match time.get("eligible") {
+            Some(eligible_time) => match eligible_time.as_i64() {
+                Some(eligible_time) => match chrono::Utc.timestamp_opt(eligible_time, 0).single() {
+                    Some(eligible_time) => eligible_time,
                     None => {
-                        tracing::warn!("Could not get submit_time as DateTime from job");
+                        tracing::warn!("Could not get eligible_time as DateTime from job");
                         start_time
                     }
                 },
                 None => {
                     tracing::warn!(
-                        "Could not get submit_time as i64 from job: {:?}",
-                        submit_time
+                        "Could not get eligible_time as i64 from job: {:?}",
+                        eligible_time
                     );
                     start_time
                 }
@@ -2940,7 +2940,7 @@ impl SlurmJob {
             node_info,
             start_time,
             original_start_time: start_time,
-            submit_time,
+            eligible_time,
             end_time,
             duration,
             state,
@@ -3049,14 +3049,14 @@ impl SlurmJob {
         &self.original_start_time
     }
 
-    pub fn submit_time(&self) -> &chrono::DateTime<chrono::Utc> {
-        &self.submit_time
+    pub fn eligible_time(&self) -> &chrono::DateTime<chrono::Utc> {
+        &self.eligible_time
     }
 
     /// The time the job spent waiting in the queue before it started running.
-    /// Clamped to zero if submit_time is after start_time (handles bogus Slurm timestamps).
+    /// Clamped to zero if eligible_time is after start_time (handles bogus Slurm timestamps).
     pub fn wait_time(&self) -> chrono::Duration {
-        let wait = self.start_time.signed_duration_since(self.submit_time());
+        let wait = self.start_time.signed_duration_since(self.eligible_time());
         if wait.num_seconds() < 0 {
             chrono::Duration::seconds(0)
         } else {

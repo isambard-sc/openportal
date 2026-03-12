@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Changed
+
+- Slurm job wait time (`SlurmJob::wait_time()`) is now computed from
+  Slurm's `time.eligible` timestamp rather than `time.submission`. The
+  eligible time is when the job first became runnable (after any holds,
+  `--dependency`, or `--begin` constraints are resolved), which is a more
+  accurate measure of scheduler queue wait time than the raw submission
+  timestamp. The internal field has been renamed from `submit_time` to
+  `eligible_time` accordingly. For jobs with no holds or dependencies the
+  two values are identical.
+
+### Fixed
+
+- `op-localaccount`: `userdel` no longer passes `-r`, so the user's home
+  directory is not deleted by the account agent. Home directories are managed
+  exclusively by the filesystem agent, which recycles them rather than
+  permanently deleting them.
+- `op-filesystem`: symlink removal in `RemoveLocalProject` now works correctly
+  in prefix (remote/container) mode. Previously, `std::fs::remove_file` was
+  called against the local filesystem, so symlinks on the remote system were
+  silently left in place. The new `filesystem::remove_link` helper dispatches
+  to `rm -f` via the exec prefix when a prefix is configured.
+
 ## [0.23.0] - 2026-03-11
 
 ### Added

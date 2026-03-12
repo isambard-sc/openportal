@@ -737,7 +737,10 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
                 next_peer_name
             } else {
                 // Find the last component in the remaining path
-                remaining_path.split('.').last().unwrap_or(next_peer_name)
+                remaining_path
+                    .split('.')
+                    .next_back()
+                    .unwrap_or(next_peer_name)
             };
 
             // Extract just the name part if it includes @zone

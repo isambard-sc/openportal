@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.23.1] - 2026-03-12
+
 ### Changed
 
 - Slurm job wait time (`SlurmJob::wait_time()`) is now computed from
@@ -1130,6 +1132,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.23.1]: https://github.com/isambard-sc/openportal/releases/tag/0.23.1
 [0.23.0]: https://github.com/isambard-sc/openportal/releases/tag/0.23.0
 [0.22.4]: https://github.com/isambard-sc/openportal/releases/tag/0.22.4
 [0.22.3]: https://github.com/isambard-sc/openportal/releases/tag/0.22.3

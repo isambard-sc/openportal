@@ -2942,19 +2942,27 @@ impl ProjectStorageReport {
         Ok(self.0.is_empty())
     }
 
-    /// Return historical snapshots sorted by date (oldest first), each as a
-    /// `ProjectStorageReport`. The current top-level date is excluded.
-    fn daily_reports(&self) -> PyResult<Vec<ProjectStorageReport>> {
-        Ok(self.0.daily_reports().into_iter().map(Into::into).collect())
+    /// Return all snapshots sorted by date (oldest first), each as a
+    /// `ProjectStorageReport`. Includes both historical entries and the current
+    /// top-level snapshot. When `with_usage_only=True` (default), only snapshots
+    /// with quota data are returned. When `False`, every calendar date between
+    /// the earliest and latest snapshot is included (empty reports for missing
+    /// days), mirroring `ProjectUsageReport.daily_reports()`.
+    #[pyo3(signature = (with_usage_only = true))]
+    fn daily_reports(&self, with_usage_only: bool) -> PyResult<Vec<ProjectStorageReport>> {
+        Ok(self
+            .0
+            .daily_reports(with_usage_only)
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     /// Return the snapshot for a specific calendar date as a
-    /// `ProjectStorageReport`. `date` must be a string in `"YYYY-MM-DD"`
-    /// format. Returns an empty report if no snapshot exists for that date.
-    fn get_daily_report(&self, date: &str) -> PyResult<ProjectStorageReport> {
-        let naive_date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .map_err(|e| PyErr::new::<PyOSError, _>(format!("Invalid date '{}': {}", date, e)))?;
-        Ok(self.0.get_daily_report(&naive_date).into())
+    /// `ProjectStorageReport`. Returns the top-level data if `date` matches
+    /// the current snapshot's date, or an empty report if not found.
+    fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectStorageReport> {
+        Ok(self.0.get_report(&date).into())
     }
 
     fn __add__(&self, other: &ProjectStorageReport) -> PyResult<ProjectStorageReport> {

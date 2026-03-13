@@ -25,20 +25,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     same day, the older is discarded. Historical entries from both sides are
     merged keeping the newest snapshot per date. The current top-level date
     is never duplicated in `daily_reports`.
-  - `ProjectStorageReport::daily_reports()` — returns historical snapshots
-    sorted by date (oldest first), each as a `ProjectStorageReport` with an
-    empty history map.
-  - `ProjectStorageReport::get_daily_report(date)` — returns the snapshot
-    for a specific `NaiveDate` as a `ProjectStorageReport`. If the date
-    matches the top-level snapshot's date, the top-level data is returned
-    (without nested history). Returns an empty report for unknown dates.
+  - `ProjectStorageReport::daily_reports(with_usage_only)` — returns all
+    snapshots (historical + current) sorted by date (oldest first), each as a
+    `ProjectStorageReport` with an empty history map. When `with_usage_only`
+    is `true`, only snapshots with quota data are returned. When `false`,
+    every calendar date in the range [earliest, latest] is included (empty
+    reports for missing days), mirroring `ProjectUsageReport::daily_reports`.
+  - `ProjectStorageReport::get_report(date)` — returns the snapshot for a
+    specific `NaiveDate` as a `ProjectStorageReport`. If the date matches the
+    top-level snapshot's date, the top-level data is returned (without nested
+    history). Returns an empty report for unknown dates.
   - `ProjectStorageReport::combine(reports)` — combines a slice of reports
     using the merge semantics above.
   - `StorageReport` gains `+` / `+=` operators and a `combine(reports)`
     function, merging per-project history across portal-level reports.
-  - Python bindings updated: `ProjectStorageReport.daily_reports()` →
-    `list[ProjectStorageReport]`; `ProjectStorageReport.get_daily_report(date)`
-    accepts a `"YYYY-MM-DD"` string; `+` / `+=` / `combine()` on both
+  - Python bindings updated: `ProjectStorageReport.daily_reports(with_usage_only=True)`
+    → `list[ProjectStorageReport]`; `ProjectStorageReport.get_report(date)`
+    accepts a `datetime.date`; `+` / `+=` / `combine()` on both
     `ProjectStorageReport` and `StorageReport`.
 
 ## [0.23.1] - 2026-03-12

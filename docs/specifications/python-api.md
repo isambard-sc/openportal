@@ -338,8 +338,8 @@ call. Reflects the current (point-in-time) storage quota state for a single proj
 | Method | Signature | Description |
 |---|---|---|
 | `is_empty` | `() → bool` | `True` if the top-level snapshot has no quota data (historical entries are not considered) |
-| `daily_reports` | `() → list[ProjectStorageReport]` | Return all snapshots sorted by date (oldest first), including both historical entries and the current top-level snapshot. Each entry is a `ProjectStorageReport` with an empty history. |
-| `get_daily_report` | `(date: str) → ProjectStorageReport` | Return the snapshot for a specific date (`"YYYY-MM-DD"` format). Returns the top-level data if `date` matches the current snapshot's date, or an empty report if not found. |
+| `daily_reports` | `(with_usage_only: bool = True) → list[ProjectStorageReport]` | Return all snapshots sorted by date (oldest first), including both historical entries and the current top-level snapshot. When `with_usage_only=True` (default), only snapshots with quota data are returned. When `False`, every calendar date between the earliest and latest snapshot is included (empty reports for missing days), mirroring `ProjectUsageReport.daily_reports()`. |
+| `get_report` | `(date: datetime.date) → ProjectStorageReport` | Return the snapshot for a specific date. Returns the top-level data if `date` matches the current snapshot's date, or an empty report if not found. |
 | `combine` | `(reports: list[ProjectStorageReport]) → ProjectStorageReport` | *(static)* Merge a list of reports for the same project using the merge semantics: newest snapshot wins at the top level; older snapshots are retained in history (one per date, newest wins). |
 | `to_json` | `() → str` | Serialise to a JSON string |
 | `from_json` | `(json: str) → ProjectStorageReport` | *(static)* Deserialise from a JSON string |
@@ -353,6 +353,8 @@ historical snapshot dates if any are present.
 **Example:**
 
 ```python
+import datetime
+
 job = openportal.run("portal.provider.clusters.mycluster get_storage_report myproject.myportal",
                      max_ms=30_000)
 if job.is_finished and not job.is_error:
@@ -366,11 +368,16 @@ if job.is_finished and not job.is_error:
 
 # Accumulate reports fetched on different days
 combined = report_day1 + report_day2 + report_day3
-for snap in combined.daily_reports():   # oldest first
+for snap in combined.daily_reports():   # oldest first, only days with data
     print(f"  {snap.generated_at}: {snap.project_quotas}")
 
+# Zip with a usage report (both fill every date in the range)
+for usage, storage in zip(usage_report.daily_reports(with_usage_only=False),
+                          storage_report.daily_reports(with_usage_only=False)):
+    print(f"  usage={usage.total_usage}  storage={storage.project_quotas}")
+
 # Retrieve a specific day
-snap = combined.get_daily_report("2024-03-10")
+snap = combined.get_report(datetime.date(2024, 3, 10))
 ```
 
 ---

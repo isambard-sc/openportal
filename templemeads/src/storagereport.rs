@@ -194,30 +194,78 @@ impl ProjectStorageReport {
     /// Return all snapshots sorted by date (oldest first), each promoted to a
     /// `ProjectStorageReport` with an empty history map. Includes both the
     /// historical entries and the current top-level snapshot.
-    pub fn daily_reports(&self) -> Vec<ProjectStorageReport> {
-        let mut dates: Vec<&NaiveDate> = self.daily_reports.keys().collect();
-        dates.sort();
-        let mut result: Vec<ProjectStorageReport> = dates
-            .into_iter()
-            .filter_map(|date| {
-                self.daily_reports.get(date).cloned().map(|snapshot| {
-                    let mut report = ProjectStorageReport::from(snapshot);
-                    report.users = self.users.clone();
-                    report
-                })
+    ///
+    /// When `with_usage_only` is `true` (the default in Python), only snapshots
+    /// that have quota data (`!is_empty()`) are returned. When `false`, every
+    /// calendar date in the range [earliest, latest] is included; dates with no
+    /// snapshot are represented by an empty `ProjectStorageReport`.
+    pub fn daily_reports(&self, with_usage_only: bool) -> Vec<ProjectStorageReport> {
+        // Collect historical snapshots as (date, report) pairs
+        let mut snapshots: Vec<(NaiveDate, ProjectStorageReport)> = self
+            .daily_reports
+            .iter()
+            .map(|(date, snapshot)| {
+                let mut report = ProjectStorageReport::from(snapshot.clone());
+                report.users = self.users.clone();
+                (*date, report)
             })
             .collect();
 
-        // Append the current top-level snapshot as the newest entry
-        result.push(ProjectStorageReport {
-            project: self.project.clone(),
-            generated_at: self.generated_at,
-            project_quotas: self.project_quotas.clone(),
-            user_quotas: self.user_quotas.clone(),
-            users: self.users.clone(),
-            daily_reports: HashMap::new(),
-        });
+        // Append the current top-level snapshot
+        let current_date = self.generated_at.date_naive();
+        snapshots.push((
+            current_date,
+            ProjectStorageReport {
+                project: self.project.clone(),
+                generated_at: self.generated_at,
+                project_quotas: self.project_quotas.clone(),
+                user_quotas: self.user_quotas.clone(),
+                users: self.users.clone(),
+                daily_reports: HashMap::new(),
+            },
+        ));
 
+        snapshots.sort_by_key(|(d, _)| *d);
+
+        if with_usage_only {
+            return snapshots
+                .into_iter()
+                .filter(|(_, r)| !r.is_empty())
+                .map(|(_, r)| r)
+                .collect();
+        }
+
+        // Fill in every calendar date between earliest and latest
+        if snapshots.is_empty() {
+            return Vec::new();
+        }
+
+        let earliest = snapshots.first().map(|(d, _)| *d).unwrap_or(current_date);
+        let latest = snapshots.last().map(|(d, _)| *d).unwrap_or(current_date);
+        let snapshot_map: HashMap<NaiveDate, ProjectStorageReport> =
+            snapshots.into_iter().collect();
+
+        let mut result = Vec::new();
+        let mut date = earliest;
+        loop {
+            if let Some(report) = snapshot_map.get(&date) {
+                result.push(report.clone());
+            } else {
+                result.push(ProjectStorageReport {
+                    project: self.project.clone(),
+                    generated_at: chrono::NaiveDateTime::new(date, chrono::NaiveTime::MIN)
+                        .and_utc(),
+                    project_quotas: HashMap::new(),
+                    user_quotas: HashMap::new(),
+                    users: HashMap::new(),
+                    daily_reports: HashMap::new(),
+                });
+            }
+            match date.succ_opt() {
+                Some(next) if next <= latest => date = next,
+                _ => break,
+            }
+        }
         result
     }
 
@@ -225,10 +273,9 @@ impl ProjectStorageReport {
     /// `ProjectStorageReport`. If `date` matches the current top-level date,
     /// returns the top-level data (without nested history). Returns an empty
     /// report if no snapshot exists for the requested date.
-    pub fn get_daily_report(&self, date: &NaiveDate) -> ProjectStorageReport {
+    pub fn get_report(&self, date: &NaiveDate) -> ProjectStorageReport {
         let current_date = self.generated_at.date_naive();
         if *date == current_date {
-            // Return the top-level data as a bare report (no nested history)
             ProjectStorageReport {
                 project: self.project.clone(),
                 generated_at: self.generated_at,

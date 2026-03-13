@@ -579,7 +579,7 @@ snapshot is never duplicated in `daily_reports`.
 | `project_quotas` | object | Map of volume name → `Quota` for the most recent snapshot |
 | `user_quotas` | object | Map of `UserIdentifier` string → (volume name → `Quota`) for the most recent snapshot |
 | `users` | object | Map of `UserIdentifier` string → local username string |
-| `daily_reports` | object | *(Optional)* Map of `YYYY-MM-DD` date string → historical snapshot object. Omitted when empty. Each snapshot object has `project`, `generated_at`, `project_quotas`, and `user_quotas` fields only — **no `users` field** (the `users` mapping is held exclusively at the top level). |
+| `daily_reports` | object | *(Optional)* Map of `YYYY-MM-DD` date string → historical snapshot object. Omitted when empty. Each snapshot object has `project`, `generated_at`, `project_quotas`, and `user_quotas` fields only — **no `users` field** (the `users` mapping is held exclusively at the top level). The current top-level snapshot date is **not** stored here; callers iterating all days via `daily_reports()` receive all historical entries plus the current top-level snapshot. |
 
 **Merge semantics:** when two `ProjectStorageReport` values are combined (`+`
 / `+=` / `combine()`), the newer snapshot (by `generated_at`) becomes the

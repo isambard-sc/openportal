@@ -191,13 +191,13 @@ impl ProjectStorageReport {
         self.project_quotas.is_empty() && self.user_quotas.is_empty()
     }
 
-    /// Return historical snapshots sorted by date (oldest first), each
-    /// promoted to a `ProjectStorageReport` with an empty history map.
-    /// The current top-level date is excluded.
+    /// Return all snapshots sorted by date (oldest first), each promoted to a
+    /// `ProjectStorageReport` with an empty history map. Includes both the
+    /// historical entries and the current top-level snapshot.
     pub fn daily_reports(&self) -> Vec<ProjectStorageReport> {
         let mut dates: Vec<&NaiveDate> = self.daily_reports.keys().collect();
         dates.sort();
-        dates
+        let mut result: Vec<ProjectStorageReport> = dates
             .into_iter()
             .filter_map(|date| {
                 self.daily_reports.get(date).cloned().map(|snapshot| {
@@ -206,7 +206,19 @@ impl ProjectStorageReport {
                     report
                 })
             })
-            .collect()
+            .collect();
+
+        // Append the current top-level snapshot as the newest entry
+        result.push(ProjectStorageReport {
+            project: self.project.clone(),
+            generated_at: self.generated_at,
+            project_quotas: self.project_quotas.clone(),
+            user_quotas: self.user_quotas.clone(),
+            users: self.users.clone(),
+            daily_reports: HashMap::new(),
+        });
+
+        result
     }
 
     /// Return the snapshot for a specific calendar date as a

@@ -338,7 +338,7 @@ call. Reflects the current (point-in-time) storage quota state for a single proj
 | Method | Signature | Description |
 |---|---|---|
 | `is_empty` | `() → bool` | `True` if the top-level snapshot has no quota data (historical entries are not considered) |
-| `daily_reports` | `() → list[ProjectStorageReport]` | Return historical snapshots sorted by date (oldest first). Each entry is a `ProjectStorageReport` with an empty history. The current top-level date is excluded. |
+| `daily_reports` | `() → list[ProjectStorageReport]` | Return all snapshots sorted by date (oldest first), including both historical entries and the current top-level snapshot. Each entry is a `ProjectStorageReport` with an empty history. |
 | `get_daily_report` | `(date: str) → ProjectStorageReport` | Return the snapshot for a specific date (`"YYYY-MM-DD"` format). Returns the top-level data if `date` matches the current snapshot's date, or an empty report if not found. |
 | `combine` | `(reports: list[ProjectStorageReport]) → ProjectStorageReport` | *(static)* Merge a list of reports for the same project using the merge semantics: newest snapshot wins at the top level; older snapshots are retained in history (one per date, newest wins). |
 | `to_json` | `() → str` | Serialise to a JSON string |

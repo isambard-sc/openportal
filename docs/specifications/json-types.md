@@ -513,9 +513,13 @@ active projects.
 
 Returned by: `get_storage_report`, `get_local_storage_report`
 
-A point-in-time snapshot of storage quota data for a single project across all
-volumes. There is no date range — the report always reflects the current state at
-the moment it was generated.
+A storage quota report for a single project. The top-level fields always hold
+the **most recent** point-in-time snapshot. An optional `daily_reports` map
+holds older snapshots keyed by calendar date (`YYYY-MM-DD`), with at most one
+snapshot per date (the newest seen for that date). The date of the top-level
+snapshot is never duplicated in `daily_reports`.
+
+**Report with no history (typical single query result):**
 
 ```json
 {
@@ -542,13 +546,49 @@ the moment it was generated.
 }
 ```
 
+**Report with historical snapshots:**
+
+```json
+{
+  "project":       "myproject.waldur",
+  "generated_at":  "2024-03-12T09:00:00Z",
+  "project_quotas": {"scratch": {"limit": "10.00 TB", "usage": "4.10 TB"}},
+  "user_quotas":    {},
+  "users":          {"alice.myproject.waldur": "alice_hpc"},
+  "daily_reports": {
+    "2024-03-10": {
+      "project":        "myproject.waldur",
+      "generated_at":   "2024-03-10T14:23:00Z",
+      "project_quotas": {"scratch": {"limit": "10.00 TB", "usage": "3.45 TB"}},
+      "user_quotas":    {}
+    },
+    "2024-03-11": {
+      "project":        "myproject.waldur",
+      "generated_at":   "2024-03-11T10:05:00Z",
+      "project_quotas": {"scratch": {"limit": "10.00 TB", "usage": "3.80 TB"}},
+      "user_quotas":    {}
+    }
+  }
+}
+```
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `project` | string | `ProjectIdentifier` in `project.portal` format |
-| `generated_at` | string | ISO 8601 UTC timestamp when the report was generated |
-| `project_quotas` | object | Map of volume name → `Quota`. Contains project-level quotas across all volumes |
-| `user_quotas` | object | Map of `UserIdentifier` string → (volume name → `Quota`). Per-user quota data; absent if no per-user quotas are configured |
-| `users` | object | Map of `UserIdentifier` string → local username string. Provides the mapping used to translate local usernames back to OpenPortal identifiers |
+| `generated_at` | string | ISO 8601 UTC timestamp of the most recent snapshot |
+| `project_quotas` | object | Map of volume name → `Quota` for the most recent snapshot |
+| `user_quotas` | object | Map of `UserIdentifier` string → (volume name → `Quota`) for the most recent snapshot |
+| `users` | object | Map of `UserIdentifier` string → local username string |
+| `daily_reports` | object | *(Optional)* Map of `YYYY-MM-DD` date string → historical snapshot object. Omitted when empty. Each snapshot object has `project`, `generated_at`, `project_quotas`, and `user_quotas` fields only — **no `users` field** (the `users` mapping is held exclusively at the top level). |
+
+**Merge semantics:** when two `ProjectStorageReport` values are combined (`+`
+/ `+=` / `combine()`), the newer snapshot (by `generated_at`) becomes the
+top-level state. The older snapshot is stored in `daily_reports` under its
+calendar date. If both snapshots fall on the same calendar day, the older is
+silently discarded. Historical entries from both sides are merged keeping the
+newest snapshot per date. The `users` maps from both sides are merged into the
+top-level `users` field (the newer report's entries take precedence for any
+duplicate keys).
 
 **Empty report (no quota data available):**
 

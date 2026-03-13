@@ -2941,6 +2941,40 @@ impl ProjectStorageReport {
     fn is_empty(&self) -> PyResult<bool> {
         Ok(self.0.is_empty())
     }
+
+    /// Return historical snapshots sorted by date (oldest first), each as a
+    /// `ProjectStorageReport`. The current top-level date is excluded.
+    fn daily_reports(&self) -> PyResult<Vec<ProjectStorageReport>> {
+        Ok(self.0.daily_reports().into_iter().map(Into::into).collect())
+    }
+
+    /// Return the snapshot for a specific calendar date as a
+    /// `ProjectStorageReport`. `date` must be a string in `"YYYY-MM-DD"`
+    /// format. Returns an empty report if no snapshot exists for that date.
+    fn get_daily_report(&self, date: &str) -> PyResult<ProjectStorageReport> {
+        let naive_date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("Invalid date '{}': {}", date, e)))?;
+        Ok(self.0.get_daily_report(&naive_date).into())
+    }
+
+    fn __add__(&self, other: &ProjectStorageReport) -> PyResult<ProjectStorageReport> {
+        Ok(ProjectStorageReport(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: ProjectStorageReport) -> PyResult<()> {
+        self.0 += other.0;
+        Ok(())
+    }
+
+    #[staticmethod]
+    fn combine(reports: Vec<ProjectStorageReport>) -> PyResult<ProjectStorageReport> {
+        let inner: Vec<storagereport::ProjectStorageReport> =
+            reports.into_iter().map(|r| r.0).collect();
+        match storagereport::ProjectStorageReport::combine(&inner) {
+            Ok(combined) => Ok(combined.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
 }
 
 impl From<storagereport::ProjectStorageReport> for ProjectStorageReport {
@@ -3007,6 +3041,24 @@ impl StorageReport {
 
     fn is_empty(&self) -> PyResult<bool> {
         Ok(self.0.is_empty())
+    }
+
+    fn __add__(&self, other: &StorageReport) -> PyResult<StorageReport> {
+        Ok(StorageReport(self.0.clone() + other.0.clone()))
+    }
+
+    fn __iadd__(&mut self, other: StorageReport) -> PyResult<()> {
+        self.0 += other.0;
+        Ok(())
+    }
+
+    #[staticmethod]
+    fn combine(reports: Vec<StorageReport>) -> PyResult<StorageReport> {
+        let inner: Vec<storagereport::StorageReport> = reports.into_iter().map(|r| r.0).collect();
+        match storagereport::StorageReport::combine(&inner) {
+            Ok(combined) => Ok(combined.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
     }
 }
 

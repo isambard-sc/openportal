@@ -337,11 +337,18 @@ call. Reflects the current (point-in-time) storage quota state for a single proj
 
 | Method | Signature | Description |
 |---|---|---|
-| `is_empty` | `() → bool` | `True` if both `project_quotas` and `user_quotas` are empty |
+| `is_empty` | `() → bool` | `True` if the top-level snapshot has no quota data (historical entries are not considered) |
+| `daily_reports` | `() → list[ProjectStorageReport]` | Return historical snapshots sorted by date (oldest first). Each entry is a `ProjectStorageReport` with an empty history. The current top-level date is excluded. |
+| `get_daily_report` | `(date: str) → ProjectStorageReport` | Return the snapshot for a specific date (`"YYYY-MM-DD"` format). Returns the top-level data if `date` matches the current snapshot's date, or an empty report if not found. |
+| `combine` | `(reports: list[ProjectStorageReport]) → ProjectStorageReport` | *(static)* Merge a list of reports for the same project using the merge semantics: newest snapshot wins at the top level; older snapshots are retained in history (one per date, newest wins). |
 | `to_json` | `() → str` | Serialise to a JSON string |
 | `from_json` | `(json: str) → ProjectStorageReport` | *(static)* Deserialise from a JSON string |
 
-`str(report)` returns a human-readable multi-line summary.
+`+` and `+=` operators merge two `ProjectStorageReport` objects using the same
+semantics as `combine`.
+
+`str(report)` returns a human-readable multi-line summary including a list of
+historical snapshot dates if any are present.
 
 **Example:**
 
@@ -356,6 +363,14 @@ if job.is_finished and not job.is_error:
         local = report.users.get(user, "unknown")
         for volume, quota in vol_quotas.items():
             print(f"  {user} ({local}) — {volume}: {quota}")
+
+# Accumulate reports fetched on different days
+combined = report_day1 + report_day2 + report_day3
+for snap in combined.daily_reports():   # oldest first
+    print(f"  {snap.generated_at}: {snap.project_quotas}")
+
+# Retrieve a specific day
+snap = combined.get_daily_report("2024-03-10")
 ```
 
 ---
@@ -378,8 +393,12 @@ aggregate of `ProjectStorageReport` objects for all active projects.
 |---|---|---|
 | `get_report` | `(project: ProjectIdentifier) → ProjectStorageReport` | Return the storage report for `project`, or an empty report if not present |
 | `is_empty` | `() → bool` | `True` if there are no project reports |
+| `combine` | `(reports: list[StorageReport]) → StorageReport` | *(static)* Merge a list of portal-level reports, merging per-project history |
 | `to_json` | `() → str` | Serialise to a JSON string |
 | `from_json` | `(json: str) → StorageReport` | *(static)* Deserialise from a JSON string |
+
+`+` and `+=` operators merge two `StorageReport` objects, combining the
+per-project reports using `ProjectStorageReport` merge semantics.
 
 `str(report)` returns a human-readable multi-line summary.
 

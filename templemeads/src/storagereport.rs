@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -35,15 +35,69 @@ impl NamedType for Vec<ProjectStorageReport> {
     }
 }
 
-/// A report of the storage quotas and usage for a single project,
-/// including per-user quotas. The report reflects the state at the
-/// time it was generated (stored in `generated_at`).
+/// An internal point-in-time snapshot of storage quota data for a single
+/// project. Used to store historical entries inside `ProjectStorageReport`.
+/// Not exposed through the public API — callers always receive
+/// `ProjectStorageReport` even for individual days.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DailyStorageReport {
+    project: ProjectIdentifier,
+    generated_at: DateTime<Utc>,
+    project_quotas: HashMap<Volume, Quota>,
+    user_quotas: HashMap<UserIdentifier, HashMap<Volume, Quota>>,
+}
+
+impl DailyStorageReport {
+    #[allow(dead_code)]
+    pub fn project(&self) -> &ProjectIdentifier {
+        &self.project
+    }
+
+    pub fn generated_at(&self) -> &DateTime<Utc> {
+        &self.generated_at
+    }
+}
+
+/// Convert a `ProjectStorageReport` to a `DailyStorageReport` by stripping
+/// the historical `daily_reports` map.
+impl From<&ProjectStorageReport> for DailyStorageReport {
+    fn from(report: &ProjectStorageReport) -> Self {
+        Self {
+            project: report.project.clone(),
+            generated_at: report.generated_at,
+            project_quotas: report.project_quotas.clone(),
+            user_quotas: report.user_quotas.clone(),
+        }
+    }
+}
+
+/// Promote a `DailyStorageReport` back to a `ProjectStorageReport` with an
+/// empty historical map. Used when returning historical snapshots to callers.
+impl From<DailyStorageReport> for ProjectStorageReport {
+    fn from(snapshot: DailyStorageReport) -> Self {
+        Self {
+            project: snapshot.project,
+            generated_at: snapshot.generated_at,
+            project_quotas: snapshot.project_quotas,
+            user_quotas: snapshot.user_quotas,
+            users: HashMap::new(),
+            daily_reports: HashMap::new(),
+        }
+    }
+}
+
+/// A report of the storage quotas and usage for a single project, including
+/// per-user quotas. The top-level fields always hold the **most recent**
+/// snapshot. Older point-in-time snapshots are stored in `daily_reports`,
+/// keyed by calendar date (UTC), with at most one snapshot per date (the
+/// newest seen for that date). The date of the top-level snapshot is never
+/// duplicated in `daily_reports`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectStorageReport {
     /// The project this report is for
     project: ProjectIdentifier,
 
-    /// When this report was generated (always "now" — no historical data)
+    /// When the top-level snapshot was generated
     generated_at: DateTime<Utc>,
 
     /// Project-level quotas keyed by volume name (e.g. "home", "scratch")
@@ -54,6 +108,11 @@ pub struct ProjectStorageReport {
 
     /// Mapping from portal UserIdentifier to local username
     users: HashMap<UserIdentifier, String>,
+
+    /// Historical snapshots keyed by date (UTC). Each entry is the newest
+    /// snapshot seen for that day. The current top-level date is excluded.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    daily_reports: HashMap<NaiveDate, DailyStorageReport>,
 }
 
 impl ProjectStorageReport {
@@ -65,6 +124,7 @@ impl ProjectStorageReport {
             project_quotas: HashMap::new(),
             user_quotas: HashMap::new(),
             users: HashMap::new(),
+            daily_reports: HashMap::new(),
         }
     }
 
@@ -73,7 +133,7 @@ impl ProjectStorageReport {
         &self.project
     }
 
-    /// Return when the report was generated.
+    /// Return when the top-level snapshot was generated.
     pub fn generated_at(&self) -> &DateTime<Utc> {
         &self.generated_at
     }
@@ -125,9 +185,80 @@ impl ProjectStorageReport {
         &self.users
     }
 
-    /// Return true if the report contains no quota data at all.
+    /// Return true if the top-level snapshot contains no quota data at all.
+    /// Historical entries in `daily_reports` are not considered.
     pub fn is_empty(&self) -> bool {
         self.project_quotas.is_empty() && self.user_quotas.is_empty()
+    }
+
+    /// Return historical snapshots sorted by date (oldest first), each
+    /// promoted to a `ProjectStorageReport` with an empty history map.
+    /// The current top-level date is excluded.
+    pub fn daily_reports(&self) -> Vec<ProjectStorageReport> {
+        let mut dates: Vec<&NaiveDate> = self.daily_reports.keys().collect();
+        dates.sort();
+        dates
+            .into_iter()
+            .filter_map(|date| {
+                self.daily_reports.get(date).cloned().map(|snapshot| {
+                    let mut report = ProjectStorageReport::from(snapshot);
+                    report.users = self.users.clone();
+                    report
+                })
+            })
+            .collect()
+    }
+
+    /// Return the snapshot for a specific calendar date as a
+    /// `ProjectStorageReport`. If `date` matches the current top-level date,
+    /// returns the top-level data (without nested history). Returns an empty
+    /// report if no snapshot exists for the requested date.
+    pub fn get_daily_report(&self, date: &NaiveDate) -> ProjectStorageReport {
+        let current_date = self.generated_at.date_naive();
+        if *date == current_date {
+            // Return the top-level data as a bare report (no nested history)
+            ProjectStorageReport {
+                project: self.project.clone(),
+                generated_at: self.generated_at,
+                project_quotas: self.project_quotas.clone(),
+                user_quotas: self.user_quotas.clone(),
+                users: self.users.clone(),
+                daily_reports: HashMap::new(),
+            }
+        } else {
+            self.daily_reports
+                .get(date)
+                .cloned()
+                .map(|snapshot| {
+                    let mut report = ProjectStorageReport::from(snapshot);
+                    report.users = self.users.clone();
+                    report
+                })
+                .unwrap_or_else(|| ProjectStorageReport::new(&self.project))
+        }
+    }
+
+    /// Combine a slice of `ProjectStorageReport`s into a single report using
+    /// the merge semantics: newest snapshot wins at the top level, older
+    /// snapshots are retained in `daily_reports` (one per date, newest wins).
+    pub fn combine(reports: &[ProjectStorageReport]) -> Result<Self, Error> {
+        if reports.is_empty() {
+            return Err(Error::InvalidState("No reports to combine".to_string()));
+        }
+
+        let mut combined = reports[0].clone();
+
+        for report in &reports[1..] {
+            if report.project != combined.project {
+                return Err(Error::Incompatible(format!(
+                    "Cannot combine reports for different projects: {} and {}",
+                    report.project, combined.project
+                )));
+            }
+            combined += report.clone();
+        }
+
+        Ok(combined)
     }
 
     /// Serialise to a JSON string.
@@ -145,6 +276,85 @@ impl ProjectStorageReport {
     }
 }
 
+/// Merge two reports for the same project. The newer snapshot (by
+/// `generated_at`) becomes the top-level state. The older snapshot is
+/// stored in `daily_reports` under its date, unless it falls on the same
+/// calendar day as the newer snapshot, in which case it is discarded
+/// (the newer one already represents that day). Historical entries from
+/// both reports are merged, keeping the newest snapshot per date.
+impl std::ops::Add<ProjectStorageReport> for ProjectStorageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        if self.project != other.project {
+            tracing::warn!(
+                "Cannot merge storage reports for different projects: {} and {}",
+                self.project,
+                other.project
+            );
+            return self;
+        }
+
+        let (mut newest, older) = if self.generated_at >= other.generated_at {
+            (self, other)
+        } else {
+            (other, self)
+        };
+
+        // Merge users from both sides into the top-level users map.
+        // The newest report's entries take precedence (already in newest.users).
+        for (user, local) in &older.users {
+            newest
+                .users
+                .entry(user.clone())
+                .or_insert_with(|| local.clone());
+        }
+
+        let newest_date = newest.generated_at.date_naive();
+        let older_date = older.generated_at.date_naive();
+
+        // Store older's top-level snapshot in daily_reports if it belongs to
+        // a different date, keeping the newest snapshot for that date.
+        if older_date != newest_date {
+            let older_snapshot = DailyStorageReport::from(&older);
+            newest
+                .daily_reports
+                .entry(older_date)
+                .and_modify(|existing| {
+                    if older.generated_at > existing.generated_at {
+                        *existing = older_snapshot.clone();
+                    }
+                })
+                .or_insert(older_snapshot);
+        }
+
+        // Merge historical entries from older, skipping any that fall on the
+        // newest top-level date.
+        for (date, snapshot) in older.daily_reports {
+            if date == newest_date {
+                continue;
+            }
+            newest
+                .daily_reports
+                .entry(date)
+                .and_modify(|existing| {
+                    if snapshot.generated_at > existing.generated_at {
+                        *existing = snapshot.clone();
+                    }
+                })
+                .or_insert(snapshot);
+        }
+
+        newest
+    }
+}
+
+impl std::ops::AddAssign<ProjectStorageReport> for ProjectStorageReport {
+    fn add_assign(&mut self, other: Self) {
+        *self = self.clone() + other;
+    }
+}
+
 impl std::fmt::Display for ProjectStorageReport {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         writeln!(
@@ -155,39 +365,55 @@ impl std::fmt::Display for ProjectStorageReport {
         )?;
 
         if self.project_quotas.is_empty() && self.user_quotas.is_empty() {
-            return writeln!(f, "  (no quota data)");
-        }
+            writeln!(f, "  (no quota data)")?;
+        } else {
+            if !self.project_quotas.is_empty() {
+                writeln!(f, "  Project quotas:")?;
+                let mut volumes: Vec<&Volume> = self.project_quotas.keys().collect();
+                volumes.sort_by_key(|v| v.name());
+                for volume in volumes {
+                    if let Some(quota) = self.project_quotas.get(volume) {
+                        writeln!(f, "    {}: {}", volume, quota)?;
+                    }
+                }
+            }
 
-        if !self.project_quotas.is_empty() {
-            writeln!(f, "  Project quotas:")?;
-            let mut volumes: Vec<&Volume> = self.project_quotas.keys().collect();
-            volumes.sort_by_key(|v| v.name());
-            for volume in volumes {
-                if let Some(quota) = self.project_quotas.get(volume) {
-                    writeln!(f, "    {}: {}", volume, quota)?;
+            if !self.user_quotas.is_empty() {
+                writeln!(f, "  User quotas:")?;
+                let mut users: Vec<&UserIdentifier> = self.user_quotas.keys().collect();
+                users.sort_by_key(|u| u.to_string());
+                for user in users {
+                    let local = self
+                        .users
+                        .get(user)
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown");
+                    writeln!(f, "    {} ({}):", user, local)?;
+                    if let Some(quotas) = self.user_quotas.get(user) {
+                        let mut volumes: Vec<&Volume> = quotas.keys().collect();
+                        volumes.sort_by_key(|v| v.name());
+                        for volume in volumes {
+                            if let Some(quota) = quotas.get(volume) {
+                                writeln!(f, "      {}: {}", volume, quota)?;
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        if !self.user_quotas.is_empty() {
-            writeln!(f, "  User quotas:")?;
-            let mut users: Vec<&UserIdentifier> = self.user_quotas.keys().collect();
-            users.sort_by_key(|u| u.to_string());
-            for user in users {
-                let local = self
-                    .users
-                    .get(user)
-                    .map(|s| s.as_str())
-                    .unwrap_or("unknown");
-                writeln!(f, "    {} ({}):", user, local)?;
-                if let Some(quotas) = self.user_quotas.get(user) {
-                    let mut volumes: Vec<&Volume> = quotas.keys().collect();
-                    volumes.sort_by_key(|v| v.name());
-                    for volume in volumes {
-                        if let Some(quota) = quotas.get(volume) {
-                            writeln!(f, "      {}: {}", volume, quota)?;
-                        }
-                    }
+        if !self.daily_reports.is_empty() {
+            let mut dates: Vec<&NaiveDate> = self.daily_reports.keys().collect();
+            dates.sort();
+            writeln!(f, "  Historical snapshots ({} day(s)):", dates.len())?;
+            for date in dates {
+                if let Some(snap) = self.daily_reports.get(date) {
+                    writeln!(
+                        f,
+                        "    {} ({})",
+                        date,
+                        snap.generated_at().format("%H:%M:%S UTC")
+                    )?;
                 }
             }
         }
@@ -225,7 +451,8 @@ impl StorageReport {
         projects
     }
 
-    /// Return the storage report for a project, or an empty report if not present.
+    /// Return the storage report for a project, or an empty report if not
+    /// present.
     pub fn get_report(&self, project: &ProjectIdentifier) -> ProjectStorageReport {
         self.reports
             .get(project)
@@ -252,6 +479,29 @@ impl StorageReport {
         self.reports.is_empty()
     }
 
+    /// Combine a slice of `StorageReport`s for the same portal into a single
+    /// report, merging per-project history.
+    pub fn combine(reports: &[StorageReport]) -> Result<Self, Error> {
+        if reports.is_empty() {
+            return Err(Error::InvalidState("No reports to combine".to_string()));
+        }
+
+        let mut combined = StorageReport::new(&reports[0].portal);
+
+        for report in reports.iter() {
+            if report.portal() != combined.portal() {
+                return Err(Error::Incompatible(format!(
+                    "Cannot combine reports from incompatible portals: {} and {}",
+                    report.portal(),
+                    combined.portal()
+                )));
+            }
+            combined += report.clone();
+        }
+
+        Ok(combined)
+    }
+
     /// Serialise to a JSON string.
     pub fn to_json(&self) -> Result<String, Error> {
         serde_json::to_string(self)
@@ -264,6 +514,47 @@ impl StorageReport {
         serde_json::from_str(json)
             .context("Failed to deserialise StorageReport from JSON")
             .map_err(Error::from)
+    }
+}
+
+impl std::ops::Add<StorageReport> for StorageReport {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        if self.portal != other.portal {
+            tracing::warn!(
+                "Cannot merge storage reports for different portals: {} and {}",
+                self.portal,
+                other.portal
+            );
+            return self;
+        }
+
+        let mut new_report = self.clone();
+        new_report += other;
+        new_report
+    }
+}
+
+impl std::ops::AddAssign<StorageReport> for StorageReport {
+    fn add_assign(&mut self, other: Self) {
+        if self.portal != other.portal {
+            tracing::warn!(
+                "Cannot merge storage reports for different portals: {} and {}",
+                self.portal,
+                other.portal
+            );
+            return;
+        }
+
+        for (project, report) in other.reports {
+            match self.reports.get_mut(&project) {
+                Some(existing) => *existing += report,
+                None => {
+                    self.reports.insert(project, report);
+                }
+            }
+        }
     }
 }
 

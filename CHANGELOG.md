@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.24.0] - 2026-03-13
+
 ### Added
 
 - `ProjectStorageReport` now supports temporal history alongside its
@@ -1170,6 +1172,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.24.0]: https://github.com/isambard-sc/openportal/releases/tag/0.24.0
 [0.23.1]: https://github.com/isambard-sc/openportal/releases/tag/0.23.1
 [0.23.0]: https://github.com/isambard-sc/openportal/releases/tag/0.23.0
 [0.22.4]: https://github.com/isambard-sc/openportal/releases/tag/0.22.4

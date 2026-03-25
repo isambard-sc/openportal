@@ -280,10 +280,15 @@ impl ProjectStorageReport {
             return Vec::new();
         }
 
-        let earliest = snapshots.first().map(|(d, _)| d.clone()).unwrap_or(current_date.clone());
-        let latest = snapshots.last().map(|(d, _)| d.clone()).unwrap_or(current_date);
-        let snapshot_map: HashMap<Date, ProjectStorageReport> =
-            snapshots.into_iter().collect();
+        let earliest = snapshots
+            .first()
+            .map(|(d, _)| d.clone())
+            .unwrap_or(current_date.clone());
+        let latest = snapshots
+            .last()
+            .map(|(d, _)| d.clone())
+            .unwrap_or(current_date);
+        let snapshot_map: HashMap<Date, ProjectStorageReport> = snapshots.into_iter().collect();
 
         let mut result = Vec::new();
         let mut date = earliest;

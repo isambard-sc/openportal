@@ -2959,7 +2959,9 @@ impl Instruction {
                 match ProjectIdentifier::parse(parts[1]) {
                     Ok(project) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
-                            Ok(date_range) => Ok(Instruction::GetStorageReport(project, date_range)),
+                            Ok(date_range) => {
+                                Ok(Instruction::GetStorageReport(project, date_range))
+                            }
                             Err(e) => {
                                 tracing::error!(
                                     "get_storage_report failed to parse '{}': {}",
@@ -3003,7 +3005,9 @@ impl Instruction {
                 match PortalIdentifier::parse(parts[1]) {
                     Ok(portal) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
-                            Ok(date_range) => Ok(Instruction::GetStorageReports(portal, date_range)),
+                            Ok(date_range) => {
+                                Ok(Instruction::GetStorageReports(portal, date_range))
+                            }
                             Err(e) => {
                                 tracing::error!(
                                     "get_storage_reports failed to parse '{}': {}",
@@ -4005,7 +4009,7 @@ impl Instruction {
                         )))
                     }
                 }
-            },
+            }
             "get_local_project_dirs" => match ProjectMapping::parse(&parts[1..].join(" ")) {
                 Ok(mapping) => Ok(Instruction::GetLocalProjectDirs(mapping)),
                 Err(_) => {

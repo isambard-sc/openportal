@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **`filter(range: DateRange)`** on all four report types — returns a copy of
+  the report restricted to days that fall within the given date range
+  (inclusive on both ends):
+  - `ProjectUsageReport::filter` — keeps only the daily-report entries whose
+    date is within `range`; the `users` map is preserved.
+  - `UsageReport::filter` — delegates to `ProjectUsageReport::filter` for each
+    contained project report.
+  - `ProjectStorageReport::filter` — keeps only the `daily_reports` entries
+    whose date is within `range`; the top-level (current) snapshot fields
+    (`generated_at`, `project_quotas`, `user_quotas`, `users`) are preserved
+    unchanged.
+  - `StorageReport::filter` — delegates to `ProjectStorageReport::filter` for
+    each contained project report.
+  - Python bindings added for all four types.
+
+- **Date-range support for storage report instructions** — `get_storage_report`,
+  `get_storage_reports`, and `get_local_storage_report` now accept an optional
+  `<date_range>` argument (default: `today`). The filesystem agent enforces that
+  the range must be `today`; any other range causes the job to fail with an
+  error. This mirrors the existing `[<date_range>]` argument on the usage report
+  instructions.
+
+### Fixed
+
+- **`ProjectUsageReport` `+` / `+=` now correctly merges `users` maps** — both
+  operators previously merged the daily-report data but silently discarded the
+  `users` map from the right-hand operand. Both now perform a union: existing
+  entries in `self` are preserved and any missing entries are filled from the
+  other report.
+
+### Changed
+
+- **`ProjectStorageReport::daily_reports` key type changed from `NaiveDate` to
+  `Date`** — the `HashMap<NaiveDate, DailyStorageReport>` field is now
+  `HashMap<Date, DailyStorageReport>`, consistent with `ProjectUsageReport`.
+  The wire/JSON format is unchanged (`Date` serialises as the same `YYYY-MM-DD`
+  string). `ProjectStorageReport::get_report` now takes `&Date` instead of
+  `&NaiveDate`; the Python binding is unchanged (still accepts
+  `datetime.date`).
+
 ## [0.25.0] - 2026-03-25
 
 ### Added

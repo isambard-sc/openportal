@@ -14,7 +14,7 @@ use templemeads::grammar::Instruction::{
     GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
     SetLocalProjectQuota, SetLocalUserQuota,
 };
-use templemeads::grammar::{ProjectMapping, UserMapping};
+use templemeads::grammar::{Date, ProjectMapping, UserMapping};
 use templemeads::job::{Envelope, Job};
 use templemeads::storage::Quota;
 use templemeads::storagereport::ProjectStorageReport;
@@ -107,7 +107,14 @@ async fn main() -> Result<()> {
             let job = envelope.job();
 
             match job.instruction() {
-                GetLocalStorageReport(mapping) => {
+                GetLocalStorageReport(mapping, dates) => {
+                    let today = Date::today().day();
+                    if dates != today {
+                        return job.errored(&format!(
+                            "Storage reports only support today's date; requested range: {}",
+                            dates
+                        ));
+                    }
                     let report = get_local_storage_report(
                         me.name(), &sender, &mapping, job.expires()
                     ).await?;

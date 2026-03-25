@@ -306,6 +306,7 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 |---|---|---|
 | `daily_reports` | `(with_usage_only: bool = True) → list[DailyProjectUsageReport]` | Return the daily reports sorted by date. If `with_usage_only=True` (default), only days with non-zero usage are returned; pass `False` to include all days. |
 | `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user breakdowns, job counts, and average wait times. |
+| `filter` | `(range: DateRange) → ProjectUsageReport` | Return a copy of this report containing only days that fall within `range` (inclusive on both ends). |
 | `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping each project name unchanged, e.g. `project.portal` → `project.new_portal`. |
 | `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
@@ -333,6 +334,7 @@ active projects. Arithmetic operators (`+`, `+=`) are supported.
 |---|---|---|
 | `get_report` | `(project: ProjectIdentifier) → ProjectUsageReport` | Return the usage report for `project`, or an empty report if not present |
 | `get_component` | `(component: str) → UsageReport` | Return a new `UsageReport` containing only the named component's usage |
+| `filter` | `(range: DateRange) → UsageReport` | Return a copy of this report with every contained `ProjectUsageReport` filtered to only days that fall within `range` (inclusive on both ends). |
 | `combine` | `(reports: list[UsageReport]) → UsageReport` | *(static)* Merge a list of portal-level reports |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Update `self.portal` and remap every contained project to the new portal, e.g. `project.portal` → `project.new_portal`. |
 | `remap_project` | `(old_project: ProjectIdentifier, new_project: ProjectIdentifier) → None` | Remap a single contained project from `old_project` to `new_project`. Does nothing if `old_project` is not present. |
@@ -367,6 +369,7 @@ call. Reflects the current (point-in-time) storage quota state for a single proj
 | `is_empty` | `() → bool` | `True` if the top-level snapshot has no quota data (historical entries are not considered) |
 | `daily_reports` | `(with_usage_only: bool = True) → list[ProjectStorageReport]` | Return all snapshots sorted by date (oldest first), including both historical entries and the current top-level snapshot. When `with_usage_only=True` (default), only snapshots with quota data are returned. When `False`, every calendar date between the earliest and latest snapshot is included (empty reports for missing days), mirroring `ProjectUsageReport.daily_reports()`. |
 | `get_report` | `(date: datetime.date) → ProjectStorageReport` | Return the snapshot for a specific date. Returns the top-level data if `date` matches the current snapshot's date, or an empty report if not found. |
+| `filter` | `(range: DateRange) → ProjectStorageReport` | Return a copy of this report containing only historical snapshots whose date falls within `range` (inclusive). The top-level (current) snapshot fields are preserved unchanged. |
 | `combine` | `(reports: list[ProjectStorageReport]) → ProjectStorageReport` | *(static)* Merge a list of reports for the same project using the merge semantics: newest snapshot wins at the top level; older snapshots are retained in history (one per date, newest wins). |
 | `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys (in `users`, `user_quotas`, and historical snapshots) so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping the project name unchanged. |
@@ -440,6 +443,7 @@ aggregate of `ProjectStorageReport` objects for all active projects.
 |---|---|---|
 | `get_report` | `(project: ProjectIdentifier) → ProjectStorageReport` | Return the storage report for `project`, or an empty report if not present |
 | `is_empty` | `() → bool` | `True` if there are no project reports |
+| `filter` | `(range: DateRange) → StorageReport` | Return a copy of this report with every contained `ProjectStorageReport` filtered to only historical snapshots that fall within `range` (inclusive). Top-level snapshot fields of each project report are preserved unchanged. |
 | `combine` | `(reports: list[StorageReport]) → StorageReport` | *(static)* Merge a list of portal-level reports, merging per-project history |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Update `self.portal` and remap every contained project to the new portal. |
 | `remap_project` | `(old_project: ProjectIdentifier, new_project: ProjectIdentifier) → None` | Remap a single contained project from `old_project` to `new_project`. Does nothing if `old_project` is not present. |

@@ -136,17 +136,17 @@ async fn main() -> Result<()> {
                     job.completed(
                         get_usage_reports(&me, &resource, &portal, &dates).await?)
                 }
-                GetStorageReport(project) => {
+                GetStorageReport(project, dates) => {
                     tracing::debug!("Getting storage report for {}", project);
 
                     job.completed(
-                        get_storage_report(&me, &resource, &project).await?)
+                        get_storage_report(&me, &resource, &project, &dates).await?)
                 }
-                GetStorageReports(portal) => {
+                GetStorageReports(portal, dates) => {
                     tracing::debug!("Getting storage reports for portal {}", portal);
 
                     job.completed(
-                        get_storage_reports(&me, &resource, &portal).await?)
+                        get_storage_reports(&me, &resource, &portal, &dates).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -894,16 +894,18 @@ pub async fn get_storage_report(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    dates: &DateRange,
 ) -> Result<ProjectStorageReport, Error> {
     match agent::bridge(BRIDGE_WAIT_TIME).await {
         Some(bridge) => {
             let job = Job::parse(
                 &format!(
-                    "{}.{}.{} get_storage_report {}",
+                    "{}.{}.{} get_storage_report {} {}",
                     me,
                     bridge.name(),
                     resource,
-                    project
+                    project,
+                    dates
                 ),
                 false,
             )?
@@ -940,16 +942,18 @@ pub async fn get_storage_reports(
     me: &str,
     resource: &str,
     portal: &PortalIdentifier,
+    dates: &DateRange,
 ) -> Result<StorageReport, Error> {
     match agent::bridge(BRIDGE_WAIT_TIME).await {
         Some(bridge) => {
             let job = Job::parse(
                 &format!(
-                    "{}.{}.{} get_storage_reports {}",
+                    "{}.{}.{} get_storage_reports {} {}",
                     me,
                     bridge.name(),
                     resource,
-                    portal
+                    portal,
+                    dates
                 ),
                 false,
             )?

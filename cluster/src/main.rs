@@ -244,12 +244,12 @@ async fn main() -> Result<()> {
                     let report = get_usage_reports(me.name(), &portal, &dates).await?;
                     job.completed(report)
                 }
-                GetStorageReport(project) => {
-                    let report = get_storage_report(me.name(), &project).await?;
+                GetStorageReport(project, dates) => {
+                    let report = get_storage_report(me.name(), &project, &dates).await?;
                     job.completed(report)
                 }
-                GetStorageReports(portal) => {
-                    let report = get_storage_reports(me.name(), &portal).await?;
+                GetStorageReports(portal, dates) => {
+                    let report = get_storage_reports(me.name(), &portal, &dates).await?;
                     job.completed(report)
                 }
                 GetLimit(project) => {
@@ -1190,6 +1190,7 @@ async fn get_usage_reports(
 async fn get_storage_report(
     me: &str,
     project: &ProjectIdentifier,
+    dates: &DateRange,
 ) -> Result<ProjectStorageReport, Error> {
     let mapping = get_project_mapping(me, project).await?;
 
@@ -1206,10 +1207,11 @@ async fn get_storage_report(
     // Delegate to the filesystem agent, which will call back with get_users
     let job = Job::parse(
         &format!(
-            "{}.{} get_local_storage_report {}",
+            "{}.{} get_local_storage_report {} {}",
             me,
             filesystem.name(),
-            mapping
+            mapping,
+            dates
         ),
         false,
     )?
@@ -1222,13 +1224,17 @@ async fn get_storage_report(
     }
 }
 
-async fn get_storage_reports(me: &str, portal: &PortalIdentifier) -> Result<StorageReport, Error> {
+async fn get_storage_reports(
+    me: &str,
+    portal: &PortalIdentifier,
+    dates: &DateRange,
+) -> Result<StorageReport, Error> {
     let projects = get_projects(me, portal).await?;
 
     let mut report = StorageReport::new(portal);
 
     for project in projects {
-        let project_report = get_storage_report(me, project.project()).await?;
+        let project_report = get_storage_report(me, project.project(), dates).await?;
         report.set_report(project_report)?;
     }
 

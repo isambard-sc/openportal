@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Context;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::Error;
 
-use crate::grammar::{NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping};
+use crate::grammar::{
+    Date, DateRange, NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping,
+};
 use crate::storage::{Quota, Volume};
 
 impl NamedType for StorageReport {
@@ -143,7 +145,7 @@ pub struct ProjectStorageReport {
     /// Historical snapshots keyed by date (UTC). Each entry is the newest
     /// snapshot seen for that day. The current top-level date is excluded.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    daily_reports: HashMap<NaiveDate, DailyStorageReport>,
+    daily_reports: HashMap<Date, DailyStorageReport>,
 }
 
 impl ProjectStorageReport {
@@ -239,20 +241,20 @@ impl ProjectStorageReport {
     /// snapshot are represented by an empty `ProjectStorageReport`.
     pub fn daily_reports(&self, with_usage_only: bool) -> Vec<ProjectStorageReport> {
         // Collect historical snapshots as (date, report) pairs
-        let mut snapshots: Vec<(NaiveDate, ProjectStorageReport)> = self
+        let mut snapshots: Vec<(Date, ProjectStorageReport)> = self
             .daily_reports
             .iter()
             .map(|(date, snapshot)| {
                 let mut report = ProjectStorageReport::from(snapshot.clone());
                 report.users = self.users.clone();
-                (*date, report)
+                (date.clone(), report)
             })
             .collect();
 
         // Append the current top-level snapshot
-        let current_date = self.generated_at.date_naive();
+        let current_date = Date::from_chrono(&self.generated_at.date_naive());
         snapshots.push((
-            current_date,
+            current_date.clone(),
             ProjectStorageReport {
                 project: self.project.clone(),
                 generated_at: self.generated_at,
@@ -263,7 +265,7 @@ impl ProjectStorageReport {
             },
         ));
 
-        snapshots.sort_by_key(|(d, _)| *d);
+        snapshots.sort_by_key(|(d, _)| d.clone());
 
         if with_usage_only {
             return snapshots
@@ -278,9 +280,9 @@ impl ProjectStorageReport {
             return Vec::new();
         }
 
-        let earliest = snapshots.first().map(|(d, _)| *d).unwrap_or(current_date);
-        let latest = snapshots.last().map(|(d, _)| *d).unwrap_or(current_date);
-        let snapshot_map: HashMap<NaiveDate, ProjectStorageReport> =
+        let earliest = snapshots.first().map(|(d, _)| d.clone()).unwrap_or(current_date.clone());
+        let latest = snapshots.last().map(|(d, _)| d.clone()).unwrap_or(current_date);
+        let snapshot_map: HashMap<Date, ProjectStorageReport> =
             snapshots.into_iter().collect();
 
         let mut result = Vec::new();
@@ -291,17 +293,22 @@ impl ProjectStorageReport {
             } else {
                 result.push(ProjectStorageReport {
                     project: self.project.clone(),
-                    generated_at: chrono::NaiveDateTime::new(date, chrono::NaiveTime::MIN)
-                        .and_utc(),
+                    generated_at: chrono::NaiveDateTime::new(
+                        date.to_chrono(),
+                        chrono::NaiveTime::MIN,
+                    )
+                    .and_utc(),
                     project_quotas: HashMap::new(),
                     user_quotas: HashMap::new(),
                     users: HashMap::new(),
                     daily_reports: HashMap::new(),
                 });
             }
-            match date.succ_opt() {
-                Some(next) if next <= latest => date = next,
-                _ => break,
+            let next = date.next();
+            if next <= latest {
+                date = next;
+            } else {
+                break;
             }
         }
         result
@@ -311,8 +318,8 @@ impl ProjectStorageReport {
     /// `ProjectStorageReport`. If `date` matches the current top-level date,
     /// returns the top-level data (without nested history). Returns an empty
     /// report if no snapshot exists for the requested date.
-    pub fn get_report(&self, date: &NaiveDate) -> ProjectStorageReport {
-        let current_date = self.generated_at.date_naive();
+    pub fn get_report(&self, date: &Date) -> ProjectStorageReport {
+        let current_date = Date::from_chrono(&self.generated_at.date_naive());
         if *date == current_date {
             ProjectStorageReport {
                 project: self.project.clone(),
@@ -332,6 +339,27 @@ impl ProjectStorageReport {
                     report
                 })
                 .unwrap_or_else(|| ProjectStorageReport::new(&self.project))
+        }
+    }
+
+    /// Return a copy of this report containing only historical snapshots whose
+    /// date falls within `range` (inclusive on both ends). The top-level
+    /// (current) snapshot fields are preserved unchanged.
+    pub fn filter(&self, range: &DateRange) -> Self {
+        let daily_reports = self
+            .daily_reports
+            .iter()
+            .filter(|(date, _)| *date >= range.start_date() && *date <= range.end_date())
+            .map(|(date, report)| (date.clone(), report.clone()))
+            .collect();
+
+        Self {
+            project: self.project.clone(),
+            generated_at: self.generated_at,
+            project_quotas: self.project_quotas.clone(),
+            user_quotas: self.user_quotas.clone(),
+            users: self.users.clone(),
+            daily_reports,
         }
     }
 
@@ -520,8 +548,8 @@ impl std::ops::Add<ProjectStorageReport> for ProjectStorageReport {
                 .or_insert_with(|| local.clone());
         }
 
-        let newest_date = newest.generated_at.date_naive();
-        let older_date = older.generated_at.date_naive();
+        let newest_date = Date::from_chrono(&newest.generated_at.date_naive());
+        let older_date = Date::from_chrono(&older.generated_at.date_naive());
 
         // Store older's top-level snapshot in daily_reports if it belongs to
         // a different date, keeping the newest snapshot for that date.
@@ -613,7 +641,7 @@ impl std::fmt::Display for ProjectStorageReport {
         }
 
         if !self.daily_reports.is_empty() {
-            let mut dates: Vec<&NaiveDate> = self.daily_reports.keys().collect();
+            let mut dates: Vec<&Date> = self.daily_reports.keys().collect();
             dates.sort();
             writeln!(f, "  Historical snapshots ({} day(s)):", dates.len())?;
             for date in dates {
@@ -696,6 +724,23 @@ impl StorageReport {
     /// Return true if there are no project reports.
     pub fn is_empty(&self) -> bool {
         self.reports.is_empty()
+    }
+
+    /// Return a copy of this report with every contained `ProjectStorageReport`
+    /// filtered to only the historical snapshots that fall within `range`
+    /// (inclusive). The top-level snapshot fields of each project report are
+    /// preserved unchanged.
+    pub fn filter(&self, range: &DateRange) -> Self {
+        let reports = self
+            .reports
+            .iter()
+            .map(|(project, report)| (project.clone(), report.filter(range)))
+            .collect();
+
+        Self {
+            portal: self.portal.clone(),
+            reports,
+        }
     }
 
     /// Remap all projects in this report to a new portal.

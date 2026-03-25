@@ -379,7 +379,7 @@ async fn main() -> Result<()> {
 
                     job.copy_result_from(&result)
                 }
-                GetStorageReport(project) => {
+                GetStorageReport(project, _dates) => {
                     // get the storage report for the project from the cluster
                     tracing::debug!("Getting storage report for {}", project);
 
@@ -412,7 +412,7 @@ async fn main() -> Result<()> {
 
                     job.copy_result_from(&result)
                 }
-                GetStorageReports(portal) => {
+                GetStorageReports(portal, _dates) => {
                     // get the storage reports for the portal from the cluster
                     tracing::debug!("Getting storage reports for {}", portal);
 

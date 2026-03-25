@@ -2642,6 +2642,10 @@ impl UsageReport {
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
     }
+
+    fn filter(&self, range: &DateRange) -> PyResult<Self> {
+        Ok(self.0.filter(&range.0).into())
+    }
 }
 
 impl From<usagereport::UsageReport> for UsageReport {
@@ -2928,6 +2932,10 @@ impl ProjectUsageReport {
             .remap_users(&mapping)
             .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
+
+    fn filter(&self, range: &DateRange) -> PyResult<Self> {
+        Ok(self.0.filter(&range.0).into())
+    }
 }
 
 impl From<usagereport::ProjectUsageReport> for ProjectUsageReport {
@@ -3061,7 +3069,7 @@ impl ProjectStorageReport {
     /// `ProjectStorageReport`. Returns the top-level data if `date` matches
     /// the current snapshot's date, or an empty report if not found.
     fn get_report(&self, date: chrono::NaiveDate) -> PyResult<ProjectStorageReport> {
-        Ok(self.0.get_report(&date).into())
+        Ok(self.0.get_report(&grammar::Date::from_chrono(&date)).into())
     }
 
     fn __add__(&self, other: &ProjectStorageReport) -> PyResult<ProjectStorageReport> {
@@ -3109,6 +3117,10 @@ impl ProjectStorageReport {
             Ok(combined) => Ok(combined.into()),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
+    }
+
+    fn filter(&self, range: &DateRange) -> PyResult<Self> {
+        Ok(self.0.filter(&range.0).into())
     }
 }
 
@@ -3238,6 +3250,10 @@ impl StorageReport {
             Ok(combined) => Ok(combined.into()),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
+    }
+
+    fn filter(&self, range: &DateRange) -> PyResult<Self> {
+        Ok(self.0.filter(&range.0).into())
     }
 }
 

@@ -2573,16 +2573,17 @@ pub enum Instruction {
     UpdateHomeDir(UserIdentifier, String),
 
     /// An instruction to get the local storage report for a project
-    /// from the filesystem agent (reflects current state)
-    GetLocalStorageReport(ProjectMapping),
+    /// from the filesystem agent in the specified date range (defaults to today)
+    GetLocalStorageReport(ProjectMapping, DateRange),
 
     /// An instruction to get the storage report for a single
-    /// project (reflects current state — no date range needed)
-    GetStorageReport(ProjectIdentifier),
+    /// project in the specified date range (defaults to today)
+    GetStorageReport(ProjectIdentifier, DateRange),
 
     /// An instruction to get the storage reports for all active
-    /// projects associated with a portal (reflects current state)
-    GetStorageReports(PortalIdentifier),
+    /// projects associated with a portal in the specified date range
+    /// (defaults to today)
+    GetStorageReports(PortalIdentifier, DateRange),
 
     /// An instruction to get the usage report for a single
     /// project in the specified date range
@@ -2956,7 +2957,23 @@ impl Instruction {
                 }
 
                 match ProjectIdentifier::parse(parts[1]) {
-                    Ok(project) => Ok(Instruction::GetStorageReport(project)),
+                    Ok(project) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
+                            Ok(date_range) => Ok(Instruction::GetStorageReport(project, date_range)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::error!(
                             "get_storage_report failed to parse '{}': {}",
@@ -2984,7 +3001,23 @@ impl Instruction {
                 }
 
                 match PortalIdentifier::parse(parts[1]) {
-                    Ok(portal) => Ok(Instruction::GetStorageReports(portal)),
+                    Ok(portal) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
+                            Ok(date_range) => Ok(Instruction::GetStorageReports(portal, date_range)),
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_storage_reports failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_storage_reports failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::error!(
                             "get_storage_reports failed to parse '{}': {}",
@@ -3929,17 +3962,48 @@ impl Instruction {
                     )))
                 }
             },
-            "get_local_storage_report" => match ProjectMapping::parse(&parts[1..].join(" ")) {
-                Ok(mapping) => Ok(Instruction::GetLocalStorageReport(mapping)),
-                Err(_) => {
+            "get_local_storage_report" => {
+                if parts.len() < 2 {
                     tracing::error!(
                         "get_local_storage_report failed to parse: {}",
                         &parts[1..].join(" ")
                     );
-                    Err(Error::Parse(format!(
+                    return Err(Error::Parse(format!(
                         "get_local_storage_report failed to parse: {}",
                         &parts[1..].join(" ")
-                    )))
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
+                            Ok(date_range) => {
+                                Ok(Instruction::GetLocalStorageReport(mapping, date_range))
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_local_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_local_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "get_local_storage_report failed to parse: {}",
+                            &parts[1..].join(" ")
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_storage_report failed to parse: {}",
+                            &parts[1..].join(" ")
+                        )))
+                    }
                 }
             },
             "get_local_project_dirs" => match ProjectMapping::parse(&parts[1..].join(" ")) {
@@ -4045,9 +4109,9 @@ impl Instruction {
             Instruction::GetLocalUserDirs(_) => "get_local_user_dirs".to_string(),
             Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
             Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
-            Instruction::GetLocalStorageReport(_) => "get_local_storage_report".to_string(),
-            Instruction::GetStorageReport(_) => "get_storage_report".to_string(),
-            Instruction::GetStorageReports(_) => "get_storage_reports".to_string(),
+            Instruction::GetLocalStorageReport(_, _) => "get_local_storage_report".to_string(),
+            Instruction::GetStorageReport(_, _) => "get_storage_report".to_string(),
+            Instruction::GetStorageReports(_, _) => "get_storage_reports".to_string(),
             Instruction::GetUsageReport(_, _) => "get_usage_report".to_string(),
             Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
             Instruction::SetLimit(_, _) => "set_limit".to_string(),
@@ -4127,12 +4191,18 @@ impl Instruction {
             Instruction::GetLocalHomeDir(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalUserDirs(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalProjectDirs(mapping) => vec![mapping.to_string()],
-            Instruction::GetLocalStorageReport(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalStorageReport(mapping, date_range) => {
+                vec![mapping.to_string(), date_range.to_string()]
+            }
             Instruction::UpdateHomeDir(user, homedir) => {
                 vec![user.to_string(), homedir.clone()]
             }
-            Instruction::GetStorageReport(project) => vec![project.to_string()],
-            Instruction::GetStorageReports(portal) => vec![portal.to_string()],
+            Instruction::GetStorageReport(project, date_range) => {
+                vec![project.to_string(), date_range.to_string()]
+            }
+            Instruction::GetStorageReports(portal, date_range) => {
+                vec![portal.to_string(), date_range.to_string()]
+            }
             Instruction::GetUsageReport(project, date_range) => {
                 vec![project.to_string(), date_range.to_string()]
             }
@@ -4207,11 +4277,11 @@ impl std::fmt::Display for Instruction {
             Instruction::GetLocalUsageReport(mapping, date_range) => {
                 write!(f, "get_local_usage_report {} {}", mapping, date_range)
             }
-            Instruction::GetStorageReport(project) => {
-                write!(f, "get_storage_report {}", project)
+            Instruction::GetStorageReport(project, date_range) => {
+                write!(f, "get_storage_report {} {}", project, date_range)
             }
-            Instruction::GetStorageReports(portal) => {
-                write!(f, "get_storage_reports {}", portal)
+            Instruction::GetStorageReports(portal, date_range) => {
+                write!(f, "get_storage_reports {} {}", portal, date_range)
             }
             Instruction::GetUsageReport(project, date_range) => {
                 write!(f, "get_usage_report {} {}", project, date_range)
@@ -4288,8 +4358,8 @@ impl std::fmt::Display for Instruction {
             Instruction::GetLocalProjectDirs(mapping) => {
                 write!(f, "get_local_project_dirs {}", mapping)
             }
-            Instruction::GetLocalStorageReport(mapping) => {
-                write!(f, "get_local_storage_report {}", mapping)
+            Instruction::GetLocalStorageReport(mapping, date_range) => {
+                write!(f, "get_local_storage_report {} {}", mapping, date_range)
             }
             Instruction::SyncOfferings(offerings) => write!(f, "sync_offerings {}", offerings),
             Instruction::AddOfferings(offerings) => write!(f, "add_offerings {}", offerings),

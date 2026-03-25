@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use crate::error::Error;
 
 use crate::grammar::{
-    Allocation, Date, NamedType, Node, PortalIdentifier, ProjectIdentifier, UserIdentifier,
-    UserMapping,
+    Allocation, Date, DateRange, NamedType, Node, PortalIdentifier, ProjectIdentifier,
+    UserIdentifier, UserMapping,
 };
 
 impl NamedType for Usage {
@@ -1081,6 +1081,10 @@ impl std::ops::Add<ProjectUsageReport> for ProjectUsageReport {
             }
         }
 
+        for (user, local_user) in other.users {
+            new_report.users.entry(user).or_insert(local_user);
+        }
+
         new_report
     }
 }
@@ -1103,6 +1107,10 @@ impl std::ops::AddAssign<ProjectUsageReport> for ProjectUsageReport {
                     self.reports.insert(date, report);
                 }
             }
+        }
+
+        for (user, local_user) in other.users {
+            self.users.entry(user).or_insert(local_user);
         }
     }
 }
@@ -1222,6 +1230,23 @@ impl ProjectUsageReport {
         dates.sort();
 
         dates
+    }
+
+    /// Return a copy of this report containing only days that fall within
+    /// `range` (inclusive on both ends).
+    pub fn filter(&self, range: &DateRange) -> Self {
+        let reports = self
+            .reports
+            .iter()
+            .filter(|(date, _)| *date >= range.start_date() && *date <= range.end_date())
+            .map(|(date, report)| (date.clone(), report.clone()))
+            .collect();
+
+        Self {
+            project: self.project.clone(),
+            reports,
+            users: self.users.clone(),
+        }
     }
 
     pub fn components(&self) -> Vec<String> {
@@ -1747,6 +1772,21 @@ impl UsageReport {
                 reports: HashMap::new(),
                 users: HashMap::new(),
             })
+    }
+
+    /// Return a copy of this report with every contained `ProjectUsageReport`
+    /// filtered to only the days that fall within `range` (inclusive).
+    pub fn filter(&self, range: &DateRange) -> Self {
+        let reports = self
+            .reports
+            .iter()
+            .map(|(project, report)| (project.clone(), report.filter(range)))
+            .collect();
+
+        Self {
+            portal: self.portal.clone(),
+            reports,
+        }
     }
 
     pub fn set_report(&mut self, report: ProjectUsageReport) -> Result<(), Error> {

@@ -584,15 +584,17 @@ Returns: `ProjectUsageReport`
 ### Storage Reporting Instructions
 
 These instructions return point-in-time snapshots of storage quota and usage
-across all volumes for a project. Unlike usage reports they have no date range —
-they always reflect the current state.
+across all volumes for a project. An optional date range may be supplied; it
+defaults to `today`. The underlying filesystem agent only supports `today` —
+any other range will cause the job to fail with an error.
 
 #### `get_storage_report`
 
 Get the storage quota report for a project across all volumes and all users.
+If no date range is given, the report covers today only.
 
 ```
-get_storage_report <project_id>
+get_storage_report <project_id> [<date_range>]
 ```
 
 Returns: `ProjectStorageReport`
@@ -600,9 +602,10 @@ Returns: `ProjectStorageReport`
 #### `get_storage_reports`
 
 Get storage quota reports for all active projects in a portal.
+If no date range is given, the reports cover today only.
 
 ```
-get_storage_reports <portal_id>
+get_storage_reports <portal_id> [<date_range>]
 ```
 
 Returns: `StorageReport`
@@ -614,8 +617,11 @@ cluster instance agent to the filesystem agent. The filesystem agent fetches
 project and per-user quotas locally, calling back to the sender with
 `get_users <project_id>` to obtain the member list.
 
+If no date range is given, it defaults to `today`. The filesystem agent will
+return an error if the requested range is anything other than today.
+
 ```
-get_local_storage_report <project_mapping>
+get_local_storage_report <project_mapping> [<date_range>]
 ```
 
 Returns: `ProjectStorageReport`
@@ -891,9 +897,9 @@ Returns: `Destinations`
 | `get_usage_report` | `<project_id> [<date_range>]` | `ProjectUsageReport` | Usage report for project |
 | `get_usage_reports` | `<portal_id> [<date_range>]` | `Vec<ProjectUsageReport>` | Usage reports for all portal projects |
 | `get_local_usage_report` | `<project_mapping> [<date_range>]` | `ProjectUsageReport` | Local usage report |
-| `get_storage_report` | `<project_id>` | `ProjectStorageReport` | Current storage quota report for project |
-| `get_storage_reports` | `<portal_id>` | `StorageReport` | Current storage quota reports for all portal projects |
-| `get_local_storage_report` | `<project_mapping>` | `ProjectStorageReport` | Local storage quota report (filesystem agent only) |
+| `get_storage_report` | `<project_id> [<date_range>]` | `ProjectStorageReport` | Storage quota report for project (default: today; filesystem agent only supports today) |
+| `get_storage_reports` | `<portal_id> [<date_range>]` | `StorageReport` | Storage quota reports for all portal projects (default: today) |
+| `get_local_storage_report` | `<project_mapping> [<date_range>]` | `ProjectStorageReport` | Local storage quota report (filesystem agent only; errors if range ≠ today) |
 | `set_limit` | `<project_id> <seconds>` | — | Set compute limit for project |
 | `get_limit` | `<project_id>` | `Usage` | Get compute limit for project |
 | `set_local_limit` | `<project_mapping> <seconds>` | — | Set local compute limit |
@@ -966,8 +972,11 @@ set_local_project_quota myproject.waldur:hpc_myproject scratch 2TB
 # Get all quotas for a user
 get_user_quotas alice.myproject.waldur
 
-# Get a point-in-time storage report for a project (all volumes, all users)
+# Get a point-in-time storage report for a project (all volumes, all users) — defaults to today
 get_storage_report myproject.waldur
+
+# Get a storage report for a project for the current month (will error — only today is supported)
+get_storage_report myproject.waldur this_month
 
 # Get storage reports for all projects in a portal
 get_storage_reports waldur
@@ -993,4 +1002,5 @@ get_storage_reports waldur
 - `get_local_storage_report` is an internal instruction: it is sent by the cluster
   instance agent to the filesystem agent and is not intended to be issued by
   external callers. The filesystem agent calls back to the sender with `get_users`
-  to retrieve the project member list.
+  to retrieve the project member list. The filesystem agent rejects any date range
+  other than `today` with an error.

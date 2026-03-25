@@ -91,7 +91,7 @@ to know which jobs can be routed to this portal.
 | Function | Signature | Description |
 |---|---|---|
 | `health` | `() → Health` | Return the health status of the bridge and connected agents. |
-| `diagnostics` | `(destination: str) → Diagnostics` | Fetch a diagnostics report from the agent at `destination` (dot-path, e.g. `"brics.clusters"`). Pass `""` to query the bridge itself. |
+| `diagnostics` | `(destination: str) → Diagnostics` | Fetch a diagnostics report from the agent at `destination` (dot-path, e.g. `"portal.clusters"`). Pass `""` to query the bridge itself. |
 | `restart` | `(restart_type: str, destination: str) → RestartResponse` | Request a restart of the agent at `destination`. `restart_type` is `"soft"` (graceful) or `"hard"` (immediate). Pass `""` to restart the bridge itself. |
 
 ---
@@ -203,7 +203,7 @@ See [notes.md](notes.md) for the provisional `HealthInfo` and
 ### `Destination`
 
 A dot-separated routing path identifying an agent, e.g.
-`myportal.brics.clusters.aip2`. Used for `offerings` and for constructing
+`myportal.clusters.shared`. Used for `offerings` and for constructing
 job commands.
 
 ---
@@ -297,6 +297,8 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 |---|---|---|
 | `total_wait_seconds` | `int` | Total queue wait time in seconds across all days in this report |
 | `average_wait_seconds` | `float` | Mean queue wait time in seconds per job across the whole report (`0.0` if no jobs) |
+| `users` | `list[UserIdentifier]` | Sorted list of portal users with mappings in this report |
+| `user_mapping` | `dict[UserIdentifier, str]` | Map of portal user identifier → local username |
 
 **Methods:**
 
@@ -304,6 +306,9 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 |---|---|---|
 | `daily_reports` | `(with_usage_only: bool = True) → list[DailyProjectUsageReport]` | Return the daily reports sorted by date. If `with_usage_only=True` (default), only days with non-zero usage are returned; pass `False` to include all days. |
 | `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user breakdowns, job counts, and average wait times. |
+| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping each project name unchanged, e.g. `project.portal` → `project.new_portal`. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
 
 `str(report)` auto-scales usage units per user per day.
 
@@ -313,6 +318,27 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 
 Portal-level aggregate report containing `ProjectUsageReport` objects for all
 active projects. Arithmetic operators (`+`, `+=`) are supported.
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `portal` | `PortalIdentifier` | The portal this report covers |
+| `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
+| `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `get_report` | `(project: ProjectIdentifier) → ProjectUsageReport` | Return the usage report for `project`, or an empty report if not present |
+| `get_component` | `(component: str) → UsageReport` | Return a new `UsageReport` containing only the named component's usage |
+| `combine` | `(reports: list[UsageReport]) → UsageReport` | *(static)* Merge a list of portal-level reports |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Update `self.portal` and remap every contained project to the new portal, e.g. `project.portal` → `project.new_portal`. |
+| `remap_project` | `(old_project: ProjectIdentifier, new_project: ProjectIdentifier) → None` | Remap a single contained project from `old_project` to `new_project`. Does nothing if `old_project` is not present. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings across all contained project reports. Raises `OSError` on clash within any project. |
+| `to_json` | `() → str` | Serialise to a JSON string |
+| `from_json` | `(json: str) → UsageReport` | *(static)* Deserialise from a JSON string |
 
 See [json-types.md](json-types.md) for full schemas.
 
@@ -331,7 +357,8 @@ call. Reflects the current (point-in-time) storage quota state for a single proj
 | `generated_at` | `datetime` | UTC timestamp when the report was generated |
 | `project_quotas` | `dict[Volume, Quota]` | Project-level quotas keyed by volume |
 | `user_quotas` | `dict[UserIdentifier, dict[Volume, Quota]]` | Per-user quotas keyed by user identifier then volume |
-| `users` | `dict[UserIdentifier, str]` | Map of portal user identifier → local username |
+| `users` | `list[UserIdentifier]` | Sorted list of portal users with mappings in this report |
+| `user_mapping` | `dict[UserIdentifier, str]` | Map of portal user identifier → local username |
 
 **Methods:**
 
@@ -341,6 +368,9 @@ call. Reflects the current (point-in-time) storage quota state for a single proj
 | `daily_reports` | `(with_usage_only: bool = True) → list[ProjectStorageReport]` | Return all snapshots sorted by date (oldest first), including both historical entries and the current top-level snapshot. When `with_usage_only=True` (default), only snapshots with quota data are returned. When `False`, every calendar date between the earliest and latest snapshot is included (empty reports for missing days), mirroring `ProjectUsageReport.daily_reports()`. |
 | `get_report` | `(date: datetime.date) → ProjectStorageReport` | Return the snapshot for a specific date. Returns the top-level data if `date` matches the current snapshot's date, or an empty report if not found. |
 | `combine` | `(reports: list[ProjectStorageReport]) → ProjectStorageReport` | *(static)* Merge a list of reports for the same project using the merge semantics: newest snapshot wins at the top level; older snapshots are retained in history (one per date, newest wins). |
+| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys (in `users`, `user_quotas`, and historical snapshots) so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping the project name unchanged. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
 | `to_json` | `() → str` | Serialise to a JSON string |
 | `from_json` | `(json: str) → ProjectStorageReport` | *(static)* Deserialise from a JSON string |
 
@@ -361,8 +391,8 @@ if job.is_finished and not job.is_error:
     report = job.result   # ProjectStorageReport
     for volume, quota in report.project_quotas.items():
         print(f"  {volume}: {quota}")
-    for user, vol_quotas in report.user_quotas.items():
-        local = report.users.get(user, "unknown")
+    for user, local in report.user_mapping.items():
+        vol_quotas = report.user_quotas.get(user, {})
         for volume, quota in vol_quotas.items():
             print(f"  {user} ({local}) — {volume}: {quota}")
 
@@ -378,6 +408,15 @@ for usage, storage in zip(usage_report.daily_reports(with_usage_only=False),
 
 # Retrieve a specific day
 snap = combined.get_report(datetime.date(2024, 3, 10))
+
+# Translate a report from one portal to another
+old_project = ProjectIdentifier.parse("myproject.myportal")
+new_project = ProjectIdentifier.parse("myproject.newportal")
+report.remap_project(new_project)
+
+# Remap local usernames (e.g. unix names → email addresses)
+uid = UserIdentifier.parse("alice.myproject.newportal")
+report.remap_users({uid: "alice@example.com"})
 ```
 
 ---
@@ -393,6 +432,7 @@ aggregate of `ProjectStorageReport` objects for all active projects.
 |---|---|---|
 | `portal` | `PortalIdentifier` | The portal this report covers |
 | `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
+| `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
 
 **Methods:**
 
@@ -401,6 +441,9 @@ aggregate of `ProjectStorageReport` objects for all active projects.
 | `get_report` | `(project: ProjectIdentifier) → ProjectStorageReport` | Return the storage report for `project`, or an empty report if not present |
 | `is_empty` | `() → bool` | `True` if there are no project reports |
 | `combine` | `(reports: list[StorageReport]) → StorageReport` | *(static)* Merge a list of portal-level reports, merging per-project history |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Update `self.portal` and remap every contained project to the new portal. |
+| `remap_project` | `(old_project: ProjectIdentifier, new_project: ProjectIdentifier) → None` | Remap a single contained project from `old_project` to `new_project`. Does nothing if `old_project` is not present. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings across all contained project reports. Raises `OSError` on clash within any project. |
 | `to_json` | `() → str` | Serialise to a JSON string |
 | `from_json` | `(json: str) → StorageReport` | *(static)* Deserialise from a JSON string |
 

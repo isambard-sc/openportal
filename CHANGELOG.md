@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **Report remapping** — all four report types (`ProjectUsageReport`,
+  `UsageReport`, `ProjectStorageReport`, `StorageReport`) now support
+  remapping identifiers, enabling reports to be translated from one portal
+  to another before merging or publishing:
+
+  - `remap_project(&new_project: ProjectIdentifier)` on
+    `ProjectUsageReport` / `ProjectStorageReport` — replaces the top-level
+    project identifier and rebuilds all `UserIdentifier` keys in the users
+    map so that `username.old_project.old_portal` becomes
+    `username.new_project.new_portal`. For `ProjectStorageReport`, also
+    rebuilds the `user_quotas` keys and updates historical snapshots in
+    `daily_reports`.
+  - `remap_portal(&new_portal: PortalIdentifier)` on all four types —
+    convenience wrapper that keeps each project's name unchanged and only
+    swaps the portal, e.g. `aiproject.brics` → `aiproject.ukri`.
+  - `remap_project(old: &ProjectIdentifier, new: &ProjectIdentifier)` on
+    `UsageReport` / `StorageReport` — remaps a single contained project
+    report from `old` to `new`. Does nothing if `old` is not present.
+  - `remap_portal(&new_portal: PortalIdentifier)` on `UsageReport` /
+    `StorageReport` — bulk-remaps every contained project to the new portal
+    and updates `self.portal`.
+  - `remap_users(&new_usermapping: HashMap<UserIdentifier, String>)` on all
+    four types — updates the local-username strings for the specified users.
+    Returns an error if the remapping would cause two distinct users to share
+    the same local username. For `ProjectUsageReport`, also propagates the
+    rename into all daily-report `HashMap<String, Usage>` entries (including
+    component breakdowns, per-user job counts, and per-user wait seconds).
+
+- **`user_mapping()`** added to all four report types — returns the full
+  `HashMap<UserIdentifier, String>` (portal user → local username) for the
+  report. For `UsageReport` and `StorageReport`, aggregates mappings across
+  all contained project reports.
+
+### Changed
+
+- `ProjectStorageReport::users()` now returns `Vec<UserIdentifier>` (sorted)
+  instead of `&HashMap<UserIdentifier, String>`, consistent with
+  `ProjectUsageReport::users()`. Use `user_mapping()` to obtain the full
+  identifier → local-username map.
+
+- Python: `ProjectStorageReport.users` is now `list[UserIdentifier]`
+  (was `dict[UserIdentifier, str]`). Use `user_mapping` for the dict.
+
+- Python bindings added for all of the above on `ProjectUsageReport`,
+  `UsageReport`, `ProjectStorageReport`, and `StorageReport`. `remap_users`
+  accepts a plain Python `dict[UserIdentifier, str]`.
+
 ## [0.24.0] - 2026-03-13
 
 ### Added

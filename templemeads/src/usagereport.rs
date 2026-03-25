@@ -712,6 +712,52 @@ impl DailyProjectUsageReport {
     pub fn is_complete(&self) -> bool {
         self.is_complete
     }
+
+    /// Remap local username strings using a pre-built old → new map.
+    /// Any username not present in `string_map` is left unchanged.
+    pub(crate) fn remap_local_users(&mut self, string_map: &HashMap<String, String>) {
+        let old_reports = std::mem::take(&mut self.reports);
+        self.reports = old_reports
+            .into_iter()
+            .map(|(user, usage)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, usage)
+            })
+            .collect();
+
+        let old_components = std::mem::take(&mut self.components);
+        self.components = old_components
+            .into_iter()
+            .map(|(component, user_map)| {
+                let new_user_map = user_map
+                    .into_iter()
+                    .map(|(user, usage)| {
+                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                        (new_user, usage)
+                    })
+                    .collect();
+                (component, new_user_map)
+            })
+            .collect();
+
+        let old_counts = std::mem::take(&mut self.user_job_counts);
+        self.user_job_counts = old_counts
+            .into_iter()
+            .map(|(user, count)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, count)
+            })
+            .collect();
+
+        let old_waits = std::mem::take(&mut self.user_wait_seconds);
+        self.user_wait_seconds = old_waits
+            .into_iter()
+            .map(|(user, secs)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, secs)
+            })
+            .collect();
+    }
 }
 
 impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
@@ -1130,6 +1176,26 @@ impl std::ops::DivAssign<f64> for ProjectUsageReport {
 }
 
 impl ProjectUsageReport {
+    /// Replace the project identifier on this report.
+    /// Use this when re-labelling a report for a different portal's identifier
+    /// (e.g. converting from a local project identifier to a remote one before
+    /// merging with a report built for the remote identifier).
+    pub fn set_project(&mut self, project: &ProjectIdentifier) {
+        self.project = project.clone();
+    }
+
+    /// Scale only the main usage totals, leaving component breakdowns unchanged.
+    /// Use this when the scale factor converts credit units but components are
+    /// in physical units (GPU-hours, CPU-hours etc.) that should not be scaled.
+    pub fn scale_total(&mut self, factor: f64) {
+        for report in self.reports.values_mut() {
+            for usage in report.reports.values_mut() {
+                *usage *= factor;
+            }
+            // unattributed usage is also in the reports map under a special key
+        }
+    }
+
     pub fn new(project: &ProjectIdentifier) -> Self {
         Self {
             project: project.clone(),
@@ -1188,6 +1254,11 @@ impl ProjectUsageReport {
         users.sort_by_cached_key(|u| u.to_string());
 
         users
+    }
+
+    /// Return the full portal-user → local-username map.
+    pub fn user_mapping(&self) -> HashMap<UserIdentifier, String> {
+        self.users.clone()
     }
 
     pub fn unmapped_users(&self) -> Vec<String> {
@@ -1392,6 +1463,111 @@ impl ProjectUsageReport {
         }
     }
 
+    /// Remap this report to a new project identifier.
+    ///
+    /// Updates the top-level `project` field and rebuilds the `users` map so
+    /// that every `UserIdentifier` key reflects the new project and portal
+    /// (i.e. `username.old_project.old_portal` becomes
+    /// `username.new_project.new_portal`).
+    pub fn remap_project(&mut self, new_project: &ProjectIdentifier) -> Result<(), Error> {
+        self.project = new_project.clone();
+
+        let old_users = std::mem::take(&mut self.users);
+        let mut new_users = HashMap::with_capacity(old_users.len());
+
+        for (uid, local) in old_users {
+            let new_uid = UserIdentifier::parse(&format!(
+                "{}.{}.{}",
+                uid.username(),
+                new_project.project(),
+                new_project.portal()
+            ))
+            .with_context(|| {
+                format!(
+                    "remap_project: failed to rebuild UserIdentifier for user {}",
+                    uid
+                )
+            })?;
+            new_users.insert(new_uid, local);
+        }
+
+        self.users = new_users;
+        Ok(())
+    }
+
+    /// Remap this report to a new portal, keeping the project name unchanged.
+    ///
+    /// Convenience wrapper around [`ProjectUsageReport::remap_project`] that
+    /// constructs the new `ProjectIdentifier` as
+    /// `self.project.project().new_portal`.
+    pub fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> Result<(), Error> {
+        let new_project = ProjectIdentifier::parse(&format!(
+            "{}.{}",
+            self.project.project(),
+            new_portal.portal()
+        ))
+        .with_context(|| {
+            format!(
+                "remap_portal: failed to rebuild ProjectIdentifier for {}",
+                self.project
+            )
+        })?;
+        self.remap_project(&new_project)
+    }
+
+    /// Remap the local username strings for a set of users.
+    ///
+    /// `new_usermapping` maps each `UserIdentifier` (as it currently appears in
+    /// this report's `users` map) to a new local-username string.  Only users
+    /// present in both `self.users` and `new_usermapping` are updated; others
+    /// are left unchanged.
+    ///
+    /// Returns an error if the remapping would cause two distinct users to
+    /// share the same local-username string.
+    pub fn remap_users(
+        &mut self,
+        new_usermapping: &HashMap<UserIdentifier, String>,
+    ) -> Result<(), Error> {
+        // Check that the remapping is injective (no two users collapse to the
+        // same local string).
+        let mut seen: HashMap<String, &UserIdentifier> = HashMap::with_capacity(self.users.len());
+        for (uid, old_local) in &self.users {
+            let new_local = new_usermapping
+                .get(uid)
+                .map(String::as_str)
+                .unwrap_or(old_local.as_str());
+            if let Some(other_uid) = seen.insert(new_local.to_string(), uid) {
+                return Err(Error::InvalidState(format!(
+                    "remap_users would merge users '{}' and '{}' into the same local \
+                     username '{}'",
+                    uid, other_uid, new_local
+                )));
+            }
+        }
+
+        // Build old-local → new-local map for updating the daily reports.
+        let mut string_map: HashMap<String, String> = HashMap::new();
+        for (uid, old_local) in &self.users {
+            if let Some(new_local) = new_usermapping.get(uid) {
+                string_map.insert(old_local.clone(), new_local.clone());
+            }
+        }
+
+        // Update the users map values.
+        for (uid, local) in self.users.iter_mut() {
+            if let Some(new_local) = new_usermapping.get(uid) {
+                *local = new_local.clone();
+            }
+        }
+
+        // Propagate to each daily report.
+        for daily in self.reports.values_mut() {
+            daily.remap_local_users(&string_map);
+        }
+
+        Ok(())
+    }
+
     pub fn to_usage_report(&self) -> UsageReport {
         let mut r = UsageReport::new(&self.project.portal_identifier());
         r.reports.insert(self.project.clone(), self.clone());
@@ -1537,6 +1713,15 @@ impl UsageReport {
         projects
     }
 
+    /// Return the combined portal-user → local-username map across all
+    /// contained project reports.
+    pub fn user_mapping(&self) -> HashMap<UserIdentifier, String> {
+        self.reports
+            .values()
+            .flat_map(|r| r.user_mapping())
+            .collect()
+    }
+
     pub fn components(&self) -> Vec<String> {
         let mut components: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1594,6 +1779,73 @@ impl UsageReport {
 
     pub fn total_usage(&self) -> Usage {
         self.reports.values().map(|r| r.total_usage()).sum()
+    }
+
+    /// Remap all projects in this report to a new portal.
+    ///
+    /// Updates `self.portal` and remaps every contained `ProjectUsageReport`
+    /// so that its project identifier keeps the same project name but uses the
+    /// new portal, e.g. `project.portal` → `project.new_portal`.
+    pub fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> Result<(), Error> {
+        self.portal = new_portal.clone();
+
+        let old_reports = std::mem::take(&mut self.reports);
+        let mut new_reports = HashMap::with_capacity(old_reports.len());
+
+        for (old_proj_id, mut proj_report) in old_reports {
+            let new_proj_id = ProjectIdentifier::parse(&format!(
+                "{}.{}",
+                old_proj_id.project(),
+                new_portal.portal()
+            ))
+            .with_context(|| {
+                format!(
+                    "remap_portal: failed to rebuild ProjectIdentifier for {}",
+                    old_proj_id
+                )
+            })?;
+            proj_report.remap_project(&new_proj_id)?;
+            new_reports.insert(new_proj_id, proj_report);
+        }
+
+        self.reports = new_reports;
+        Ok(())
+    }
+
+    /// Remap a single project within this report from `old_project` to
+    /// `new_project`.
+    ///
+    /// Finds the contained `ProjectUsageReport` keyed by `old_project`,
+    /// delegates to [`ProjectUsageReport::remap_project`] with `new_project`,
+    /// and re-inserts it under the new key.  Does nothing if no report exists
+    /// for `old_project`.
+    pub fn remap_project(
+        &mut self,
+        old_project: &ProjectIdentifier,
+        new_project: &ProjectIdentifier,
+    ) -> Result<(), Error> {
+        let mut proj_report = match self.reports.remove(old_project) {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        proj_report.remap_project(new_project)?;
+        self.reports.insert(new_project.clone(), proj_report);
+        Ok(())
+    }
+
+    /// Remap local username strings across all contained project reports.
+    ///
+    /// Delegates to [`ProjectUsageReport::remap_users`] for each project.
+    /// Returns an error if the remapping would cause a clash within any
+    /// individual project report.
+    pub fn remap_users(
+        &mut self,
+        new_usermapping: &HashMap<UserIdentifier, String>,
+    ) -> Result<(), Error> {
+        for report in self.reports.values_mut() {
+            report.remap_users(new_usermapping)?;
+        }
+        Ok(())
     }
 
     pub fn combine(reports: &[UsageReport]) -> Result<Self, Error> {

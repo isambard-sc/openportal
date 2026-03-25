@@ -56,6 +56,37 @@ impl DailyStorageReport {
     pub fn generated_at(&self) -> &DateTime<Utc> {
         &self.generated_at
     }
+
+    /// Update the project identifier and rebuild `user_quotas` keys so that
+    /// every `UserIdentifier` reflects the new project and portal.
+    pub(crate) fn remap_project(
+        &mut self,
+        new_project: &ProjectIdentifier,
+    ) -> Result<(), crate::error::Error> {
+        self.project = new_project.clone();
+
+        let old_quotas = std::mem::take(&mut self.user_quotas);
+        let mut new_quotas = HashMap::with_capacity(old_quotas.len());
+
+        for (uid, quotas) in old_quotas {
+            let new_uid = UserIdentifier::parse(&format!(
+                "{}.{}.{}",
+                uid.username(),
+                new_project.project(),
+                new_project.portal()
+            ))
+            .with_context(|| {
+                format!(
+                    "remap_project: failed to rebuild UserIdentifier for user {}",
+                    uid
+                )
+            })?;
+            new_quotas.insert(new_uid, quotas);
+        }
+
+        self.user_quotas = new_quotas;
+        Ok(())
+    }
 }
 
 /// Convert a `ProjectStorageReport` to a `DailyStorageReport` by stripping
@@ -180,9 +211,16 @@ impl ProjectStorageReport {
         Ok(())
     }
 
-    /// Return the portal-user → local-username map.
-    pub fn users(&self) -> &HashMap<UserIdentifier, String> {
-        &self.users
+    /// Return the portal users as a sorted list of UserIdentifiers.
+    pub fn users(&self) -> Vec<UserIdentifier> {
+        let mut users: Vec<UserIdentifier> = self.users.keys().cloned().collect();
+        users.sort_by_cached_key(|u| u.to_string());
+        users
+    }
+
+    /// Return the full portal-user → local-username map.
+    pub fn user_mapping(&self) -> HashMap<UserIdentifier, String> {
+        self.users.clone()
     }
 
     /// Return true if the top-level snapshot contains no quota data at all.
@@ -295,6 +333,119 @@ impl ProjectStorageReport {
                 })
                 .unwrap_or_else(|| ProjectStorageReport::new(&self.project))
         }
+    }
+
+    /// Remap this report to a new project identifier.
+    ///
+    /// Updates the top-level `project` field and rebuilds the `users` and
+    /// `user_quotas` maps so that every `UserIdentifier` key reflects the new
+    /// project and portal (i.e. `username.old_project.old_portal` becomes
+    /// `username.new_project.new_portal`).  Historical snapshots in
+    /// `daily_reports` are updated in the same way.
+    pub fn remap_project(&mut self, new_project: &ProjectIdentifier) -> Result<(), Error> {
+        self.project = new_project.clone();
+
+        let old_users = std::mem::take(&mut self.users);
+        let mut new_users = HashMap::with_capacity(old_users.len());
+        for (uid, local) in old_users {
+            let new_uid = UserIdentifier::parse(&format!(
+                "{}.{}.{}",
+                uid.username(),
+                new_project.project(),
+                new_project.portal()
+            ))
+            .with_context(|| {
+                format!(
+                    "remap_project: failed to rebuild UserIdentifier for user {}",
+                    uid
+                )
+            })?;
+            new_users.insert(new_uid, local);
+        }
+        self.users = new_users;
+
+        let old_quotas = std::mem::take(&mut self.user_quotas);
+        let mut new_quotas = HashMap::with_capacity(old_quotas.len());
+        for (uid, quotas) in old_quotas {
+            let new_uid = UserIdentifier::parse(&format!(
+                "{}.{}.{}",
+                uid.username(),
+                new_project.project(),
+                new_project.portal()
+            ))
+            .with_context(|| {
+                format!(
+                    "remap_project: failed to rebuild UserIdentifier for user {}",
+                    uid
+                )
+            })?;
+            new_quotas.insert(new_uid, quotas);
+        }
+        self.user_quotas = new_quotas;
+
+        for snapshot in self.daily_reports.values_mut() {
+            snapshot.remap_project(new_project)?;
+        }
+
+        Ok(())
+    }
+
+    /// Remap this report to a new portal, keeping the project name unchanged.
+    ///
+    /// Convenience wrapper around [`ProjectStorageReport::remap_project`] that
+    /// constructs the new `ProjectIdentifier` as
+    /// `self.project.project().new_portal`.
+    pub fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> Result<(), Error> {
+        let new_project = ProjectIdentifier::parse(&format!(
+            "{}.{}",
+            self.project.project(),
+            new_portal.portal()
+        ))
+        .with_context(|| {
+            format!(
+                "remap_portal: failed to rebuild ProjectIdentifier for {}",
+                self.project
+            )
+        })?;
+        self.remap_project(&new_project)
+    }
+
+    /// Remap the local username strings for a set of users.
+    ///
+    /// `new_usermapping` maps each `UserIdentifier` (as it currently appears
+    /// in this report's `users` map) to a new local-username string.  Only
+    /// users present in both `self.users` and `new_usermapping` are updated;
+    /// others are left unchanged.
+    ///
+    /// Returns an error if the remapping would cause two distinct users to
+    /// share the same local-username string.
+    pub fn remap_users(
+        &mut self,
+        new_usermapping: &HashMap<UserIdentifier, String>,
+    ) -> Result<(), Error> {
+        // Check that the remapping is injective.
+        let mut seen: HashMap<String, &UserIdentifier> = HashMap::with_capacity(self.users.len());
+        for (uid, old_local) in &self.users {
+            let new_local = new_usermapping
+                .get(uid)
+                .map(String::as_str)
+                .unwrap_or(old_local.as_str());
+            if let Some(other_uid) = seen.insert(new_local.to_string(), uid) {
+                return Err(Error::InvalidState(format!(
+                    "remap_users would merge users '{}' and '{}' into the same local \
+                     username '{}'",
+                    uid, other_uid, new_local
+                )));
+            }
+        }
+
+        for (uid, local) in self.users.iter_mut() {
+            if let Some(new_local) = new_usermapping.get(uid) {
+                *local = new_local.clone();
+            }
+        }
+
+        Ok(())
     }
 
     /// Combine a slice of `ProjectStorageReport`s into a single report using
@@ -510,6 +661,15 @@ impl StorageReport {
         projects
     }
 
+    /// Return the combined portal-user → local-username map across all
+    /// contained project reports.
+    pub fn user_mapping(&self) -> HashMap<UserIdentifier, String> {
+        self.reports
+            .values()
+            .flat_map(|r| r.user_mapping())
+            .collect()
+    }
+
     /// Return the storage report for a project, or an empty report if not
     /// present.
     pub fn get_report(&self, project: &ProjectIdentifier) -> ProjectStorageReport {
@@ -536,6 +696,73 @@ impl StorageReport {
     /// Return true if there are no project reports.
     pub fn is_empty(&self) -> bool {
         self.reports.is_empty()
+    }
+
+    /// Remap all projects in this report to a new portal.
+    ///
+    /// Updates `self.portal` and remaps every contained `ProjectStorageReport`
+    /// so that its project identifier keeps the same project name but uses the
+    /// new portal, e.g. `project.portal` → `project.new_portal`.
+    pub fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> Result<(), Error> {
+        self.portal = new_portal.clone();
+
+        let old_reports = std::mem::take(&mut self.reports);
+        let mut new_reports = HashMap::with_capacity(old_reports.len());
+
+        for (old_proj_id, mut proj_report) in old_reports {
+            let new_proj_id = ProjectIdentifier::parse(&format!(
+                "{}.{}",
+                old_proj_id.project(),
+                new_portal.portal()
+            ))
+            .with_context(|| {
+                format!(
+                    "remap_portal: failed to rebuild ProjectIdentifier for {}",
+                    old_proj_id
+                )
+            })?;
+            proj_report.remap_project(&new_proj_id)?;
+            new_reports.insert(new_proj_id, proj_report);
+        }
+
+        self.reports = new_reports;
+        Ok(())
+    }
+
+    /// Remap a single project within this report from `old_project` to
+    /// `new_project`.
+    ///
+    /// Finds the contained `ProjectStorageReport` keyed by `old_project`,
+    /// delegates to [`ProjectStorageReport::remap_project`] with `new_project`,
+    /// and re-inserts it under the new key.  Does nothing if no report exists
+    /// for `old_project`.
+    pub fn remap_project(
+        &mut self,
+        old_project: &ProjectIdentifier,
+        new_project: &ProjectIdentifier,
+    ) -> Result<(), Error> {
+        let mut proj_report = match self.reports.remove(old_project) {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        proj_report.remap_project(new_project)?;
+        self.reports.insert(new_project.clone(), proj_report);
+        Ok(())
+    }
+
+    /// Remap local username strings across all contained project reports.
+    ///
+    /// Delegates to [`ProjectStorageReport::remap_users`] for each project.
+    /// Returns an error if the remapping would cause a clash within any
+    /// individual project report.
+    pub fn remap_users(
+        &mut self,
+        new_usermapping: &HashMap<UserIdentifier, String>,
+    ) -> Result<(), Error> {
+        for report in self.reports.values_mut() {
+            report.remap_users(new_usermapping)?;
+        }
+        Ok(())
     }
 
     /// Combine a slice of `StorageReport`s for the same portal into a single

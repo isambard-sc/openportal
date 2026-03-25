@@ -2570,6 +2570,18 @@ impl UsageReport {
     }
 
     #[getter]
+    fn user_mapping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        for (user, local_username) in self.0.user_mapping() {
+            dict.set_item(
+                UserIdentifier::from(user).into_pyobject(py)?,
+                local_username.into_pyobject(py)?,
+            )?;
+        }
+        Ok(dict)
+    }
+
+    #[getter]
     fn components(&self) -> PyResult<Vec<String>> {
         Ok(self.0.components().iter().map(|c| c.to_string()).collect())
     }
@@ -2580,6 +2592,38 @@ impl UsageReport {
 
     fn get_component(&self, component: &str) -> PyResult<UsageReport> {
         Ok(self.0.get_component(component).into())
+    }
+
+    fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> PyResult<()> {
+        self.0
+            .remap_portal(&new_portal.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_project(
+        &mut self,
+        old_project: &ProjectIdentifier,
+        new_project: &ProjectIdentifier,
+    ) -> PyResult<()> {
+        self.0
+            .remap_project(&old_project.0, &new_project.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_users(&mut self, new_usermapping: Py<PyAny>, py: Python) -> PyResult<()> {
+        let dict = new_usermapping.bind(py);
+        let dict = dict
+            .cast::<pyo3::types::PyDict>()
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("expected a dict: {:?}", e)))?;
+        let mut mapping: HashMap<grammar::UserIdentifier, String> = HashMap::new();
+        for (key, value) in dict.iter() {
+            let uid: UserIdentifier = key.extract()?;
+            let local: String = value.extract()?;
+            mapping.insert(uid.0, local);
+        }
+        self.0
+            .remap_users(&mapping)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
 
     #[getter]
@@ -2715,6 +2759,18 @@ impl ProjectUsageReport {
     }
 
     #[getter]
+    fn user_mapping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        for (user, local_username) in self.0.user_mapping() {
+            dict.set_item(
+                UserIdentifier::from(user).into_pyobject(py)?,
+                local_username.into_pyobject(py)?,
+            )?;
+        }
+        Ok(dict)
+    }
+
+    #[getter]
     fn unmapped_users(&self) -> PyResult<Vec<String>> {
         Ok(self.0.unmapped_users())
     }
@@ -2791,6 +2847,16 @@ impl ProjectUsageReport {
         }
     }
 
+    fn set_project(&mut self, project: &ProjectIdentifier) -> PyResult<()> {
+        self.0.set_project(&project.0);
+        Ok(())
+    }
+
+    fn scale_total(&mut self, factor: f64) -> PyResult<()> {
+        self.0.scale_total(factor);
+        Ok(())
+    }
+
     fn set_report(
         &mut self,
         date: chrono::NaiveDate,
@@ -2833,6 +2899,34 @@ impl ProjectUsageReport {
 
     fn to_usage_report(&self) -> UsageReport {
         self.0.to_usage_report().into()
+    }
+
+    fn remap_project(&mut self, new_project: &ProjectIdentifier) -> PyResult<()> {
+        self.0
+            .remap_project(&new_project.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> PyResult<()> {
+        self.0
+            .remap_portal(&new_portal.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_users(&mut self, new_usermapping: Py<PyAny>, py: Python) -> PyResult<()> {
+        let dict = new_usermapping.bind(py);
+        let dict = dict
+            .cast::<pyo3::types::PyDict>()
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("expected a dict: {:?}", e)))?;
+        let mut mapping: HashMap<grammar::UserIdentifier, String> = HashMap::new();
+        for (key, value) in dict.iter() {
+            let uid: UserIdentifier = key.extract()?;
+            let local: String = value.extract()?;
+            mapping.insert(uid.0, local);
+        }
+        self.0
+            .remap_users(&mapping)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
 }
 
@@ -2927,11 +3021,16 @@ impl ProjectStorageReport {
     }
 
     #[getter]
-    fn users<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn users(&self) -> PyResult<Vec<UserIdentifier>> {
+        Ok(self.0.users().iter().map(|u| u.clone().into()).collect())
+    }
+
+    #[getter]
+    fn user_mapping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let dict = pyo3::types::PyDict::new(py);
-        for (user, local_username) in self.0.users() {
+        for (user, local_username) in self.0.user_mapping() {
             dict.set_item(
-                UserIdentifier::from(user.clone()).into_pyobject(py)?,
+                UserIdentifier::from(user).into_pyobject(py)?,
                 local_username.into_pyobject(py)?,
             )?;
         }
@@ -2972,6 +3071,34 @@ impl ProjectStorageReport {
     fn __iadd__(&mut self, other: ProjectStorageReport) -> PyResult<()> {
         self.0 += other.0;
         Ok(())
+    }
+
+    fn remap_project(&mut self, new_project: &ProjectIdentifier) -> PyResult<()> {
+        self.0
+            .remap_project(&new_project.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> PyResult<()> {
+        self.0
+            .remap_portal(&new_portal.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_users(&mut self, new_usermapping: Py<PyAny>, py: Python) -> PyResult<()> {
+        let dict = new_usermapping.bind(py);
+        let dict = dict
+            .cast::<pyo3::types::PyDict>()
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("expected a dict: {:?}", e)))?;
+        let mut mapping: HashMap<grammar::UserIdentifier, String> = HashMap::new();
+        for (key, value) in dict.iter() {
+            let uid: UserIdentifier = key.extract()?;
+            let local: String = value.extract()?;
+            mapping.insert(uid.0, local);
+        }
+        self.0
+            .remap_users(&mapping)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
 
     #[staticmethod]
@@ -3043,6 +3170,18 @@ impl StorageReport {
         Ok(self.0.projects().iter().map(|p| p.clone().into()).collect())
     }
 
+    #[getter]
+    fn user_mapping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        for (user, local_username) in self.0.user_mapping() {
+            dict.set_item(
+                UserIdentifier::from(user).into_pyobject(py)?,
+                local_username.into_pyobject(py)?,
+            )?;
+        }
+        Ok(dict)
+    }
+
     fn get_report(&self, project: &ProjectIdentifier) -> PyResult<ProjectStorageReport> {
         Ok(self.0.get_report(&project.0).into())
     }
@@ -3058,6 +3197,38 @@ impl StorageReport {
     fn __iadd__(&mut self, other: StorageReport) -> PyResult<()> {
         self.0 += other.0;
         Ok(())
+    }
+
+    fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> PyResult<()> {
+        self.0
+            .remap_portal(&new_portal.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_project(
+        &mut self,
+        old_project: &ProjectIdentifier,
+        new_project: &ProjectIdentifier,
+    ) -> PyResult<()> {
+        self.0
+            .remap_project(&old_project.0, &new_project.0)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn remap_users(&mut self, new_usermapping: Py<PyAny>, py: Python) -> PyResult<()> {
+        let dict = new_usermapping.bind(py);
+        let dict = dict
+            .cast::<pyo3::types::PyDict>()
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("expected a dict: {:?}", e)))?;
+        let mut mapping: HashMap<grammar::UserIdentifier, String> = HashMap::new();
+        for (key, value) in dict.iter() {
+            let uid: UserIdentifier = key.extract()?;
+            let local: String = value.extract()?;
+            mapping.insert(uid.0, local);
+        }
+        self.0
+            .remap_users(&mapping)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
 
     #[staticmethod]

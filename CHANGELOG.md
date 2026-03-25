@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.26.0] - 2026-03-25
+
 ### Added
 
 - **`filter(range: DateRange)`** on all four report types — returns a copy of
@@ -22,7 +24,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - `StorageReport::filter` — delegates to `ProjectStorageReport::filter` for
     each contained project report.
   - Python bindings added for all four types.
-
 - **Date-range support for storage report instructions** — `get_storage_report`,
   `get_storage_reports`, and `get_local_storage_report` now accept an optional
   `<date_range>` argument (default: `today`). The filesystem agent enforces that
@@ -1262,6 +1263,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.26.0]: https://github.com/isambard-sc/openportal/releases/tag/0.26.0
 [0.25.0]: https://github.com/isambard-sc/openportal/releases/tag/0.25.0
 [0.24.0]: https://github.com/isambard-sc/openportal/releases/tag/0.24.0
 [0.23.1]: https://github.com/isambard-sc/openportal/releases/tag/0.23.1

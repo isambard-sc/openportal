@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.25.0] - 2026-03-25
+
 ### Added
 
 - **Report remapping** — all four report types (`ProjectUsageReport`,
@@ -35,7 +37,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     the same local username. For `ProjectUsageReport`, also propagates the
     rename into all daily-report `HashMap<String, Usage>` entries (including
     component breakdowns, per-user job counts, and per-user wait seconds).
-
 - **`user_mapping()`** added to all four report types — returns the full
   `HashMap<UserIdentifier, String>` (portal user → local username) for the
   report. For `UsageReport` and `StorageReport`, aggregates mappings across
@@ -47,10 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   instead of `&HashMap<UserIdentifier, String>`, consistent with
   `ProjectUsageReport::users()`. Use `user_mapping()` to obtain the full
   identifier → local-username map.
-
 - Python: `ProjectStorageReport.users` is now `list[UserIdentifier]`
   (was `dict[UserIdentifier, str]`). Use `user_mapping` for the dict.
-
 - Python bindings added for all of the above on `ProjectUsageReport`,
   `UsageReport`, `ProjectStorageReport`, and `StorageReport`. `remap_users`
   accepts a plain Python `dict[UserIdentifier, str]`.
@@ -1221,6 +1220,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.25.0]: https://github.com/isambard-sc/openportal/releases/tag/0.25.0
 [0.24.0]: https://github.com/isambard-sc/openportal/releases/tag/0.24.0
 [0.23.1]: https://github.com/isambard-sc/openportal/releases/tag/0.23.1
 [0.23.0]: https://github.com/isambard-sc/openportal/releases/tag/0.23.0

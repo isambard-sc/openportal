@@ -490,6 +490,7 @@ impl Job {
         self.command.destination().last() == job.command.destination().last()
             && self.command.instruction() == job.command.instruction()
             && job.is_pending()
+            && !job.is_expired()
             && self.is_pending()
     }
 

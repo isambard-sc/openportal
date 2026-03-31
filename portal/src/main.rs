@@ -11,9 +11,9 @@ use templemeads::async_runnable;
 use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
-    AddOfferings, CreateProject, GetOfferings, GetProject, GetProjectMapping, GetProjects,
-    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, RemoveOfferings,
-    RemoveProject, Submit, SyncOfferings, UpdateProject,
+    AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
+    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports,
+    RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
@@ -107,6 +107,18 @@ async fn main() -> Result<()> {
 
                     job.completed(
                         get_project(&me, &resource, &project).await?)
+                }
+                GetAward(project) => {
+                    tracing::debug!("Getting award for project {}", project);
+
+                    job.completed(
+                        get_award(&me, &resource, &project).await?)
+                }
+                GetAwards(portal) => {
+                    tracing::debug!("Getting all awards for portal {}", portal);
+
+                    job.completed(
+                        get_awards(&me, &resource, &portal).await?)
                 }
                 GetProjects(portal) => {
                     tracing::debug!("Getting all projects");
@@ -707,6 +719,102 @@ pub async fn get_project(
                     tracing::warn!("No project retrieved?");
                     Err(Error::MissingProject(
                         "No project retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the award details for an existing project
+///
+pub async fn get_award(
+    me: &str,
+    resource: &str,
+    project: &ProjectIdentifier,
+) -> Result<ProjectDetails, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_award {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<ProjectDetails>()?;
+
+            match result {
+                Some(award) => {
+                    tracing::debug!("Award retrieved by bridge agent: {:?}", award);
+                    Ok(award)
+                }
+                None => {
+                    tracing::warn!("No award retrieved?");
+                    Err(Error::MissingProject(
+                        "No award retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the award details for all projects managed for the remote portal
+///
+pub async fn get_awards(
+    me: &str,
+    resource: &str,
+    portal: &PortalIdentifier,
+) -> Result<Vec<ProjectDetails>, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_awards {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    portal
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<Vec<ProjectDetails>>()?;
+
+            match result {
+                Some(awards) => {
+                    tracing::debug!("Awards retrieved by bridge agent: {:?}", awards);
+                    Ok(awards)
+                }
+                None => {
+                    tracing::warn!("No awards retrieved?");
+                    Err(Error::MissingProject(
+                        "No awards retrieved by bridge agent".to_string(),
                     ))
                 }
             }

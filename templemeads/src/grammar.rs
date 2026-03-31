@@ -1972,107 +1972,6 @@ impl<'de> Deserialize<'de> for DomainPattern {
     }
 }
 
-/// Details about the award itself (e.g. the name, link)
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
-pub struct AwardDetails {
-    /// The ID of the award
-    id: Option<String>,
-
-    /// The link to the award (must be a valid URL if provided)
-    link: Option<String>,
-}
-
-impl NamedType for AwardDetails {
-    fn type_name() -> &'static str {
-        "AwardDetails"
-    }
-}
-
-impl AwardDetails {
-    pub fn new() -> Self {
-        Self {
-            id: None,
-            link: None,
-        }
-    }
-
-    pub fn id(&self) -> Option<String> {
-        self.id.clone()
-    }
-
-    pub fn set_id(&mut self, id: &str) {
-        let id = id.trim();
-
-        if id.is_empty() {
-            self.id = None;
-        } else {
-            self.id = Some(id.to_string());
-        }
-    }
-
-    pub fn clear_id(&mut self) {
-        self.id = None;
-    }
-
-    pub fn link(&self) -> Option<String> {
-        self.link.clone()
-    }
-
-    pub fn set_link(&mut self, link: &str) -> Result<(), Error> {
-        let link = link.trim();
-
-        if link.is_empty() {
-            self.link = None;
-            Ok(())
-        } else {
-            // Validate that the link is a valid URL
-            Url::parse(link)
-                .map_err(|e| Error::Parse(format!("Invalid URL for award link: {}", e)))?;
-            self.link = Some(link.to_string());
-            Ok(())
-        }
-    }
-
-    pub fn clear_link(&mut self) {
-        self.link = None;
-    }
-}
-
-impl std::fmt::Display for AwardDetails {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string(self).unwrap_or_default())
-    }
-}
-
-impl<'de> Deserialize<'de> for AwardDetails {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct AwardDetailsHelper {
-            id: Option<String>,
-            link: Option<String>,
-        }
-
-        let helper = AwardDetailsHelper::deserialize(deserializer)?;
-
-        // Validate the link if it's provided
-        if let Some(link) = &helper.link {
-            if !link.is_empty() {
-                Url::parse(link).map_err(|e| {
-                    serde::de::Error::custom(format!("Invalid URL for award link: {}", e))
-                })?;
-            }
-        }
-
-        Ok(AwardDetails {
-            id: helper.id,
-            link: helper.link,
-        })
-    }
-}
-
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -2111,8 +2010,13 @@ pub struct ProjectDetails {
     /// The allocation of resource for this project
     allocation: Option<Allocation>,
 
-    /// Details about the award associated with this project
-    award: Option<AwardDetails>,
+    /// The human-readable ID of the award associated with this project
+    /// (e.g. "061-4738952-1")
+    award_id: Option<String>,
+
+    /// The URL of the award associated with this project
+    /// (must be a valid URL if provided)
+    award_url: Option<String>,
 
     /// The list of allowed domains for this project.
     /// If this is None, then all domains are allowed.
@@ -2128,6 +2032,12 @@ impl NamedType for ProjectDetails {
     }
 }
 
+impl NamedType for Vec<ProjectDetails> {
+    fn type_name() -> &'static str {
+        "Vec<ProjectDetails>"
+    }
+}
+
 impl ProjectDetails {
     pub fn new() -> Self {
         Self {
@@ -2139,7 +2049,8 @@ impl ProjectDetails {
             start_date: None,
             end_date: None,
             allocation: None,
-            award: None,
+            award_id: None,
+            award_url: None,
             allowed_domains: None,
         }
     }
@@ -2308,16 +2219,44 @@ impl ProjectDetails {
         self.allocation = None;
     }
 
-    pub fn award(&self) -> Option<AwardDetails> {
-        self.award.clone()
+    pub fn award_id(&self) -> Option<String> {
+        self.award_id.clone()
     }
 
-    pub fn set_award(&mut self, award: AwardDetails) {
-        self.award = Some(award);
+    pub fn set_award_id(&mut self, id: &str) {
+        let id = id.trim();
+
+        if id.is_empty() {
+            self.award_id = None;
+        } else {
+            self.award_id = Some(id.to_string());
+        }
     }
 
-    pub fn clear_award(&mut self) {
-        self.award = None;
+    pub fn clear_award_id(&mut self) {
+        self.award_id = None;
+    }
+
+    pub fn award_url(&self) -> Option<String> {
+        self.award_url.clone()
+    }
+
+    pub fn set_award_url(&mut self, url: &str) -> Result<(), Error> {
+        let url = url.trim();
+
+        if url.is_empty() {
+            self.award_url = None;
+            Ok(())
+        } else {
+            Url::parse(url)
+                .map_err(|e| Error::Parse(format!("Invalid URL for award_url: {}", e)))?;
+            self.award_url = Some(url.to_string());
+            Ok(())
+        }
+    }
+
+    pub fn clear_award_url(&mut self) {
+        self.award_url = None;
     }
 
     pub fn allowed_domains(&self) -> Option<Vec<DomainPattern>> {
@@ -2418,8 +2357,12 @@ impl ProjectDetails {
             merged.key = other.key.clone();
         }
 
-        if other.award.is_some() {
-            merged.award = other.award.clone();
+        if other.award_id.is_some() {
+            merged.award_id = other.award_id.clone();
+        }
+
+        if other.award_url.is_some() {
+            merged.award_url = other.award_url.clone();
         }
 
         if other.allowed_domains.is_some() {
@@ -2449,6 +2392,11 @@ impl std::fmt::Display for ProjectDetails {
     }
 }
 
+/// AwardDetails is an alias for ProjectDetails - an award is the funding
+/// record that drives project creation, so the two concepts share the
+/// same data structure.
+pub type AwardDetails = ProjectDetails;
+
 ///
 /// Enum of all of the instructions that can be sent to agents
 ///
@@ -2468,6 +2416,12 @@ pub enum Instruction {
 
     /// An instruction to get all projects managed by a portal
     GetProjects(PortalIdentifier),
+
+    /// An instruction to get the award details for a single project
+    GetAward(ProjectIdentifier),
+
+    /// An instruction to get the award details for all projects managed by a portal
+    GetAwards(PortalIdentifier),
 
     /// An instruction to add a project
     AddProject(ProjectIdentifier),
@@ -2676,7 +2630,7 @@ impl Instruction {
                     )))
                 }
             },
-            "create_project" => match ProjectIdentifier::parse(parts[1]) {
+            "create_project" | "create_award" => match ProjectIdentifier::parse(parts[1]) {
                 Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
                     Ok(details) => Ok(Instruction::CreateProject(project, details)),
                     Err(_) => {
@@ -2698,7 +2652,7 @@ impl Instruction {
                     )))
                 }
             },
-            "update_project" => match ProjectIdentifier::parse(parts[1]) {
+            "update_project" | "update_award" => match ProjectIdentifier::parse(parts[1]) {
                 Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
                     Ok(details) => Ok(Instruction::UpdateProject(project, details)),
                     Err(_) => {
@@ -2736,6 +2690,26 @@ impl Instruction {
                     tracing::error!("get_projects failed to parse: {}", &parts[1..].join(" "));
                     Err(Error::Parse(format!(
                         "get_projects failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_award" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::GetAward(project)),
+                Err(_) => {
+                    tracing::error!("get_award failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_award failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_awards" | "list_awards" => match PortalIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(portal) => Ok(Instruction::GetAwards(portal)),
+                Err(_) => {
+                    tracing::error!("get_awards failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_awards failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }
@@ -4084,6 +4058,8 @@ impl Instruction {
             Instruction::UpdateProject(_, _) => "update_project".to_string(),
             Instruction::GetProject(_) => "get_project".to_string(),
             Instruction::GetProjects(_) => "get_projects".to_string(),
+            Instruction::GetAward(_) => "get_award".to_string(),
+            Instruction::GetAwards(_) => "get_awards".to_string(),
             Instruction::AddProject(_) => "add_project".to_string(),
             Instruction::RemoveProject(_) => "remove_project".to_string(),
             Instruction::GetUsers(_) => "get_users".to_string(),
@@ -4151,6 +4127,8 @@ impl Instruction {
             }
             Instruction::GetProject(project) => vec![project.to_string()],
             Instruction::GetProjects(portal) => vec![portal.to_string()],
+            Instruction::GetAward(project) => vec![project.to_string()],
+            Instruction::GetAwards(portal) => vec![portal.to_string()],
             Instruction::AddProject(project) => vec![project.to_string()],
             Instruction::RemoveProject(project) => vec![project.to_string()],
             Instruction::GetUsers(project) => vec![project.to_string()],
@@ -4262,6 +4240,8 @@ impl std::fmt::Display for Instruction {
             }
             Instruction::GetProject(project) => write!(f, "get_project {}", project),
             Instruction::GetProjects(portal) => write!(f, "get_projects {}", portal),
+            Instruction::GetAward(project) => write!(f, "get_award {}", project),
+            Instruction::GetAwards(portal) => write!(f, "get_awards {}", portal),
             Instruction::AddProject(project) => write!(f, "add_project {}", project),
             Instruction::RemoveProject(project) => write!(f, "remove_project {}", project),
             Instruction::GetUsers(project) => write!(f, "get_users {}", project),

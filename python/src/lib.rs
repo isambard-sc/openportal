@@ -4056,80 +4056,6 @@ enum DomainPatternOrStr {
     Str(String),
 }
 
-#[pyclass(module = "openportal")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AwardDetails(grammar::AwardDetails);
-
-#[pymethods]
-impl AwardDetails {
-    #[new]
-    fn new() -> PyResult<Self> {
-        Ok(Self(grammar::AwardDetails::new()))
-    }
-
-    fn __str__(&self) -> PyResult<String> {
-        Ok(self.0.to_string())
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        self.__str__()
-    }
-
-    fn __copy__(&self) -> PyResult<AwardDetails> {
-        Ok(self.clone())
-    }
-
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<AwardDetails> {
-        Ok(self.clone())
-    }
-
-    fn __richcmp__(&self, other: &AwardDetails, op: CompareOp) -> PyResult<bool> {
-        match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
-            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
-        }
-    }
-
-    #[getter]
-    fn award_id(&self) -> PyResult<Option<String>> {
-        Ok(self.0.id())
-    }
-
-    #[setter]
-    fn set_award_id(&mut self, award_id: &str) -> PyResult<()> {
-        self.0.set_id(award_id);
-        Ok(())
-    }
-
-    fn clear_award_id(&mut self) -> PyResult<()> {
-        self.0.clear_id();
-        Ok(())
-    }
-
-    #[getter]
-    fn link(&self) -> PyResult<Option<String>> {
-        Ok(self.0.link())
-    }
-
-    #[setter]
-    fn set_link(&mut self, link: &str) -> PyResult<()> {
-        self.0
-            .set_link(link)
-            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
-    }
-
-    fn clear_link(&mut self) -> PyResult<()> {
-        self.0.clear_link();
-        Ok(())
-    }
-}
-
-impl From<grammar::AwardDetails> for AwardDetails {
-    fn from(award_details: grammar::AwardDetails) -> Self {
-        AwardDetails(award_details)
-    }
-}
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4377,22 +4303,35 @@ impl ProjectDetails {
     }
 
     #[getter]
-    fn award(&self) -> PyResult<Option<AwardDetails>> {
-        Ok(self.0.award().map(|award| award.into()))
+    fn award_id(&self) -> PyResult<Option<String>> {
+        Ok(self.0.award_id())
     }
 
     #[setter]
-    fn set_award(&mut self, award: Option<AwardDetails>) -> PyResult<()> {
-        if let Some(award) = award {
-            self.0.set_award(award.0);
-        } else {
-            self.0.clear_award();
-        }
+    fn set_award_id(&mut self, award_id: &str) -> PyResult<()> {
+        self.0.set_award_id(award_id);
         Ok(())
     }
 
-    fn clear_award(&mut self) -> PyResult<()> {
-        self.0.clear_award();
+    fn clear_award_id(&mut self) -> PyResult<()> {
+        self.0.clear_award_id();
+        Ok(())
+    }
+
+    #[getter]
+    fn award_url(&self) -> PyResult<Option<String>> {
+        Ok(self.0.award_url())
+    }
+
+    #[setter]
+    fn set_award_url(&mut self, url: &str) -> PyResult<()> {
+        self.0
+            .set_award_url(url)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn clear_award_url(&mut self) -> PyResult<()> {
+        self.0.clear_award_url();
         Ok(())
     }
 
@@ -5122,7 +5061,6 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ProjectStorageReport>()?;
     m.add_class::<StorageReport>()?;
     m.add_class::<DomainPattern>()?;
-    m.add_class::<AwardDetails>()?;
     m.add_class::<ProjectDetails>()?;
     m.add_class::<ProjectTemplate>()?;
     m.add_class::<StorageSize>()?;

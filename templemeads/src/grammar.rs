@@ -1979,7 +1979,7 @@ impl<'de> Deserialize<'de> for DomainPattern {
 /// the fields that are set will be updated.
 ///
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectDetails {
+pub struct AwardDetails {
     /// The name of the project
     name: Option<String>,
 
@@ -2026,19 +2026,19 @@ pub struct ProjectDetails {
     allowed_domains: Option<Vec<DomainPattern>>,
 }
 
-impl NamedType for ProjectDetails {
+impl NamedType for AwardDetails {
     fn type_name() -> &'static str {
         "ProjectDetails"
     }
 }
 
-impl NamedType for Vec<ProjectDetails> {
+impl NamedType for Vec<AwardDetails> {
     fn type_name() -> &'static str {
         "Vec<ProjectDetails>"
     }
 }
 
-impl ProjectDetails {
+impl AwardDetails {
     pub fn new() -> Self {
         Self {
             name: None,
@@ -2056,7 +2056,7 @@ impl ProjectDetails {
     }
 
     pub fn parse(json: &str) -> Result<Self, Error> {
-        ProjectDetails::from_json(json)
+        AwardDetails::from_json(json)
     }
 
     pub fn from_json(json: &str) -> Result<Self, Error> {
@@ -2300,7 +2300,7 @@ impl ProjectDetails {
         }
     }
 
-    pub fn merge(&self, other: &ProjectDetails) -> Result<ProjectDetails, Error> {
+    pub fn merge(&self, other: &AwardDetails) -> Result<AwardDetails, Error> {
         let mut merged = self.clone();
 
         if merged.template.is_none() {
@@ -2386,16 +2386,15 @@ impl ProjectDetails {
     }
 }
 
-impl std::fmt::Display for ProjectDetails {
+impl std::fmt::Display for AwardDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_json())
     }
 }
 
-/// AwardDetails is an alias for ProjectDetails - an award is the funding
-/// record that drives project creation, so the two concepts share the
-/// same data structure.
-pub type AwardDetails = ProjectDetails;
+/// ProjectDetails is an alias for AwardDetails for backward compatibility.
+/// New code should use AwardDetails directly.
+pub type ProjectDetails = AwardDetails;
 
 ///
 /// Enum of all of the instructions that can be sent to agents

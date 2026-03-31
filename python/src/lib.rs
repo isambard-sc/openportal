@@ -1283,7 +1283,7 @@ impl Job {
         try_extract!(Usage, |v: Usage| v.0);
         try_extract!(DateRange, |v: DateRange| v.0.clone());
         try_extract!(ProjectTemplate, |v: ProjectTemplate| v.0.clone());
-        try_extract!(ProjectDetails, |v: ProjectDetails| v.0.clone());
+        try_extract!(AwardDetails, |v: AwardDetails| v.0.clone());
         try_extract!(StorageSize, |v: StorageSize| v.0);
         try_extract!(StorageUsage, |v: StorageUsage| v.0);
         try_extract!(QuotaLimit, |v: QuotaLimit| v.0.clone());
@@ -1537,7 +1537,7 @@ impl Job {
                 };
 
                 match result {
-                    Some(result) => Ok(ProjectDetails::from(result).into_pyobject(py)?.into_any()),
+                    Some(result) => Ok(AwardDetails::from(result).into_pyobject(py)?.into_any()),
                     None => Ok(py.None().into_bound(py)),
                 }
             }
@@ -4104,13 +4104,13 @@ impl From<grammar::ProjectTemplate> for ProjectTemplate {
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectDetails(grammar::ProjectDetails);
+struct AwardDetails(grammar::AwardDetails);
 
 #[pymethods]
-impl ProjectDetails {
+impl AwardDetails {
     #[new]
     fn new(details: &str) -> PyResult<Self> {
-        match grammar::ProjectDetails::parse(details) {
+        match grammar::AwardDetails::parse(details) {
             Ok(project_details) => Ok(Self(project_details)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -4122,7 +4122,7 @@ impl ProjectDetails {
 
     #[staticmethod]
     fn from_json(json: &str) -> PyResult<Self> {
-        match grammar::ProjectDetails::from_json(json) {
+        match grammar::AwardDetails::from_json(json) {
             Ok(project_details) => Ok(Self(project_details)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -4136,15 +4136,15 @@ impl ProjectDetails {
         self.__str__()
     }
 
-    fn __copy__(&self) -> PyResult<ProjectDetails> {
+    fn __copy__(&self) -> PyResult<AwardDetails> {
         Ok(self.clone())
     }
 
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<ProjectDetails> {
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<AwardDetails> {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &ProjectDetails, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &AwardDetails, op: CompareOp) -> PyResult<bool> {
         match op {
             CompareOp::Eq => Ok(self.0 == other.0),
             CompareOp::Ne => Ok(self.0 != other.0),
@@ -4380,7 +4380,7 @@ impl ProjectDetails {
         Ok(self.0.is_domain_allowed(domain))
     }
 
-    fn merge(&self, other: &ProjectDetails) -> PyResult<ProjectDetails> {
+    fn merge(&self, other: &AwardDetails) -> PyResult<AwardDetails> {
         match self.0.merge(&other.0) {
             Ok(merged) => Ok(merged.into()),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
@@ -4388,9 +4388,9 @@ impl ProjectDetails {
     }
 }
 
-impl From<grammar::ProjectDetails> for ProjectDetails {
+impl From<grammar::ProjectDetails> for AwardDetails {
     fn from(project_details: grammar::ProjectDetails) -> Self {
-        ProjectDetails(project_details)
+        AwardDetails(project_details)
     }
 }
 
@@ -5061,7 +5061,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ProjectStorageReport>()?;
     m.add_class::<StorageReport>()?;
     m.add_class::<DomainPattern>()?;
-    m.add_class::<ProjectDetails>()?;
+    m.add_class::<AwardDetails>()?;
+    m.add("ProjectDetails", m.py().get_type::<AwardDetails>())?;
     m.add_class::<ProjectTemplate>()?;
     m.add_class::<StorageSize>()?;
     m.add_class::<StorageUsage>()?;

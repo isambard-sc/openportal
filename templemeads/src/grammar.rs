@@ -2110,6 +2110,53 @@ impl std::fmt::Display for Note {
     }
 }
 
+/// Controls whether the receiving portal may independently modify the membership
+/// or roles of a project.
+///
+/// When this field is absent (`None` on `AwardDetails`) the behaviour is
+/// identical to `Open` — the receiving portal manages membership freely.
+/// Explicitly setting a value lets the sending portal declare a policy that
+/// the receiving portal is expected to honour.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipControl {
+    /// Receiving portal may freely add/remove members and change roles (default
+    /// when field is absent).
+    Open,
+    /// Receiving portal may add or remove members, but must not change the
+    /// role of any member — roles are authoritative in `AwardDetails`.
+    MembersOnly,
+    /// Receiving portal may change the role of existing members, but must not
+    /// add new members or remove existing ones.
+    RolesOnly,
+    /// Receiving portal must not change membership or roles; both are
+    /// authoritative in `AwardDetails` updates from the sender.
+    Locked,
+}
+
+impl MembershipControl {
+    /// Returns `true` if the receiving portal may add or remove members.
+    pub fn can_change_membership(&self) -> bool {
+        matches!(self, Self::Open | Self::MembersOnly)
+    }
+
+    /// Returns `true` if the receiving portal may change the role of a member.
+    pub fn can_change_roles(&self) -> bool {
+        matches!(self, Self::Open | Self::RolesOnly)
+    }
+}
+
+impl std::fmt::Display for MembershipControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::MembersOnly => write!(f, "members_only"),
+            Self::RolesOnly => write!(f, "roles_only"),
+            Self::Locked => write!(f, "locked"),
+        }
+    }
+}
+
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -2180,6 +2227,11 @@ pub struct AwardDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     earliest_approve: Option<DateTime<Utc>>,
 
+    /// Controls whether the receiving portal may independently modify
+    /// membership or roles. When absent, behaviour is `Open`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    membership_control: Option<MembershipControl>,
+
     /// The list of allowed domains for this project.
     /// If this is None, then all domains are allowed.
     /// If this is Some(vec![]), then no domains are allowed.
@@ -2218,6 +2270,7 @@ impl AwardDetails {
             renewal: None,
             notes: Vec::new(),
             earliest_approve: None,
+            membership_control: None,
             allowed_domains: None,
         }
     }
@@ -2494,6 +2547,34 @@ impl AwardDetails {
         self.earliest_approve = None;
     }
 
+    /// Returns the effective membership control policy. When the field is
+    /// absent the policy is `Open` (receiving portal manages freely).
+    pub fn membership_control(&self) -> MembershipControl {
+        self.membership_control
+            .clone()
+            .unwrap_or(MembershipControl::Open)
+    }
+
+    pub fn set_membership_control(&mut self, control: Option<MembershipControl>) {
+        self.membership_control = control;
+    }
+
+    pub fn clear_membership_control(&mut self) {
+        self.membership_control = None;
+    }
+
+    /// Returns `true` if the receiving portal may add or remove members.
+    /// Equivalent to `self.membership_control().can_change_membership()`.
+    pub fn can_change_membership(&self) -> bool {
+        self.membership_control().can_change_membership()
+    }
+
+    /// Returns `true` if the receiving portal may change the role of a member.
+    /// Equivalent to `self.membership_control().can_change_roles()`.
+    pub fn can_change_roles(&self) -> bool {
+        self.membership_control().can_change_roles()
+    }
+
     pub fn allowed_domains(&self) -> Option<Vec<DomainPattern>> {
         self.allowed_domains.clone()
     }
@@ -2622,6 +2703,10 @@ impl AwardDetails {
 
         if other.earliest_approve.is_some() {
             merged.earliest_approve = other.earliest_approve;
+        }
+
+        if other.membership_control.is_some() {
+            merged.membership_control = other.membership_control.clone();
         }
 
         if other.allowed_domains.is_some() {

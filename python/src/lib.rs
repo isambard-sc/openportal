@@ -4242,6 +4242,79 @@ impl From<grammar::ProjectTemplate> for ProjectTemplate {
     }
 }
 
+/// Controls whether the receiving portal may independently modify project
+/// membership or roles.  Access via `award.can_change_membership()` /
+/// `award.can_change_roles()` rather than comparing enum values directly.
+#[pyclass(module = "openportal", eq)]
+#[derive(Debug, Clone, PartialEq)]
+enum MembershipControl {
+    /// Receiving portal may add/remove members and change roles (default).
+    Open,
+    /// Receiving portal may add/remove members; roles are fixed by sender.
+    MembersOnly,
+    /// Receiving portal may change roles of existing members; membership is
+    /// fixed by sender.
+    RolesOnly,
+    /// Receiving portal must not change membership or roles.
+    Locked,
+}
+
+#[pymethods]
+impl MembershipControl {
+    /// Returns `true` if the receiving portal may add or remove members.
+    fn can_change_membership(&self) -> bool {
+        matches!(self, Self::Open | Self::MembersOnly)
+    }
+
+    /// Returns `true` if the receiving portal may change the role of a member.
+    fn can_change_roles(&self) -> bool {
+        matches!(self, Self::Open | Self::RolesOnly)
+    }
+
+    fn __str__(&self) -> &str {
+        match self {
+            Self::Open => "open",
+            Self::MembersOnly => "members_only",
+            Self::RolesOnly => "roles_only",
+            Self::Locked => "locked",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MembershipControl.{}",
+            match self {
+                Self::Open => "Open",
+                Self::MembersOnly => "MembersOnly",
+                Self::RolesOnly => "RolesOnly",
+                Self::Locked => "Locked",
+            }
+        )
+    }
+}
+
+impl From<grammar::MembershipControl> for MembershipControl {
+    fn from(mc: grammar::MembershipControl) -> Self {
+        match mc {
+            grammar::MembershipControl::Open => Self::Open,
+            grammar::MembershipControl::MembersOnly => Self::MembersOnly,
+            grammar::MembershipControl::RolesOnly => Self::RolesOnly,
+            grammar::MembershipControl::Locked => Self::Locked,
+        }
+    }
+}
+
+impl From<MembershipControl> for grammar::MembershipControl {
+    fn from(mc: MembershipControl) -> Self {
+        match mc {
+            MembershipControl::Open => Self::Open,
+            MembershipControl::MembersOnly => Self::MembersOnly,
+            MembershipControl::RolesOnly => Self::RolesOnly,
+            MembershipControl::Locked => Self::Locked,
+        }
+    }
+}
+
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AwardDetails(grammar::AwardDetails);
@@ -4592,6 +4665,33 @@ impl AwardDetails {
     fn clear_earliest_approve(&mut self) -> PyResult<()> {
         self.0.clear_earliest_approve();
         Ok(())
+    }
+
+    /// Returns the effective membership control policy.
+    /// Absent field is treated as `MembershipControl.Open`.
+    #[getter]
+    fn membership_control(&self) -> MembershipControl {
+        MembershipControl::from(self.0.membership_control())
+    }
+
+    #[setter]
+    fn set_membership_control(&mut self, control: MembershipControl) {
+        self.0
+            .set_membership_control(Some(grammar::MembershipControl::from(control)));
+    }
+
+    fn clear_membership_control(&mut self) {
+        self.0.clear_membership_control();
+    }
+
+    /// Returns `true` if the receiving portal may add or remove members.
+    fn can_change_membership(&self) -> bool {
+        self.0.can_change_membership()
+    }
+
+    /// Returns `true` if the receiving portal may change the role of a member.
+    fn can_change_roles(&self) -> bool {
+        self.0.can_change_roles()
     }
 
     #[getter]
@@ -5322,6 +5422,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DomainPattern>()?;
     m.add_class::<Link>()?;
     m.add_class::<Note>()?;
+    m.add_class::<MembershipControl>()?;
     m.add_class::<AwardDetails>()?;
     m.add("ProjectDetails", m.py().get_type::<AwardDetails>())?;
     m.add_class::<ProjectTemplate>()?;

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Watchdog false disconnections (paddington) — after removing `register_activity()`
+  from `send_message()` to fix zombie connection detection, the client-side
+  (`make_connection`) receive path was missing a `register_activity()` call.
+  Client-initiated connections had no activity tracking at all and were
+  disconnected by the watchdog after 300 seconds even when healthy. Activity
+  is now registered on every successfully received message on both the
+  server-side (`handle_connection`) and client-side (`make_connection`) paths.
+
 ## [0.27.0] - 2026-04-01
 
 ### Added

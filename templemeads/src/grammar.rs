@@ -2166,6 +2166,13 @@ pub struct AwardDetails {
     /// The allocation of resource for this project
     allocation: Option<Allocation>,
 
+    /// A free-form breakdown of the allocation into named components.
+    /// Keys and values are arbitrary strings agreed between the local
+    /// and remote portals — OpenPortal does not interpret them.
+    /// e.g. {"project_storage": "5 TB", "gpu_hours": "500 GPUHR"}
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    breakdown: BTreeMap<String, String>,
+
     /// Link back to the award record on the funding body's system
     #[serde(skip_serializing_if = "Option::is_none")]
     award: Option<Link>,
@@ -2223,6 +2230,7 @@ impl AwardDetails {
             start_date: None,
             end_date: None,
             allocation: None,
+            breakdown: BTreeMap::new(),
             award: None,
             call: None,
             project_link: None,
@@ -2395,6 +2403,26 @@ impl AwardDetails {
 
     pub fn clear_allocation(&mut self) {
         self.allocation = None;
+    }
+
+    pub fn breakdown(&self) -> &BTreeMap<String, String> {
+        &self.breakdown
+    }
+
+    pub fn set_breakdown_entry(&mut self, key: &str, value: &str) {
+        self.breakdown.insert(key.to_string(), value.to_string());
+    }
+
+    pub fn remove_breakdown_entry(&mut self, key: &str) {
+        self.breakdown.remove(key);
+    }
+
+    pub fn set_breakdown(&mut self, breakdown: BTreeMap<String, String>) {
+        self.breakdown = breakdown;
+    }
+
+    pub fn clear_breakdown(&mut self) {
+        self.breakdown.clear();
     }
 
     pub fn award(&self) -> Option<Link> {
@@ -2573,6 +2601,10 @@ impl AwardDetails {
 
         if other.allocation.is_some() {
             merged.allocation = other.allocation.clone();
+        }
+
+        for (key, value) in &other.breakdown {
+            merged.breakdown.insert(key.clone(), value.clone());
         }
 
         if other.members.is_some() {

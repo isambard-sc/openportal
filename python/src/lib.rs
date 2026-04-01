@@ -4443,6 +4443,35 @@ impl AwardDetails {
     }
 
     #[getter]
+    fn breakdown(&self) -> PyResult<std::collections::BTreeMap<String, String>> {
+        Ok(self.0.breakdown().clone())
+    }
+
+    #[setter]
+    fn set_breakdown(
+        &mut self,
+        breakdown: std::collections::BTreeMap<String, String>,
+    ) -> PyResult<()> {
+        self.0.set_breakdown(breakdown);
+        Ok(())
+    }
+
+    fn set_breakdown_entry(&mut self, key: &str, value: &str) -> PyResult<()> {
+        self.0.set_breakdown_entry(key, value);
+        Ok(())
+    }
+
+    fn remove_breakdown_entry(&mut self, key: &str) -> PyResult<()> {
+        self.0.remove_breakdown_entry(key);
+        Ok(())
+    }
+
+    fn clear_breakdown(&mut self) -> PyResult<()> {
+        self.0.clear_breakdown();
+        Ok(())
+    }
+
+    #[getter]
     fn award(&self) -> PyResult<Option<Link>> {
         Ok(self.0.award().map(Into::into))
     }

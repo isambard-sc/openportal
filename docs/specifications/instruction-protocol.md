@@ -265,6 +265,7 @@ enabling partial updates. This type is also accepted under the legacy name
   "start_date":       "<YYYY-MM-DD>",
   "end_date":         "<YYYY-MM-DD>",
   "allocation":       "<size> <units>",
+  "breakdown":        { "<key>": "<value>", ... },
   "award":            { "id": "<string>", "url": "<url>" },
   "call":             { "id": "<string>", "url": "<url>" },
   "project_link":     { "id": "<string>", "url": "<url>" },
@@ -276,6 +277,24 @@ enabling partial updates. This type is also accepted under the legacy name
 ```
 
 **`template`**: alphanumeric characters, underscores and dashes only; no spaces.
+
+**`members`**: keys are email addresses, values are role strings. Keys are
+serialised in ascending alphabetical order. Omitted when empty.
+
+**`breakdown`**: free-form map of named allocation components. Keys and values
+are arbitrary strings agreed between the local and remote portals — OpenPortal
+does not interpret them. Omitted when empty. Example:
+```json
+{
+  "gpu_hours":             "500 GPUHR",
+  "interactive_cpu_hours": "1000 CPUHR",
+  "project_storage":       "5 TB",
+  "user_storage":          "500 GB"
+}
+```
+On `merge` / `update_award`, entries from the incoming object overwrite matching
+keys in the existing map; new keys are added; existing keys not mentioned are
+unchanged.
 
 **`award`**: link back to the award record on the funding body's system (e.g. UKRI GtR).
 

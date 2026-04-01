@@ -4357,12 +4357,15 @@ impl AwardDetails {
     }
 
     #[getter]
-    fn members(&self) -> PyResult<Option<HashMap<String, String>>> {
+    fn members(&self) -> PyResult<Option<std::collections::BTreeMap<String, String>>> {
         Ok(self.0.members())
     }
 
     #[setter]
-    fn set_members(&mut self, members: HashMap<String, String>) -> PyResult<()> {
+    fn set_members(
+        &mut self,
+        members: std::collections::BTreeMap<String, String>,
+    ) -> PyResult<()> {
         self.0.set_members(members);
         Ok(())
     }

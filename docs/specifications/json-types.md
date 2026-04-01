@@ -198,6 +198,11 @@ Fields that are `null` or unset are omitted from the serialised JSON.
   "start_date":  "2024-01-01",
   "end_date":    "2024-12-31",
   "allocation":  "1000 NHR",
+  "breakdown": {
+    "gpu_hours":        "500 GPUHR",
+    "project_storage":  "5 TB",
+    "user_storage":     "500 GB"
+  },
   "award":       { "id": "061-4738952-1", "url": "https://gtr.ukri.org/..." },
   "call":        { "id": "EPSRC-2024-AI", "url": "https://..." },
   "project_link":{ "id": "PRJ-001", "url": "https://waldur.example.ac.uk/projects/..." },
@@ -221,7 +226,8 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `template` | string | Template identifier (alphanumeric, `_`, `-` only) |
 | `key` | string | Authorization key for the template |
 | `description` | string | Free-text project description |
-| `members` | object | Map of email address → role string |
+| `members` | object | Map of email address → role string (keys sorted alphabetically) |
+| `breakdown` | object | Free-form map of named allocation components (keys/values are portal-defined strings; omitted when empty) |
 | `start_date` | string | ISO date `YYYY-MM-DD` |
 | `end_date` | string | ISO date `YYYY-MM-DD` |
 | `allocation` | string | Resource allocation, e.g. `"1000 NHR"` or `"No allocation"` |
@@ -737,4 +743,4 @@ structure:
   `DailyProjectUsageReport`, `ProjectUsageReport`, `UsageReport`),
   `templemeads/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`),
   `templemeads/src/storage.rs` (`StorageSize`, `QuotaLimit`, `Quota`, `Volume`),
-  `templemeads/src/grammar.rs` (`AwardDetails` / `ProjectDetails`, identifiers and mappings).
+  `templemeads/src/grammar.rs` (`AwardDetails` / `ProjectDetails`, `Link`, `Note`, identifiers and mappings).

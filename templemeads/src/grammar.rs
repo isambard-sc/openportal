@@ -9,7 +9,7 @@ use crate::usagereport::Usage;
 use anyhow::Context;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::{hash::Hash, sync::Arc};
 use url::Url;
 use wildmatch::WildMatch;
@@ -1830,24 +1830,6 @@ impl<'de> Deserialize<'de> for Allocation {
     }
 }
 
-fn ordered_map<S, K: Ord + Serialize, V: Serialize>(
-    value: &Option<HashMap<K, V>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if let Some(value) = value {
-        if value.is_empty() {
-            serializer.serialize_none()
-        } else {
-            let ordered: BTreeMap<_, _> = value.iter().collect();
-            ordered.serialize(serializer)
-        }
-    } else {
-        serializer.serialize_none()
-    }
-}
 
 /// A domain pattern - this can be used to match domains that are allowed / denied
 /// Supports exact matches (e.g., "example.com") and wildcard matches (e.g., "*.example.com")
@@ -2154,8 +2136,7 @@ pub struct AwardDetails {
 
     /// The email address(es) of the members of the project,
     /// (keys) and their roles (values).
-    #[serde(serialize_with = "ordered_map")]
-    members: Option<HashMap<String, String>>,
+    members: Option<BTreeMap<String, String>>,
 
     /// Proposed start date of the project
     start_date: Option<Date>,
@@ -2319,7 +2300,7 @@ impl AwardDetails {
         self.description = None;
     }
 
-    pub fn members(&self) -> Option<HashMap<String, String>> {
+    pub fn members(&self) -> Option<BTreeMap<String, String>> {
         self.members.clone()
     }
 
@@ -2336,7 +2317,7 @@ impl AwardDetails {
             return;
         };
 
-        let members = self.members.get_or_insert_with(HashMap::new);
+        let members = self.members.get_or_insert_with(BTreeMap::new);
         members.insert(email.to_string(), role.to_string());
     }
 
@@ -2353,7 +2334,7 @@ impl AwardDetails {
         }
     }
 
-    pub fn set_members(&mut self, members: HashMap<String, String>) {
+    pub fn set_members(&mut self, members: BTreeMap<String, String>) {
         if members.is_empty() {
             self.members = None;
         } else {

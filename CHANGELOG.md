@@ -30,11 +30,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     which the receiving portal must not approve or provision the award. Lets the
     awarder make corrections in the window between creating the award and it being
     acted on (e.g. set to one hour in the future on creation).
+  - `breakdown: BTreeMap<String, String>` — a free-form map of portal-defined
+    allocation component names to human-readable values (e.g.
+    `"project_storage" → "5 TB"`). OpenPortal carries this map transparently and
+    does not interpret its contents. Keys and values are both arbitrary strings;
+    ordering is deterministic (alphabetical by key). On merge, entries from the
+    incoming `AwardDetails` overwrite or add to existing entries (no keys are
+    deleted). Absent from serialised JSON when empty.
 - **Python bindings**: `openportal.Link` and `openportal.Note` classes exported.
   `AwardDetails` gains `award`, `call`, `project_link`, `renewal`, `notes`,
-  `add_note`, `clear_notes`, `earliest_approve`, `set_earliest_approve`, and
-  `clear_earliest_approve`. `earliest_approve` is exposed as a UTC-aware
-  `datetime.datetime`.
+  `add_note`, `clear_notes`, `earliest_approve`, `set_earliest_approve`,
+  `clear_earliest_approve`, `breakdown` (getter/setter), `set_breakdown_entry`,
+  `remove_breakdown_entry`, and `clear_breakdown`. `earliest_approve` is exposed
+  as a UTC-aware `datetime.datetime`.
 
 - **`get_award` and `get_awards` instructions** — new portal-level instructions
   to retrieve award details. `get_award <project_id>` returns the `AwardDetails`
@@ -67,18 +75,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   it describes a funding award (with its members, dates, allocation, etc.) from
   which a project is created. `ProjectDetails` remains as a type alias so
   existing Rust code compiles without changes.
-  - New fields `award_id: Option<String>` and `award_url: Option<String>` have
-    been added directly to `AwardDetails`, replacing the old nested `award`
-    sub-object (`AwardDetails { id, link }`). JSON sent by old clients with an
-    `"award"` key will simply have that field ignored; new JSON uses `"award_id"`
-    and `"award_url"` at the top level.
-  - Wire protocol unchanged: `create_project` and `update_project` remain the
-    canonical command names (Display still emits the old names). `create_award`
-    and `update_award` are now accepted as synonyms by the parser.
+  - Wire protocol unchanged: `NamedType::type_name()` still returns
+    `"ProjectDetails"` for `AwardDetails`, so result-type tags in Job payloads
+    are unchanged. `create_project` and `update_project` remain the canonical
+    command names (Display still emits the old names). `create_award` and
+    `update_award` are accepted as synonyms by the parser.
   - Python: the class is now `openportal.AwardDetails`. `openportal.ProjectDetails`
-    is registered as an alias pointing to the same class. The old `award` getter
-    on `ProjectDetails` is replaced by `award_id` and `award_url` on
-    `AwardDetails`.
+    is registered as an alias pointing to the same class object
+    (`openportal.ProjectDetails is openportal.AwardDetails` is `True`).
+- **`members` field migrated to `BTreeMap`** — `AwardDetails::members` was
+  `Option<HashMap<String, String>>` serialised through a custom `ordered_map`
+  helper that sorted keys on every serialise. It is now
+  `Option<BTreeMap<String, String>>`, which provides the same deterministic
+  alphabetical key ordering without the helper. The change is fully
+  backward-compatible: existing JSON deserialises identically and the wire
+  representation is unchanged. The `ordered_map` helper function has been
+  removed from `templemeads::grammar`.
 
 ## [0.26.0] - 2026-03-25
 

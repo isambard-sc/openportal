@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.27.0] - 2026-04-01
+
 ### Added
 
 - **`Link` and `Note` types** — new reusable types in `templemeads::grammar`:
@@ -43,7 +45,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `clear_earliest_approve`, `breakdown` (getter/setter), `set_breakdown_entry`,
   `remove_breakdown_entry`, and `clear_breakdown`. `earliest_approve` is exposed
   as a UTC-aware `datetime.datetime`.
-
 - **`MembershipControl` enum and `membership_control` field on `AwardDetails`** —
   the sending portal can now declare a policy that constrains whether the receiving
   portal may independently modify project membership or roles:
@@ -62,13 +63,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `openportal.MembershipControl` is exported as a Python class with `Open`,
   `MembersOnly`, `RolesOnly`, and `Locked` attributes, each of which also exposes
   `can_change_membership()` and `can_change_roles()` directly.
-
 - **`get_users` instruction at portal level** — the portal and bridge agents now
   handle `get_users <project_id>`, forwarding it to the connected web portal via
   the bridge. The response is `Vec<UserMapping>` where `local_user` = email
   address (the portal-level equivalent of a Unix username). The Python bindings
   already supported `Vec<UserMapping>` so no Python changes were required.
-
 - **`get_award` and `get_awards` instructions** — new portal-level instructions
   to retrieve award details. `get_award <project_id>` returns the `AwardDetails`
   for a single project; `get_awards <portal_id>` (also accepted as `list_awards`)
@@ -1374,6 +1373,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.27.0]: https://github.com/isambard-sc/openportal/releases/tag/0.27.0
 [0.26.0]: https://github.com/isambard-sc/openportal/releases/tag/0.26.0
 [0.25.0]: https://github.com/isambard-sc/openportal/releases/tag/0.25.0
 [0.24.0]: https://github.com/isambard-sc/openportal/releases/tag/0.24.0

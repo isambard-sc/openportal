@@ -1456,6 +1456,16 @@ impl Connection {
                     tracing::warn!("Error handling message: {:?}", e);
                 });
 
+            // record the last time we successfully received a message
+            match self.state.lock() {
+                Ok(mut state) => {
+                    state.register_activity();
+                }
+                Err(e) => {
+                    tracing::warn!("Error registering activity: {:?}", e);
+                }
+            }
+
             future::ok(())
         });
 

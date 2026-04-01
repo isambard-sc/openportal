@@ -524,7 +524,7 @@ async_message_handler! {
                 match service_info.keepalives.lock() {
                     Ok(mut keepalives) => {
                         if keepalives.contains(&name) {
-                            tracing::warn!("Duplicate keepalive message from {} in zone {} - skipping", sender, zone);
+                            tracing::debug!("Duplicate keepalive message from {} in zone {} - skipping", sender, zone);
                             return Ok(());
                         }
 

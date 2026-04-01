@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **`get_award` and `get_awards` instructions** — new portal-level instructions
+  to retrieve award details. `get_award <project_id>` returns the `AwardDetails`
+  for a single project; `get_awards <portal_id>` (also accepted as `list_awards`)
+  returns all award details for a portal as a `Vec<AwardDetails>`. Both are
+  handled by the portal agent and forwarded to the bridge.
+
+### Fixed
+
+- Zombie connection prevents reconnection (paddington) — when a network
+  fault silently dropped a websocket connection without closing the TCP socket,
+  the server retained the stale connection in its registry. Any reconnection
+  attempt from that peer was incorrectly classified as a secondary (standby)
+  connection and never promoted to primary, causing all messages to that peer
+  to be lost indefinitely until the server was restarted.
+  - Root cause: `send_message()` was calling `register_activity()` on every
+    outgoing send, so the watchdog's 300-second inactivity timer was
+    continuously reset by keepalive sends to the zombie connection. Only
+    received messages now count as activity.
+  - Extra safeguard: `check_standby()` now proactively runs the watchdog
+    check on the existing connection whenever a new connection arrives for
+    the same peer. If the existing connection is stale it is disconnected
+    immediately, allowing the new connection to become primary without
+    waiting for the background watchdog loop.
+
+### Changed
+
+- **`ProjectDetails` renamed to `AwardDetails`** — the data structure that
+  carries project/award metadata is now called `AwardDetails`, reflecting that
+  it describes a funding award (with its members, dates, allocation, etc.) from
+  which a project is created. `ProjectDetails` remains as a type alias so
+  existing Rust code compiles without changes.
+  - New fields `award_id: Option<String>` and `award_url: Option<String>` have
+    been added directly to `AwardDetails`, replacing the old nested `award`
+    sub-object (`AwardDetails { id, link }`). JSON sent by old clients with an
+    `"award"` key will simply have that field ignored; new JSON uses `"award_id"`
+    and `"award_url"` at the top level.
+  - Wire protocol unchanged: `create_project` and `update_project` remain the
+    canonical command names (Display still emits the old names). `create_award`
+    and `update_award` are now accepted as synonyms by the parser.
+  - Python: the class is now `openportal.AwardDetails`. `openportal.ProjectDetails`
+    is registered as an alias pointing to the same class. The old `award` getter
+    on `ProjectDetails` is replaced by `award_id` and `award_url` on
+    `AwardDetails`.
+
 ## [0.26.0] - 2026-03-25
 
 ### Added

@@ -547,11 +547,13 @@ are placed on the bridge board for the portal to handle:
 
 | Instruction | Description |
 |-------------|-------------|
-| `create_project` | Create a new project |
+| `create_project` / `create_award` | Create a new project |
 | `remove_project` | Remove an existing project |
-| `update_project` | Update project details |
+| `update_project` / `update_award` | Update project details |
 | `get_project` | Get details of a project |
 | `get_projects` | Get all projects |
+| `get_award` | Get award details for a project |
+| `get_awards` | Get award details for all projects |
 | `get_project_mapping` | Get the local group mapping for a project |
 | `get_usage_report` | Get compute usage for a project over a date range |
 | `get_usage_reports` | Get compute usage for all projects over a date range |

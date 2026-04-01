@@ -127,7 +127,7 @@ Represents a unit of work in the OpenPortal system.
 |---|---|---|
 | `update` | `() → None` | Refresh this job in-place by fetching its latest status from the bridge. No-op if already finished. |
 | `wait` | `(max_ms: int = 1000) → bool` | Block until the job is finished or `max_ms` milliseconds elapse. Pass a negative value to wait indefinitely. Returns `True` if the job is now finished. |
-| `completed` | `(result) → Job` | Return a new copy of this job marked as complete with the given result. `result` may be a `str`, `bool`, `UserIdentifier`, `ProjectIdentifier`, `ProjectDetails`, `ProjectUsageReport`, `UsageReport`, `ProjectStorageReport`, `StorageReport`, `Quota`, `Volume`, `StorageSize`, `StorageUsage`, `QuotaLimit`, `ProjectTemplate`, `DateRange`, or a `list` or `dict` of those types. Used when handling bridge-board jobs. |
+| `completed` | `(result) → Job` | Return a new copy of this job marked as complete with the given result. `result` may be a `str`, `bool`, `UserIdentifier`, `ProjectIdentifier`, `AwardDetails`, `ProjectUsageReport`, `UsageReport`, `ProjectStorageReport`, `StorageReport`, `Quota`, `Volume`, `StorageSize`, `StorageUsage`, `QuotaLimit`, `ProjectTemplate`, `DateRange`, or a `list` or `dict` of those types. Used when handling bridge-board jobs. |
 | `errored` | `(error: str) → Job` | Return a new copy of this job marked as failed with the given error message. Used when handling bridge-board jobs. |
 | `to_json` | `() → str` | Serialise the job to a JSON string. |
 | `from_json` | `(json: str) → Job` | *(static)* Deserialise a job from a JSON string. |
@@ -227,11 +227,14 @@ The name of a portal, e.g. `myportal`.
 
 ---
 
-### `ProjectDetails`
+### `AwardDetails`
 
-Details about a project, including its identifier, template, member users,
-and associated mappings. See [json-types.md](json-types.md) for the full
-JSON schema.
+Details about an award (and the project it creates), including the project
+identifier, template, member users, award identifiers, and resource allocation.
+See [json-types.md](json-types.md) for the full JSON schema.
+
+`openportal.ProjectDetails` is an alias for `AwardDetails` for backward
+compatibility; both refer to the same class.
 
 ---
 

@@ -19,8 +19,9 @@ An instruction is a single-line text string:
 
 The command keyword is separated from arguments by single spaces. Compound argument
 types use internal delimiters (`.`, `:`) that do not conflict with the space delimiter.
-The exception is `ProjectDetails`, which is a JSON object and may contain spaces; it
-always appears as the final argument of its instruction.
+The exception is `AwardDetails` (also accepted as `ProjectDetails` for backward
+compatibility), which is a JSON object and may contain spaces; it always appears
+as the final argument of its instruction.
 
 Instruction strings are the canonical serialisation format: `Instruction::to_string()`
 produces them and `Instruction::parse()` consumes them.
@@ -217,10 +218,11 @@ Example: `3600` (one hour)
 
 ---
 
-### ProjectDetails
+### AwardDetails
 
-Project metadata serialised as a JSON object. All fields are optional, enabling
-partial updates.
+Award/project metadata serialised as a JSON object. All fields are optional,
+enabling partial updates. This type is also accepted under the legacy name
+`ProjectDetails` for backward compatibility.
 
 ```json
 {
@@ -232,12 +234,18 @@ partial updates.
   "start_date":     "<YYYY-MM-DD>",
   "end_date":       "<YYYY-MM-DD>",
   "allocation":     "<size> <units>",
-  "award":          { "id": "<string>", "link": "<url>" },
+  "award_id":       "<string>",
+  "award_url":      "<url>",
   "allowed_domains": ["<domain_pattern>", ...]
 }
 ```
 
 **`template`**: alphanumeric characters, underscores and dashes only; no spaces.
+
+**`award_id`**: a human-readable award identifier string, e.g. `"061-4738952-1"`.
+
+**`award_url`**: a valid URL pointing to the award page, e.g.
+`"https://example.com/award/061-4738952-1"`.
 
 **`allocation` units** (canonical forms, case-insensitive aliases accepted):
 
@@ -280,21 +288,24 @@ submit portal.provider.cluster_platform.cluster_a add_user alice.proj.waldur
 
 ### Project Instructions
 
-#### `create_project`
+#### `create_project` / `create_award`
 
 Create a new project with the given identifier and metadata.
+`create_award` is accepted as a synonym; `create_project` is the canonical
+wire form for now (until all agents are migrated).
 
 ```
-create_project <project_id> <project_details_json>
+create_project <project_id> <award_details_json>
 ```
 
-#### `update_project`
+#### `update_project` / `update_award`
 
 Update metadata for an existing project. Only fields present in the JSON are
-changed.
+changed. `update_award` is accepted as a synonym; `update_project` is the
+canonical wire form for now.
 
 ```
-update_project <project_id> <project_details_json>
+update_project <project_id> <award_details_json>
 ```
 
 #### `get_project`
@@ -305,7 +316,7 @@ Retrieve the full details of a single project.
 get_project <project_id>
 ```
 
-Returns: `ProjectDetails`
+Returns: `ProjectDetails` (`AwardDetails`)
 
 #### `get_projects`
 
@@ -315,7 +326,28 @@ List all projects managed by a portal.
 get_projects <portal_id>
 ```
 
-Returns: `Vec<ProjectDetails>`
+Returns: `Vec<ProjectDetails>` (`Vec<AwardDetails>`)
+
+#### `get_award`
+
+Retrieve the award details for a single project.
+
+```
+get_award <project_id>
+```
+
+Returns: `ProjectDetails` (`AwardDetails`)
+
+#### `get_awards` / `list_awards`
+
+List the award details for all projects managed by a portal.
+`list_awards` is accepted as a synonym.
+
+```
+get_awards <portal_id>
+```
+
+Returns: `Vec<ProjectDetails>` (`Vec<AwardDetails>`)
 
 #### `add_project`
 
@@ -869,10 +901,12 @@ Returns: `Destinations`
 | Command | Arguments | Returns | Description |
 |---------|-----------|---------|-------------|
 | `submit` | `<destination> <instruction>` | — | Route instruction to a specific destination |
-| `create_project` | `<project_id> <details_json>` | — | Create a project |
-| `update_project` | `<project_id> <details_json>` | — | Update project metadata |
+| `create_project` / `create_award` | `<project_id> <details_json>` | — | Create a project |
+| `update_project` / `update_award` | `<project_id> <details_json>` | — | Update project metadata |
 | `get_project` | `<project_id>` | `ProjectDetails` | Retrieve project details |
 | `get_projects` | `<portal_id>` | `Vec<ProjectDetails>` | List all projects for a portal |
+| `get_award` | `<project_id>` | `ProjectDetails` | Retrieve award details for a project |
+| `get_awards` / `list_awards` | `<portal_id>` | `Vec<ProjectDetails>` | List award details for all projects |
 | `add_project` | `<project_id>` | — | Add project to agent scope |
 | `remove_project` | `<project_id>` | — | Remove project from agent scope |
 | `is_existing_project` | `<project_id>` | `bool` | Check if project exists |

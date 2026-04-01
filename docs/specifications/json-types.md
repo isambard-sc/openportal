@@ -176,7 +176,11 @@ A JSON array of user identifier strings, each in `username.project.portal` forma
 
 ### `ProjectDetails`
 
-Returned by: `get_project`
+Also known as `AwardDetails` — `ProjectDetails` is a backward-compatibility
+alias; new code should use `AwardDetails`. The `result_type` field in a `Job`
+will contain `"ProjectDetails"` for wire-protocol compatibility.
+
+Returned by: `get_project`, `get_award`
 
 A JSON object. All fields are optional and may be absent if not set by the portal.
 
@@ -193,10 +197,8 @@ A JSON object. All fields are optional and may be absent if not set by the porta
   "start_date":  "2024-01-01",
   "end_date":    "2024-12-31",
   "allocation":  "1000 NHR",
-  "award": {
-    "id":   "EP/X000000/1",
-    "link": "https://example.com/award/EP-X000000-1"
-  },
+  "award_id":    "061-4738952-1",
+  "award_url":   "https://example.com/award/061-4738952-1",
   "allowed_domains": [
     "example.com",
     "*.university.ac.uk"
@@ -216,25 +218,15 @@ A JSON object. All fields are optional and may be absent if not set by the porta
 | `start_date` | string | ISO date `YYYY-MM-DD` |
 | `end_date` | string | ISO date `YYYY-MM-DD` |
 | `allocation` | string | Resource allocation, e.g. `"1000 NHR"` or `"No allocation"` |
-| `award` | object | Award details (see below) |
+| `award_id` | string | Human-readable award identifier, e.g. `"061-4738952-1"` |
+| `award_url` | string | URL of the award page (must be a valid URL if provided) |
 | `allowed_domains` | array of strings | Domain allow-list; `null` = all; `[]` = none |
-
-**`award` object:**
-
-```json
-{
-  "id":   "<award-id>",
-  "link": "<url>"
-}
-```
-
-Both `id` and `link` are optional and may be `null`.
 
 ---
 
 ### `Vec<ProjectDetails>`
 
-Returned by: `get_projects`
+Returned by: `get_projects`, `get_awards`
 
 A JSON array of `ProjectDetails` objects.
 
@@ -679,8 +671,8 @@ structure:
 | `"UserMapping"` | Mapping string | `get_user_mapping` |
 | `"ProjectMapping"` | Mapping string | `get_project_mapping` |
 | `"Vec<UserIdentifier>"` | Array of identifier strings | `get_users` |
-| `"ProjectDetails"` | Object | `get_project` |
-| `"Vec<ProjectDetails>"` | Array of objects | `get_projects` |
+| `"ProjectDetails"` | Object | `get_project`, `get_award` |
+| `"Vec<ProjectDetails>"` | Array of objects | `get_projects`, `get_awards` |
 | `"Usage"` | `{"seconds": <u64>}` | `get_limit`, `get_local_limit` |
 | `"Quota"` | `{"limit": "…", "usage": "…"}` | `get_*_quota` |
 | `"HashMap<Volume, Quota>"` | Object: volume → Quota | `get_*_quotas` |
@@ -718,4 +710,4 @@ structure:
   `DailyProjectUsageReport`, `ProjectUsageReport`, `UsageReport`),
   `templemeads/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`),
   `templemeads/src/storage.rs` (`StorageSize`, `QuotaLimit`, `Quota`, `Volume`),
-  `templemeads/src/grammar.rs` (`ProjectDetails`, identifiers and mappings).
+  `templemeads/src/grammar.rs` (`AwardDetails` / `ProjectDetails`, identifiers and mappings).

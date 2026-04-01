@@ -32,7 +32,7 @@ a portal or agent that needs to construct or parse OpenPortal commands.
 **JSON serialisation of result types**
 
 Specifies the JSON format of every value that can appear in a `Job`'s `result`
-field once a job completes: `Job` itself, `ProjectDetails`, `ProjectUsageReport`,
+field once a job completes: `Job` itself, `AwardDetails` (wire name: `ProjectDetails`), `ProjectUsageReport`,
 `Quota`, `Usage`, and all other return types. Includes the `result_type` name
 reference table mapping Rust type names to their JSON schemas.
 
@@ -79,7 +79,7 @@ that portal software uses to interact with OpenPortal via the bridge agent.
 Covers initialisation, all top-level functions (`run`, `status`, `fetch_jobs`,
 `send_result`, `health`, `diagnostics`, `sync_offerings`, etc.), and every
 exported class (`Job`, `Status`, `Health`, `Diagnostics`, `Destination`,
-`UserIdentifier`, `ProjectDetails`, usage/storage types). Includes usage
+`UserIdentifier`, `AwardDetails` / `ProjectDetails`, usage/storage types). Includes usage
 patterns for both the portal → OpenPortal direction and the OpenPortal →
 portal callback direction.
 

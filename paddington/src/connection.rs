@@ -414,16 +414,6 @@ impl Connection {
         .await
         .with_context(|| "Error sending message to peer")?;
 
-        // record the last time we successfully sent a message
-        match self.state.lock() {
-            Ok(mut state) => {
-                state.register_activity();
-            }
-            Err(e) => {
-                tracing::warn!("Error registering activity: {:?}", e);
-            }
-        }
-
         Ok(())
     }
 

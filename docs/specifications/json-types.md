@@ -210,7 +210,8 @@ Fields that are `null` or unset are omitted from the serialised JSON.
   "notes": [
     { "timestamp": "2024-01-15T10:30:00Z", "author": "Jane Smith", "text": "Approved." }
   ],
-  "earliest_approve": "2024-01-15T11:30:00Z",
+  "earliest_approve":   "2024-01-15T11:30:00Z",
+  "membership_control": "members_only",
   "allowed_domains": [
     "example.com",
     "*.university.ac.uk"
@@ -237,7 +238,20 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `renewal` | `Link` | Link to the renewal / more-time application page |
 | `notes` | array of `Note` | Append-only timestamped messages; omitted when empty |
 | `earliest_approve` | string | RFC 3339 UTC — do not approve before this time; omitted when unset |
+| `membership_control` | string | `"open"` / `"members_only"` / `"roles_only"` / `"locked"` — see below; omitted when unset (defaults to `open`) |
 | `allowed_domains` | array of strings | Domain allow-list; `null` = all; `[]` = none |
+
+**`MembershipControl` values:**
+
+| Value | Can add/remove members | Can change roles |
+|-------|:----------------------:|:----------------:|
+| `"open"` (default) | ✓ | ✓ |
+| `"members_only"` | ✓ | ✗ |
+| `"roles_only"` | ✗ | ✓ |
+| `"locked"` | ✗ | ✗ |
+
+Absent field is equivalent to `"open"`. On merge, the incoming value overwrites
+the existing value if present.
 
 **`Link` object:**
 

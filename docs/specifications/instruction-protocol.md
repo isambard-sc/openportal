@@ -218,6 +218,24 @@ Example: `3600` (one hour)
 
 ---
 
+### MembershipControl
+
+Controls whether the receiving portal may independently modify project membership
+or roles. When the field is absent from `AwardDetails` the behaviour is `open`
+(receiving portal manages freely).
+
+| Value | `can_change_membership` | `can_change_roles` |
+|-------|:-----------------------:|:------------------:|
+| `"open"` | ✓ | ✓ |
+| `"members_only"` | ✓ | ✗ |
+| `"roles_only"` | ✗ | ✓ |
+| `"locked"` | ✗ | ✗ |
+
+Serialised as a lowercase snake\_case string in JSON,
+e.g. `"membership_control": "members_only"`.
+
+---
+
 ### Link
 
 A reference to an external resource. Both fields are optional.
@@ -270,9 +288,10 @@ enabling partial updates. This type is also accepted under the legacy name
   "call":             { "id": "<string>", "url": "<url>" },
   "project_link":     { "id": "<string>", "url": "<url>" },
   "renewal":          { "id": "<string>", "url": "<url>" },
-  "notes":            [ { "timestamp": "<RFC 3339>", "author": "<string>", "text": "<string>" } ],
-  "earliest_approve": "<RFC 3339 UTC>",
-  "allowed_domains":  ["<domain_pattern>", ...]
+  "notes":              [ { "timestamp": "<RFC 3339>", "author": "<string>", "text": "<string>" } ],
+  "earliest_approve":   "<RFC 3339 UTC>",
+  "membership_control": "<open|members_only|roles_only|locked>",
+  "allowed_domains":    ["<domain_pattern>", ...]
 }
 ```
 
@@ -311,6 +330,10 @@ Display format per note: `[YYYY-MM-DD HH:MM UTC — Author] text`.
 
 **`earliest_approve`**: RFC 3339 UTC timestamp before which the receiving portal
 must not approve or provision this award. Omitted when not set.
+
+**`membership_control`**: see [`MembershipControl`](#membershipcontrol) above.
+Omitted when not set; absence is equivalent to `"open"`. On merge, the incoming
+value overwrites the existing value if present.
 
 **`allocation` units** (canonical forms, case-insensitive aliases accepted):
 

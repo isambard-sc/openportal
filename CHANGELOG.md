@@ -44,6 +44,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `remove_breakdown_entry`, and `clear_breakdown`. `earliest_approve` is exposed
   as a UTC-aware `datetime.datetime`.
 
+- **`MembershipControl` enum and `membership_control` field on `AwardDetails`** —
+  the sending portal can now declare a policy that constrains whether the receiving
+  portal may independently modify project membership or roles:
+  - `open` (default, field absent) — receiving portal manages membership and roles
+    freely.
+  - `members_only` — receiving portal may add/remove members; roles are
+    authoritative in `AwardDetails` updates from the sender.
+  - `roles_only` — receiving portal may change the role of existing members; it
+    must not add or remove members.
+  - `locked` — receiving portal must not change membership or roles; both are
+    authoritative in `AwardDetails` updates from the sender.
+  On merge, the incoming value overwrites the existing value if present; absent
+  is treated as `open` at runtime (field is omitted from serialised JSON).
+  Python: `award.membership_control` getter/setter, `award.clear_membership_control()`,
+  and convenience methods `award.can_change_membership()` / `award.can_change_roles()`.
+  `openportal.MembershipControl` is exported as a Python class with `Open`,
+  `MembersOnly`, `RolesOnly`, and `Locked` attributes, each of which also exposes
+  `can_change_membership()` and `can_change_roles()` directly.
+
+- **`get_users` instruction at portal level** — the portal and bridge agents now
+  handle `get_users <project_id>`, forwarding it to the connected web portal via
+  the bridge. The response is `Vec<UserMapping>` where `local_user` = email
+  address (the portal-level equivalent of a Unix username). The Python bindings
+  already supported `Vec<UserMapping>` so no Python changes were required.
+
 - **`get_award` and `get_awards` instructions** — new portal-level instructions
   to retrieve award details. `get_award <project_id>` returns the `AwardDetails`
   for a single project; `get_awards <portal_id>` (also accepted as `list_awards`)

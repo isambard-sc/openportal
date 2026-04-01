@@ -404,7 +404,9 @@ Retrieve the full details of a single project.
 get_project <project_id>
 ```
 
-Returns: `ProjectDetails` (`AwardDetails`)
+(deprecated - now use `get_award` instead)
+
+Returns: `AwardDetails` (`ProjectDetails`)
 
 #### `get_projects`
 
@@ -414,7 +416,7 @@ List all projects managed by a portal.
 get_projects <portal_id>
 ```
 
-Returns: `Vec<ProjectDetails>` (`Vec<AwardDetails>`)
+Returns: `Vec<ProjectMapping>`
 
 #### `get_award`
 
@@ -424,7 +426,7 @@ Retrieve the award details for a single project.
 get_award <project_id>
 ```
 
-Returns: `ProjectDetails` (`AwardDetails`)
+Returns: `AwardDetails` (`ProjectDetails`)
 
 #### `get_awards` / `list_awards`
 
@@ -435,7 +437,7 @@ List the award details for all projects managed by a portal.
 get_awards <portal_id>
 ```
 
-Returns: `Vec<ProjectDetails>` (`Vec<AwardDetails>`)
+Returns: `Vec<AwardDetails>` (`Vec<ProjectDetails>`)
 
 #### `add_project`
 
@@ -475,7 +477,7 @@ List all users in a project.
 get_users <project_id>
 ```
 
-Returns: `Vec<UserIdentifier>`
+Returns: `Vec<UserMapping>`
 
 #### `add_user`
 
@@ -991,14 +993,14 @@ Returns: `Destinations`
 | `submit` | `<destination> <instruction>` | — | Route instruction to a specific destination |
 | `create_project` / `create_award` | `<project_id> <details_json>` | — | Create a project |
 | `update_project` / `update_award` | `<project_id> <details_json>` | — | Update project metadata |
-| `get_project` | `<project_id>` | `ProjectDetails` | Retrieve project details |
-| `get_projects` | `<portal_id>` | `Vec<ProjectDetails>` | List all projects for a portal |
-| `get_award` | `<project_id>` | `ProjectDetails` | Retrieve award details for a project |
-| `get_awards` / `list_awards` | `<portal_id>` | `Vec<ProjectDetails>` | List award details for all projects |
+| `get_project` | `<project_id>` | `ProjectMapping` | Retrieve project details |
+| `get_projects` | `<portal_id>` | `Vec<ProjectMapping>` | List all projects for a portal |
+| `get_award` | `<project_id>` | `AwardDetails` | Retrieve award details for a project |
+| `get_awards` / `list_awards` | `<portal_id>` | `Vec<AwardDetails>` | List award details for all projects |
 | `add_project` | `<project_id>` | — | Add project to agent scope |
 | `remove_project` | `<project_id>` | — | Remove project from agent scope |
 | `is_existing_project` | `<project_id>` | `bool` | Check if project exists |
-| `get_users` | `<project_id>` | `Vec<UserIdentifier>` | List users in a project |
+| `get_users` | `<project_id>` | `Vec<UserMapping>` | List users in a project |
 | `add_user` | `<user_id>` | — | Add user to project |
 | `remove_user` | `<user_id>` | — | Remove user from project |
 | `is_protected_user` | `<user_id>` | `bool` | Check if user is protected |

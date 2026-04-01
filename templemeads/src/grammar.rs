@@ -1830,7 +1830,6 @@ impl<'de> Deserialize<'de> for Allocation {
     }
 }
 
-
 /// A domain pattern - this can be used to match domains that are allowed / denied
 /// Supports exact matches (e.g., "example.com") and wildcard matches (e.g., "*.example.com")
 /// Serializes to/from JSON as a plain string (e.g., "*.example.com")
@@ -2003,8 +2002,7 @@ impl Link {
             self.url = None;
             Ok(())
         } else {
-            Url::parse(url)
-                .map_err(|e| Error::Parse(format!("Invalid URL for link: {}", e)))?;
+            Url::parse(url).map_err(|e| Error::Parse(format!("Invalid URL for link: {}", e)))?;
             self.url = Some(url.to_string());
             Ok(())
         }

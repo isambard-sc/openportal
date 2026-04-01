@@ -4056,7 +4056,6 @@ enum DomainPatternOrStr {
     Str(String),
 }
 
-
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Link(grammar::Link);
@@ -4435,10 +4434,7 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_members(
-        &mut self,
-        members: std::collections::BTreeMap<String, String>,
-    ) -> PyResult<()> {
+    fn set_members(&mut self, members: std::collections::BTreeMap<String, String>) -> PyResult<()> {
         self.0.set_members(members);
         Ok(())
     }
@@ -4651,10 +4647,7 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_earliest_approve(
-        &mut self,
-        dt: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> PyResult<()> {
+    fn set_earliest_approve(&mut self, dt: Option<chrono::DateTime<chrono::Utc>>) -> PyResult<()> {
         match dt {
             Some(dt) => self.0.set_earliest_approve(dt),
             None => self.0.clear_earliest_approve(),

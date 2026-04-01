@@ -12,7 +12,7 @@ use templemeads::async_runnable;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
     CreateProject, GetAward, GetAwards, GetProject, GetProjectMapping, GetProjects,
-    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, RemoveProject,
+    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
     SyncOfferings, UpdateProject,
 };
 use templemeads::job::{send_queued, Envelope, Job};
@@ -348,6 +348,39 @@ async fn main() -> Result<()> {
                 GetProjectMapping(project) => {
                     // get the project mapping from the cluster
                     tracing::debug!("Getting project mapping for {}", project);
+
+                    let board = server::get_board().await?;
+
+                    let waiter = board.write().await.add(&job)?;
+
+                    // now signal the web-portal connected to the bridge
+                    // that this job is ready to be processed
+                    let signal_url = board.read().await.signal_url();
+
+                    match signal_web_portal(&signal_url, &job).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // remove the job from the board as it will not be processed
+                            board.write().await.remove(&job)?;
+                            return job.errored(
+                                &format!("Failed to signal web portal: {}", e),
+                            );
+                        }
+                    }
+
+                    let mut result = waiter.result().await?;
+
+                    while !result.is_finished() {
+                        // get a new waiter to wait for the job to finish
+                        let waiter = board.write().await.get_waiter(&result)?;
+                        result = waiter.result().await?;
+                    }
+
+                    job.copy_result_from(&result)
+                }
+                GetUsers(project) => {
+                    // get the users (UserIdentifier → email) for the project
+                    tracing::debug!("Getting users for project {}", project);
 
                     let board = server::get_board().await?;
 

@@ -12,11 +12,11 @@ use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
     AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
-    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports,
+    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers,
     RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
 };
 use templemeads::grammar::{
-    DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
+    DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
 };
 use templemeads::job::{send_queued, Envelope, Job};
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};
@@ -133,6 +133,12 @@ async fn main() -> Result<()> {
 
                     job.completed(
                         get_project_mapping(&me, &resource, &project).await?)
+                }
+                GetUsers(project) => {
+                    tracing::debug!("Getting users for project {}", project);
+
+                    job.completed(
+                        get_users(&me, &resource, &project).await?)
                 }
                 GetUsageReport(project, dates) => {
                     tracing::debug!("Getting usage report for {} for dates {}", project, dates);
@@ -925,6 +931,55 @@ pub async fn get_project_mapping(
                     Err(Error::MissingProject(
                         "No project mapping retrieved by bridge agent".to_string(),
                     ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the users (as UserIdentifier → email mappings) for an existing project.
+///
+/// At the portal level the "local username" is the user's email address, since
+/// emails are the portal-level equivalent of Unix usernames.
+///
+pub async fn get_users(
+    me: &str,
+    resource: &str,
+    project: &ProjectIdentifier,
+) -> Result<Vec<UserMapping>, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_users {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
+                false,
+            )?
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<Vec<UserMapping>>()?;
+
+            match result {
+                Some(users) => {
+                    tracing::debug!("Users retrieved by bridge agent: {:?}", users);
+                    Ok(users)
+                }
+                None => {
+                    tracing::warn!("No users retrieved?");
+                    Ok(Vec::new())
                 }
             }
         }

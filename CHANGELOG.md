@@ -8,6 +8,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`Link` and `Note` types** — new reusable types in `templemeads::grammar`:
+  - `Link { id: Option<String>, url: Option<String> }` — a reference to an
+    external resource with an optional human-readable ID and an optional validated
+    URL. Used for all the link fields on `AwardDetails`.
+  - `Note { timestamp: DateTime<Utc>, author: String, text: String }` — a
+    timestamped message. `Note::new(author, text)` stamps with `Utc::now()`;
+    `Note::with_timestamp(dt, author, text)` accepts an explicit timestamp.
+    `Display` format: `[YYYY-MM-DD HH:MM UTC — Author] text`.
+- **New fields on `AwardDetails`**:
+  - `award: Option<Link>` — link to the award record on the funding body's system
+    (e.g. UKRI GtR). Replaces the previous flat `award_id` / `award_url` fields.
+  - `call: Option<Link>` — link to the funding call that produced the award.
+  - `project_link: Option<Link>` — link to the project page on the remote/awarding
+    portal, so local users can navigate there.
+  - `renewal: Option<Link>` — link to the renewal / more-time application page.
+  - `notes: Vec<Note>` — append-only list of timestamped messages from the awarder.
+    Serialises as `[]`-omitted (field absent when empty); deserialises with
+    `#[serde(default)]` so old JSON is backward compatible.
+  - `earliest_approve: Option<DateTime<Utc>>` — RFC 3339 UTC timestamp before
+    which the receiving portal must not approve or provision the award. Lets the
+    awarder make corrections in the window between creating the award and it being
+    acted on (e.g. set to one hour in the future on creation).
+- **Python bindings**: `openportal.Link` and `openportal.Note` classes exported.
+  `AwardDetails` gains `award`, `call`, `project_link`, `renewal`, `notes`,
+  `add_note`, `clear_notes`, `earliest_approve`, `set_earliest_approve`, and
+  `clear_earliest_approve`. `earliest_approve` is exposed as a UTC-aware
+  `datetime.datetime`.
+
 - **`get_award` and `get_awards` instructions** — new portal-level instructions
   to retrieve award details. `get_award <project_id>` returns the `AwardDetails`
   for a single project; `get_awards <portal_id>` (also accepted as `list_awards`)

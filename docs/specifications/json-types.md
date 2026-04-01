@@ -183,6 +183,7 @@ will contain `"ProjectDetails"` for wire-protocol compatibility.
 Returned by: `get_project`, `get_award`
 
 A JSON object. All fields are optional and may be absent if not set by the portal.
+Fields that are `null` or unset are omitted from the serialised JSON.
 
 ```json
 {
@@ -197,8 +198,14 @@ A JSON object. All fields are optional and may be absent if not set by the porta
   "start_date":  "2024-01-01",
   "end_date":    "2024-12-31",
   "allocation":  "1000 NHR",
-  "award_id":    "061-4738952-1",
-  "award_url":   "https://example.com/award/061-4738952-1",
+  "award":       { "id": "061-4738952-1", "url": "https://gtr.ukri.org/..." },
+  "call":        { "id": "EPSRC-2024-AI", "url": "https://..." },
+  "project_link":{ "id": "PRJ-001", "url": "https://waldur.example.ac.uk/projects/..." },
+  "renewal":     { "url": "https://apply.example.ac.uk/renew" },
+  "notes": [
+    { "timestamp": "2024-01-15T10:30:00Z", "author": "Jane Smith", "text": "Approved." }
+  ],
+  "earliest_approve": "2024-01-15T11:30:00Z",
   "allowed_domains": [
     "example.com",
     "*.university.ac.uk"
@@ -218,9 +225,29 @@ A JSON object. All fields are optional and may be absent if not set by the porta
 | `start_date` | string | ISO date `YYYY-MM-DD` |
 | `end_date` | string | ISO date `YYYY-MM-DD` |
 | `allocation` | string | Resource allocation, e.g. `"1000 NHR"` or `"No allocation"` |
-| `award_id` | string | Human-readable award identifier, e.g. `"061-4738952-1"` |
-| `award_url` | string | URL of the award page (must be a valid URL if provided) |
+| `award` | `Link` | Link to the award record on the funding body's system |
+| `call` | `Link` | Link to the funding call that produced this award |
+| `project_link` | `Link` | Link to the project page on the remote/awarding portal |
+| `renewal` | `Link` | Link to the renewal / more-time application page |
+| `notes` | array of `Note` | Append-only timestamped messages; omitted when empty |
+| `earliest_approve` | string | RFC 3339 UTC — do not approve before this time; omitted when unset |
 | `allowed_domains` | array of strings | Domain allow-list; `null` = all; `[]` = none |
+
+**`Link` object:**
+
+```json
+{ "id": "<string>", "url": "<url>" }
+```
+
+Both `id` and `url` are optional; fields absent when `null`.
+
+**`Note` object:**
+
+```json
+{ "timestamp": "<RFC 3339 UTC>", "author": "<string>", "text": "<string>" }
+```
+
+All three fields are always present.
 
 ---
 

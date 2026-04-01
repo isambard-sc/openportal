@@ -218,6 +218,37 @@ Example: `3600` (one hour)
 
 ---
 
+### Link
+
+A reference to an external resource. Both fields are optional.
+
+```json
+{ "id": "<string>", "url": "<url>" }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Human-readable identifier, e.g. `"EP/X000000/1"` |
+| `url` | string | Valid URL pointing to the resource |
+
+---
+
+### Note
+
+A timestamped message attached to an award.
+
+```json
+{ "timestamp": "<RFC 3339 UTC>", "author": "<string>", "text": "<string>" }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | string | ISO 8601 / RFC 3339 UTC timestamp, e.g. `"2024-01-15T10:30:00Z"` |
+| `author` | string | Name of the person who created the note |
+| `text` | string | Free-text content of the note |
+
+---
+
 ### AwardDetails
 
 Award/project metadata serialised as a JSON object. All fields are optional,
@@ -226,26 +257,41 @@ enabling partial updates. This type is also accepted under the legacy name
 
 ```json
 {
-  "name":           "<string>",
-  "template":       "<string>",
-  "key":            "<string>",
-  "description":    "<string>",
-  "members":        { "<email>": "<role>", ... },
-  "start_date":     "<YYYY-MM-DD>",
-  "end_date":       "<YYYY-MM-DD>",
-  "allocation":     "<size> <units>",
-  "award_id":       "<string>",
-  "award_url":      "<url>",
-  "allowed_domains": ["<domain_pattern>", ...]
+  "name":             "<string>",
+  "template":         "<string>",
+  "key":              "<string>",
+  "description":      "<string>",
+  "members":          { "<email>": "<role>", ... },
+  "start_date":       "<YYYY-MM-DD>",
+  "end_date":         "<YYYY-MM-DD>",
+  "allocation":       "<size> <units>",
+  "award":            { "id": "<string>", "url": "<url>" },
+  "call":             { "id": "<string>", "url": "<url>" },
+  "project_link":     { "id": "<string>", "url": "<url>" },
+  "renewal":          { "id": "<string>", "url": "<url>" },
+  "notes":            [ { "timestamp": "<RFC 3339>", "author": "<string>", "text": "<string>" } ],
+  "earliest_approve": "<RFC 3339 UTC>",
+  "allowed_domains":  ["<domain_pattern>", ...]
 }
 ```
 
 **`template`**: alphanumeric characters, underscores and dashes only; no spaces.
 
-**`award_id`**: a human-readable award identifier string, e.g. `"061-4738952-1"`.
+**`award`**: link back to the award record on the funding body's system (e.g. UKRI GtR).
 
-**`award_url`**: a valid URL pointing to the award page, e.g.
-`"https://example.com/award/061-4738952-1"`.
+**`call`**: link to the funding call from which the award was made.
+
+**`project_link`**: link to the project page on the remote/awarding portal,
+so local users can navigate there.
+
+**`renewal`**: link to the page where more time or a renewal can be requested.
+
+**`notes`**: append-only list of `Note` objects, sorted by timestamp.
+Omitted from JSON when empty; deserialises to `[]` when absent.
+Display format per note: `[YYYY-MM-DD HH:MM UTC — Author] text`.
+
+**`earliest_approve`**: RFC 3339 UTC timestamp before which the receiving portal
+must not approve or provision this award. Omitted when not set.
 
 **`allocation` units** (canonical forms, case-insensitive aliases accepted):
 

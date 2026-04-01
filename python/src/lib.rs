@@ -4059,6 +4059,146 @@ enum DomainPatternOrStr {
 
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct Link(grammar::Link);
+
+#[pymethods]
+impl Link {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(Self(grammar::Link::new()))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Link> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Link> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Link, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn id(&self) -> PyResult<Option<String>> {
+        Ok(self.0.id())
+    }
+
+    #[setter]
+    fn set_id(&mut self, id: &str) -> PyResult<()> {
+        self.0.set_id(id);
+        Ok(())
+    }
+
+    fn clear_id(&mut self) -> PyResult<()> {
+        self.0.clear_id();
+        Ok(())
+    }
+
+    #[getter]
+    fn url(&self) -> PyResult<Option<String>> {
+        Ok(self.0.url())
+    }
+
+    #[setter]
+    fn set_url(&mut self, url: &str) -> PyResult<()> {
+        self.0
+            .set_url(url)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn clear_url(&mut self) -> PyResult<()> {
+        self.0.clear_url();
+        Ok(())
+    }
+
+    fn is_empty(&self) -> PyResult<bool> {
+        Ok(self.0.is_empty())
+    }
+}
+
+impl From<grammar::Link> for Link {
+    fn from(link: grammar::Link) -> Self {
+        Link(link)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Note(grammar::Note);
+
+#[pymethods]
+impl Note {
+    #[new]
+    fn new(author: &str, text: &str) -> PyResult<Self> {
+        Ok(Self(grammar::Note::new(author, text)))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Note> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Note> {
+        Ok(self.clone())
+    }
+
+    fn __richcmp__(&self, other: &Note, op: CompareOp) -> PyResult<bool> {
+        match op {
+            CompareOp::Eq => Ok(self.0 == other.0),
+            CompareOp::Ne => Ok(self.0 != other.0),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    #[getter]
+    fn timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.timestamp().timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn author(&self) -> PyResult<String> {
+        Ok(self.0.author().to_string())
+    }
+
+    #[getter]
+    fn text(&self) -> PyResult<String> {
+        Ok(self.0.text().to_string())
+    }
+}
+
+impl From<grammar::Note> for Note {
+    fn from(note: grammar::Note) -> Self {
+        Note(note)
+    }
+}
+
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectTemplate(grammar::ProjectTemplate);
 
 #[pymethods]
@@ -4303,35 +4443,122 @@ impl AwardDetails {
     }
 
     #[getter]
-    fn award_id(&self) -> PyResult<Option<String>> {
-        Ok(self.0.award_id())
+    fn award(&self) -> PyResult<Option<Link>> {
+        Ok(self.0.award().map(Into::into))
     }
 
     #[setter]
-    fn set_award_id(&mut self, award_id: &str) -> PyResult<()> {
-        self.0.set_award_id(award_id);
+    fn set_award(&mut self, link: Option<Link>) -> PyResult<()> {
+        match link {
+            Some(l) => self.0.set_award(l.0),
+            None => self.0.clear_award(),
+        }
         Ok(())
     }
 
-    fn clear_award_id(&mut self) -> PyResult<()> {
-        self.0.clear_award_id();
+    fn clear_award(&mut self) -> PyResult<()> {
+        self.0.clear_award();
         Ok(())
     }
 
     #[getter]
-    fn award_url(&self) -> PyResult<Option<String>> {
-        Ok(self.0.award_url())
+    fn call(&self) -> PyResult<Option<Link>> {
+        Ok(self.0.call().map(Into::into))
     }
 
     #[setter]
-    fn set_award_url(&mut self, url: &str) -> PyResult<()> {
-        self.0
-            .set_award_url(url)
-            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    fn set_call(&mut self, link: Option<Link>) -> PyResult<()> {
+        match link {
+            Some(l) => self.0.set_call(l.0),
+            None => self.0.clear_call(),
+        }
+        Ok(())
     }
 
-    fn clear_award_url(&mut self) -> PyResult<()> {
-        self.0.clear_award_url();
+    fn clear_call(&mut self) -> PyResult<()> {
+        self.0.clear_call();
+        Ok(())
+    }
+
+    #[getter]
+    fn project_link(&self) -> PyResult<Option<Link>> {
+        Ok(self.0.project_link().map(Into::into))
+    }
+
+    #[setter]
+    fn set_project_link(&mut self, link: Option<Link>) -> PyResult<()> {
+        match link {
+            Some(l) => self.0.set_project_link(l.0),
+            None => self.0.clear_project_link(),
+        }
+        Ok(())
+    }
+
+    fn clear_project_link(&mut self) -> PyResult<()> {
+        self.0.clear_project_link();
+        Ok(())
+    }
+
+    #[getter]
+    fn renewal(&self) -> PyResult<Option<Link>> {
+        Ok(self.0.renewal().map(Into::into))
+    }
+
+    #[setter]
+    fn set_renewal(&mut self, link: Option<Link>) -> PyResult<()> {
+        match link {
+            Some(l) => self.0.set_renewal(l.0),
+            None => self.0.clear_renewal(),
+        }
+        Ok(())
+    }
+
+    fn clear_renewal(&mut self) -> PyResult<()> {
+        self.0.clear_renewal();
+        Ok(())
+    }
+
+    #[getter]
+    fn notes(&self) -> PyResult<Vec<Note>> {
+        Ok(self.0.notes().iter().cloned().map(Into::into).collect())
+    }
+
+    fn add_note(&mut self, note: Note) -> PyResult<()> {
+        self.0.add_note(note.0);
+        Ok(())
+    }
+
+    fn clear_notes(&mut self) -> PyResult<()> {
+        self.0.clear_notes();
+        Ok(())
+    }
+
+    #[getter]
+    fn earliest_approve<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDateTime>>> {
+        match self.0.earliest_approve() {
+            Some(dt) => Ok(Some(PyDateTime::from_timestamp(
+                py,
+                dt.timestamp() as f64,
+                PyTzInfo::utc(py).ok().as_deref(),
+            )?)),
+            None => Ok(None),
+        }
+    }
+
+    #[setter]
+    fn set_earliest_approve(
+        &mut self,
+        dt: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> PyResult<()> {
+        match dt {
+            Some(dt) => self.0.set_earliest_approve(dt),
+            None => self.0.clear_earliest_approve(),
+        }
+        Ok(())
+    }
+
+    fn clear_earliest_approve(&mut self) -> PyResult<()> {
+        self.0.clear_earliest_approve();
         Ok(())
     }
 
@@ -5061,6 +5288,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ProjectStorageReport>()?;
     m.add_class::<StorageReport>()?;
     m.add_class::<DomainPattern>()?;
+    m.add_class::<Link>()?;
+    m.add_class::<Note>()?;
     m.add_class::<AwardDetails>()?;
     m.add("ProjectDetails", m.py().get_type::<AwardDetails>())?;
     m.add_class::<ProjectTemplate>()?;

@@ -7,7 +7,7 @@ use crate::storage::{QuotaLimit, Volume};
 use crate::usagereport::Usage;
 
 use anyhow::Context;
-use chrono::{Datelike, Timelike};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::{hash::Hash, sync::Arc};
@@ -1972,6 +1972,162 @@ impl<'de> Deserialize<'de> for DomainPattern {
     }
 }
 
+/// A reference to an external resource: an optional human-readable ID
+/// and an optional URL. Used for award, call, project, and renewal links
+/// inside AwardDetails.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct Link {
+    /// Human-readable identifier, e.g. "EP/X000000/1" or "061-4738952-1"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+
+    /// URL pointing to the resource (must be a valid URL if provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
+impl Link {
+    pub fn new() -> Self {
+        Self {
+            id: None,
+            url: None,
+        }
+    }
+
+    pub fn id(&self) -> Option<String> {
+        self.id.clone()
+    }
+
+    pub fn set_id(&mut self, id: &str) {
+        let id = id.trim();
+        if id.is_empty() {
+            self.id = None;
+        } else {
+            self.id = Some(id.to_string());
+        }
+    }
+
+    pub fn clear_id(&mut self) {
+        self.id = None;
+    }
+
+    pub fn url(&self) -> Option<String> {
+        self.url.clone()
+    }
+
+    pub fn set_url(&mut self, url: &str) -> Result<(), Error> {
+        let url = url.trim();
+        if url.is_empty() {
+            self.url = None;
+            Ok(())
+        } else {
+            Url::parse(url)
+                .map_err(|e| Error::Parse(format!("Invalid URL for link: {}", e)))?;
+            self.url = Some(url.to_string());
+            Ok(())
+        }
+    }
+
+    pub fn clear_url(&mut self) {
+        self.url = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.id.is_none() && self.url.is_none()
+    }
+}
+
+impl std::fmt::Display for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).unwrap_or_default())
+    }
+}
+
+impl<'de> Deserialize<'de> for Link {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct LinkHelper {
+            id: Option<String>,
+            url: Option<String>,
+        }
+
+        let helper = LinkHelper::deserialize(deserializer)?;
+
+        if let Some(url) = &helper.url {
+            if !url.is_empty() {
+                Url::parse(url).map_err(|e| {
+                    serde::de::Error::custom(format!("Invalid URL for link: {}", e))
+                })?;
+            }
+        }
+
+        Ok(Link {
+            id: helper.id,
+            url: helper.url,
+        })
+    }
+}
+
+/// A timestamped note attached to an award. Notes are append-only
+/// messages, typically used by the awarding portal to communicate
+/// with the project team.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    /// When the note was created (UTC)
+    timestamp: DateTime<Utc>,
+
+    /// Name of the person who created the note
+    author: String,
+
+    /// Free-text content of the note
+    text: String,
+}
+
+impl Note {
+    pub fn new(author: &str, text: &str) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            author: author.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    pub fn with_timestamp(timestamp: DateTime<Utc>, author: &str, text: &str) -> Self {
+        Self {
+            timestamp,
+            author: author.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    pub fn timestamp(&self) -> DateTime<Utc> {
+        self.timestamp
+    }
+
+    pub fn author(&self) -> &str {
+        &self.author
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Note {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{} — {}] {}",
+            self.timestamp.format("%Y-%m-%d %H:%M UTC"),
+            self.author,
+            self.text
+        )
+    }
+}
+
 /// Details about a project that exists in a portal.
 /// This holds all data as "option" as not all details
 /// will be set by all portals. Also, using "option" allows
@@ -2010,13 +2166,31 @@ pub struct AwardDetails {
     /// The allocation of resource for this project
     allocation: Option<Allocation>,
 
-    /// The human-readable ID of the award associated with this project
-    /// (e.g. "061-4738952-1")
-    award_id: Option<String>,
+    /// Link back to the award record on the funding body's system
+    #[serde(skip_serializing_if = "Option::is_none")]
+    award: Option<Link>,
 
-    /// The URL of the award associated with this project
-    /// (must be a valid URL if provided)
-    award_url: Option<String>,
+    /// Link to the funding call from which the award was made
+    #[serde(skip_serializing_if = "Option::is_none")]
+    call: Option<Link>,
+
+    /// Link to the project page on the remote/awarding portal
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_link: Option<Link>,
+
+    /// Link to the page where more time / renewal can be requested
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renewal: Option<Link>,
+
+    /// Notes attached to this award (append-only log of messages)
+    #[serde(default)]
+    notes: Vec<Note>,
+
+    /// The earliest UTC time at which this award may be approved on the
+    /// receiving portal. Lets the awarder make corrections in the window
+    /// between creating the award and it being provisioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    earliest_approve: Option<DateTime<Utc>>,
 
     /// The list of allowed domains for this project.
     /// If this is None, then all domains are allowed.
@@ -2049,8 +2223,12 @@ impl AwardDetails {
             start_date: None,
             end_date: None,
             allocation: None,
-            award_id: None,
-            award_url: None,
+            award: None,
+            call: None,
+            project_link: None,
+            renewal: None,
+            notes: Vec::new(),
+            earliest_approve: None,
             allowed_domains: None,
         }
     }
@@ -2219,44 +2397,92 @@ impl AwardDetails {
         self.allocation = None;
     }
 
-    pub fn award_id(&self) -> Option<String> {
-        self.award_id.clone()
+    pub fn award(&self) -> Option<Link> {
+        self.award.clone()
     }
 
-    pub fn set_award_id(&mut self, id: &str) {
-        let id = id.trim();
-
-        if id.is_empty() {
-            self.award_id = None;
+    pub fn set_award(&mut self, link: Link) {
+        if link.is_empty() {
+            self.award = None;
         } else {
-            self.award_id = Some(id.to_string());
+            self.award = Some(link);
         }
     }
 
-    pub fn clear_award_id(&mut self) {
-        self.award_id = None;
+    pub fn clear_award(&mut self) {
+        self.award = None;
     }
 
-    pub fn award_url(&self) -> Option<String> {
-        self.award_url.clone()
+    pub fn call(&self) -> Option<Link> {
+        self.call.clone()
     }
 
-    pub fn set_award_url(&mut self, url: &str) -> Result<(), Error> {
-        let url = url.trim();
-
-        if url.is_empty() {
-            self.award_url = None;
-            Ok(())
+    pub fn set_call(&mut self, link: Link) {
+        if link.is_empty() {
+            self.call = None;
         } else {
-            Url::parse(url)
-                .map_err(|e| Error::Parse(format!("Invalid URL for award_url: {}", e)))?;
-            self.award_url = Some(url.to_string());
-            Ok(())
+            self.call = Some(link);
         }
     }
 
-    pub fn clear_award_url(&mut self) {
-        self.award_url = None;
+    pub fn clear_call(&mut self) {
+        self.call = None;
+    }
+
+    pub fn project_link(&self) -> Option<Link> {
+        self.project_link.clone()
+    }
+
+    pub fn set_project_link(&mut self, link: Link) {
+        if link.is_empty() {
+            self.project_link = None;
+        } else {
+            self.project_link = Some(link);
+        }
+    }
+
+    pub fn clear_project_link(&mut self) {
+        self.project_link = None;
+    }
+
+    pub fn renewal(&self) -> Option<Link> {
+        self.renewal.clone()
+    }
+
+    pub fn set_renewal(&mut self, link: Link) {
+        if link.is_empty() {
+            self.renewal = None;
+        } else {
+            self.renewal = Some(link);
+        }
+    }
+
+    pub fn clear_renewal(&mut self) {
+        self.renewal = None;
+    }
+
+    pub fn notes(&self) -> &[Note] {
+        &self.notes
+    }
+
+    pub fn add_note(&mut self, note: Note) {
+        self.notes.push(note);
+    }
+
+    pub fn clear_notes(&mut self) {
+        self.notes.clear();
+    }
+
+    pub fn earliest_approve(&self) -> Option<DateTime<Utc>> {
+        self.earliest_approve
+    }
+
+    pub fn set_earliest_approve(&mut self, dt: DateTime<Utc>) {
+        self.earliest_approve = Some(dt);
+    }
+
+    pub fn clear_earliest_approve(&mut self) {
+        self.earliest_approve = None;
     }
 
     pub fn allowed_domains(&self) -> Option<Vec<DomainPattern>> {
@@ -2357,12 +2583,32 @@ impl AwardDetails {
             merged.key = other.key.clone();
         }
 
-        if other.award_id.is_some() {
-            merged.award_id = other.award_id.clone();
+        if other.award.is_some() {
+            merged.award = other.award.clone();
         }
 
-        if other.award_url.is_some() {
-            merged.award_url = other.award_url.clone();
+        if other.call.is_some() {
+            merged.call = other.call.clone();
+        }
+
+        if other.project_link.is_some() {
+            merged.project_link = other.project_link.clone();
+        }
+
+        if other.renewal.is_some() {
+            merged.renewal = other.renewal.clone();
+        }
+
+        // Merge notes: append notes from other that are not already present
+        for note in &other.notes {
+            if !merged.notes.contains(note) {
+                merged.notes.push(note.clone());
+            }
+        }
+        merged.notes.sort_by_key(|n| n.timestamp);
+
+        if other.earliest_approve.is_some() {
+            merged.earliest_approve = other.earliest_approve;
         }
 
         if other.allowed_domains.is_some() {

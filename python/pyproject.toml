@@ -1,0 +1,15 @@
+[project]
+name = "openportal"
+version = "0.27.1"
+description = "Python wrappers for OpenPortal"
+license = { text = "MIT" }
+authors = [{ name = "Christopher Woods", email = "Christopher.Woods@bristol.ac.uk" }]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "openportal"
+package-name = "openportal"
+python-source = "src"
+
+[tool.pyo3-stub-gen]
+# Optional configuration

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "openportal"
-version = "0.27.1"
+version = "0.28.0"
 description = "Python wrappers for OpenPortal"
 license = { text = "MIT" }
 authors = [{ name = "Christopher Woods", email = "Christopher.Woods@bristol.ac.uk" }]

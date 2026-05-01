@@ -33,7 +33,7 @@ jobs:
       - name: Generate Python stubs
         run: |
           cd python
-          cargo run --bin stub_gen --no-default-features
+          cargo run --bin stub_gen --no-default-features --features generate-stubs
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -63,7 +63,7 @@ jobs:
       - name: Generate Python stubs
         run: |
           cd python
-          cargo run --bin stub_gen --no-default-features
+          cargo run --bin stub_gen --no-default-features --features generate-stubs
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -96,7 +96,7 @@ jobs:
       - name: Generate Python stubs
         run: |
           cd python
-          cargo run --bin stub_gen --no-default-features
+          cargo run --bin stub_gen --no-default-features --features generate-stubs
       - name: Build Wheels
         uses: PyO3/maturin-action@main
         with:

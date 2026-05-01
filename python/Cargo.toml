@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "stub_gen"
 path = "src/bin/stub_gen.rs"
+required-features = ["generate-stubs"]
 
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }
@@ -47,3 +48,4 @@ pyo3-stub-gen-derive = "0.22.1"
 [features]
 extension-module = ["pyo3/extension-module"]
 default = ["extension-module"]
+generate-stubs = []

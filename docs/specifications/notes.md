@@ -147,7 +147,16 @@ The current schema is:
     }
   ],
 
-  "warnings": ["<string>", ...]
+  "warnings": ["<string>", ...],
+
+  "recent_logs": [
+    {
+      "timestamp": "<ISO 8601 datetime>",
+      "level":     "<TRACE|DEBUG|INFO|WARN|ERROR>",
+      "target":    "<rust-module-path>",
+      "message":   "<string>"
+    }
+  ]
 }
 ```
 
@@ -165,6 +174,13 @@ The current schema is:
 - `warnings` — auto-generated alert strings: high failure rates (≥10
   occurrences), jobs running longer than 5 minutes, large numbers of expired
   jobs (>50 tracked).
+- `recent_logs` — up to 500 log messages captured from the agent's tracing
+  framework, stored newest-first in the JSON. The `target` field is the Rust
+  module path (e.g. `"templemeads::agent"`). The ring buffer is populated only
+  after `initialise_tracing()` has been called (i.e. once the agent process
+  starts). Absent from old responses (treated as `[]` via `serde(default)`).
+  Use `DiagnosticsReport.logs()` in the Python API to retrieve entries with
+  filtering; see [python-api.md](python-api.md#diagnosticsreport) for details.
 - All counters and lists reset when the agent restarts.
 - Diagnostics can be forwarded through the agent hierarchy using dot-separated
   paths (e.g. `"cluster.filesystem"`) and zone specifiers

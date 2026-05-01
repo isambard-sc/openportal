@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **Log ring buffer in diagnostics** — agents now capture tracing log messages
+  into an in-memory ring buffer (up to 500 entries) via a custom
+  `tracing_subscriber::Layer` installed at startup. The full buffer is included
+  in every `DiagnosticsReport` as `recent_logs` (newest-first in JSON; field is
+  `serde(default)` so old responses deserialise cleanly).
+- **`DiagnosticsReport.logs()` / `Diagnostics.logs()` (Python)** — retrieve log
+  entries in chronological order (oldest first) with optional filtering:
+  - `max` (default `0` = all) — limits entries returned, applied *after* any
+    level/search filter, so `.logs(50, level="ERROR")` gives the 50 most recent
+    errors.
+  - `level` — exact match (`"INFO"`) or minimum-level threshold (`"INFO+"`);
+    accepts `"WARN"` and `"WARNING"` interchangeably. Levels from lowest to
+    highest: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.
+  - `search` — case-insensitive substring match against the message text.
+  - All filters are ANDed.
+
+  ```python
+  d = openportal.diagnostics("brics")
+  d.logs()                                    # all entries, oldest first
+  d.logs(level="WARN+")                       # warnings and errors
+  d.logs(50, level="WARN+", search="timeout") # last 50 matching entries
+  ```
+
+- **`LogEntry` Python class** — properties: `timestamp` (UTC `datetime`),
+  `level` (`str`), `target` (Rust module path, e.g. `"templemeads::agent"`),
+  `message` (`str`).
+
 ## [0.27.1] - 2026-04-01
 
 ### Fixed

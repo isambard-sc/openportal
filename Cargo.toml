@@ -11,6 +11,17 @@ members = [
     "docs/cmdline/cluster"
 ]
 
+# The python crate must be built via maturin (see `make python`), not plain
+# cargo, because its stub_gen binary requires Python symbols that are only
+# available in maturin's build environment.
+default-members = [
+    "bridge", "cluster", "clusters",
+    "filesystem", "freeipa", "localaccount", "paddington", "portal",
+    "provider", "slurm", "templemeads",
+    "docs/echo", "docs/job", "docs/cmdline/portal",
+    "docs/cmdline/cluster"
+]
+
 resolver = "2"
 
 [profile.release]

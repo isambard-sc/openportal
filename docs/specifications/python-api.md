@@ -190,13 +190,83 @@ Return type of `health()`.
 
 Return type of `diagnostics()`.
 
+**Properties:**
+
 | Property | Type | Description |
 |---|---|---|
 | `status` | `str` | `"ok"` or an error description |
 | `detail` | `DiagnosticsReport \| None` | Full diagnostics report if available |
 
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `is_healthy` | `() → bool` | `True` if `status == "ok"` |
+| `logs` | `(max: int = 0, level: str \| None = None, search: str \| None = None) → list[LogEntry]` | Return log entries from the contained report. See [`DiagnosticsReport.logs`](#diagnosticsreport) for full details. Returns `[]` if no report is available. |
+
 See [notes.md](notes.md) for the provisional `HealthInfo` and
 `DiagnosticsReport` schemas (these types are still evolving).
+
+---
+
+### `DiagnosticsReport`
+
+Full diagnostics data for a single agent. Returned by `Diagnostics.detail` and
+passed directly when iterating cached reports.
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `agent_name` | `str` | Name of the agent that generated the report |
+| `generated_at` | `datetime` | UTC time the report was generated |
+| `failed_jobs` | `list[FailedJobEntry]` | Recent failed jobs (deduplicated) |
+| `slowest_jobs` | `list[SlowJobEntry]` | Slowest successful jobs (>10 s) |
+| `expired_jobs` | `list[ExpiredJobEntry]` | Recent expired jobs (deduplicated) |
+| `running_jobs` | `list[RunningJobEntry]` | Currently running jobs |
+| `warnings` | `list[str]` | Auto-generated alert strings |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `logs` | `(max: int = 0, level: str \| None = None, search: str \| None = None) → list[LogEntry]` | Return captured log entries in chronological order (oldest first). |
+
+`logs` parameters:
+
+- **`max`** — maximum number of entries to return; `0` (default) returns all captured entries. Applied *after* any filtering, so `.logs(50, level="ERROR")` returns the 50 most recent errors.
+- **`level`** — filter by log level (case-insensitive):
+  - `"INFO"` — exact match; only INFO entries.
+  - `"INFO+"` — threshold; INFO and above (INFO, WARN, ERROR).
+  - `"WARN"` and `"WARNING"` are accepted interchangeably.
+  - Available levels, from lowest to highest: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.
+- **`search`** — case-insensitive substring match against the message text.
+
+All supplied filters are ANDed together.
+
+```python
+d = openportal.diagnostics("brics")
+
+d.logs()                               # all captured entries, oldest first
+d.logs(100)                            # last 100 entries
+d.logs(level="ERROR")                  # all errors
+d.logs(level="WARN+")                  # warnings and errors
+d.logs(50, level="WARN+")             # last 50 warnings/errors
+d.logs(level="WARN+", search="timeout")  # warning/error messages containing "timeout"
+```
+
+---
+
+### `LogEntry`
+
+A single log message captured from the agent's tracing framework.
+
+| Property | Type | Description |
+|---|---|---|
+| `timestamp` | `datetime` | UTC time the message was logged |
+| `level` | `str` | Log level: `"TRACE"`, `"DEBUG"`, `"INFO"`, `"WARN"`, or `"ERROR"` |
+| `target` | `str` | Rust module path that produced the message (e.g. `"templemeads::agent"`) |
+| `message` | `str` | The log message text |
 
 ---
 

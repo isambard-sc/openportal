@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 /// Maximum number of failed jobs to track
@@ -24,6 +25,9 @@ const MAX_SLOW_JOBS: usize = 200;
 
 /// Maximum number of expired jobs to track
 const MAX_EXPIRED_JOBS: usize = 200;
+
+/// Maximum number of log entries to retain in the ring buffer
+const MAX_LOG_ENTRIES: usize = 500;
 
 /// Job statistics totals for all time
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -55,6 +59,9 @@ pub struct DiagnosticsReport {
     pub running_jobs: Vec<RunningJobEntry>,
     /// System warnings and issues
     pub warnings: Vec<String>,
+    /// Recent log messages (most recent first, up to 100)
+    #[serde(default)]
+    pub recent_logs: Vec<LogEntry>,
 }
 
 /// Entry for a failed job
@@ -117,6 +124,19 @@ pub struct RunningJobEntry {
     pub running_for_seconds: i64,
 }
 
+/// A single log message captured from the tracing framework
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogEntry {
+    /// When the message was logged
+    pub timestamp: DateTime<Utc>,
+    /// Log level (ERROR, WARN, INFO, DEBUG, TRACE)
+    pub level: String,
+    /// Module/target that produced the message
+    pub target: String,
+    /// The log message text
+    pub message: String,
+}
+
 impl NamedType for DiagnosticsReport {
     fn type_name() -> &'static str {
         "DiagnosticsReport"
@@ -144,6 +164,12 @@ impl NamedType for ExpiredJobEntry {
 impl NamedType for RunningJobEntry {
     fn type_name() -> &'static str {
         "RunningJobEntry"
+    }
+}
+
+impl NamedType for LogEntry {
+    fn type_name() -> &'static str {
+        "LogEntry"
     }
 }
 
@@ -443,6 +469,7 @@ impl DiagnosticsTracker {
             expired_jobs,
             running_jobs,
             warnings,
+            recent_logs: get_recent_logs(0),
         }
     }
 
@@ -459,6 +486,76 @@ impl DiagnosticsTracker {
 /// Global diagnostics tracker instance
 static DIAGNOSTICS: Lazy<RwLock<DiagnosticsTracker>> =
     Lazy::new(|| RwLock::new(DiagnosticsTracker::new()));
+
+/// Global ring buffer for recent log messages captured from the tracing framework
+static LOG_BUFFER: Lazy<Mutex<VecDeque<LogEntry>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
+
+struct MessageVisitor {
+    message: String,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{:?}", value);
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_owned();
+        }
+    }
+}
+
+/// A tracing `Layer` that captures log events into a global ring buffer.
+/// Install it via `initialise_tracing()` — after that, `get_recent_logs()`
+/// returns captured entries oldest-first (reversed slice gives newest-first).
+pub struct RingBufferLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingBufferLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let meta = event.metadata();
+        let mut visitor = MessageVisitor {
+            message: String::new(),
+        };
+        event.record(&mut visitor);
+
+        let entry = LogEntry {
+            timestamp: Utc::now(),
+            level: meta.level().to_string(),
+            target: meta.target().to_string(),
+            message: visitor.message,
+        };
+
+        if let Ok(mut buf) = LOG_BUFFER.lock() {
+            buf.push_back(entry);
+            if buf.len() > MAX_LOG_ENTRIES {
+                buf.pop_front();
+            }
+        }
+    }
+}
+
+/// Return up to `max` recent log entries, most recent first. `0` means all.
+pub fn get_recent_logs(max: usize) -> Vec<LogEntry> {
+    match LOG_BUFFER.lock() {
+        Ok(buf) => {
+            let iter = buf.iter().rev();
+            if max == 0 {
+                iter.cloned().collect()
+            } else {
+                iter.take(max).cloned().collect()
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
 
 static SLOW_JOB_THRESHOLD_MS: f64 = 10000.0; // 10 seconds
 
@@ -803,6 +900,33 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
 }
 
 impl DiagnosticsReport {
+    /// Return log entries in chronological order (oldest first).
+    ///
+    /// - `max`: maximum entries to return; `0` means all.
+    /// - `level`: optional level filter (case-insensitive).
+    ///   - `"INFO"` — exact match only.
+    ///   - `"INFO+"` — INFO and above (INFO, WARN, ERROR).
+    ///   - Accepts `"WARN"` and `"WARNING"` interchangeably.
+    /// - `search`: optional case-insensitive substring match against the message.
+    ///
+    /// All supplied filters are ANDed. `max` applies after filtering.
+    pub fn logs(&self, max: usize, level: Option<&str>, search: Option<&str>) -> Vec<LogEntry> {
+        let search_lower = search.map(|s| s.to_lowercase());
+        let iter = self.recent_logs.iter().filter(|e| {
+            level.map_or(true, |l| log_level_matches(&e.level, l))
+                && search_lower
+                    .as_ref()
+                    .map_or(true, |s| e.message.to_lowercase().contains(s.as_str()))
+        });
+        let mut result: Vec<LogEntry> = if max == 0 {
+            iter.cloned().collect()
+        } else {
+            iter.take(max).cloned().collect()
+        };
+        result.reverse();
+        result
+    }
+
     /// Format diagnostics report as a human-readable string
     pub fn to_pretty_string(&self) -> String {
         let mut output = String::new();
@@ -1021,6 +1145,43 @@ impl std::fmt::Display for RunningJobEntry {
             self.started_at.format("%Y-%m-%d %H:%M:%S"),
             format_duration(self.running_for_seconds)
         )
+    }
+}
+
+impl std::fmt::Display for LogEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}] {:5} {} - {}",
+            self.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            self.level,
+            self.target,
+            self.message
+        )
+    }
+}
+
+fn level_rank(level: &str) -> u8 {
+    match level.to_uppercase().as_str() {
+        "TRACE" => 1,
+        "DEBUG" => 2,
+        "INFO" => 3,
+        "WARN" | "WARNING" => 4,
+        "ERROR" => 5,
+        _ => 0,
+    }
+}
+
+fn log_level_matches(entry_level: &str, filter: &str) -> bool {
+    let (filter_base, threshold) = filter
+        .strip_suffix('+')
+        .map_or((filter, false), |base| (base, true));
+    if threshold {
+        level_rank(entry_level) >= level_rank(filter_base)
+    } else {
+        entry_level.eq_ignore_ascii_case(filter_base)
+            || (filter_base.eq_ignore_ascii_case("warning")
+                && entry_level.eq_ignore_ascii_case("warn"))
     }
 }
 

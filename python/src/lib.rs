@@ -531,6 +531,62 @@ impl From<mod_diagnostics::RunningJobEntry> for RunningJobEntry {
     }
 }
 
+/// A single log entry captured from the tracing framework
+#[gen_stub_pyclass]
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry(mod_diagnostics::LogEntry);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl LogEntry {
+    #[getter]
+    fn timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
+        PyDateTime::from_timestamp(
+            py,
+            self.0.timestamp.timestamp() as f64,
+            PyTzInfo::utc(py).ok().as_deref(),
+        )
+    }
+
+    #[getter]
+    fn level(&self) -> PyResult<String> {
+        Ok(self.0.level.clone())
+    }
+
+    #[getter]
+    fn target(&self) -> PyResult<String> {
+        Ok(self.0.target.clone())
+    }
+
+    #[getter]
+    fn message(&self) -> PyResult<String> {
+        Ok(self.0.message.clone())
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!("{}", self.0))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<LogEntry> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<LogEntry> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::LogEntry> for LogEntry {
+    fn from(entry: mod_diagnostics::LogEntry) -> Self {
+        LogEntry(entry)
+    }
+}
+
 ///
 /// The DiagnosticsReport object returned from diagnostics requests
 ///
@@ -597,6 +653,14 @@ impl DiagnosticsReport {
     #[getter]
     fn warnings(&self) -> PyResult<Vec<String>> {
         Ok(self.0.warnings.clone())
+    }
+
+    /// Return log entries in chronological order (oldest first).
+    /// `max=0` returns all. `level` filters by level ("INFO", "WARN+", etc.).
+    /// `search` does a case-insensitive substring match on the message.
+    #[pyo3(signature = (max=0, level=None, search=None))]
+    fn logs(&self, max: usize, level: Option<String>, search: Option<String>) -> PyResult<Vec<LogEntry>> {
+        Ok(self.0.logs(max, level.as_deref(), search.as_deref()).into_iter().map(Into::into).collect())
     }
 
     fn __str__(&self) -> PyResult<String> {
@@ -674,6 +738,17 @@ impl Diagnostics {
 
     fn is_healthy(&self) -> PyResult<bool> {
         Ok(self.status == "ok")
+    }
+
+    /// Return log entries from the contained report in chronological order (oldest first).
+    /// `max=0` returns all. `level` filters by level ("INFO", "WARN+", etc.).
+    /// `search` does a case-insensitive substring match on the message.
+    #[pyo3(signature = (max=0, level=None, search=None))]
+    fn logs(&self, max: usize, level: Option<String>, search: Option<String>) -> PyResult<Vec<LogEntry>> {
+        match &self.diagnostics {
+            Some(report) => Ok(report.0.logs(max, level.as_deref(), search.as_deref()).into_iter().map(Into::into).collect()),
+            None => Ok(Vec::new()),
+        }
     }
 }
 

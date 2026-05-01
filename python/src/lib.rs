@@ -10,8 +10,8 @@ use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDate, PyDateTime, PyList, PyString, PyTzInfo};
 use pyo3::{IntoPyObject, PyResult, Python};
-use pyo3_stub_gen::{define_stub_info_gatherer, PyStubType, TypeInfo};
 use pyo3_stub_gen::derive::*;
+use pyo3_stub_gen::{define_stub_info_gatherer, PyStubType, TypeInfo};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path;
@@ -659,8 +659,18 @@ impl DiagnosticsReport {
     /// `max=0` returns all. `level` filters by level ("INFO", "WARN+", etc.).
     /// `search` does a case-insensitive substring match on the message.
     #[pyo3(signature = (max=0, level=None, search=None))]
-    fn logs(&self, max: usize, level: Option<String>, search: Option<String>) -> PyResult<Vec<LogEntry>> {
-        Ok(self.0.logs(max, level.as_deref(), search.as_deref()).into_iter().map(Into::into).collect())
+    fn logs(
+        &self,
+        max: usize,
+        level: Option<String>,
+        search: Option<String>,
+    ) -> PyResult<Vec<LogEntry>> {
+        Ok(self
+            .0
+            .logs(max, level.as_deref(), search.as_deref())
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     fn __str__(&self) -> PyResult<String> {
@@ -744,9 +754,19 @@ impl Diagnostics {
     /// `max=0` returns all. `level` filters by level ("INFO", "WARN+", etc.).
     /// `search` does a case-insensitive substring match on the message.
     #[pyo3(signature = (max=0, level=None, search=None))]
-    fn logs(&self, max: usize, level: Option<String>, search: Option<String>) -> PyResult<Vec<LogEntry>> {
+    fn logs(
+        &self,
+        max: usize,
+        level: Option<String>,
+        search: Option<String>,
+    ) -> PyResult<Vec<LogEntry>> {
         match &self.diagnostics {
-            Some(report) => Ok(report.0.logs(max, level.as_deref(), search.as_deref()).into_iter().map(Into::into).collect()),
+            Some(report) => Ok(report
+                .0
+                .logs(max, level.as_deref(), search.as_deref())
+                .into_iter()
+                .map(Into::into)
+                .collect()),
             None => Ok(Vec::new()),
         }
     }

@@ -488,8 +488,7 @@ static DIAGNOSTICS: Lazy<RwLock<DiagnosticsTracker>> =
     Lazy::new(|| RwLock::new(DiagnosticsTracker::new()));
 
 /// Global ring buffer for recent log messages captured from the tracing framework
-static LOG_BUFFER: Lazy<Mutex<VecDeque<LogEntry>>> =
-    Lazy::new(|| Mutex::new(VecDeque::new()));
+static LOG_BUFFER: Lazy<Mutex<VecDeque<LogEntry>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
 
 struct MessageVisitor {
     message: String,

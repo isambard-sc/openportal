@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.28.0] - 2026-05-01
+
 ### Added
 
 - **Log ring buffer in diagnostics** — agents now capture tracing log messages
@@ -30,7 +32,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   d.logs(level="WARN+")                       # warnings and errors
   d.logs(50, level="WARN+", search="timeout") # last 50 matching entries
   ```
-
 - **`LogEntry` Python class** — properties: `timestamp` (UTC `datetime`),
   `level` (`str`), `target` (Rust module path, e.g. `"templemeads::agent"`),
   `message` (`str`).
@@ -1414,6 +1415,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.28.0]: https://github.com/isambard-sc/openportal/releases/tag/0.28.0
 [0.27.1]: https://github.com/isambard-sc/openportal/releases/tag/0.27.1
 [0.27.0]: https://github.com/isambard-sc/openportal/releases/tag/0.27.0
 [0.26.0]: https://github.com/isambard-sc/openportal/releases/tag/0.26.0

@@ -93,10 +93,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.12.7
-      - name: Generate Python stubs
-        run: |
-          cd python
-          cargo run --bin stub_gen --no-default-features --features generate-stubs
       - name: Build Wheels
         uses: PyO3/maturin-action@main
         with:

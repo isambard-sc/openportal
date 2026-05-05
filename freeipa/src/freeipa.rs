@@ -885,6 +885,16 @@ impl IPAUser {
     }
 
     ///
+    /// Return whether or not this user is blocked by OpenPortal.
+    /// Blocked users are disabled and are members of the "openportal.blocked"
+    /// group. This distinguishes them from users that have been removed
+    /// (also disabled, but not in the blocked group).
+    ///
+    pub fn is_blocked(&self) -> bool {
+        self.in_group_cn("openportal.blocked")
+    }
+
+    ///
     /// Set this user as enabled in FreeIPA
     ///
     pub fn set_enabled(&mut self) {
@@ -1336,12 +1346,13 @@ async fn force_get_users_in_group(
         result
     );
 
-    // filter out users who are not enabled - we do list unmanaged users,
-    // so that OpenPortal isn't repeatedly told to add users who already exist
+    // filter out users who are not enabled, except for blocked users which are
+    // intentionally disabled - we do list unmanaged users, so that OpenPortal
+    // isn't repeatedly told to add users who already exist
     Ok(result
         .users(group.identifier())?
         .iter()
-        .filter(|u| u.is_enabled())
+        .filter(|u| u.is_enabled() || u.is_blocked())
         .cloned()
         .collect())
 }
@@ -2112,6 +2123,16 @@ pub async fn add_user(
             return Ok(user);
         }
 
+        // blocked users must be explicitly unblocked - don't re-enable them here
+        if user.is_blocked() {
+            tracing::info!(
+                "User {} is blocked - not re-enabling during add_user. Use unblock_user to unblock.",
+                user.identifier()
+            );
+            cache::add_existing_user(&user).await?;
+            return Ok(user);
+        }
+
         // make sure to re-enable if needed
         if user.is_disabled() {
             user = match reenable_user(&user, expires).await {
@@ -2200,7 +2221,15 @@ pub async fn add_user(
 
             match get_user(user, expires).await? {
                 Some(mut user) => {
-                    if user.is_disabled() {
+                    if user.is_blocked() {
+                        // blocked users must be explicitly unblocked - don't re-enable them here
+                        tracing::info!(
+                            "User {} is blocked - not re-enabling during add_user. Use unblock_user to unblock.",
+                            user.identifier()
+                        );
+                        cache::add_existing_user(&user).await?;
+                        return Ok(user);
+                    } else if user.is_disabled() {
                         if user.is_managed() {
                             // the user should be enabled...
                             user = reenable_user(&user, expires).await?;
@@ -2460,8 +2489,8 @@ pub async fn remove_user(
         )));
     }
 
-    if user.is_disabled() {
-        // nothing to do
+    if user.is_disabled() && !user.is_blocked() {
+        // nothing to do - user has already been removed
         tracing::info!(
             "User {} is already disabled. No changes needed.",
             user.identifier()
@@ -3039,7 +3068,7 @@ pub async fn is_existing_user(
 ) -> Result<bool, Error> {
     match get_user(user, expires).await? {
         Some(user) => {
-            if user.is_enabled() || user.is_protected() {
+            if user.is_enabled() || user.is_protected() || user.is_blocked() {
                 Ok(true)
             } else {
                 Ok(false)
@@ -3057,4 +3086,237 @@ pub async fn is_existing_project(
         Some(_) => Ok(true),
         None => Ok(false),
     }
+}
+
+///
+/// Ensure the "openportal.blocked" group exists in FreeIPA, creating it if
+/// necessary. This group is the source of truth for which users are blocked.
+///
+async fn ensure_blocked_group_exists(expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    let blocked_cn = "openportal.blocked";
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), blocked_cn.to_string());
+        kwargs.insert("description".to_string(), "Group for all users blocked by OpenPortal".to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            tracing::info!("Created {} group in FreeIPA", blocked_cn);
+            Ok(())
+        }
+        Err(Error::Duplicate(_)) => {
+            // group already exists - that's fine
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to ensure {} group exists: {}", blocked_cn, e);
+            Err(e)
+        }
+    }
+}
+
+pub async fn is_blocked_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    match force_get_user(user, expires).await? {
+        Some(user) => Ok(user.is_blocked()),
+        None => Ok(false),
+    }
+}
+
+///
+/// Block the user in FreeIPA by adding them to the "openportal.blocked" group
+/// and disabling their account. This prevents login without removing their
+/// account, home directory, or scheduler configuration. Only unblock_user
+/// should re-enable them.
+///
+pub async fn block_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_user_mutex(user).await?.try_lock_owned() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to block user {} - another task is adding or removing.",
+                        user
+                    )));
+                }
+                assert_not_expired(expires)?;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
+    assert_not_expired(expires)?;
+
+    let user = match force_get_user(user, expires).await? {
+        Some(user) => user,
+        None => {
+            return Err(Error::NotFound(format!(
+                "Could not find user {} to block.",
+                user
+            )));
+        }
+    };
+
+    if !user.is_managed() {
+        return Err(Error::UnmanagedUser(format!(
+            "User {} is not managed by OpenPortal - cannot block.",
+            user.identifier()
+        )));
+    }
+
+    if user.is_blocked() {
+        tracing::info!("User {} is already blocked - nothing to do.", user.identifier());
+        return Ok(user);
+    }
+
+    assert_not_expired(expires)?;
+
+    ensure_blocked_group_exists(expires).await?;
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), "openportal.blocked".to_string());
+        kwargs.insert("user".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            tracing::info!("Added user {} to openportal.blocked group", user.identifier());
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not add user {} to openportal.blocked group: {}",
+                user.identifier(),
+                e
+            );
+            return Err(e);
+        }
+    }
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("uid".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    let mut user = user;
+    match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            user.set_disabled();
+            tracing::info!("Blocked user: {}", user.identifier());
+            cache::remove_existing_user(&user).await?;
+        }
+        Err(Error::NotFound(_)) => {
+            tracing::warn!(
+                "User {} not found when disabling during block - they may have been removed.",
+                user.identifier()
+            );
+            cache::clear().await?;
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not disable user {} when blocking: {}",
+                user.identifier(),
+                e
+            );
+            return Err(e);
+        }
+    }
+
+    Ok(user)
+}
+
+///
+/// Unblock a previously blocked user by removing them from "openportal.blocked"
+/// and re-enabling their account.
+///
+pub async fn unblock_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_user_mutex(user).await?.try_lock_owned() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to unblock user {} - another task is adding or removing.",
+                        user
+                    )));
+                }
+                assert_not_expired(expires)?;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
+    assert_not_expired(expires)?;
+
+    let user = match force_get_user(user, expires).await? {
+        Some(user) => user,
+        None => {
+            return Err(Error::NotFound(format!(
+                "Could not find user {} to unblock.",
+                user
+            )));
+        }
+    };
+
+    if !user.is_managed() {
+        return Err(Error::UnmanagedUser(format!(
+            "User {} is not managed by OpenPortal - cannot unblock.",
+            user.identifier()
+        )));
+    }
+
+    if !user.is_blocked() {
+        tracing::info!("User {} is not blocked - nothing to do.", user.identifier());
+        return Ok(user);
+    }
+
+    assert_not_expired(expires)?;
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), "openportal.blocked".to_string());
+        kwargs.insert("user".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            tracing::info!(
+                "Removed user {} from openportal.blocked group",
+                user.identifier()
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not remove user {} from openportal.blocked group: {}",
+                user.identifier(),
+                e
+            );
+            return Err(e);
+        }
+    }
+
+    let user = reenable_user(&user, expires).await?;
+
+    tracing::info!("Unblocked user: {}", user.identifier());
+
+    Ok(user)
 }

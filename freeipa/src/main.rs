@@ -15,8 +15,9 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
-    IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser, UpdateHomeDir,
+    AddProject, AddUser, BlockUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
+    IsBlockedUser, IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser,
+    UnblockUser, UpdateHomeDir,
 };
 use templemeads::grammar::UserMapping;
 use templemeads::job::{assert_not_expired, Envelope, Job};
@@ -148,6 +149,18 @@ async fn main() -> Result<()> {
                 RemoveUser(user) => {
                     let user = freeipa::remove_user(&user, &sender, job.expires()).await?;
                     job.completed(user.mapping()?)
+                },
+                BlockUser(user) => {
+                    let user = freeipa::block_user(&user, job.expires()).await?;
+                    job.completed(user.mapping()?)
+                },
+                UnblockUser(user) => {
+                    let user = freeipa::unblock_user(&user, job.expires()).await?;
+                    job.completed(user.mapping()?)
+                },
+                IsBlockedUser(user) => {
+                    let is_blocked = freeipa::is_blocked_user(&user, job.expires()).await?;
+                    job.completed(is_blocked)
                 },
                 UpdateHomeDir(user, homedir) => {
                     let _ = freeipa::update_homedir(&user, &homedir, job.expires()).await?;

@@ -9,11 +9,12 @@ use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
-    GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota,
-    GetProjectQuotas, GetProjects, GetStorageReport, GetStorageReports, GetUsageReport,
-    GetUsageReports, GetUserDirs, GetUserMapping, GetUserQuota, GetUserQuotas, GetUsers,
-    IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
+    AddProject, AddUser, BlockProject, BlockUser, ClearProjectQuota, ClearUserQuota, GetHomeDir,
+    GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs,
+    GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects, GetStorageReport,
+    GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs, GetUserMapping, GetUserQuota,
+    GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser, IsProtectedUser, RemoveProject,
+    RemoveUser, SetLimit, SetProjectQuota, SetUserQuota, UnblockProject, UnblockUser,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
@@ -160,6 +161,16 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // blocked users must not be re-enabled by add_user;
+                    // only unblock_user should do that
+                    if is_blocked_user(me.name(), &user).await? {
+                        tracing::info!(
+                            "User {} is blocked - not re-adding. Use unblock_user to unblock.",
+                            user
+                        );
+                        return job.completed(get_user_mapping(me.name(), &user).await?);
+                    }
+
                     // does the user already exist?
                     let user_exists: bool = is_existing_user(me.name(), &user).await?;
 
@@ -222,6 +233,30 @@ async fn main() -> Result<()> {
                     // remove the user from the cluster
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
                     job.completed(mapping)
+                }
+                BlockUser(user) => {
+                    let mapping = block_user_on_cluster(me.name(), &user).await?;
+                    job.completed(mapping)
+                }
+                UnblockUser(user) => {
+                    let mapping = unblock_user_on_cluster(me.name(), &user).await?;
+                    job.completed(mapping)
+                }
+                IsBlockedUser(user) => {
+                    let is_blocked = is_blocked_user(me.name(), &user).await?;
+                    job.completed(is_blocked)
+                }
+                BlockProject(project) => {
+                    let mappings = block_project_on_cluster(me.name(), &project).await?;
+                    job.completed(mappings)
+                }
+                UnblockProject(project) => {
+                    let mappings = unblock_project_on_cluster(me.name(), &project).await?;
+                    job.completed(mappings)
+                }
+                IsBlockedProject(project) => {
+                    let is_blocked = is_blocked_project_on_cluster(me.name(), &project).await?;
+                    job.completed(is_blocked)
                 }
                 IsProtectedUser(user) => {
                     let is_protected = is_protected_user(me.name(), &user).await?;
@@ -1767,6 +1802,178 @@ async fn is_existing_user(me: &str, user: &UserIdentifier) -> Result<bool, Error
                 "Cannot run the job because there is no account agent".to_string(),
             ))
         }
+    }
+}
+
+async fn is_blocked_user(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            let job = Job::parse(
+                &format!("{}.{} is_blocked_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(is_blocked) => {
+                    tracing::debug!("User is blocked: {}", is_blocked);
+                    Ok(is_blocked)
+                }
+                None => Err(Error::MissingUser(format!(
+                    "Could not find information for user {}",
+                    user
+                ))),
+            }
+        }
+        None => Err(Error::MissingAgent(
+            "Cannot run the job because there is no account agent".to_string(),
+        )),
+    }
+}
+
+async fn block_user_on_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    match is_protected_user(me, user).await {
+        Ok(true) => return get_user_mapping(me, user).await,
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => return Err(e),
+        _ => {}
+    }
+
+    tracing::info!("Blocking user on cluster: {}", user);
+
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            let job = Job::parse(
+                &format!("{}.{} block_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            let result = job.wait().await?.result::<UserMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!("User blocked: {:?}", mapping);
+                    Ok(mapping)
+                }
+                None => Err(Error::Call(
+                    format!("Error blocking user: {:?}", job).to_string(),
+                )),
+            }
+        }
+        None => Err(Error::MissingAgent(
+            "Cannot run the job because there is no account agent".to_string(),
+        )),
+    }
+}
+
+async fn block_project_on_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<Vec<UserMapping>, Error> {
+    tracing::info!("Blocking all users in project: {}", project);
+
+    let users = get_accounts(me, project).await?;
+
+    let mut mappings = Vec::new();
+
+    for user_mapping in &users {
+        match block_user_on_cluster(me, user_mapping.user()).await {
+            Ok(mapping) => mappings.push(mapping),
+            Err(e) => tracing::error!(
+                "Error blocking user {} in project {}: {:?}",
+                user_mapping.user(),
+                project,
+                e
+            ),
+        }
+    }
+
+    Ok(mappings)
+}
+
+async fn unblock_project_on_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<Vec<UserMapping>, Error> {
+    tracing::info!("Unblocking all users in project: {}", project);
+
+    let users = get_accounts(me, project).await?;
+
+    let mut mappings = Vec::new();
+
+    for user_mapping in &users {
+        match unblock_user_on_cluster(me, user_mapping.user()).await {
+            Ok(mapping) => mappings.push(mapping),
+            Err(e) => tracing::error!(
+                "Error unblocking user {} in project {}: {:?}",
+                user_mapping.user(),
+                project,
+                e
+            ),
+        }
+    }
+
+    Ok(mappings)
+}
+
+async fn is_blocked_project_on_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<bool, Error> {
+    let users = get_accounts(me, project).await?;
+
+    if users.is_empty() {
+        return Ok(false);
+    }
+
+    for user_mapping in &users {
+        if !is_blocked_user(me, user_mapping.user()).await? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn unblock_user_on_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    match is_protected_user(me, user).await {
+        Ok(true) => return get_user_mapping(me, user).await,
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => return Err(e),
+        _ => {}
+    }
+
+    tracing::info!("Unblocking user on cluster: {}", user);
+
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            let job = Job::parse(
+                &format!("{}.{} unblock_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            let result = job.wait().await?.result::<UserMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!("User unblocked: {:?}", mapping);
+                    Ok(mapping)
+                }
+                None => Err(Error::Call(
+                    format!("Error unblocking user: {:?}", job).to_string(),
+                )),
+            }
+        }
+        None => Err(Error::MissingAgent(
+            "Cannot run the job because there is no account agent".to_string(),
+        )),
     }
 }
 

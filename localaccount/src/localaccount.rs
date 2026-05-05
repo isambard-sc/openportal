@@ -27,6 +27,7 @@ pub struct Commands {
     groupdel: Vec<String>,
     usermod: Vec<String>,
     getent: Vec<String>,
+    gpasswd: Vec<String>,
     /// Group that all users managed by this agent are added to, used to
     /// distinguish managed users from pre-existing system accounts.
     managed_group: String,
@@ -54,6 +55,7 @@ impl Commands {
         groupdel: &str,
         usermod: &str,
         getent: &str,
+        gpasswd: &str,
         managed_group: &str,
         system_groups: Vec<String>,
         instance_groups: HashMap<String, Vec<String>>,
@@ -65,6 +67,7 @@ impl Commands {
             groupdel: Self::parse_cmd(groupdel),
             usermod: Self::parse_cmd(usermod),
             getent: Self::parse_cmd(getent),
+            gpasswd: Self::parse_cmd(gpasswd),
             managed_group: managed_group.to_owned(),
             system_groups,
             instance_groups,
@@ -339,6 +342,16 @@ pub async fn add_user(
     let local_user = identifier_to_userid(user);
     let local_group = get_primary_group_name(user);
     let cmds = get_commands()?;
+
+    // blocked users must be explicitly unblocked - don't re-enable them here
+    if is_blocked_user(user, expires).await? {
+        tracing::info!(
+            "User {} is blocked - not re-adding. Use unblock_user to unblock.",
+            local_user
+        );
+        return UserMapping::new(user, &local_user, &local_group)
+            .map_err(|e| Error::Call(e.to_string()));
+    }
 
     let default_home = format!("/home/{}", local_user);
     let homedir_str = homedir.as_deref().unwrap_or(&default_home);
@@ -643,6 +656,166 @@ pub async fn is_existing_project(
     let (exit_code, _, _) = run_command(&cmds.getent, &["group", &group_name]).await?;
 
     Ok(exit_code == 0)
+}
+
+///
+/// Return the name of the blocked group: "{managed_group}.blocked".
+/// Membership of this group is the source of truth for whether a user
+/// is blocked, mirroring the "openportal.blocked" convention in FreeIPA.
+///
+fn blocked_group_name(cmds: &Commands) -> String {
+    format!("{}.blocked", cmds.managed_group)
+}
+
+///
+/// Return true if the local Unix user is a member of the given group.
+///
+async fn is_user_in_group(
+    local_user: &str,
+    group: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let cmds = get_commands()?;
+
+    let (exit_code, stdout, _) = run_command(&cmds.getent, &["group", group]).await?;
+
+    if exit_code != 0 {
+        return Ok(false);
+    }
+
+    let line = stdout.trim();
+    let members_field = line.splitn(4, ':').nth(3).unwrap_or("");
+
+    Ok(members_field.split(',').any(|m| m.trim() == local_user))
+}
+
+pub async fn is_blocked_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let local_user = identifier_to_userid(user);
+    let cmds = get_commands()?;
+    let blocked_group = blocked_group_name(cmds);
+
+    is_user_in_group(&local_user, &blocked_group, expires).await
+}
+
+///
+/// Block a managed user by adding them to the blocked group and locking
+/// their Unix account. Idempotent: returns the mapping without error if
+/// the user is already blocked.
+///
+pub async fn block_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<UserMapping, Error> {
+    assert_not_expired(expires)?;
+
+    let local_user = identifier_to_userid(user);
+    let local_group = get_primary_group_name(user);
+    let cmds = get_commands()?;
+    let blocked_group = blocked_group_name(cmds);
+
+    let mapping = UserMapping::new(user, &local_user, &local_group)
+        .map_err(|e| Error::Call(e.to_string()))?;
+
+    if is_protected_user(user, expires).await? {
+        tracing::warn!(
+            "Ignoring request to block {} as they are not managed by this agent",
+            local_user
+        );
+        return Ok(mapping);
+    }
+
+    if is_blocked_user(user, expires).await? {
+        tracing::info!("User {} is already blocked - nothing to do.", local_user);
+        return Ok(mapping);
+    }
+
+    ensure_group_exists(&blocked_group, expires).await?;
+
+    let (exit_code, _, stderr) =
+        run_command(&cmds.usermod, &["-aG", &blocked_group, &local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -aG {} failed for '{}': exit code {}, stderr: {}",
+            blocked_group, local_user, exit_code, stderr
+        )));
+    }
+
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-L", &local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -L failed for '{}': exit code {}, stderr: {}",
+            local_user, exit_code, stderr
+        )));
+    }
+
+    tracing::info!("Blocked user: {}", local_user);
+
+    Ok(mapping)
+}
+
+///
+/// Unblock a previously blocked user by removing them from the blocked group
+/// and unlocking their Unix account. Idempotent: returns the mapping without
+/// error if the user is not currently blocked.
+///
+pub async fn unblock_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<UserMapping, Error> {
+    assert_not_expired(expires)?;
+
+    let local_user = identifier_to_userid(user);
+    let local_group = get_primary_group_name(user);
+    let cmds = get_commands()?;
+    let blocked_group = blocked_group_name(cmds);
+
+    let mapping = UserMapping::new(user, &local_user, &local_group)
+        .map_err(|e| Error::Call(e.to_string()))?;
+
+    if is_protected_user(user, expires).await? {
+        tracing::warn!(
+            "Ignoring request to unblock {} as they are not managed by this agent",
+            local_user
+        );
+        return Ok(mapping);
+    }
+
+    if !is_blocked_user(user, expires).await? {
+        tracing::info!("User {} is not blocked - nothing to do.", local_user);
+        return Ok(mapping);
+    }
+
+    let (exit_code, _, stderr) =
+        run_command(&cmds.gpasswd, &["-d", &local_user, &blocked_group]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "gpasswd -d failed for '{}' from group '{}': exit code {}, stderr: {}",
+            local_user, blocked_group, exit_code, stderr
+        )));
+    }
+
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-U", &local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -U failed for '{}': exit code {}, stderr: {}",
+            local_user, exit_code, stderr
+        )));
+    }
+
+    tracing::info!("Unblocked user: {}", local_user);
+
+    Ok(mapping)
 }
 
 ///

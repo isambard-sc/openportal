@@ -11,8 +11,9 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
-    IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser, UpdateHomeDir,
+    AddProject, AddUser, BlockUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
+    IsBlockedUser, IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser,
+    UnblockUser, UpdateHomeDir,
 };
 use templemeads::grammar::UserMapping;
 use templemeads::job::{assert_not_expired, Envelope, Job};
@@ -73,6 +74,7 @@ async fn main() -> Result<()> {
     let groupdel = config.option("groupdel", "groupdel");
     let usermod = config.option("usermod", "usermod");
     let getent = config.option("getent", "getent");
+    let gpasswd = config.option("gpasswd", "gpasswd");
 
     // The managed group distinguishes users created by this agent from
     // pre-existing system users.  All managed users are added to it.
@@ -94,6 +96,7 @@ async fn main() -> Result<()> {
         &groupdel,
         &usermod,
         &getent,
+        &gpasswd,
         &managed_group,
         system_groups,
         instance_groups,
@@ -138,6 +141,18 @@ async fn main() -> Result<()> {
                 RemoveUser(user) => {
                     let mapping = localaccount::remove_user(&user, job.expires()).await?;
                     job.completed(mapping)
+                },
+                BlockUser(user) => {
+                    let mapping = localaccount::block_user(&user, job.expires()).await?;
+                    job.completed(mapping)
+                },
+                UnblockUser(user) => {
+                    let mapping = localaccount::unblock_user(&user, job.expires()).await?;
+                    job.completed(mapping)
+                },
+                IsBlockedUser(user) => {
+                    let is_blocked = localaccount::is_blocked_user(&user, job.expires()).await?;
+                    job.completed(is_blocked)
                 },
                 UpdateHomeDir(user, homedir) => {
                     localaccount::update_homedir(&user, &homedir, job.expires()).await?;

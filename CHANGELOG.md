@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **`block_user` / `unblock_user` / `is_blocked_user` instructions** — new
+  account-level instructions to suspend and reinstate users without touching the
+  filesystem or Slurm scheduler:
+  - `block_user <user>` — adds the user to the `openportal.blocked` group and
+    disables their account (FreeIPA: `user_disable`; localaccount: `usermod -L`).
+    Idempotent; no-ops if the user is already blocked or is protected.
+  - `unblock_user <user>` — removes the user from `openportal.blocked` and
+    re-enables their account. Idempotent; no-ops if the user is not blocked or
+    is protected.
+  - `is_blocked_user <user>` — returns `true` if the user is currently in the
+    `openportal.blocked` group.
+- **`block_project` / `unblock_project` / `is_blocked_project` instructions** —
+  cluster-level convenience instructions that operate on all users in a project:
+  - `block_project` / `unblock_project` call `block_user` / `unblock_user` for
+    each member. Per-user errors are logged but do not abort the fan-out. Note:
+    `unblock_project` unblocks **all** users in the project, including any that
+    were individually blocked beforehand.
+  - `is_blocked_project` returns `true` if the project has at least one member
+    **and** every member is currently blocked; `false` if the project is empty or
+    any member is unblocked.
+- **`openportal.blocked` group** — the `op-freeipa` and `op-localaccount` agents
+  use a `{managed-group}.blocked` group (default: `openportal.blocked`) as the
+  canonical source of truth for blocked status. This lets blocked users be
+  distinguished from users removed for other reasons — both are account-disabled,
+  but only blocked users appear in the group.
+- **`gpasswd` configurable command in `op-localaccount`** — needed to remove a
+  user from a single supplementary group cleanly during `unblock_user`. Defaults
+  to `gpasswd`; can be overridden in the agent config (e.g.
+  `gpasswd = "docker exec slurmctld gpasswd"`).
+
+### Changed
+
+- **`add_user` will not re-enable a blocked user** — if a user is in the
+  `openportal.blocked` group at the time `add_user` is called, the call returns
+  the existing mapping immediately without re-enabling the account. Only
+  `unblock_user` can reinstate a blocked user. A corresponding guard was added
+  at the cluster level to avoid unnecessary downstream agent calls.
+- **`is_existing_user` returns `true` for blocked users** — a blocked user is
+  still a managed, existing user and should continue to appear in queries.
+  Previously, disabled accounts that were not protected were treated as
+  non-existent.
+- **`remove_user` can remove blocked users** — a blocked user can be fully
+  removed by `remove_user`; the early-exit guard for disabled accounts now skips
+  only users who are disabled but *not* blocked.
+
 ## [0.28.0] - 2026-05-01
 
 ### Added

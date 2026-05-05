@@ -515,6 +515,89 @@ is_existing_user <user_id>
 
 Returns: `bool`
 
+#### `block_user`
+
+Block a managed user from logging in without removing their account, home
+directory, or scheduler configuration. The user is disabled in the account
+system (FreeIPA: `user_disable`; localaccount: `usermod -L`) and added to the
+`openportal.blocked` group, which is the source of truth for blocked status.
+
+`add_user` will **not** re-enable a blocked user — only `unblock_user` can do
+that. `remove_user` and `get_users` are unaffected: the user remains visible as
+a project member and can be fully removed at any time.
+
+Protected users (those not managed by OpenPortal) are silently ignored.
+
+```
+block_user <user_id>
+```
+
+Returns: `UserMapping`
+
+#### `unblock_user`
+
+Re-enable a previously blocked user by removing them from the
+`openportal.blocked` group and re-enabling their account. Idempotent: has no
+effect if the user is not currently blocked.
+
+```
+unblock_user <user_id>
+```
+
+Returns: `UserMapping`
+
+#### `is_blocked_user`
+
+Check whether a user is currently blocked.
+
+```
+is_blocked_user <user_id>
+```
+
+Returns: `bool`
+
+#### `block_project`
+
+Block all users in a project by calling `block_user` for each member. This is a
+cluster-level convenience instruction; it does not touch the filesystem or
+scheduler.
+
+**Note on edge cases:** `unblock_project` unconditionally unblocks *all* members
+of the project, including any user who was individually blocked before
+`block_project` was called. There is no per-user memory of pre-existing blocks.
+
+```
+block_project <project_id>
+```
+
+Returns: `Vec<UserMapping>` (mappings of users that were successfully processed;
+per-user errors are logged and do not abort the operation)
+
+#### `unblock_project`
+
+Unblock all users in a project by calling `unblock_user` for each member.
+Per-user errors are logged and do not abort the operation.
+
+```
+unblock_project <project_id>
+```
+
+Returns: `Vec<UserMapping>`
+
+---
+
+#### `is_blocked_project`
+
+Returns `true` if the project has at least one member **and** every member is
+currently blocked. Returns `false` if the project has no members, or if any
+member is not blocked.
+
+```
+is_blocked_project <project_id>
+```
+
+Returns: `bool`
+
 ---
 
 ### Mapping Instructions
@@ -1003,6 +1086,12 @@ Returns: `Destinations`
 | `get_users` | `<project_id>` | `Vec<UserMapping>` | List users in a project |
 | `add_user` | `<user_id>` | — | Add user to project |
 | `remove_user` | `<user_id>` | — | Remove user from project |
+| `block_user` | `<user_id>` | `UserMapping` | Disable login without removing account, home dir, or scheduler config |
+| `unblock_user` | `<user_id>` | `UserMapping` | Re-enable a blocked user |
+| `is_blocked_user` | `<user_id>` | `bool` | Check if user is blocked |
+| `block_project` | `<project_id>` | `Vec<UserMapping>` | Block all users in a project |
+| `unblock_project` | `<project_id>` | `Vec<UserMapping>` | Unblock all users in a project |
+| `is_blocked_project` | `<project_id>` | `bool` | True if project has members and all are blocked |
 | `is_protected_user` | `<user_id>` | `bool` | Check if user is protected |
 | `is_existing_user` | `<user_id>` | `bool` | Check if user account exists |
 | `get_user_mapping` | `<user_id>` | `UserMapping` | Get local mapping for user |
@@ -1104,6 +1193,24 @@ get_storage_report myproject.waldur this_month
 
 # Get storage reports for all projects in a portal
 get_storage_reports waldur
+
+# Block a single user (disables login, leaves home dir and scheduler config intact)
+block_user alice.myproject.waldur
+
+# Unblock a previously blocked user
+unblock_user alice.myproject.waldur
+
+# Check whether a user is currently blocked
+is_blocked_user alice.myproject.waldur
+
+# Block all users in a project
+block_project myproject.waldur
+
+# Unblock all users in a project
+unblock_project myproject.waldur
+
+# Check whether all users in a project are blocked
+is_blocked_project myproject.waldur
 ```
 
 ---

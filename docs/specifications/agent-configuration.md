@@ -401,6 +401,7 @@ Slurm Docker container where the commands can be prefixed with
 | `groupdel` | `extra` | `"groupdel"` | Command to remove a group. |
 | `usermod` | `extra` | `"usermod"` | Command to modify a user. |
 | `getent` | `extra` | `"getent"` | Command to query the user/group database. |
+| `gpasswd` | `extra` | `"gpasswd"` | Command to remove a user from a group (used by `unblock_user`). |
 | `managed-group` | `extra` | `"openportal"` | Name of the Unix group added to every managed user (used to distinguish agent-created users from pre-existing system accounts). |
 | `system-groups` | `extra` | `""` | Comma-separated list of Unix groups to add all managed users to. |
 | `instance-groups` | `extra` | `""` | Per-instance group mappings. Format: `"instance:group,instance:group2,..."` |
@@ -418,6 +419,7 @@ op-localaccount extra --key groupadd  --value "docker exec slurmctld groupadd"
 op-localaccount extra --key groupdel  --value "docker exec slurmctld groupdel"
 op-localaccount extra --key usermod   --value "docker exec slurmctld usermod"
 op-localaccount extra --key getent    --value "docker exec slurmctld getent"
+op-localaccount extra --key gpasswd   --value "docker exec slurmctld gpasswd"
 ```
 
 **Group management:**
@@ -431,6 +433,21 @@ user to them:
    characters replaced with `_`)
 4. Any groups listed in `system-groups`
 5. Any groups listed in `instance-groups` for the relevant instance
+
+**Blocking and unblocking:**
+
+The agent supports `block_user` and `unblock_user` instructions (and the
+convenience `block_project` / `unblock_project` instructions handled by the
+cluster agent). Blocking a user:
+
+- Adds the user to the `{managed-group}.blocked` group (e.g. `openportal.blocked`),
+  which is created automatically on first use. This group is the source of truth
+  for blocked status.
+- Locks the Unix account with `usermod -L`, preventing password-based login.
+
+Unblocking reverses both steps: `gpasswd -d` removes the user from the blocked
+group and `usermod -U` re-enables the account. `add_user` will not re-enable a
+blocked user — only `unblock_user` can do that.
 
 **Typical peer relationships:**
 - **Server:** one `cluster` (instance) agent

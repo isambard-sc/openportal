@@ -2789,6 +2789,25 @@ pub enum Instruction {
     /// An instruction to remove a user
     RemoveUser(UserIdentifier),
 
+    /// An instruction to block a user from logging in without removing their
+    /// account, home directory, or scheduler configuration
+    BlockUser(UserIdentifier),
+
+    /// An instruction to unblock a previously blocked user, re-enabling login
+    UnblockUser(UserIdentifier),
+
+    /// An instruction to check if a user is blocked
+    IsBlockedUser(UserIdentifier),
+
+    /// An instruction to block all users in a project
+    BlockProject(ProjectIdentifier),
+
+    /// An instruction to unblock all users in a project
+    UnblockProject(ProjectIdentifier),
+
+    /// An instruction to check if all users in a project are blocked
+    IsBlockedProject(ProjectIdentifier),
+
     /// An instruction to look up the mapping for a user
     GetUserMapping(UserIdentifier),
 
@@ -3127,6 +3146,69 @@ impl Instruction {
                     tracing::error!("remove_user failed to parse: {}", &parts[1..].join(" "));
                     Err(Error::Parse(format!(
                         "remove_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "block_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::BlockUser(user)),
+                Err(_) => {
+                    tracing::error!("block_user failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "block_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "unblock_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::UnblockUser(user)),
+                Err(_) => {
+                    tracing::error!("unblock_user failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "unblock_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "is_blocked_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::IsBlockedUser(user)),
+                Err(_) => {
+                    tracing::error!("is_blocked_user failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "is_blocked_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "block_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::BlockProject(project)),
+                Err(_) => {
+                    tracing::error!("block_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "block_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "unblock_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::UnblockProject(project)),
+                Err(_) => {
+                    tracing::error!("unblock_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "unblock_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "is_blocked_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::IsBlockedProject(project)),
+                Err(_) => {
+                    tracing::error!(
+                        "is_blocked_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "is_blocked_project failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }
@@ -4406,6 +4488,12 @@ impl Instruction {
             Instruction::GetUsers(_) => "get_users".to_string(),
             Instruction::AddUser(_) => "add_user".to_string(),
             Instruction::RemoveUser(_) => "remove_user".to_string(),
+            Instruction::BlockUser(_) => "block_user".to_string(),
+            Instruction::UnblockUser(_) => "unblock_user".to_string(),
+            Instruction::IsBlockedUser(_) => "is_blocked_user".to_string(),
+            Instruction::BlockProject(_) => "block_project".to_string(),
+            Instruction::UnblockProject(_) => "unblock_project".to_string(),
+            Instruction::IsBlockedProject(_) => "is_blocked_project".to_string(),
             Instruction::GetUserMapping(_) => "get_user_mapping".to_string(),
             Instruction::GetProjectMapping(_) => "get_project_mapping".to_string(),
             Instruction::GetHomeDir(_) => "get_home_dir".to_string(),
@@ -4475,6 +4563,12 @@ impl Instruction {
             Instruction::GetUsers(project) => vec![project.to_string()],
             Instruction::AddUser(user) => vec![user.to_string()],
             Instruction::RemoveUser(user) => vec![user.to_string()],
+            Instruction::BlockUser(user) => vec![user.to_string()],
+            Instruction::UnblockUser(user) => vec![user.to_string()],
+            Instruction::IsBlockedUser(user) => vec![user.to_string()],
+            Instruction::BlockProject(project) => vec![project.to_string()],
+            Instruction::UnblockProject(project) => vec![project.to_string()],
+            Instruction::IsBlockedProject(project) => vec![project.to_string()],
             Instruction::GetUserMapping(user) => vec![user.to_string()],
             Instruction::GetProjectMapping(project) => vec![project.to_string()],
             Instruction::GetHomeDir(user) => vec![user.to_string()],
@@ -4588,6 +4682,12 @@ impl std::fmt::Display for Instruction {
             Instruction::GetUsers(project) => write!(f, "get_users {}", project),
             Instruction::AddUser(user) => write!(f, "add_user {}", user),
             Instruction::RemoveUser(user) => write!(f, "remove_user {}", user),
+            Instruction::BlockUser(user) => write!(f, "block_user {}", user),
+            Instruction::UnblockUser(user) => write!(f, "unblock_user {}", user),
+            Instruction::IsBlockedUser(user) => write!(f, "is_blocked_user {}", user),
+            Instruction::BlockProject(project) => write!(f, "block_project {}", project),
+            Instruction::UnblockProject(project) => write!(f, "unblock_project {}", project),
+            Instruction::IsBlockedProject(project) => write!(f, "is_blocked_project {}", project),
             Instruction::AddLocalProject(mapping) => write!(f, "add_local_project {}", mapping),
             Instruction::RemoveLocalProject(mapping) => {
                 write!(f, "remove_local_project {}", mapping)

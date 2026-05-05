@@ -3098,7 +3098,10 @@ async fn ensure_blocked_group_exists(expires: &chrono::DateTime<Utc>) -> Result<
     let kwargs = {
         let mut kwargs = HashMap::new();
         kwargs.insert("cn".to_string(), blocked_cn.to_string());
-        kwargs.insert("description".to_string(), "Group for all users blocked by OpenPortal".to_string());
+        kwargs.insert(
+            "description".to_string(),
+            "Group for all users blocked by OpenPortal".to_string(),
+        );
         kwargs
     };
 
@@ -3176,7 +3179,10 @@ pub async fn block_user(
     }
 
     if user.is_blocked() {
-        tracing::info!("User {} is already blocked - nothing to do.", user.identifier());
+        tracing::info!(
+            "User {} is already blocked - nothing to do.",
+            user.identifier()
+        );
         return Ok(user);
     }
 
@@ -3193,7 +3199,10 @@ pub async fn block_user(
 
     match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
         Ok(_) => {
-            tracing::info!("Added user {} to openportal.blocked group", user.identifier());
+            tracing::info!(
+                "Added user {} to openportal.blocked group",
+                user.identifier()
+            );
         }
         Err(e) => {
             tracing::error!(

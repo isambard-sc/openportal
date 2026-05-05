@@ -3,7 +3,7 @@
 
 [package]
 name = "example-cluster"
-version = "0.28.0"
+version = "0.29.0"
 description = "templemeads command line example - cluster agent"
 edition = "2021"
 license = "MIT"

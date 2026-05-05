@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.29.0] - 2026-05-05
+
 ### Added
 
 - **`block_user` / `unblock_user` / `is_blocked_user` instructions** — new
@@ -1462,6 +1464,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.29.0]: https://github.com/isambard-sc/openportal/releases/tag/0.29.0
 [0.28.0]: https://github.com/isambard-sc/openportal/releases/tag/0.28.0
 [0.27.1]: https://github.com/isambard-sc/openportal/releases/tag/0.27.1
 [0.27.0]: https://github.com/isambard-sc/openportal/releases/tag/0.27.0

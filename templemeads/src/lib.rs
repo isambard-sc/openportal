@@ -48,3 +48,49 @@ pub mod server {
 
 // Re-export system info monitor for agents to use at startup
 pub use systeminfo::spawn_monitor as spawn_system_monitor;
+
+#[cfg(test)]
+mod tests {
+    use crate::agent::Type as AgentType;
+    use crate::diagnostics::{
+        DiagnosticsReport, ExpiredJobEntry, FailedJobEntry, JobStatistics, LogEntry,
+        RunningJobEntry, SlowJobEntry,
+    };
+    use crate::grammar::{AwardDetails, Link, MembershipControl, Note};
+    use crate::health::HealthInfo;
+    use crate::job::{Job, Status};
+    use crate::storage::{Quota, Volume};
+    use crate::storagereport::{ProjectStorageReport, StorageReport};
+    use crate::usagereport::{
+        DailyProjectUsageReport, ProjectUsageReport, Usage, UsageReport, UserUsageReport,
+    };
+    use ts_rs::TS;
+
+    #[test]
+    fn export_ts_bindings() {
+        AgentType::export_all().expect("Could not export AgentType");
+        Status::export_all().expect("Could not export Status");
+        Job::export_all().expect("Could not export Job");
+        JobStatistics::export_all().expect("Could not export JobStatistics");
+        DiagnosticsReport::export_all().expect("Could not export DiagnosticsReport");
+        FailedJobEntry::export_all().expect("Could not export FailedJobEntry");
+        SlowJobEntry::export_all().expect("Could not export SlowJobEntry");
+        ExpiredJobEntry::export_all().expect("Could not export ExpiredJobEntry");
+        RunningJobEntry::export_all().expect("Could not export RunningJobEntry");
+        LogEntry::export_all().expect("Could not export LogEntry");
+        HealthInfo::export_all().expect("Could not export HealthInfo");
+        Volume::export_all().expect("Could not export Volume");
+        Quota::export_all().expect("Could not export Quota");
+        Usage::export_all().expect("Could not export Usage");
+        UserUsageReport::export_all().expect("Could not export UserUsageReport");
+        DailyProjectUsageReport::export_all().expect("Could not export DailyProjectUsageReport");
+        ProjectUsageReport::export_all().expect("Could not export ProjectUsageReport");
+        UsageReport::export_all().expect("Could not export UsageReport");
+        ProjectStorageReport::export_all().expect("Could not export ProjectStorageReport");
+        StorageReport::export_all().expect("Could not export StorageReport");
+        Link::export_all().expect("Could not export Link");
+        Note::export_all().expect("Could not export Note");
+        MembershipControl::export_all().expect("Could not export MembershipControl");
+        AwardDetails::export_all().expect("Could not export AwardDetails");
+    }
+}

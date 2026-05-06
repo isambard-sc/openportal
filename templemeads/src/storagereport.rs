@@ -5,6 +5,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ts_rs::TS;
 
 use crate::error::Error;
 
@@ -41,11 +42,14 @@ impl NamedType for Vec<ProjectStorageReport> {
 /// project. Used to store historical entries inside `ProjectStorageReport`.
 /// Not exposed through the public API — callers always receive
 /// `ProjectStorageReport` even for individual days.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub(crate) struct DailyStorageReport {
+    #[ts(as = "String")]
     project: ProjectIdentifier,
     generated_at: DateTime<Utc>,
+    #[ts(as = "HashMap<String, Quota>")]
     project_quotas: HashMap<Volume, Quota>,
+    #[ts(as = "HashMap<String, HashMap<String, Quota>>")]
     user_quotas: HashMap<UserIdentifier, HashMap<Volume, Quota>>,
 }
 
@@ -125,26 +129,32 @@ impl From<DailyStorageReport> for ProjectStorageReport {
 /// keyed by calendar date (UTC), with at most one snapshot per date (the
 /// newest seen for that date). The date of the top-level snapshot is never
 /// duplicated in `daily_reports`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ProjectStorageReport {
     /// The project this report is for
+    #[ts(as = "String")]
     project: ProjectIdentifier,
 
     /// When the top-level snapshot was generated
     generated_at: DateTime<Utc>,
 
     /// Project-level quotas keyed by volume name (e.g. "home", "scratch")
+    #[ts(as = "HashMap<String, Quota>")]
     project_quotas: HashMap<Volume, Quota>,
 
     /// Per-user quotas: portal UserIdentifier → (volume → quota)
+    #[ts(as = "HashMap<String, HashMap<String, Quota>>")]
     user_quotas: HashMap<UserIdentifier, HashMap<Volume, Quota>>,
 
     /// Mapping from portal UserIdentifier to local username
+    #[ts(as = "HashMap<String, String>")]
     users: HashMap<UserIdentifier, String>,
 
     /// Historical snapshots keyed by date (UTC). Each entry is the newest
     /// snapshot seen for that day. The current top-level date is excluded.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[ts(as = "HashMap<String, DailyStorageReport>")]
     daily_reports: HashMap<Date, DailyStorageReport>,
 }
 
@@ -667,9 +677,12 @@ impl std::fmt::Display for ProjectStorageReport {
 
 /// A portal-level storage report containing per-project storage reports for
 /// all projects associated with a portal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct StorageReport {
+    #[ts(as = "String")]
     portal: PortalIdentifier,
+    #[ts(as = "HashMap<String, ProjectStorageReport>")]
     reports: HashMap<ProjectIdentifier, ProjectStorageReport>,
 }
 

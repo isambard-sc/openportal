@@ -4,6 +4,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ts_rs::TS;
 
 use crate::error::Error;
 
@@ -72,7 +73,8 @@ impl NamedType for Vec<UsageReport> {
     }
 }
 
-#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Usage {
     seconds: u64,
 }
@@ -395,8 +397,10 @@ impl std::ops::Div<f64> for Usage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct UserUsageReport {
+    #[ts(as = "String")]
     user: UserIdentifier,
     usage: Usage,
 }
@@ -424,7 +428,8 @@ impl UserUsageReport {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct DailyProjectUsageReport {
     reports: HashMap<String, Usage>,
     #[serde(default)]
@@ -877,10 +882,14 @@ impl std::ops::DivAssign<f64> for DailyProjectUsageReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ProjectUsageReport {
+    #[ts(as = "String")]
     project: ProjectIdentifier,
+    #[ts(as = "HashMap<String, DailyProjectUsageReport>")]
     reports: HashMap<Date, DailyProjectUsageReport>,
+    #[ts(as = "HashMap<String, String>")]
     users: HashMap<UserIdentifier, String>,
 }
 
@@ -1600,9 +1609,12 @@ impl ProjectUsageReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct UsageReport {
+    #[ts(as = "String")]
     portal: PortalIdentifier,
+    #[ts(as = "HashMap<String, ProjectUsageReport>")]
     reports: HashMap<ProjectIdentifier, ProjectUsageReport>,
 }
 

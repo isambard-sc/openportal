@@ -14,6 +14,7 @@ use chrono::serde::ts_seconds;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,7 +48,8 @@ impl Envelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub enum Status {
     Created,
     Pending,
@@ -276,21 +278,28 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Job {
     id: Uuid,
     #[serde(with = "ts_seconds")]
+    #[ts(type = "number")]
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
+    #[ts(type = "number")]
     changed: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
+    #[ts(type = "number")]
     expires: chrono::DateTime<Utc>,
+    #[ts(type = "number")]
     version: u64,
+    #[ts(as = "String")]
     command: Command,
     state: Status,
     result: Option<String>,
     result_type: Option<String>,
     #[serde(skip)]
+    #[ts(skip)]
     board: Option<Peer>,
 }
 

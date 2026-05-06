@@ -148,6 +148,24 @@ wire together, and run agents in a real deployment.
 
 ---
 
+### [typescript-bindings.md](typescript-bindings.md)
+**TypeScript bindings**
+
+Describes the auto-generated TypeScript type definitions produced from the
+`templemeads` Rust types via [ts-rs](https://github.com/Aleph-Alpha/ts-rs).
+Covers:
+
+- How to regenerate the bindings with `cargo test`
+- The full table of exported types and which Rust source they derive from
+- Serialisation notes: timestamp formats, identifier strings, HashMap key
+  conventions, and custom-format fields such as storage sizes
+- The hand-written `identifiers.ts` utility — parse/stringify helpers for
+  `UserIdentifier`, `ProjectIdentifier`, `PortalIdentifier`, `UserMapping`,
+  and `ProjectMapping`
+- How to add a new exported type
+
+---
+
 ### [notes.md](notes.md)
 **Errata, provisional schemas, and operational notes**
 

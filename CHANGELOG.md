@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **TypeScript bindings for `templemeads` types** — the `templemeads` crate
+  now derives TypeScript type definitions from its Rust structs and enums via
+  [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Running
+  `cargo test -p templemeads export_ts_bindings` regenerates
+  `templemeads/bindings/` with one `.ts` file per exported type. Exported
+  types cover jobs (`Job`, `Status`), diagnostics (`DiagnosticsReport` and
+  all sub-entries), health (`HealthInfo`), storage (`Quota`, `Volume`,
+  `StorageReport`, `ProjectStorageReport`), usage (`UsageReport`,
+  `ProjectUsageReport`, `DailyProjectUsageReport`, `Usage`), and award
+  details (`AwardDetails`, `Link`, `Note`, `MembershipControl`).
+- **`templemeads/bindings/identifiers.ts`** — hand-written TypeScript utility
+  providing parse and stringify helpers for the five string-encoded identifier
+  types (`PortalIdentifier`, `ProjectIdentifier`, `UserIdentifier`,
+  `ProjectMapping`, `UserMapping`). Allows React components to decompose
+  e.g. `"alice.myproject.brics"` into `{ username, project, portal }` and
+  reassemble when sending instructions back to OpenPortal.
+- **`docs/specifications/typescript-bindings.md`** — specification document
+  covering the bindings: how to generate them, the full table of exported
+  types, serialisation notes (timestamp formats, HashMap key conventions,
+  custom-format strings), and instructions for adding new exported types.
+
 ## [0.29.0] - 2026-05-05
 
 ### Added

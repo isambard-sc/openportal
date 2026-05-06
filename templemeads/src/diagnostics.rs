@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use tokio::sync::RwLock;
+use ts_rs::TS;
 
 /// Maximum number of failed jobs to track
 const MAX_FAILED_JOBS: usize = 200;
@@ -30,7 +31,8 @@ const MAX_EXPIRED_JOBS: usize = 200;
 const MAX_LOG_ENTRIES: usize = 500;
 
 /// Job statistics totals for all time
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct JobStatistics {
     /// Total number of successfully completed jobs
     pub total_completed: usize,
@@ -43,7 +45,8 @@ pub struct JobStatistics {
 }
 
 /// Diagnostics report containing troubleshooting information
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct DiagnosticsReport {
     /// Agent name
     pub agent_name: String,
@@ -65,7 +68,8 @@ pub struct DiagnosticsReport {
 }
 
 /// Entry for a failed job
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct FailedJobEntry {
     /// Job destination
     pub destination: String,
@@ -82,7 +86,8 @@ pub struct FailedJobEntry {
 }
 
 /// Entry for a slow job
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd, TS)]
+#[ts(export)]
 pub struct SlowJobEntry {
     /// Job destination
     pub destination: String,
@@ -95,7 +100,8 @@ pub struct SlowJobEntry {
 }
 
 /// Entry for an expired job
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct ExpiredJobEntry {
     /// Job destination
     pub destination: String,
@@ -110,7 +116,8 @@ pub struct ExpiredJobEntry {
 }
 
 /// Entry for a currently running job
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct RunningJobEntry {
     /// Job destination
     pub destination: String,
@@ -125,7 +132,8 @@ pub struct RunningJobEntry {
 }
 
 /// A single log message captured from the tracing framework
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct LogEntry {
     /// When the message was logged
     pub timestamp: DateTime<Utc>,

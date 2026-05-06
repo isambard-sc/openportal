@@ -11,6 +11,7 @@ use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::{hash::Hash, sync::Arc};
+use ts_rs::TS;
 use url::Url;
 use wildmatch::WildMatch;
 
@@ -1956,7 +1957,8 @@ impl<'de> Deserialize<'de> for DomainPattern {
 /// A reference to an external resource: an optional human-readable ID
 /// and an optional URL. Used for award, call, project, and renewal links
 /// inside AwardDetails.
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct Link {
     /// Human-readable identifier, e.g. "EP/X000000/1" or "061-4738952-1"
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2054,7 +2056,8 @@ impl<'de> Deserialize<'de> for Link {
 /// A timestamped note attached to an award. Notes are append-only
 /// messages, typically used by the awarding portal to communicate
 /// with the project team.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Note {
     /// When the note was created (UTC)
     timestamp: DateTime<Utc>,
@@ -2115,8 +2118,9 @@ impl std::fmt::Display for Note {
 /// identical to `Open` — the receiving portal manages membership freely.
 /// Explicitly setting a value lets the sending portal declare a policy that
 /// the receiving portal is expected to honour.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum MembershipControl {
     /// Receiving portal may freely add/remove members and change roles (default
     /// when field is absent).
@@ -2161,12 +2165,14 @@ impl std::fmt::Display for MembershipControl {
 /// this struct to be used in "update" requests, as only
 /// the fields that are set will be updated.
 ///
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct AwardDetails {
     /// The name of the project
     name: Option<String>,
 
     /// The template used for the project
+    #[ts(as = "Option<String>")]
     template: Option<ProjectTemplate>,
 
     /// The key that may need to be provided to show that the
@@ -2183,13 +2189,16 @@ pub struct AwardDetails {
     /// (keys) and their roles (values).
     members: Option<BTreeMap<String, String>>,
 
-    /// Proposed start date of the project
+    /// Proposed start date of the project (ISO 8601 date string)
+    #[ts(as = "Option<String>")]
     start_date: Option<Date>,
 
-    /// Proposed end date of the project
+    /// Proposed end date of the project (ISO 8601 date string)
+    #[ts(as = "Option<String>")]
     end_date: Option<Date>,
 
-    /// The allocation of resource for this project
+    /// The allocation of resource for this project (e.g. "1000 NHR")
+    #[ts(as = "Option<String>")]
     allocation: Option<Allocation>,
 
     /// A free-form breakdown of the allocation into named components.
@@ -2235,6 +2244,7 @@ pub struct AwardDetails {
     /// If this is Some(vec![]), then no domains are allowed.
     /// If this is Some(vec![...]), then only the domains that match
     /// those in the list are allowed.
+    #[ts(as = "Option<Vec<String>>")]
     allowed_domains: Option<Vec<DomainPattern>>,
 }
 

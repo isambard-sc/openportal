@@ -4,6 +4,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ts_rs::TS;
 
 use crate::error::Error;
 
@@ -496,10 +497,15 @@ impl From<StorageSize> for QuotaLimit {
 }
 
 /// Represents a storage quota with a limit and optional current usage
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Quota {
+    /// Limit expressed as a human-readable size string (e.g. "100GB") or "unlimited"
+    #[ts(as = "String")]
     limit: QuotaLimit,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Current usage expressed as a human-readable size string (e.g. "2.5GB")
+    #[ts(as = "Option<String>")]
     usage: Option<StorageUsage>,
 }
 
@@ -650,8 +656,9 @@ impl std::fmt::Display for Quota {
 }
 
 /// Identifies a storage volume (e.g., "home", "scratch", "project")
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash, TS)]
 #[serde(transparent)]
+#[ts(export, type = "string")]
 pub struct Volume {
     name: String,
 }

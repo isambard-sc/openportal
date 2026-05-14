@@ -617,7 +617,9 @@ async fn send_award_notification(notification_url: &Option<Url>, event: Notifica
     };
 
     let notification = Notification::new(dest, event);
-    signal_web_portal_notification(notification_url, &notification).await;
+    if let Err(e) = signal_web_portal_notification(notification_url, &notification).await {
+        tracing::warn!("Failed to send award notification: {}", e);
+    }
 }
 
 ///

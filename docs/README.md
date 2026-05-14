@@ -59,8 +59,10 @@ The two main components of OpenPortal are:
    communicate with each other, sending Jobs (tasks) to each other which
    are managed on Job Boards. The Agents collectively manage a distributed
    set of Jobs in a robust manner, such that the system can recover from
-   the failure of individual Agents. The source code is in the
-   [templemeads](../templemeads) directory.
+   the failure of individual Agents. In addition to Jobs, `templemeads`
+   provides a lightweight fire-and-forget **Notification** system for
+   signalling events between agents without requiring acknowledgement or
+   a result. The source code is in the [templemeads](../templemeads) directory.
 
 ### Agents
 
@@ -201,6 +203,6 @@ agent and the `openportal` Python library.
 ## Protocol Specifications
 
 The [specifications](specifications) directory contains formal protocol
-and API reference documentation covering the instruction grammar, JSON
-result types, wire protocol, security model, bridge HTTP API,
-and agent configuration reference.
+and API reference documentation covering the instruction grammar, notification
+event grammar, JSON result types, wire protocol, security model, bridge HTTP
+API, and agent configuration reference.

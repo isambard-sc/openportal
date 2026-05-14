@@ -186,6 +186,22 @@ Reply to a `DiagnosticsRequest`. `report` is a free-form JSON object.
 }
 ```
 
+#### `Notify`
+
+Carries a fire-and-forget `Notification` — a one-way event signal routed along
+a destination path. Unlike `Put`/`Update`, no acknowledgement or result is ever
+sent back. The notification is **not** stored on any job board.
+
+```json
+{
+  "type":         "Notify",
+  "notification": { <Notification> }
+}
+```
+
+See [notification-protocol.md](notification-protocol.md) for the full
+specification of the `Notification` object and `NotificationEvent` grammar.
+
 ---
 
 ## 2. Paddington Framing Layer
@@ -471,7 +487,8 @@ Once the handshake completes, the following sequence occurs:
    board state, so the remote side can reconcile any jobs that may have been
    in-flight when a previous connection dropped.
 3. **Normal operation** — agents exchange `Put`, `Update`, and `Delete` commands
-   as jobs are created, progress, and complete.
+   as jobs are created, progress, and complete. `Notify` commands may also be
+   sent at any time during normal operation.
 4. **Keepalives** — periodic `KEEPALIVE` messages (and Paddington `Watchdog`
    control messages) maintain the connection and detect failures.
 
@@ -491,6 +508,7 @@ version mismatch causes the connection to be refused.
 |---------|-------------|
 | `Envelope`, `Job`, `Status` | `templemeads/src/job.rs` |
 | Templemeads `Command` | `templemeads/src/command.rs` |
+| `Notification`, `NotificationEvent`, `NotificationEnvelope` | `templemeads/src/notification.rs` |
 | Paddington `Message` | `paddington/src/message.rs` |
 | Paddington `Command` | `paddington/src/command.rs` |
 | `Key`, `Salt`, encryption | `paddington/src/crypto.rs` |

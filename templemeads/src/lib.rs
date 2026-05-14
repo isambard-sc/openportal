@@ -35,6 +35,7 @@ pub use error::Error;
 pub mod grammar;
 pub mod health;
 pub mod job;
+pub mod notification;
 pub mod runnable;
 pub mod state;
 pub mod storage;
@@ -48,6 +49,9 @@ pub mod server {
 
 // Re-export system info monitor for agents to use at startup
 pub use systeminfo::spawn_monitor as spawn_system_monitor;
+
+// Re-export notification runner setter so agent binaries can register handlers
+pub use handler::set_notify_runner;
 
 #[cfg(test)]
 mod tests {

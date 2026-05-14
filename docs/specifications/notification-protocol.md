@@ -221,12 +221,61 @@ At each hop, the receiving agent checks its position in the destination path:
 |----------|--------|
 | `Downstream` | Forward `Notify` to the next agent in the path. No board write. No update sent back. |
 | `Destination` | Call the registered `notify_runner`. No board write. No update sent back. |
-| `Error` | Log a warning and drop the notification. |
+| `Error` | Log a warning and drop the notification (unless the bridge sidecar case applies — see §5.3). |
 
 Notifications are **allowed through a soft restart** (unlike Jobs, which are
 rejected with an error during restart). Because no acknowledgement is ever
 sent, a rejected notification would simply be lost silently; allowing it
 through is safer.
+
+### 5.1 Forward Routing
+
+The bridge agent is a **sidecar** — its name never appears in a notification's
+destination path, which names only the OpenPortal agents that must handle the
+notification. To route a notification through the portal from the bridge (or
+vice versa), the bridge wraps the inner notification in a `Forward` event:
+
+```rust
+NotificationEvent::Forward(Box<Notification>)
+```
+
+The `Forward` wrapper is addressed to `<bridge-name>.<portal-name>`. The portal
+receives it, extracts the inner notification, and routes it by finding its own
+name in the inner destination path, then forwarding to the agent at the next
+index (see §5.2).
+
+### 5.2 Bidirectional Portal Forwarding
+
+When the portal handles a `Forward` notification it locates its own position in
+the inner destination path and routes to `agents()[portal_index + 1]`:
+
+| Portal index in inner destination | Direction | Example inner path | Routes to |
+|-----------------------------------|-----------|-------------------|-----------|
+| 0 | South (bridge → downstream agents) | `portal.clusters.instance` | `clusters` |
+| 1 | North (virtual agent → peer portal) | `isambard-ai.brics.ukri` | `ukri` |
+
+For security, when the portal is at index 1, index 0 **must** be the name of a
+registered virtual agent connected to the portal. Any other portal index (2 or
+higher) is rejected with an error.
+
+### 5.3 Bridge Sidecar (Position::Error)
+
+When an infrastructure agent emits a notification addressed to agents that do
+not include the bridge name — for example `portal.clusters.instance user_added
+chris.project.portal` — the notification travels up the hierarchy and the
+portal's notify runner forwards it to the bridge unchanged (§7.1). Because the
+bridge is not named in the destination, `position()` returns `Error`.
+
+The bridge handles this sidecar case with a security check:
+
+1. The receiving agent must be of type `Bridge`.
+2. It must have a connected portal.
+3. The portal's name must be the **last** or **penultimate** agent in the
+   notification destination (i.e. the final destination is either the portal
+   itself or a virtual agent one hop past the portal).
+
+If all three conditions hold, the notification is accepted and passed to the
+bridge's `notify_runner`. Otherwise it is logged as a warning and dropped.
 
 ---
 
@@ -298,7 +347,78 @@ let notification = Notification::parse(
 
 ---
 
-## 7. Guarantees and Limitations
+## 7. Bridge and Portal Notification Flow
+
+The bridge is the boundary between the OpenPortal agent network and an
+external web portal application (e.g. a Python/Django service). Two directions
+of notification flow are relevant.
+
+### 7.1 South-to-North: Infrastructure → Web Portal
+
+When an agent emits a notification — for example `freeipa` fires `user_added`
+addressed to `portal.clusters.instance` — it travels up the agent hierarchy.
+At the portal, the notify runner checks whether the notification reaches the
+portal itself (addressed to the portal only) or whether it should be passed to
+the bridge for delivery to the web portal. In either case the portal forwards
+the notification to the connected bridge **unchanged** (preserving the original
+destination path). The bridge accepts it via the sidecar check (§5.3) and its
+notify runner POSTs it to the web portal via the notification URL callback
+(§7.3).
+
+### 7.2 North-to-South: Web Portal → Agent Network (via Forward)
+
+When the web portal wants to emit a notification into the OpenPortal network —
+for example, to signal that an event occurred in the web portal itself — it
+calls `POST /notify` on the bridge HTTP API with a notification command string:
+
+```
+POST /notify
+{"command": "isambard-ai.brics.ukri user_added chris.project.brics"}
+```
+
+The bridge's `notify` function:
+
+1. Parses the inner notification string.
+2. Validates that the destination contains the connected portal's name.
+3. Wraps it in a `Forward` event addressed to `<bridge-name>.<portal-name>`.
+4. Sends the `Forward` notification to the portal.
+5. The portal unwraps it, finds its own position in the inner destination, and
+   routes to the next agent (§5.2).
+
+This allows virtual agents registered with the portal to act as notification
+sources for peer portals in other zones (e.g. `isambard-ai` as a virtual agent
+on `brics` notifying `ukri`).
+
+### 7.3 Notification URL Callback
+
+The bridge is configured with a `notification_url`. When a notification arrives
+from the OpenPortal network and passes the sidecar check (§5.3), the bridge's
+notify runner POSTs the `Notification` object as JSON to this URL:
+
+```
+POST <notification_url>
+Content-Type: application/json
+
+{
+  "id":          "<uuid-string>",
+  "destination": "<dot-separated-agent-path>",
+  "event":       "<event-string>"
+}
+```
+
+The bridge makes up to **3 attempts** with a **2-second delay** between
+attempts. If all attempts fail the notification is logged at `ERROR` level and
+dropped — no error is propagated back to the OpenPortal sender. The endpoint
+should respond with HTTP 2xx. The response body is not read.
+
+The notification URL is unauthenticated. It is called from the bridge process
+(typically localhost), so no credential is needed. Configure
+`OPENPORTAL_ALLOW_INVALID_SSL_CERTS=true` to disable TLS verification in
+development.
+
+---
+
+## 8. Guarantees and Limitations
 
 - **No delivery guarantee.** If the destination agent is unreachable, the
   notification is silently dropped. There is no retry queue and no error is
@@ -314,11 +434,16 @@ For operations where delivery confirmation matters, use a Job instead.
 
 ---
 
-## 8. Source File Reference
+## 9. Source File Reference
 
 | Concept | Source file |
 |---------|-------------|
 | `NotificationEvent`, `Notification`, `NotificationEnvelope` | `templemeads/src/notification.rs` |
 | `AsyncNotifyRunnable`, `default_notify_runner` | `templemeads/src/notification.rs` |
 | `Command::Notify`, `Command::notify()` | `templemeads/src/command.rs` |
-| `set_notify_runner`, routing in `process_command` | `templemeads/src/handler.rs` |
+| `set_notify_runner`, routing in `process_command`, sidecar check | `templemeads/src/handler.rs` |
+| `bridge::notify()`, `Forward` wrapping | `templemeads/src/bridge.rs` |
+| `notification_url` config, `signal_web_portal_notification` | `bridge/src/main.rs` |
+| `BridgeBoard::set_notification_url` | `templemeads/src/bridgeboard.rs` |
+| `POST /notify` HTTP endpoint | `templemeads/src/bridge_server.rs` |
+| Portal notify runner (Forward dispatch, south-to-north) | `portal/src/main.rs` |

@@ -59,6 +59,7 @@ assert openportal.is_config_loaded()
 | `run` | `(command: str, max_ms: int = 0) → Job` | Submit a command to OpenPortal and return a `Job`. If `max_ms > 0`, blocks until the job finishes or the timeout elapses. If `max_ms < 0`, blocks indefinitely. If `max_ms == 0` (default), returns immediately without waiting. |
 | `status` | `(job: Job) → Job` | Fetch the latest version of the given job from the bridge. |
 | `get` | `(job_id: str \| Uuid) → Job` | Fetch the job with the specified ID. Raises `OSError` if the job does not exist. |
+| `notify` | `(command: str) → None` | Send a fire-and-forget notification into the OpenPortal agent network. `command` is a notification string: `<destination> <event> [<argument>]`. Returns immediately — no result or acknowledgement is ever received. Raises `OSError` if the portal is not connected or the destination is invalid. See [notification-protocol.md](notification-protocol.md) for the full notification grammar and routing rules. |
 
 ### Bridge board (portal callbacks)
 
@@ -162,6 +163,66 @@ for job in jobs:
         errored_job = job.errored(f"Unknown instruction: {instruction}")
         openportal.send_result(errored_job)
 ```
+
+---
+
+### `Notification`
+
+A fire-and-forget notification received from the OpenPortal network. Construct
+one from the JSON body that the bridge POSTs to `notification_url`, or parse
+from a notification command string.
+
+**Constructors:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `Notification` | `(command: str) → Notification` | Parse from `"<destination> <event> [<args>]"` string. Raises `OSError` on invalid input. |
+| `Notification.parse` | `(command: str) → Notification` | Same as the constructor. |
+| `Notification.from_json` | `(json: str) → Notification` | Deserialise from the JSON body posted to `notification_url`. |
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | `str` | UUID string. For logging only — not stored anywhere. |
+| `destination` | `str` | Dot-separated routing path, e.g. `"portal.clusters.shared"`. |
+| `event` | `str` | Full event string including all arguments, e.g. `"user_added chris.p.portal"`. |
+| `event_type` | `str` | The event keyword alone, e.g. `"user_added"`. Use this for dispatch. |
+| `event_argument` | `str` | Everything after the event keyword. Empty string if the event carries no arguments. For multi-argument events this will include all arguments and their spaces. |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `to_json` | `() → str` | Serialise to a JSON string. |
+
+**Usage pattern for a web portal notification callback:**
+
+```python
+import openportal
+
+def handle_notification(request_body: str):
+    n = openportal.Notification.from_json(request_body)
+
+    match n.event_type:
+        case "user_added":
+            user = openportal.UserIdentifier(n.event_argument)
+            provision_user(user)
+        case "user_removed":
+            user = openportal.UserIdentifier(n.event_argument)
+            deprovision_user(user)
+        case "project_added":
+            project = openportal.ProjectIdentifier(n.event_argument)
+            create_project(project)
+        case "project_removed":
+            project = openportal.ProjectIdentifier(n.event_argument)
+            delete_project(project)
+        case _:
+            pass  # ignore events we don't handle
+```
+
+`str(notification)` returns the full notification string:
+`"<destination> <event_type> <event_argument>"`.
 
 ---
 

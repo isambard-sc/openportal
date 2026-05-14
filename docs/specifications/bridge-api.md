@@ -41,6 +41,7 @@ The bridge handles two directions of communication:
 | Bridge API listen address | `127.0.0.1:3000` |
 | Bridge API public URL | `http://localhost:3000` |
 | Signal URL | `http://localhost/signal` |
+| Notification URL | `http://localhost/notification` |
 
 ### 1.2 Bridge Invite File
 
@@ -503,6 +504,50 @@ Collects a diagnostic report from the specified agent.
 
 ---
 
+### `POST /notify`
+
+Sends a fire-and-forget notification into the OpenPortal agent network via the
+portal. Returns immediately once the notification has been handed off — no
+result or acknowledgement is ever received back.
+
+**Authentication:** required (POST signature over `"notify"` and request body)
+
+**Request body:**
+
+```json
+{"command": "<destination> <event> [<argument>]"}
+```
+
+The `command` string follows the notification format described in
+[notification-protocol.md](notification-protocol.md) §2. The destination must
+contain the connected portal's name.
+
+**Examples:**
+
+```json
+{"command": "portal.clusters.instance user_added chris.project.portal"}
+{"command": "isambard-ai.brics.ukri user_added chris.project.brics"}
+```
+
+The second example uses a virtual agent (`isambard-ai`) as the apparent sender,
+routing northbound through the `brics` portal to notify the `ukri` peer portal.
+
+**Response:**
+
+```json
+{"status": "ok"}
+```
+
+Returns HTTP 500 if the portal agent is not connected or the destination is
+invalid.
+
+**Routing note:** The bridge wraps the notification in a `Forward` event
+addressed to `<bridge-name>.<portal-name>`. The portal unwraps it and routes
+to the next agent in the inner destination path (see
+[notification-protocol.md](notification-protocol.md) §5.1–5.2).
+
+---
+
 ## 5. Bridge Board: OpenPortal → Portal Flow
 
 Certain instructions are not initiated by the portal but by OpenPortal itself.
@@ -540,7 +585,58 @@ response body.
 
 ---
 
-## 6. Instructions Handled by the Bridge Board
+## 6. OpenPortal → Portal Notification Push
+
+When a notification arrives at the bridge from the OpenPortal network, the
+bridge's notify runner POSTs it to the configured `notification_url`. This is
+the notification equivalent of the signal URL used for jobs (§5).
+
+The flow is:
+
+```
+1. An OpenPortal agent emits a notification (e.g. freeipa fires user_added).
+2. The notification travels up the agent hierarchy to the portal.
+3. The portal's notify runner forwards the notification to the bridge.
+4. The bridge accepts it via the sidecar check and calls its notify runner.
+5. Bridge POSTs the Notification JSON to <notification_url>.
+6. Web portal receives the push and reacts to the event.
+```
+
+### 6.1 Notification URL
+
+The bridge calls `POST <notification_url>` with the `Notification` as a JSON
+body:
+
+```json
+{
+  "id":          "<uuid-string>",
+  "destination": "<dot-separated-agent-path>",
+  "event":       "<event-string>"
+}
+```
+
+The bridge makes up to **3 attempts** with a **2-second delay** between
+attempts. If all attempts fail the notification is logged at `ERROR` level and
+dropped. No error is returned to the OpenPortal sender (notifications are
+fire-and-forget).
+
+The notification URL endpoint is unauthenticated. It should respond with HTTP
+2xx. The response body is ignored.
+
+### 6.2 Notification URL Configuration
+
+The `notification_url` is set at initialisation time:
+
+```bash
+op-bridge init --notification-url http://localhost/notification
+```
+
+To update it, reinitialise the bridge with `--force`, or edit the config file
+directly. The default is `http://localhost/notification`.
+
+---
+
+## 7. Instructions Handled by the Bridge Board
 
 The following instructions, when sent from the OpenPortal network to the bridge,
 are placed on the bridge board for the portal to handle:
@@ -563,12 +659,13 @@ grammar and argument formats.
 
 ---
 
-## 7. Source File Reference
+## 8. Source File Reference
 
 | Concept | Source file |
 |---------|-------------|
-| HTTP API server (all endpoints) | `templemeads/src/bridge_server.rs` |
+| HTTP API server (all endpoints including `/notify`) | `templemeads/src/bridge_server.rs` |
 | `sign_api_call` function | `templemeads/src/bridge_server.rs` |
-| Bridge board (OpenPortal → portal jobs) | `templemeads/src/bridgeboard.rs` |
-| `run` and `status` logic | `templemeads/src/bridge.rs` |
+| Bridge board (OpenPortal → portal jobs), `notification_url` storage | `templemeads/src/bridgeboard.rs` |
+| `run`, `status`, and `notify` logic | `templemeads/src/bridge.rs` |
+| `signal_web_portal_notification`, `bridge_notify_runner` | `bridge/src/main.rs` |
 | Bridge agent main (instruction dispatch) | `bridge/src/main.rs` |

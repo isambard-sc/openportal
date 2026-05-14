@@ -16,7 +16,7 @@ use templemeads::grammar::Instruction::{
     SyncOfferings, UpdateProject,
 };
 use templemeads::job::{send_queued, Envelope, Job};
-use templemeads::notification::{Notification, NotificationEnvelope};
+use templemeads::notification::{Notification, NotificationEnvelope, NotificationEvent};
 use templemeads::server;
 use templemeads::set_notify_runner;
 use templemeads::Error;
@@ -155,7 +155,12 @@ async fn main() -> Result<()> {
                         result = waiter.result().await?;
                     }
 
-                    job.copy_result_from(&result)
+                    let completed = job.copy_result_from(&result)?;
+                    if !completed.is_error() {
+                        let notification_url = board.read().await.notification_url();
+                        send_award_notification(&notification_url, NotificationEvent::AwardAdded(project.clone())).await;
+                    }
+                    Ok(completed)
                 }
                 RemoveProject(project) => {
                     // remove the project from the cluster
@@ -188,7 +193,12 @@ async fn main() -> Result<()> {
                         result = waiter.result().await?;
                     }
 
-                    job.copy_result_from(&result)
+                    let completed = job.copy_result_from(&result)?;
+                    if !completed.is_error() {
+                        let notification_url = board.read().await.notification_url();
+                        send_award_notification(&notification_url, NotificationEvent::AwardRemoved(project.clone())).await;
+                    }
+                    Ok(completed)
                 }
                 UpdateProject(project, details) => {
                     // update the project in the cluster
@@ -221,7 +231,12 @@ async fn main() -> Result<()> {
                         result = waiter.result().await?;
                     }
 
-                    job.copy_result_from(&result)
+                    let completed = job.copy_result_from(&result)?;
+                    if !completed.is_error() {
+                        let notification_url = board.read().await.notification_url();
+                        send_award_notification(&notification_url, NotificationEvent::AwardChanged(project.clone())).await;
+                    }
+                    Ok(completed)
                 }
                 GetProject(project) => {
                     // get the project from the cluster
@@ -580,7 +595,31 @@ async fn main() -> Result<()> {
 ///
 /// POST the notification as JSON to the notification URL.
 /// Attempts up to 3 times with a short backoff, then logs and drops.
-///
+/// Build an award notification addressed to the connected portal and deliver
+/// it directly to the web portal via `signal_web_portal_notification`.
+/// The destination is the portal name so the web portal can identify the
+/// source in its `notification.destination` field.
+async fn send_award_notification(notification_url: &Option<Url>, event: NotificationEvent) {
+    let portal_name = match agent::portal(0).await {
+        Some(p) => p.name().to_string(),
+        None => {
+            tracing::warn!("Cannot send award notification: no portal connected");
+            return;
+        }
+    };
+
+    let dest = match Destination::parse(&portal_name) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Cannot send award notification: could not parse destination '{}': {}", portal_name, e);
+            return;
+        }
+    };
+
+    let notification = Notification::new(dest, event);
+    signal_web_portal_notification(notification_url, &notification).await;
+}
+
 ///
 /// POST the notification as JSON to the notification URL.
 /// Attempts up to 3 times with a short backoff, then logs and drops.

@@ -363,39 +363,60 @@ async fn main() -> Result<()> {
                             //   northbound: isambard-ai.portal.ukri → portal at 1 → next = ukri
                             let portal_index = agents.iter().position(|a| a == &my_name);
 
-                            match portal_index {
+                            let next_index = match portal_index {
                                 None => {
                                     return Err(Error::InvalidInstruction(format!(
                                         "Forward notification destination '{}' does not include this portal ({})",
                                         destination, my_name
                                     )));
                                 }
-                                Some(i) if i + 1 >= agents.len() => {
-                                    return Err(Error::InvalidInstruction(format!(
-                                        "Forward notification destination '{}' has no agent after this portal",
-                                        destination
-                                    )));
+                                Some(0) => 1,
+                                Some(1) => {
+                                    // Northbound: agents()[0] must be a registered virtual agent.
+                                    let is_valid = match agent::find(&agents[0], 0).await {
+                                        Some(peer) => agent::is_virtual(&peer).await,
+                                        None => false,
+                                    };
+                                    if !is_valid {
+                                        return Err(Error::InvalidInstruction(format!(
+                                            "Forward notification destination '{}': '{}' must be a virtual agent when portal is at position 1",
+                                            destination, agents[0]
+                                        )));
+                                    }
+                                    2
                                 }
                                 Some(i) => {
-                                    let next_agent =
-                                        agent::find(&agents[i + 1], 5)
-                                            .await
-                                            .ok_or_else(|| {
-                                                Error::MissingAgent(format!(
-                                                    "Cannot find next agent '{}' for notification forwarding",
-                                                    agents[i + 1]
-                                                ))
-                                            })?;
-
-                                    if let Err(e) = Command::notify(inner).send_to(&next_agent).await {
-                                        tracing::warn!(
-                                            "Failed to forward notification [{}] to {}: {}",
-                                            inner.id(),
-                                            next_agent,
-                                            e
-                                        );
-                                    }
+                                    return Err(Error::InvalidInstruction(format!(
+                                        "Forward notification destination '{}': portal at position {} is not allowed (max 1)",
+                                        destination, i
+                                    )));
                                 }
+                            };
+
+                            if next_index >= agents.len() {
+                                return Err(Error::InvalidInstruction(format!(
+                                    "Forward notification destination '{}' has no agent after this portal",
+                                    destination
+                                )));
+                            }
+
+                            let next_agent =
+                                agent::find(&agents[next_index], 5)
+                                    .await
+                                    .ok_or_else(|| {
+                                        Error::MissingAgent(format!(
+                                            "Cannot find next agent '{}' for notification forwarding",
+                                            agents[next_index]
+                                        ))
+                                    })?;
+
+                            if let Err(e) = Command::notify(inner).send_to(&next_agent).await {
+                                tracing::warn!(
+                                    "Failed to forward notification [{}] to {}: {}",
+                                    inner.id(),
+                                    next_agent,
+                                    e
+                                );
                             }
 
                             Ok(())

@@ -7,6 +7,9 @@ use templemeads::agent;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
+use templemeads::command::Command;
+use templemeads::notification::{NotificationEnvelope, NotificationEvent};
+use templemeads::set_notify_runner;
 
 use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
@@ -337,6 +340,70 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    async_runnable! {
+        /// Notify runner for the portal. Handles Forward notifications from the bridge
+        /// agent: strips the bridge from the path and re-sends the inner notification
+        /// to the next southbound agent. All other senders are ignored.
+        pub async fn portal_notify_runner(envelope: NotificationEnvelope) -> Result<(), Error> {
+            let sender = envelope.sender();
+            let notification = envelope.notification();
+
+            match agent::agent_type(&sender).await {
+                Some(Bridge) => {
+                    match notification.event() {
+                        NotificationEvent::Forward(inner) => {
+                            let destination = inner.destination();
+
+                            if destination.agents().len() < 2 {
+                                return Err(Error::InvalidInstruction(format!(
+                                    "Forward notification destination must have at least 2 agents: {}",
+                                    destination
+                                )));
+                            }
+
+                            let next_agent =
+                                agent::find(&destination.agents()[1], 5)
+                                    .await
+                                    .ok_or_else(|| {
+                                        Error::MissingAgent(format!(
+                                            "Cannot find next agent '{}' for notification forwarding",
+                                            destination.agents()[1]
+                                        ))
+                                    })?;
+
+                            if let Err(e) = Command::notify(inner).send_to(&next_agent).await {
+                                tracing::warn!(
+                                    "Failed to forward notification [{}] to {}: {}",
+                                    inner.id(),
+                                    next_agent,
+                                    e
+                                );
+                            }
+
+                            Ok(())
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "Portal received unexpected notification event from bridge: {}",
+                                notification.event()
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        "Portal received notification from non-bridge agent {}; ignoring",
+                        sender
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    set_notify_runner(portal_notify_runner).await?;
 
     // run the portal agent
     run(config, portal_runner).await?;

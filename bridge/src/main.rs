@@ -16,7 +16,9 @@ use templemeads::grammar::Instruction::{
     SyncOfferings, UpdateProject,
 };
 use templemeads::job::{send_queued, Envelope, Job};
+use templemeads::notification::{Notification, NotificationEnvelope};
 use templemeads::server;
+use templemeads::set_notify_runner;
 use templemeads::Error;
 
 ///
@@ -61,6 +63,7 @@ async fn main() -> Result<()> {
         Some("127.0.0.1".to_owned()),
         Some(3000),
         Some("http://localhost/signal".to_owned()),
+        Some("http://localhost/notification".to_owned()),
     );
 
     // now parse the command line arguments to get the service configuration
@@ -76,6 +79,10 @@ async fn main() -> Result<()> {
 
     if let Some(signal_url) = &config.bridge.signal_url {
         board.write().await.set_signal_url(signal_url.clone());
+    }
+
+    if let Some(notification_url) = &config.bridge.notification_url {
+        board.write().await.set_notification_url(notification_url.clone());
     }
 
     async_runnable! {
@@ -553,8 +560,99 @@ async fn main() -> Result<()> {
         }
     }
 
+    async_runnable! {
+        pub async fn bridge_notify_runner(envelope: NotificationEnvelope) -> Result<(), Error>
+        {
+            let notification = envelope.notification().clone();
+            let board = server::get_board().await?;
+            let notification_url = board.read().await.notification_url();
+            signal_web_portal_notification(&notification_url, &notification).await
+        }
+    }
+
     // run the Bridge agent
+    set_notify_runner(bridge_notify_runner).await?;
     run(config, bridge_runner).await?;
+
+    Ok(())
+}
+
+///
+/// POST the notification as JSON to the notification URL.
+/// Attempts up to 3 times with a short backoff, then logs and drops.
+///
+///
+/// POST the notification as JSON to the notification URL.
+/// Attempts up to 3 times with a short backoff, then logs and drops.
+///
+pub async fn signal_web_portal_notification(
+    notification_url: &Option<Url>,
+    notification: &Notification,
+) -> Result<(), Error> {
+    if let Some(url) = notification_url {
+        let client = match Client::builder()
+            .danger_accept_invalid_certs(should_allow_invalid_certs())
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to build HTTP client for notification: {}", e);
+                return Ok(());
+            }
+        };
+
+        for attempt in 1..=3u32 {
+            let response = client
+                .post(url.clone())
+                .json(notification)
+                .send()
+                .await;
+
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!(
+                        "Notification [{}] delivered to web portal: {}",
+                        notification.id(),
+                        notification.event()
+                    );
+                    return Ok(());
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        "Attempt {}: notification [{}] rejected by web portal with status {}",
+                        attempt,
+                        notification.id(),
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Attempt {}: failed to deliver notification [{}]: {}",
+                        attempt,
+                        notification.id(),
+                        e
+                    );
+                }
+            }
+
+            if attempt < 3 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            }
+        }
+
+        tracing::error!(
+            "Dropping notification [{}] after 3 failed delivery attempts: {}",
+            notification.id(),
+            notification.event()
+        );
+    } else {
+        tracing::debug!(
+            "No notification URL configured; dropping notification [{}]: {}",
+            notification.id(),
+            notification.event()
+        );
+    }
 
     Ok(())
 }

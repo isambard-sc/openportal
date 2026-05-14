@@ -17,6 +17,8 @@ use templemeads::grammar::Instruction::{
 };
 use templemeads::grammar::UserMapping;
 use templemeads::job::{assert_not_expired, Envelope, Job};
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 use templemeads::Error;
 
 ///
@@ -187,6 +189,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    set_notify_runner(default_notify_runner).await?;
     run(config, localaccount_runner).await?;
 
     Ok(())

@@ -4955,6 +4955,25 @@ fn run(command: String, max_ms: i64) -> PyResult<Job> {
 }
 
 ///
+/// Send a fire-and-forget notification into the OpenPortal network.
+/// The command string has the same format as a notification:
+///   `<destination> <event> [<argument>]`
+/// e.g. `brics.aip1.clusters.shared user_added chris.project.brics`
+///
+/// Returns immediately — no result or acknowledgement is ever received back.
+/// Raises an error only if the notification could not be handed off to the
+/// bridge (e.g. malformed command, bridge unreachable).
+///
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn notify(command: String) -> PyResult<()> {
+    match call_post::<serde_json::Value>("notify", serde_json::json!({"command": command})) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
+///
 /// Get the status of the passed job on the OpenPortal System
 /// This will return the job updated to the latest version.
 ///
@@ -5578,6 +5597,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(remove_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(restart, m)?)?;
+    m.add_function(wrap_pyfunction!(notify, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(send_result, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;

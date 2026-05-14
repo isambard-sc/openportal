@@ -16,6 +16,8 @@ use templemeads::grammar::Instruction::{
 };
 use templemeads::grammar::{Date, ProjectMapping, UserMapping};
 use templemeads::job::{Envelope, Job};
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 use templemeads::storage::Quota;
 use templemeads::storagereport::ProjectStorageReport;
 use templemeads::Error;
@@ -230,6 +232,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    set_notify_runner(default_notify_runner).await?;
     run(config, filesystem_runner).await?;
 
     Ok(())

@@ -5,6 +5,8 @@ use anyhow::Result;
 
 use templemeads::agent::platform::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 
 ///
 /// Main function for the cluster platform agent
@@ -51,6 +53,7 @@ async fn main() -> Result<()> {
     };
 
     // run the agent
+    set_notify_runner(default_notify_runner).await?;
     run(config).await?;
 
     Ok(())

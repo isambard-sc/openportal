@@ -37,6 +37,10 @@ pub enum NotificationEvent {
     ProjectBlocked(ProjectIdentifier),
     /// All users in a project were unblocked
     ProjectUnblocked(ProjectIdentifier),
+    /// Infrastructure-only: used by the bridge agent to ask the portal to forward
+    /// an inner notification southbound, stripping the bridge from the path.
+    /// Analogous to `Instruction::Submit` for Jobs. Not accepted by `parse()`.
+    Forward(Box<Notification>),
 }
 
 impl NotificationEvent {
@@ -57,6 +61,9 @@ impl NotificationEvent {
             "project_changed" => Ok(Self::ProjectChanged(ProjectIdentifier::parse(rest)?)),
             "project_blocked" => Ok(Self::ProjectBlocked(ProjectIdentifier::parse(rest)?)),
             "project_unblocked" => Ok(Self::ProjectUnblocked(ProjectIdentifier::parse(rest)?)),
+            "forward" => Err(Error::Parse(
+                "NotificationEvent::Forward is an infrastructure-only event and cannot be parsed from a string".to_owned(),
+            )),
             unknown => Err(Error::Parse(format!(
                 "Unknown notification event: '{}'",
                 unknown
@@ -78,6 +85,7 @@ impl fmt::Display for NotificationEvent {
             Self::ProjectChanged(p) => write!(f, "project_changed {}", p),
             Self::ProjectBlocked(p) => write!(f, "project_blocked {}", p),
             Self::ProjectUnblocked(p) => write!(f, "project_unblocked {}", p),
+            Self::Forward(n) => write!(f, "forward [{}]", n),
         }
     }
 }
@@ -175,7 +183,7 @@ pub fn default_notify_runner(
     envelope: NotificationEnvelope,
 ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
     Box::pin(async move {
-        tracing::debug!(
+        tracing::info!(
             "Notification [{}] from {} : {}",
             envelope.notification().id(),
             envelope.sender(),

@@ -20,6 +20,8 @@ use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 use templemeads::storage::{Quota, Volume};
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
@@ -365,6 +367,7 @@ async fn main() -> Result<()> {
     }
 
     // run the agent
+    set_notify_runner(default_notify_runner).await?;
     run(config, cluster_runner).await?;
 
     Ok(())

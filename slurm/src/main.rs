@@ -11,6 +11,8 @@ use templemeads::grammar::Instruction::{
     RemoveLocalUser, SetLocalLimit,
 };
 use templemeads::job::{Envelope, Job};
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 use templemeads::Error;
 
 mod cache;
@@ -120,6 +122,8 @@ async fn main() -> Result<()> {
         max_slurm_runners,
     )
     .await;
+
+    set_notify_runner(default_notify_runner).await?;
 
     if slurm_server.is_empty() {
         // we are using sacctmgr and the commandline to interact

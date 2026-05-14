@@ -535,12 +535,45 @@ async fn process_command(
                     }
                 }
                 Position::Error => {
-                    tracing::warn!(
-                        "Notification [{}] in errored position (recipient={}, sender={})",
-                        notification.id(),
-                        recipient,
-                        sender
-                    );
+                    // The recipient is not in the destination path. The only
+                    // legitimate case is a bridge agent receiving a notification
+                    // whose destination ends at (or one step past) the portal it
+                    // is connected to — i.e. the portal is the last or penultimate
+                    // agent in the path (penultimate covers virtual-agent suffixes).
+                    let mut handled = false;
+
+                    let my_agent_type = SERVICE_DETAILS.read().await.agent_type.clone();
+                    if my_agent_type == AgentType::Bridge {
+                        if let Some(portal) = agent::portal(0).await {
+                            let agents = notification.destination().agents();
+                            let n = agents.len();
+                            let portal_is_last = n >= 1 && agents[n - 1] == portal.name();
+                            let portal_is_penultimate = n >= 2 && agents[n - 2] == portal.name();
+
+                            if portal_is_last || portal_is_penultimate {
+                                tracing::debug!(
+                                    "Notification [{}] accepted by bridge sidecar (portal={} is {} in path)",
+                                    notification.id(),
+                                    portal.name(),
+                                    if portal_is_last { "last" } else { "penultimate" },
+                                );
+                                let envelope = NotificationEnvelope::new(recipient, sender, zone, notification);
+                                if let Err(e) = notify_runner(envelope).await {
+                                    tracing::warn!("Error in notify runner for [{}]: {}", notification.id(), e);
+                                }
+                                handled = true;
+                            }
+                        }
+                    }
+
+                    if !handled {
+                        tracing::warn!(
+                            "Notification [{}] in errored position (recipient={}, sender={})",
+                            notification.id(),
+                            recipient,
+                            sender
+                        );
+                    }
                 }
                 _ => {
                     tracing::warn!(

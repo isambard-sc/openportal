@@ -20,7 +20,9 @@ use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
-use templemeads::notification::default_notify_runner;
+use templemeads::command::Command;
+use templemeads::destination::Destination;
+use templemeads::notification::{default_notify_runner, Notification, NotificationEvent};
 use templemeads::set_notify_runner;
 use templemeads::storage::{Quota, Volume};
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};
@@ -138,6 +140,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    send_notification(&envelope, NotificationEvent::ProjectAdded(project.clone())).await;
                     job.completed(mapping)
                 },
                 RemoveProject(project) => {
@@ -145,6 +148,7 @@ async fn main() -> Result<()> {
 
                     // remove the project from the cluster
                     let mapping = remove_project_from_cluster(me.name(), &project).await?;
+                    send_notification(&envelope, NotificationEvent::ProjectRemoved(project.clone())).await;
                     job.completed(mapping)
                 },
                 AddUser(user) => {
@@ -214,6 +218,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    send_notification(&envelope, NotificationEvent::UserAdded(user.clone())).await;
                     job.completed(mapping)
                 }
                 RemoveUser(user) => {
@@ -234,14 +239,17 @@ async fn main() -> Result<()> {
 
                     // remove the user from the cluster
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
+                    send_notification(&envelope, NotificationEvent::UserRemoved(user.clone())).await;
                     job.completed(mapping)
                 }
                 BlockUser(user) => {
                     let mapping = block_user_on_cluster(me.name(), &user).await?;
+                    send_notification(&envelope, NotificationEvent::UserBlocked(user.clone())).await;
                     job.completed(mapping)
                 }
                 UnblockUser(user) => {
                     let mapping = unblock_user_on_cluster(me.name(), &user).await?;
+                    send_notification(&envelope, NotificationEvent::UserUnblocked(user.clone())).await;
                     job.completed(mapping)
                 }
                 IsBlockedUser(user) => {
@@ -250,10 +258,12 @@ async fn main() -> Result<()> {
                 }
                 BlockProject(project) => {
                     let mappings = block_project_on_cluster(me.name(), &project).await?;
+                    send_notification(&envelope, NotificationEvent::ProjectBlocked(project.clone())).await;
                     job.completed(mappings)
                 }
                 UnblockProject(project) => {
                     let mappings = unblock_project_on_cluster(me.name(), &project).await?;
+                    send_notification(&envelope, NotificationEvent::ProjectUnblocked(project.clone())).await;
                     job.completed(mappings)
                 }
                 IsBlockedProject(project) => {
@@ -371,6 +381,49 @@ async fn main() -> Result<()> {
     run(config, cluster_runner).await?;
 
     Ok(())
+}
+
+/// Send a fire-and-forget notification back up the path that the triggering
+/// job came from. The notification destination is the job destination reversed,
+/// e.g. a job addressed to `brics.aip1.clusters.shared` produces a notification
+/// addressed to `shared.clusters.aip1.brics`. The notification is forwarded to
+/// the platform agent (next hop upward) and routed from there.
+async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
+    let agents = envelope.job().destination().agents();
+
+    if agents.len() < 2 {
+        tracing::warn!("Cannot send notification: job destination too short: {:?}", agents);
+        return;
+    }
+
+    let reversed: Vec<&str> = agents.iter().rev().map(|s| s.as_str()).collect();
+    let dest_str = reversed.join(".");
+
+    let dest = match Destination::parse(&dest_str) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Cannot send notification: could not parse destination '{}': {}", dest_str, e);
+            return;
+        }
+    };
+
+    let notification = Notification::new(dest, event);
+
+    // Next hop is the second agent in the reversed path (the platform above us)
+    match agent::find(reversed[1], 0).await {
+        Some(peer) => {
+            if let Err(e) = Command::notify(&notification).send_to(&peer).await {
+                tracing::warn!("Could not send notification [{}]: {}", notification.id(), e);
+            }
+        }
+        None => {
+            tracing::warn!(
+                "Cannot send notification [{}]: upstream agent '{}' not found",
+                notification.id(),
+                reversed[1]
+            );
+        }
+    }
 }
 
 async fn assert_agents_connected() -> Result<(), Error> {

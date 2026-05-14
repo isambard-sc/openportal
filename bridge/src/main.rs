@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
                     let completed = job.copy_result_from(&result)?;
                     if !completed.is_error() {
                         let notification_url = board.read().await.notification_url();
-                        send_award_notification(&notification_url, NotificationEvent::AwardAdded(project.clone())).await;
+                        send_award_notification(&notification_url, job.destination().clone(), NotificationEvent::AwardAdded(project.clone())).await;
                     }
                     Ok(completed)
                 }
@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
                     let completed = job.copy_result_from(&result)?;
                     if !completed.is_error() {
                         let notification_url = board.read().await.notification_url();
-                        send_award_notification(&notification_url, NotificationEvent::AwardRemoved(project.clone())).await;
+                        send_award_notification(&notification_url, job.destination().clone(), NotificationEvent::AwardRemoved(project.clone())).await;
                     }
                     Ok(completed)
                 }
@@ -234,7 +234,7 @@ async fn main() -> Result<()> {
                     let completed = job.copy_result_from(&result)?;
                     if !completed.is_error() {
                         let notification_url = board.read().await.notification_url();
-                        send_award_notification(&notification_url, NotificationEvent::AwardChanged(project.clone())).await;
+                        send_award_notification(&notification_url, job.destination().clone(), NotificationEvent::AwardChanged(project.clone())).await;
                     }
                     Ok(completed)
                 }
@@ -599,24 +599,8 @@ async fn main() -> Result<()> {
 /// it directly to the web portal via `signal_web_portal_notification`.
 /// The destination is the portal name so the web portal can identify the
 /// source in its `notification.destination` field.
-async fn send_award_notification(notification_url: &Option<Url>, event: NotificationEvent) {
-    let portal_name = match agent::portal(0).await {
-        Some(p) => p.name().to_string(),
-        None => {
-            tracing::warn!("Cannot send award notification: no portal connected");
-            return;
-        }
-    };
-
-    let dest = match Destination::parse(&portal_name) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("Cannot send award notification: could not parse destination '{}': {}", portal_name, e);
-            return;
-        }
-    };
-
-    let notification = Notification::new(dest, event);
+async fn send_award_notification(notification_url: &Option<Url>, destination: Destination, event: NotificationEvent) {
+    let notification = Notification::new(destination, event);
     if let Err(e) = signal_web_portal_notification(notification_url, &notification).await {
         tracing::warn!("Failed to send award notification: {}", e);
     }

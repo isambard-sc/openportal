@@ -57,16 +57,18 @@ pub async fn notify(command: &str) -> Result<(), Error> {
         Some(portal) => {
             let inner = Notification::parse(command)?;
 
-            if inner.destination().first() != portal.name() {
+            if !inner.destination().agents().iter().any(|a| a == portal.name()) {
                 return Err(Error::Delivery(format!(
-                    "Notification destination '{}' must start with the portal name '{}'",
+                    "Notification destination '{}' must include the portal name '{}'",
                     inner.destination(),
                     portal.name()
                 )));
             }
 
-            // Wrap in a Forward notification addressed bridge.portal so the portal
-            // can strip the bridge from the path before forwarding southbound.
+            // Wrap in a Forward notification addressed bridge.portal. The portal
+            // finds its own position in the inner destination and routes to the
+            // next agent — works for both southbound (portal first) and northbound
+            // (portal in the middle, e.g. isambard-ai.brics.ukri).
             let outer_dest =
                 Destination::parse(&format!("{}.{}", my_name, portal.name()))?;
             let outer =

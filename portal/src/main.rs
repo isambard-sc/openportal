@@ -354,31 +354,48 @@ async fn main() -> Result<()> {
                     match notification.event() {
                         NotificationEvent::Forward(inner) => {
                             let destination = inner.destination();
+                            let agents = destination.agents();
+                            let my_name = agent::name().await;
 
-                            if destination.agents().len() < 2 {
-                                return Err(Error::InvalidInstruction(format!(
-                                    "Forward notification destination must have at least 2 agents: {}",
-                                    destination
-                                )));
-                            }
+                            // Find this portal's position in the inner destination,
+                            // then route to the next agent. This handles both directions:
+                            //   southbound: portal.provider.cluster → portal at 0 → next = provider
+                            //   northbound: isambard-ai.portal.ukri → portal at 1 → next = ukri
+                            let portal_index = agents.iter().position(|a| a == &my_name);
 
-                            let next_agent =
-                                agent::find(&destination.agents()[1], 5)
-                                    .await
-                                    .ok_or_else(|| {
-                                        Error::MissingAgent(format!(
-                                            "Cannot find next agent '{}' for notification forwarding",
-                                            destination.agents()[1]
-                                        ))
-                                    })?;
+                            match portal_index {
+                                None => {
+                                    return Err(Error::InvalidInstruction(format!(
+                                        "Forward notification destination '{}' does not include this portal ({})",
+                                        destination, my_name
+                                    )));
+                                }
+                                Some(i) if i + 1 >= agents.len() => {
+                                    return Err(Error::InvalidInstruction(format!(
+                                        "Forward notification destination '{}' has no agent after this portal",
+                                        destination
+                                    )));
+                                }
+                                Some(i) => {
+                                    let next_agent =
+                                        agent::find(&agents[i + 1], 5)
+                                            .await
+                                            .ok_or_else(|| {
+                                                Error::MissingAgent(format!(
+                                                    "Cannot find next agent '{}' for notification forwarding",
+                                                    agents[i + 1]
+                                                ))
+                                            })?;
 
-                            if let Err(e) = Command::notify(inner).send_to(&next_agent).await {
-                                tracing::warn!(
-                                    "Failed to forward notification [{}] to {}: {}",
-                                    inner.id(),
-                                    next_agent,
-                                    e
-                                );
+                                    if let Err(e) = Command::notify(inner).send_to(&next_agent).await {
+                                        tracing::warn!(
+                                            "Failed to forward notification [{}] to {}: {}",
+                                            inner.id(),
+                                            next_agent,
+                                            e
+                                        );
+                                    }
+                                }
                             }
 
                             Ok(())

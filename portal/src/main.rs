@@ -393,11 +393,28 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ => {
-                    tracing::warn!(
-                        "Portal received notification from non-bridge agent {}; ignoring",
-                        sender
-                    );
-                    Ok(())
+                    // Notification from a southbound agent — forward it to the bridge
+                    // so the bridge can deliver it to the web portal.
+                    match agent::bridge(BRIDGE_WAIT_TIME).await {
+                        Some(bridge) => {
+                            if let Err(e) = Command::notify(notification).send_to(&bridge).await {
+                                tracing::warn!(
+                                    "Failed to forward notification [{}] to bridge: {}",
+                                    notification.id(),
+                                    e
+                                );
+                            }
+                            Ok(())
+                        }
+                        None => {
+                            tracing::warn!(
+                                "Portal received notification [{}] from {} but no bridge agent found; dropping",
+                                notification.id(),
+                                sender
+                            );
+                            Ok(())
+                        }
+                    }
                 }
             }
         }

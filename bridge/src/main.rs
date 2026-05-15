@@ -9,9 +9,9 @@ use url::Url;
 
 use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
-use templemeads::diagnostics;
 use templemeads::async_runnable;
 use templemeads::destination::{Destination, Destinations};
+use templemeads::diagnostics;
 use templemeads::grammar::Instruction::{
     CreateProject, GetAward, GetAwards, GetProject, GetProjectMapping, GetProjects,
     GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
@@ -84,7 +84,10 @@ async fn main() -> Result<()> {
     }
 
     if let Some(notification_url) = &config.bridge.notification_url {
-        board.write().await.set_notification_url(notification_url.clone());
+        board
+            .write()
+            .await
+            .set_notification_url(notification_url.clone());
     }
 
     async_runnable! {

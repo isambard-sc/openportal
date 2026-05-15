@@ -57,7 +57,12 @@ pub async fn notify(command: &str) -> Result<(), Error> {
         Some(portal) => {
             let inner = Notification::parse(command)?;
 
-            if !inner.destination().agents().iter().any(|a| a == portal.name()) {
+            if !inner
+                .destination()
+                .agents()
+                .iter()
+                .any(|a| a == portal.name())
+            {
                 return Err(Error::Delivery(format!(
                     "Notification destination '{}' must include the portal name '{}'",
                     inner.destination(),
@@ -69,10 +74,8 @@ pub async fn notify(command: &str) -> Result<(), Error> {
             // finds its own position in the inner destination and routes to the
             // next agent — works for both southbound (portal first) and northbound
             // (portal in the middle, e.g. isambard-ai.brics.ukri).
-            let outer_dest =
-                Destination::parse(&format!("{}.{}", my_name, portal.name()))?;
-            let outer =
-                Notification::new(outer_dest, NotificationEvent::Forward(Box::new(inner)));
+            let outer_dest = Destination::parse(&format!("{}.{}", my_name, portal.name()))?;
+            let outer = Notification::new(outer_dest, NotificationEvent::Forward(Box::new(inner)));
 
             Ok(Command::notify(&outer).send_to(&portal).await?)
         }

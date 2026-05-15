@@ -8,6 +8,9 @@ use templemeads::agent;
 use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
+use templemeads::command::Command;
+use templemeads::destination::Destination;
+use templemeads::diagnostics;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, BlockProject, BlockUser, ClearProjectQuota, ClearUserQuota, GetHomeDir,
     GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs,
@@ -20,10 +23,7 @@ use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
-use templemeads::command::Command;
-use templemeads::destination::Destination;
 use templemeads::notification::{default_notify_runner, Notification, NotificationEvent};
-use templemeads::diagnostics;
 use templemeads::set_notify_runner;
 use templemeads::storage::{Quota, Volume};
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};
@@ -393,7 +393,10 @@ async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
     let agents = envelope.job().destination().agents();
 
     if agents.len() < 2 {
-        tracing::warn!("Cannot send notification: job destination too short: {:?}", agents);
+        tracing::warn!(
+            "Cannot send notification: job destination too short: {:?}",
+            agents
+        );
         diagnostics::increment_notification_failed().await;
         return;
     }
@@ -404,7 +407,11 @@ async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
     let dest = match Destination::parse(&dest_str) {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("Cannot send notification: could not parse destination '{}': {}", dest_str, e);
+            tracing::warn!(
+                "Cannot send notification: could not parse destination '{}': {}",
+                dest_str,
+                e
+            );
             diagnostics::increment_notification_failed().await;
             return;
         }

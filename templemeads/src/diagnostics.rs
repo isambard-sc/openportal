@@ -1141,8 +1141,10 @@ impl DiagnosticsReport {
         // Notification statistics section
         let ns = &self.notification_statistics;
         output.push_str("│  ┌─ Notification Statistics\n");
-        output.push_str(&format!("│  │  Received: {}  Sent: {}  Failed: {}\n",
-            ns.total_received, ns.total_sent, ns.total_failed));
+        output.push_str(&format!(
+            "│  │  Received: {}  Sent: {}  Failed: {}\n",
+            ns.total_received, ns.total_sent, ns.total_failed
+        ));
         output.push_str("│  │\n");
 
         output.push_str("└─\n");

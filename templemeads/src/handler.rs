@@ -558,9 +558,18 @@ async fn process_command(
                                     portal.name(),
                                     if portal_is_last { "last" } else { "penultimate" },
                                 );
-                                let envelope = NotificationEnvelope::new(recipient, sender, zone, notification);
+                                let envelope = NotificationEnvelope::new(
+                                    recipient,
+                                    sender,
+                                    zone,
+                                    notification,
+                                );
                                 if let Err(e) = notify_runner(envelope).await {
-                                    tracing::warn!("Error in notify runner for [{}]: {}", notification.id(), e);
+                                    tracing::warn!(
+                                        "Error in notify runner for [{}]: {}",
+                                        notification.id(),
+                                        e
+                                    );
                                 }
                                 handled = true;
                             }

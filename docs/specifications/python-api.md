@@ -71,6 +71,7 @@ for the full two-direction communication model.
 |---|---|---|
 | `fetch_jobs` | `() → list[Job]` | Fetch all jobs that OpenPortal has queued for the portal to handle. |
 | `fetch_job` | `(job_id: str \| Uuid) → Job` | Fetch a single queued job by ID. |
+| `fetch_notification` | `(notification_id: str \| Uuid) → Notification` | Fetch a pending notification from the bridge by UUID. Called from the `notification_url` handler after the bridge sends its GET signal. Raises `OSError` if the UUID is not found. |
 | `send_result` | `(job: Job) → None` | Send the completed or errored result of a bridge-board job back to OpenPortal. |
 | `get_portal` | `() → PortalIdentifier` | Return the `PortalIdentifier` of the portal connected to the bridge. |
 
@@ -196,30 +197,50 @@ from a notification command string.
 |---|---|---|
 | `to_json` | `() → str` | Serialise to a JSON string. |
 
-**Usage pattern for a web portal notification callback:**
+**Usage pattern — pull model:**
+
+The bridge signals your `notification_url` endpoint with a GET request
+carrying the notification UUID. Your handler fetches the full notification
+via `fetch_notification`, processes it, and returns HTTP 200:
 
 ```python
 import openportal
 
-def handle_notification(request_body: str):
-    n = openportal.Notification.from_json(request_body)
+# Django view for GET <notification_url>?notification_id=<uuid>
+def notification_signal(request):
+    notification_id = request.GET.get("notification_id")
+    if not notification_id:
+        return HttpResponseBadRequest("missing notification_id")
+
+    try:
+        n = openportal.fetch_notification(notification_id)
+    except OSError:
+        # UUID not found — bridge may have already removed it; ignore
+        return HttpResponse(status=200)
 
     match n.event_type:
         case "user_added":
-            user = openportal.UserIdentifier(n.event_argument)
-            provision_user(user)
+            provision_user(openportal.UserIdentifier(n.event_argument))
         case "user_removed":
-            user = openportal.UserIdentifier(n.event_argument)
-            deprovision_user(user)
+            deprovision_user(openportal.UserIdentifier(n.event_argument))
         case "project_added":
-            project = openportal.ProjectIdentifier(n.event_argument)
-            create_project(project)
+            create_project(openportal.ProjectIdentifier(n.event_argument))
         case "project_removed":
-            project = openportal.ProjectIdentifier(n.event_argument)
-            delete_project(project)
+            delete_project(openportal.ProjectIdentifier(n.event_argument))
+        case "award_added" | "award_changed":
+            sync_award(openportal.ProjectIdentifier(n.event_argument))
+        case "award_removed":
+            remove_award(openportal.ProjectIdentifier(n.event_argument))
         case _:
             pass  # ignore events we don't handle
+
+    return HttpResponse(status=200)
 ```
+
+Returning a non-2xx response causes the bridge to retry up to 3 times with a
+2-second delay between attempts, so transient failures are handled
+automatically. Make your handler idempotent — the same notification may be
+delivered more than once if a retry races with a successful fetch.
 
 `str(notification)` returns the full notification string:
 `"<destination> <event_type> <event_argument>"`.

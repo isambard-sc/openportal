@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **`fetch_notification` Python function** — `openportal.fetch_notification(uuid)`
+  fetches a pending notification from the bridge by UUID. Called from the web
+  portal's `notification_url` handler after the bridge sends its GET signal.
+  Accepts a UUID string, `Uuid` object, or `Notification` object. Raises
+  `OSError` if the UUID is not found. Complements the existing `fetch_job` /
+  `fetch_jobs` pattern.
+
 ## [0.30.0] - 2026-05-15
 
 ### Added

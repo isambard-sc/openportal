@@ -5217,6 +5217,43 @@ fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
     }
 }
 
+///
+/// Fetch a pending notification from the bridge by UUID.
+///
+/// Called after the bridge signals your `notification_url` endpoint with
+/// `GET <notification_url>?notification_id=<uuid>`. Pass the UUID (as a
+/// string, a `Uuid`, or an existing `Notification`) to retrieve the full
+/// `Notification` object so you can inspect its `event` and `destination`.
+///
+/// Raises `OSError` if the UUID is not found (already removed or never stored).
+///
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn fetch_notification(py: Python<'_>, notification_id: Py<PyAny>) -> PyResult<Notification> {
+    let uid: uuid::Uuid = match notification_id.extract::<Uuid>(py) {
+        Ok(uid) => uid.0,
+        Err(_) => match notification_id.extract::<Notification>(py) {
+            Ok(n) => n.0.id(),
+            Err(_) => match notification_id.extract::<String>(py) {
+                Ok(uid) => uuid::Uuid::parse_str(&uid).map_err(|_| {
+                    PyErr::new::<PyOSError, _>("Notification ID must be a string or a Uuid")
+                })?,
+                Err(_) => {
+                    return Err(PyErr::new::<PyOSError, _>(
+                        "Notification ID must be a string or a Uuid",
+                    ))
+                }
+            },
+        },
+    };
+
+    match call_post::<mod_notification::Notification>("fetch_notification", serde_json::json!(uid))
+    {
+        Ok(response) => Ok(response.into()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn add_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
@@ -5756,6 +5793,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_config, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_job, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_jobs, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_notification, m)?)?;
     m.add_function(wrap_pyfunction!(get, m)?)?;
     m.add_function(wrap_pyfunction!(get_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(get_portal, m)?)?;

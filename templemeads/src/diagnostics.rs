@@ -672,6 +672,11 @@ pub async fn increment_notification_failed() {
     DIAGNOSTICS.write().await.total_notifications_failed += 1;
 }
 
+/// Bulk-increment the failed notification counter (e.g. when clearing a full queue)
+pub async fn add_notifications_failed(count: usize) {
+    DIAGNOSTICS.write().await.total_notifications_failed += count;
+}
+
 /// Clear all diagnostics data (used during soft restart)
 pub async fn clear_diagnostics() {
     let mut tracker = DIAGNOSTICS.write().await;

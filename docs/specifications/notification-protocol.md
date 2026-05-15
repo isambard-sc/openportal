@@ -421,8 +421,9 @@ portal itself (addressed to the portal only) or whether it should be passed to
 the bridge for delivery to the web portal. In either case the portal forwards
 the notification to the connected bridge **unchanged** (preserving the original
 destination path). The bridge accepts it via the sidecar check (§5.3) and its
-notify runner POSTs it to the web portal via the notification URL callback
-(§7.3).
+notify runner places the notification on the **delivery queue** (§7.3). A
+single background delivery task drains the queue and signals the web portal via
+the notification URL callback (§7.3).
 
 ### 7.2 North-to-South: Web Portal → Agent Network (via Forward)
 
@@ -450,21 +451,43 @@ on `brics` notifying `ukri`).
 
 ### 7.3 Notification URL Callback (Pull Model)
 
-The bridge uses a **pull model** to deliver notifications to the web portal
-securely. Rather than POSTing the notification body directly to an
-unauthenticated endpoint, the bridge stores the notification internally and
-signals the web portal to fetch it.
+The bridge uses a **pull model** with a **rate-limited delivery queue** to
+deliver notifications to the web portal securely.
 
-**Flow:**
+#### Delivery Queue
+
+All incoming notifications — whether from the agent network or from award
+events — are placed on an internal bounded `VecDeque` before delivery. A
+**single background task** drains the queue, serialising all deliveries so the
+web portal never receives concurrent notification signals.
+
+| Property | Value |
+|----------|-------|
+| Queue capacity | 500 notifications |
+| On overflow | Clear **all** queued entries (stale during outage), log at `WARN`, increment failed counter |
+| Delivery rate | ≤ 100 notifications/s (10 ms sleep after each delivery) |
+| Consumer tasks | 1 (serialised delivery) |
+
+When the queue overflows, dropping the stale backlog and accepting the newest
+notification is preferable to losing recent events — older notifications
+represent state that has already been superseded during the outage.
+
+#### Pull Flow
+
+Rather than pushing the notification body directly to an unauthenticated
+endpoint, the bridge stores each notification internally and signals the web
+portal to fetch it:
 
 ```
-1. Bridge stores the notification in a pending map keyed by its UUID.
-2. Bridge sends GET <notification_url>?notification_id=<uuid> to the web portal.
-3. Web portal receives the GET and calls POST /fetch_notification on the bridge
+1. Notification placed on delivery queue.
+2. Background delivery task pops the notification.
+3. Bridge stores the notification in a pending map keyed by its UUID.
+4. Bridge sends GET <notification_url>?notification_id=<uuid> to the web portal.
+5. Web portal receives the GET and calls POST /fetch_notification on the bridge
    with the UUID as the JSON body (authenticated — see bridge-api.md §4).
-4. Bridge returns the full Notification JSON from the pending map.
-5. Web portal processes the notification and returns HTTP 200 to the original GET.
-6. Bridge removes the notification from the pending map.
+6. Bridge returns the full Notification JSON from the pending map.
+7. Web portal processes the notification and returns HTTP 200 to the original GET.
+8. Bridge removes the notification from the pending map.
 ```
 
 If the web portal returns a non-2xx status or the request fails, the bridge
@@ -487,14 +510,22 @@ TLS verification in development.
 ## 8. Guarantees and Limitations
 
 - **No delivery guarantee.** If the destination agent is unreachable, the
-  notification is silently dropped. There is no retry queue and no error is
-  propagated back to the sender.
+  notification is silently dropped. There is no retry queue in the agent
+  network and no error is propagated back to the sender.
 - **No ordering guarantee.** Two notifications sent in sequence may arrive
   out of order if there are multiple hops.
 - **No deduplication.** The `id` field is for logging only. If a sender
   retransmits after a suspected drop, the destination may receive duplicates.
 - **No result.** The notify runner's return value is used only for local error
   logging; it is never transmitted anywhere.
+- **Bridge delivery queue cap.** The bridge holds at most 500 notifications
+  in its delivery queue at any time. If the queue fills (e.g. the web portal
+  is unreachable for an extended period), all queued notifications are dropped
+  and the failed counter in `DiagnosticsTracker` is incremented in bulk. The
+  newest notification is then accepted.
+- **Bridge delivery rate limit.** The bridge delivers at most ~100
+  notifications per second to the web portal. Bursts above this rate are
+  absorbed by the queue up to its capacity.
 
 For operations where delivery confirmation matters, use a Job instead.
 
@@ -509,7 +540,8 @@ For operations where delivery confirmation matters, use a Job instead.
 | `Command::Notify`, `Command::notify()` | `templemeads/src/command.rs` |
 | `set_notify_runner`, routing in `process_command`, sidecar check | `templemeads/src/handler.rs` |
 | `bridge::notify()`, `Forward` wrapping | `templemeads/src/bridge.rs` |
-| `notification_url` config, `signal_web_portal_notification` | `bridge/src/main.rs` |
+| `notification_url` config, `deliver_notification`, `spawn_notification_delivery_task` | `bridge/src/main.rs` |
+| Delivery queue, pending-fetch map (`enqueue`, `pop_queued`, `add`, `get`, `remove`) | `templemeads/src/notificationstate.rs` |
 | `BridgeBoard::set_notification_url` | `templemeads/src/bridgeboard.rs` |
-| `POST /notify` HTTP endpoint | `templemeads/src/bridge_server.rs` |
+| `POST /notify`, `POST /fetch_notification` HTTP endpoints | `templemeads/src/bridge_server.rs` |
 | Portal notify runner (Forward dispatch, south-to-north) | `portal/src/main.rs` |

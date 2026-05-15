@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use std::time::Duration;
+use tokio::time::sleep;
 use url::Url;
 
 use templemeads::agent;
@@ -158,8 +159,7 @@ async fn main() -> Result<()> {
 
                     let completed = job.copy_result_from(&result)?;
                     if !completed.is_error() {
-                        let notification_url = board.read().await.notification_url();
-                        send_award_notification(&notification_url, job.destination().clone(), NotificationEvent::AwardAdded(project.clone())).await;
+                        send_award_notification(job.destination().clone(), NotificationEvent::AwardAdded(project.clone())).await;
                     }
                     Ok(completed)
                 }
@@ -196,8 +196,7 @@ async fn main() -> Result<()> {
 
                     let completed = job.copy_result_from(&result)?;
                     if !completed.is_error() {
-                        let notification_url = board.read().await.notification_url();
-                        send_award_notification(&notification_url, job.destination().clone(), NotificationEvent::AwardRemoved(project.clone())).await;
+                        send_award_notification(job.destination().clone(), NotificationEvent::AwardRemoved(project.clone())).await;
                     }
                     Ok(completed)
                 }
@@ -234,8 +233,7 @@ async fn main() -> Result<()> {
 
                     let completed = job.copy_result_from(&result)?;
                     if !completed.is_error() {
-                        let notification_url = board.read().await.notification_url();
-                        send_award_notification(&notification_url, job.destination().clone(), NotificationEvent::AwardChanged(project.clone())).await;
+                        send_award_notification(job.destination().clone(), NotificationEvent::AwardChanged(project.clone())).await;
                     }
                     Ok(completed)
                 }
@@ -579,52 +577,60 @@ async fn main() -> Result<()> {
     async_runnable! {
         pub async fn bridge_notify_runner(envelope: NotificationEnvelope) -> Result<(), Error>
         {
-            let notification = envelope.notification().clone();
-            let board = server::get_board().await?;
-            let notification_url = board.read().await.notification_url();
-            signal_web_portal_notification(&notification_url, &notification).await
+            server::enqueue_notification(envelope.notification().clone()).await;
+            Ok(())
         }
     }
 
     // run the Bridge agent
     set_notify_runner(bridge_notify_runner).await?;
+    spawn_notification_delivery_task();
     run(config, bridge_runner).await?;
 
     Ok(())
 }
 
-///
-/// POST the notification as JSON to the notification URL.
-/// Attempts up to 3 times with a short backoff, then logs and drops.
-/// Build an award notification addressed to the connected portal and deliver
-/// it directly to the web portal via `signal_web_portal_notification`.
-/// The destination is the portal name so the web portal can identify the
-/// source in its `notification.destination` field.
-async fn send_award_notification(notification_url: &Option<Url>, destination: Destination, event: NotificationEvent) {
-    let notification = Notification::new(destination, event);
-    if let Err(e) = signal_web_portal_notification(notification_url, &notification).await {
-        tracing::warn!("Failed to send award notification: {}", e);
-    }
+/// Build an award notification and push it onto the delivery queue.
+async fn send_award_notification(destination: Destination, event: NotificationEvent) {
+    server::enqueue_notification(Notification::new(destination, event)).await;
 }
 
-///
-/// POST the notification as JSON to the notification URL.
-/// Attempts up to 3 times with a short backoff, then logs and drops.
-///
-pub async fn signal_web_portal_notification(
-    notification_url: &Option<Url>,
-    notification: &Notification,
-) -> Result<(), Error> {
+/// Spawn the single background task that drains the notification delivery queue.
+/// Rate-limited to ~100 notifications/s (10 ms sleep after each delivery).
+fn spawn_notification_delivery_task() {
+    tokio::spawn(async move {
+        loop {
+            let notification = server::pop_queued_notification().await;
+            let board = match server::get_board().await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("Notification delivery: could not get board: {}", e);
+                    diagnostics::increment_notification_failed().await;
+                    sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+            };
+            let notification_url = board.read().await.notification_url();
+            deliver_notification(&notification_url, &notification).await;
+            sleep(Duration::from_millis(10)).await;
+        }
+    });
+}
+
+/// Signal the web portal that a notification is ready to fetch, then serve it
+/// via the authenticated POST /fetch_notification endpoint.
+/// Attempts up to 3 times with a 2-second backoff, then logs and drops.
+async fn deliver_notification(notification_url: &Option<Url>, notification: &Notification) {
     let Some(url) = notification_url else {
         tracing::debug!(
             "No notification URL configured; dropping notification [{}]: {}",
             notification.id(),
             notification.event()
         );
-        return Ok(());
+        return;
     };
 
-    // Store the notification so the web portal can fetch it via POST /fetch_notification.
+    // Store so the web portal can retrieve it via POST /fetch_notification.
     server::add_pending_notification(notification).await;
 
     let notification_id = notification.id().to_string();
@@ -639,7 +645,7 @@ pub async fn signal_web_portal_notification(
             tracing::error!("Failed to build HTTP client for notification: {}", e);
             server::remove_pending_notification(notification.id()).await;
             diagnostics::increment_notification_failed().await;
-            return Ok(());
+            return;
         }
     };
 
@@ -659,7 +665,7 @@ pub async fn signal_web_portal_notification(
                 );
                 server::remove_pending_notification(notification.id()).await;
                 diagnostics::increment_notification_sent().await;
-                return Ok(());
+                return;
             }
             Ok(resp) => {
                 tracing::warn!(
@@ -680,7 +686,7 @@ pub async fn signal_web_portal_notification(
         }
 
         if attempt < 3 {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            sleep(Duration::from_secs(2)).await;
         }
     }
 
@@ -691,8 +697,6 @@ pub async fn signal_web_portal_notification(
     );
     server::remove_pending_notification(notification.id()).await;
     diagnostics::increment_notification_failed().await;
-
-    Ok(())
 }
 
 fn should_allow_invalid_certs() -> bool {

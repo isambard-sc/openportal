@@ -47,7 +47,9 @@ pub mod server {
     pub use crate::bridge_server::sign_api_call;
     pub use crate::bridgestate::get as get_board;
     pub use crate::notificationstate::add as add_pending_notification;
+    pub use crate::notificationstate::enqueue as enqueue_notification;
     pub use crate::notificationstate::get as get_pending_notification;
+    pub use crate::notificationstate::pop_queued as pop_queued_notification;
     pub use crate::notificationstate::remove as remove_pending_notification;
 }
 

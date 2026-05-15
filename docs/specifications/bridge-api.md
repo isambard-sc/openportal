@@ -620,27 +620,47 @@ response body.
 
 ## 6. OpenPortal → Portal Notification Delivery (Pull Model)
 
-When a notification arrives at the bridge from the OpenPortal network, the
-bridge uses a pull model to deliver it to the web portal securely. Rather than
-pushing the notification body to an unauthenticated endpoint, the bridge stores
-the notification and signals the web portal to fetch it.
+When a notification arrives at the bridge from the OpenPortal network, it is
+placed on an internal **delivery queue**. A single background task drains the
+queue and delivers each notification to the web portal using a pull model:
+rather than pushing the notification body to an unauthenticated endpoint, the
+bridge stores the notification and signals the web portal to fetch it.
 
-The flow is:
+### 6.1 Delivery Queue
+
+All notifications — whether from the agent network or from award events
+(`award_added`, `award_removed`, `award_changed`) — are pushed onto an internal
+bounded queue before delivery. This serialises all web-portal signals through
+a single consumer and protects the web portal from notification storms.
+
+| Property | Value |
+|----------|-------|
+| Queue capacity | 500 notifications |
+| On overflow | Clear **all** queued entries, log at `WARN`, increment failed counter |
+| Delivery rate | ≤ 100 notifications/s (10 ms sleep after each delivery) |
+| Consumer tasks | 1 (serialised delivery) |
+
+When the queue overflows, dropping the entire stale backlog and accepting the
+newest notification is preferred over dropping the newest entry: during a
+prolonged outage the older notifications represent superseded state.
+
+### 6.2 Pull Flow
 
 ```
-1. An OpenPortal agent emits a notification (e.g. cluster fires user_added).
-2. The notification travels up the agent hierarchy to the portal.
-3. The portal's notify runner forwards the notification to the bridge.
-4. The bridge accepts it via the sidecar check and calls its notify runner.
-5. Bridge stores the notification internally (keyed by UUID).
-6. Bridge sends GET <notification_url>?notification_id=<uuid> to the web portal.
-7. Web portal calls POST /fetch_notification on the bridge with the UUID.
-8. Bridge returns the Notification JSON; web portal processes the event.
-9. Web portal returns HTTP 200 to the original GET.
-10. Bridge removes the notification from the pending store.
+ 1. An OpenPortal agent emits a notification (e.g. cluster fires user_added).
+ 2. The notification travels up the agent hierarchy to the portal.
+ 3. The portal's notify runner forwards the notification to the bridge.
+ 4. The bridge accepts it via the sidecar check and pushes it onto the queue.
+ 5. Background delivery task pops the notification from the queue.
+ 6. Bridge stores the notification in a pending map keyed by its UUID.
+ 7. Bridge sends GET <notification_url>?notification_id=<uuid> to the web portal.
+ 8. Web portal calls POST /fetch_notification on the bridge with the UUID.
+ 9. Bridge returns the Notification JSON; web portal processes the event.
+10. Web portal returns HTTP 200 to the original GET.
+11. Bridge removes the notification from the pending store.
 ```
 
-### 6.1 Notification URL Signal
+### 6.3 Notification URL Signal
 
 The bridge sends:
 
@@ -658,14 +678,14 @@ body. It should respond HTTP 2xx after the web portal has fetched and processed
 the notification via `POST /fetch_notification` (§4). The response body is
 ignored.
 
-### 6.2 Fetching the Notification
+### 6.4 Fetching the Notification
 
 After receiving the signal, the web portal calls `POST /fetch_notification`
 (§4) with the UUID to retrieve the full `Notification` object. This endpoint
 is authenticated with the bridge HMAC key (§2), so the notification content is
 never exposed to unauthenticated callers.
 
-### 6.3 Notification URL Configuration
+### 6.5 Notification URL Configuration
 
 The `notification_url` is set at initialisation time:
 
@@ -709,5 +729,6 @@ grammar and argument formats.
 | `sign_api_call` function | `templemeads/src/bridge_server.rs` |
 | Bridge board (OpenPortal → portal jobs), `notification_url` storage | `templemeads/src/bridgeboard.rs` |
 | `run`, `status`, and `notify` logic | `templemeads/src/bridge.rs` |
-| `signal_web_portal_notification`, `bridge_notify_runner` | `bridge/src/main.rs` |
+| `deliver_notification`, `spawn_notification_delivery_task`, `bridge_notify_runner` | `bridge/src/main.rs` |
+| Delivery queue, pending-fetch map (`enqueue`, `pop_queued`, `add`, `get`, `remove`) | `templemeads/src/notificationstate.rs` |
 | Bridge agent main (instruction dispatch) | `bridge/src/main.rs` |

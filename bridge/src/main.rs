@@ -8,6 +8,7 @@ use url::Url;
 
 use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
+use templemeads::diagnostics;
 use templemeads::async_runnable;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
@@ -614,70 +615,82 @@ pub async fn signal_web_portal_notification(
     notification_url: &Option<Url>,
     notification: &Notification,
 ) -> Result<(), Error> {
-    if let Some(url) = notification_url {
-        let client = match Client::builder()
-            .danger_accept_invalid_certs(should_allow_invalid_certs())
-            .timeout(Duration::from_secs(10))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to build HTTP client for notification: {}", e);
-                return Ok(());
-            }
-        };
-
-        for attempt in 1..=3u32 {
-            let response = client
-                .post(url.clone())
-                .json(notification)
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) if resp.status().is_success() => {
-                    tracing::info!(
-                        "Notification [{}] delivered to web portal: {}",
-                        notification.id(),
-                        notification.event()
-                    );
-                    return Ok(());
-                }
-                Ok(resp) => {
-                    tracing::warn!(
-                        "Attempt {}: notification [{}] rejected by web portal with status {}",
-                        attempt,
-                        notification.id(),
-                        resp.status()
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Attempt {}: failed to deliver notification [{}]: {}",
-                        attempt,
-                        notification.id(),
-                        e
-                    );
-                }
-            }
-
-            if attempt < 3 {
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            }
-        }
-
-        tracing::error!(
-            "Dropping notification [{}] after 3 failed delivery attempts: {}",
-            notification.id(),
-            notification.event()
-        );
-    } else {
+    let Some(url) = notification_url else {
         tracing::debug!(
             "No notification URL configured; dropping notification [{}]: {}",
             notification.id(),
             notification.event()
         );
+        return Ok(());
+    };
+
+    // Store the notification so the web portal can fetch it via POST /fetch_notification.
+    server::add_pending_notification(notification).await;
+
+    let notification_id = notification.id().to_string();
+
+    let client = match Client::builder()
+        .danger_accept_invalid_certs(should_allow_invalid_certs())
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to build HTTP client for notification: {}", e);
+            server::remove_pending_notification(notification.id()).await;
+            diagnostics::increment_notification_failed().await;
+            return Ok(());
+        }
+    };
+
+    for attempt in 1..=3u32 {
+        let response = client
+            .get(url.clone())
+            .query(&[("notification_id", notification_id.as_str())])
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!(
+                    "Notification [{}] fetched by web portal: {}",
+                    notification.id(),
+                    notification.event()
+                );
+                server::remove_pending_notification(notification.id()).await;
+                diagnostics::increment_notification_sent().await;
+                return Ok(());
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "Attempt {}: notification [{}] signal rejected by web portal with status {}",
+                    attempt,
+                    notification.id(),
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Attempt {}: failed to signal notification [{}]: {}",
+                    attempt,
+                    notification.id(),
+                    e
+                );
+            }
+        }
+
+        if attempt < 3 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        }
     }
+
+    tracing::error!(
+        "Dropping notification [{}] after 3 failed signal attempts: {}",
+        notification.id(),
+        notification.event()
+    );
+    server::remove_pending_notification(notification.id()).await;
+    diagnostics::increment_notification_failed().await;
 
     Ok(())
 }

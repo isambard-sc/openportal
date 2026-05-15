@@ -286,6 +286,7 @@ passed directly when iterating cached reports.
 | `expired_jobs` | `list[ExpiredJobEntry]` | Recent expired jobs (deduplicated) |
 | `running_jobs` | `list[RunningJobEntry]` | Currently running jobs |
 | `warnings` | `list[str]` | Auto-generated alert strings |
+| `notification_statistics` | `NotificationStatistics` | All-time notification counters |
 
 **Methods:**
 

@@ -502,6 +502,7 @@ async fn process_command(
                 .await;
         }
         Command::Notify { notification } => {
+            diagnostics::increment_notification_received().await;
             tracing::debug!(
                 "Notification [{}] from {}: {}",
                 notification.id(),

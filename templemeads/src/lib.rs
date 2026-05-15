@@ -8,6 +8,7 @@ mod agent_core;
 mod bridge_server;
 mod bridgeboard;
 mod bridgestate;
+mod notificationstate;
 mod control_message;
 mod custom;
 mod error;
@@ -45,6 +46,9 @@ pub mod usagereport;
 pub mod server {
     pub use crate::bridge_server::sign_api_call;
     pub use crate::bridgestate::get as get_board;
+    pub use crate::notificationstate::add as add_pending_notification;
+    pub use crate::notificationstate::get as get_pending_notification;
+    pub use crate::notificationstate::remove as remove_pending_notification;
 }
 
 // Re-export system info monitor for agents to use at startup

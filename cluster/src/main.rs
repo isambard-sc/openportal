@@ -23,6 +23,7 @@ use templemeads::job::{Envelope, Job};
 use templemeads::command::Command;
 use templemeads::destination::Destination;
 use templemeads::notification::{default_notify_runner, Notification, NotificationEvent};
+use templemeads::diagnostics;
 use templemeads::set_notify_runner;
 use templemeads::storage::{Quota, Volume};
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};
@@ -393,6 +394,7 @@ async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
 
     if agents.len() < 2 {
         tracing::warn!("Cannot send notification: job destination too short: {:?}", agents);
+        diagnostics::increment_notification_failed().await;
         return;
     }
 
@@ -403,6 +405,7 @@ async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("Cannot send notification: could not parse destination '{}': {}", dest_str, e);
+            diagnostics::increment_notification_failed().await;
             return;
         }
     };
@@ -414,6 +417,9 @@ async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
         Some(peer) => {
             if let Err(e) = Command::notify(&notification).send_to(&peer).await {
                 tracing::warn!("Could not send notification [{}]: {}", notification.id(), e);
+                diagnostics::increment_notification_failed().await;
+            } else {
+                diagnostics::increment_notification_sent().await;
             }
         }
         None => {
@@ -422,6 +428,7 @@ async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
                 notification.id(),
                 reversed[1]
             );
+            diagnostics::increment_notification_failed().await;
         }
     }
 }

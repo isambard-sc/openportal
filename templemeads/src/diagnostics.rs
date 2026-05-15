@@ -44,6 +44,18 @@ pub struct JobStatistics {
     pub total_slow: usize,
 }
 
+/// Notification statistics totals for all time
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct NotificationStatistics {
+    /// Total notifications received by this agent (inbound from the network)
+    pub total_received: usize,
+    /// Total notifications successfully sent (delivered to next hop or web portal)
+    pub total_sent: usize,
+    /// Total notifications that failed to deliver after all retries
+    pub total_failed: usize,
+}
+
 /// Diagnostics report containing troubleshooting information
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
@@ -65,6 +77,9 @@ pub struct DiagnosticsReport {
     /// Recent log messages (most recent first, up to 100)
     #[serde(default)]
     pub recent_logs: Vec<LogEntry>,
+    /// Notification send/receive/failure totals
+    #[serde(default)]
+    pub notification_statistics: NotificationStatistics,
 }
 
 /// Entry for a failed job
@@ -237,6 +252,10 @@ struct DiagnosticsTracker {
     total_jobs_failed: usize,
     total_jobs_expired: usize,
     total_jobs_slow: usize,
+    /// All-time total counts by notification state
+    total_notifications_received: usize,
+    total_notifications_sent: usize,
+    total_notifications_failed: usize,
 }
 
 impl DiagnosticsTracker {
@@ -252,6 +271,9 @@ impl DiagnosticsTracker {
             total_jobs_failed: 0,
             total_jobs_expired: 0,
             total_jobs_slow: 0,
+            total_notifications_received: 0,
+            total_notifications_sent: 0,
+            total_notifications_failed: 0,
         }
     }
 
@@ -469,6 +491,16 @@ impl DiagnosticsTracker {
             ));
         }
 
+        // Warning for any notification delivery failures
+        if self.total_notifications_failed > 0 {
+            warnings.push(format!(
+                "{} notification(s) failed to deliver",
+                self.total_notifications_failed
+            ));
+        }
+
+        let notification_statistics = self.get_notification_statistics();
+
         DiagnosticsReport {
             agent_name: agent_name.to_string(),
             generated_at: now,
@@ -478,6 +510,7 @@ impl DiagnosticsTracker {
             running_jobs,
             warnings,
             recent_logs: get_recent_logs(0),
+            notification_statistics,
         }
     }
 
@@ -487,6 +520,14 @@ impl DiagnosticsTracker {
             total_failed: self.total_jobs_failed,
             total_expired: self.total_jobs_expired,
             total_slow: self.total_jobs_slow,
+        }
+    }
+
+    fn get_notification_statistics(&self) -> NotificationStatistics {
+        NotificationStatistics {
+            total_received: self.total_notifications_received,
+            total_sent: self.total_notifications_sent,
+            total_failed: self.total_notifications_failed,
         }
     }
 }
@@ -614,6 +655,21 @@ pub async fn generate_report(agent_name: &str) -> DiagnosticsReport {
 pub async fn get_job_statistics() -> JobStatistics {
     let tracker = DIAGNOSTICS.read().await;
     tracker.get_job_statistics()
+}
+
+/// Record a notification received by this agent (inbound from the network)
+pub async fn increment_notification_received() {
+    DIAGNOSTICS.write().await.total_notifications_received += 1;
+}
+
+/// Record a notification successfully sent (delivered to next hop or web portal)
+pub async fn increment_notification_sent() {
+    DIAGNOSTICS.write().await.total_notifications_sent += 1;
+}
+
+/// Record a notification that failed to deliver after all retries
+pub async fn increment_notification_failed() {
+    DIAGNOSTICS.write().await.total_notifications_failed += 1;
 }
 
 /// Clear all diagnostics data (used during soft restart)
@@ -1076,6 +1132,13 @@ impl DiagnosticsReport {
                 ));
             }
         }
+
+        // Notification statistics section
+        let ns = &self.notification_statistics;
+        output.push_str("│  ┌─ Notification Statistics\n");
+        output.push_str(&format!("│  │  Received: {}  Sent: {}  Failed: {}\n",
+            ns.total_received, ns.total_sent, ns.total_failed));
+        output.push_str("│  │\n");
 
         output.push_str("└─\n");
 

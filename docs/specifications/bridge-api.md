@@ -371,6 +371,39 @@ Retrieves a specific unfinished job from the bridge board by UUID. Returns HTTP
 
 ---
 
+### `POST /fetch_notification`
+
+Retrieves a pending notification by UUID. Called by the web portal after
+receiving a `GET <notification_url>?notification_id=<uuid>` signal from the
+bridge. Returns HTTP 404 if the UUID is not found (already removed or never
+stored).
+
+**Authentication:** required (POST signature over `"fetch_notification"` and
+request body)
+
+**Request body:** a JSON UUID string
+
+```json
+"a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
+**Response:** the `Notification` object
+
+```json
+{
+  "id":          "<uuid-string>",
+  "destination": "<dot-separated-agent-path>",
+  "event":       "<event-string>"
+}
+```
+
+The web portal should return HTTP 200 to the original `GET <notification_url>`
+request after successfully fetching and processing the notification. The bridge
+interprets the 200 as delivery confirmation and removes the notification from
+the pending store.
+
+---
+
 ### `POST /send_result`
 
 Posts the result of a bridge-board job back to the bridge. Used by the portal
@@ -585,34 +618,34 @@ response body.
 
 ---
 
-## 6. OpenPortal → Portal Notification Push
+## 6. OpenPortal → Portal Notification Delivery (Pull Model)
 
 When a notification arrives at the bridge from the OpenPortal network, the
-bridge's notify runner POSTs it to the configured `notification_url`. This is
-the notification equivalent of the signal URL used for jobs (§5).
+bridge uses a pull model to deliver it to the web portal securely. Rather than
+pushing the notification body to an unauthenticated endpoint, the bridge stores
+the notification and signals the web portal to fetch it.
 
 The flow is:
 
 ```
-1. An OpenPortal agent emits a notification (e.g. freeipa fires user_added).
+1. An OpenPortal agent emits a notification (e.g. cluster fires user_added).
 2. The notification travels up the agent hierarchy to the portal.
 3. The portal's notify runner forwards the notification to the bridge.
 4. The bridge accepts it via the sidecar check and calls its notify runner.
-5. Bridge POSTs the Notification JSON to <notification_url>.
-6. Web portal receives the push and reacts to the event.
+5. Bridge stores the notification internally (keyed by UUID).
+6. Bridge sends GET <notification_url>?notification_id=<uuid> to the web portal.
+7. Web portal calls POST /fetch_notification on the bridge with the UUID.
+8. Bridge returns the Notification JSON; web portal processes the event.
+9. Web portal returns HTTP 200 to the original GET.
+10. Bridge removes the notification from the pending store.
 ```
 
-### 6.1 Notification URL
+### 6.1 Notification URL Signal
 
-The bridge calls `POST <notification_url>` with the `Notification` as a JSON
-body:
+The bridge sends:
 
-```json
-{
-  "id":          "<uuid-string>",
-  "destination": "<dot-separated-agent-path>",
-  "event":       "<event-string>"
-}
+```
+GET <notification_url>?notification_id=<uuid>
 ```
 
 The bridge makes up to **3 attempts** with a **2-second delay** between
@@ -620,10 +653,19 @@ attempts. If all attempts fail the notification is logged at `ERROR` level and
 dropped. No error is returned to the OpenPortal sender (notifications are
 fire-and-forget).
 
-The notification URL endpoint is unauthenticated. It should respond with HTTP
-2xx. The response body is ignored.
+The `notification_url` endpoint only receives a UUID in a query parameter — no
+body. It should respond HTTP 2xx after the web portal has fetched and processed
+the notification via `POST /fetch_notification` (§4). The response body is
+ignored.
 
-### 6.2 Notification URL Configuration
+### 6.2 Fetching the Notification
+
+After receiving the signal, the web portal calls `POST /fetch_notification`
+(§4) with the UUID to retrieve the full `Notification` object. This endpoint
+is authenticated with the bridge HMAC key (§2), so the notification content is
+never exposed to unauthenticated callers.
+
+### 6.3 Notification URL Configuration
 
 The `notification_url` is set at initialisation time:
 

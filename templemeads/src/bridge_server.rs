@@ -11,6 +11,8 @@ use crate::error::Error;
 use crate::grammar::PortalIdentifier;
 use crate::health::collect_health;
 use crate::job::Job;
+use crate::notification::Notification;
+use crate::notificationstate;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -825,6 +827,32 @@ async fn fetch_job(
 }
 
 ///
+/// The 'fetch_notification' endpoint for the web API. Returns a pending notification
+/// by its UUID. The web portal calls this after receiving a fetch_notification signal
+/// from the bridge, then returns 200 OK to confirm receipt.
+///
+#[tracing::instrument(skip_all)]
+async fn fetch_notification(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<Notification>, AppError> {
+    verify_headers(&state, &headers, "post", "fetch_notification", &body).await?;
+
+    let uid: Uuid = serde_json::from_slice(&body)?;
+
+    tracing::debug!("fetch_notification: {:?}", uid);
+
+    match notificationstate::get(uid).await {
+        Some(notification) => Ok(Json(notification)),
+        None => Err(AppError(
+            anyhow::anyhow!("Notification not found: {}", uid),
+            Some(StatusCode::NOT_FOUND),
+        )),
+    }
+}
+
+///
 /// The 'send_result' endpoint for the web API. This will send the
 /// result of a job that we need to process back to the OpenPortal system.
 ///
@@ -1146,6 +1174,7 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
         .route("/status", post(status))
         .route("/fetch_job", post(fetch_job))
         .route("/fetch_jobs", get(fetch_jobs))
+        .route("/fetch_notification", post(fetch_notification))
         .route("/get_portal", get(get_portal))
         .route("/send_result", post(send_result))
         .route("/sync_offerings", post(sync_offerings))

@@ -589,6 +589,57 @@ impl From<mod_diagnostics::LogEntry> for LogEntry {
 }
 
 ///
+/// Notification send/receive/failure totals for a single agent
+///
+#[gen_stub_pyclass]
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationStatistics(mod_diagnostics::NotificationStatistics);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl NotificationStatistics {
+    #[getter]
+    fn total_received(&self) -> PyResult<usize> {
+        Ok(self.0.total_received)
+    }
+
+    #[getter]
+    fn total_sent(&self) -> PyResult<usize> {
+        Ok(self.0.total_sent)
+    }
+
+    #[getter]
+    fn total_failed(&self) -> PyResult<usize> {
+        Ok(self.0.total_failed)
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!(
+            "NotificationStatistics(received={}, sent={}, failed={})",
+            self.0.total_received, self.0.total_sent, self.0.total_failed
+        ))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<NotificationStatistics> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<NotificationStatistics> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::NotificationStatistics> for NotificationStatistics {
+    fn from(s: mod_diagnostics::NotificationStatistics) -> Self {
+        NotificationStatistics(s)
+    }
+}
+
 /// The DiagnosticsReport object returned from diagnostics requests
 ///
 #[gen_stub_pyclass]
@@ -654,6 +705,11 @@ impl DiagnosticsReport {
     #[getter]
     fn warnings(&self) -> PyResult<Vec<String>> {
         Ok(self.0.warnings.clone())
+    }
+
+    #[getter]
+    fn notification_statistics(&self) -> PyResult<NotificationStatistics> {
+        Ok(self.0.notification_statistics.clone().into())
     }
 
     /// Return log entries in chronological order (oldest first).
@@ -5719,6 +5775,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RestartResponse>()?;
     m.add_class::<Diagnostics>()?;
     m.add_class::<DiagnosticsReport>()?;
+    m.add_class::<NotificationStatistics>()?;
     m.add_class::<FailedJobEntry>()?;
     m.add_class::<SlowJobEntry>()?;
     m.add_class::<ExpiredJobEntry>()?;

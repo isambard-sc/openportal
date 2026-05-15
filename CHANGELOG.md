@@ -10,8 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - **New notification system** — notifications now flow end-to-end between
   infrastructure agents and the web portal via the bridge. Infrastructure
-  agents can fire events (e.g. `user_added`) that are pushed to the web portal
-  as JSON POSTs to a configurable `notification_url`. The web portal can also
+  agents can fire events (e.g. `user_added`) that are notified to the
+  web portal via a `notification_url`. The web portal can also
   send notifications into the agent network (including to peer portals) via the
   new `POST /notify` bridge endpoint and the `openportal.notify()` Python
   function. A new `Notification` Python class provides `event_type` and

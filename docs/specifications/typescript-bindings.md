@@ -165,11 +165,40 @@ objects and are typed as `string` in TypeScript:
 
 ---
 
-## Identifier utilities
+## Hand-written utilities
 
-`templemeads/bindings/identifiers.ts` is a hand-written companion file (not
-auto-generated) that provides parse and stringify helpers for the five
-string-encoded identifier types.
+Two companion files sit alongside the generated bindings. Neither is
+auto-generated and both are safe to edit.
+
+### `identifiers.ts` — identifier parse / stringify
+
+Provides parse and stringify helpers for the five string-encoded identifier
+types.
+
+### `helpers.ts` — business logic mirrors
+
+Mirrors Rust methods that encode non-obvious policy decisions, so React
+components do not have to re-implement them.
+
+#### MembershipControl helpers
+
+```typescript
+canChangeMembership(control: MembershipControl | null | undefined): boolean
+canChangeRoles(control: MembershipControl | null | undefined): boolean
+```
+
+Both functions treat `null`/`undefined` as `"open"`, matching the Rust
+behaviour when the `membership_control` field is absent from `AwardDetails`.
+
+| `control` value | `canChangeMembership` | `canChangeRoles` |
+|-----------------|----------------------|-----------------|
+| `null` / absent | `true` | `true` |
+| `"open"` | `true` | `true` |
+| `"members_only"` | `true` | `false` |
+| `"roles_only"` | `false` | `true` |
+| `"locked"` | `false` | `false` |
+
+## Identifier utilities
 
 ### Interfaces
 

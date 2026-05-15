@@ -4,19 +4,23 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use std::time::Duration;
+use tokio::time::sleep;
 use url::Url;
 
 use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
 use templemeads::async_runnable;
 use templemeads::destination::{Destination, Destinations};
+use templemeads::diagnostics;
 use templemeads::grammar::Instruction::{
     CreateProject, GetAward, GetAwards, GetProject, GetProjectMapping, GetProjects,
     GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
     SyncOfferings, UpdateProject,
 };
 use templemeads::job::{send_queued, Envelope, Job};
+use templemeads::notification::{Notification, NotificationEnvelope, NotificationEvent};
 use templemeads::server;
+use templemeads::set_notify_runner;
 use templemeads::Error;
 
 ///
@@ -61,6 +65,7 @@ async fn main() -> Result<()> {
         Some("127.0.0.1".to_owned()),
         Some(3000),
         Some("http://localhost/signal".to_owned()),
+        Some("http://localhost/notification".to_owned()),
     );
 
     // now parse the command line arguments to get the service configuration
@@ -76,6 +81,13 @@ async fn main() -> Result<()> {
 
     if let Some(signal_url) = &config.bridge.signal_url {
         board.write().await.set_signal_url(signal_url.clone());
+    }
+
+    if let Some(notification_url) = &config.bridge.notification_url {
+        board
+            .write()
+            .await
+            .set_notification_url(notification_url.clone());
     }
 
     async_runnable! {
@@ -148,7 +160,11 @@ async fn main() -> Result<()> {
                         result = waiter.result().await?;
                     }
 
-                    job.copy_result_from(&result)
+                    let completed = job.copy_result_from(&result)?;
+                    if !completed.is_error() {
+                        send_award_notification(job.destination().clone(), NotificationEvent::AwardAdded(project.clone())).await;
+                    }
+                    Ok(completed)
                 }
                 RemoveProject(project) => {
                     // remove the project from the cluster
@@ -181,7 +197,11 @@ async fn main() -> Result<()> {
                         result = waiter.result().await?;
                     }
 
-                    job.copy_result_from(&result)
+                    let completed = job.copy_result_from(&result)?;
+                    if !completed.is_error() {
+                        send_award_notification(job.destination().clone(), NotificationEvent::AwardRemoved(project.clone())).await;
+                    }
+                    Ok(completed)
                 }
                 UpdateProject(project, details) => {
                     // update the project in the cluster
@@ -214,7 +234,11 @@ async fn main() -> Result<()> {
                         result = waiter.result().await?;
                     }
 
-                    job.copy_result_from(&result)
+                    let completed = job.copy_result_from(&result)?;
+                    if !completed.is_error() {
+                        send_award_notification(job.destination().clone(), NotificationEvent::AwardChanged(project.clone())).await;
+                    }
+                    Ok(completed)
                 }
                 GetProject(project) => {
                     // get the project from the cluster
@@ -553,10 +577,129 @@ async fn main() -> Result<()> {
         }
     }
 
+    async_runnable! {
+        pub async fn bridge_notify_runner(envelope: NotificationEnvelope) -> Result<(), Error>
+        {
+            server::enqueue_notification(envelope.notification().clone()).await;
+            Ok(())
+        }
+    }
+
     // run the Bridge agent
+    set_notify_runner(bridge_notify_runner).await?;
+    spawn_notification_delivery_task();
     run(config, bridge_runner).await?;
 
     Ok(())
+}
+
+/// Build an award notification and push it onto the delivery queue.
+async fn send_award_notification(destination: Destination, event: NotificationEvent) {
+    server::enqueue_notification(Notification::new(destination, event)).await;
+}
+
+/// Spawn the single background task that drains the notification delivery queue.
+/// Rate-limited to ~100 notifications/s (10 ms sleep after each delivery).
+fn spawn_notification_delivery_task() {
+    tokio::spawn(async move {
+        loop {
+            let notification = server::pop_queued_notification().await;
+            let board = match server::get_board().await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("Notification delivery: could not get board: {}", e);
+                    diagnostics::increment_notification_failed().await;
+                    sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+            };
+            let notification_url = board.read().await.notification_url();
+            deliver_notification(&notification_url, &notification).await;
+            sleep(Duration::from_millis(10)).await;
+        }
+    });
+}
+
+/// Signal the web portal that a notification is ready to fetch, then serve it
+/// via the authenticated POST /fetch_notification endpoint.
+/// Attempts up to 3 times with a 2-second backoff, then logs and drops.
+async fn deliver_notification(notification_url: &Option<Url>, notification: &Notification) {
+    let Some(url) = notification_url else {
+        tracing::debug!(
+            "No notification URL configured; dropping notification [{}]: {}",
+            notification.id(),
+            notification.event()
+        );
+        return;
+    };
+
+    // Store so the web portal can retrieve it via POST /fetch_notification.
+    server::add_pending_notification(notification).await;
+
+    let notification_id = notification.id().to_string();
+
+    let client = match Client::builder()
+        .danger_accept_invalid_certs(should_allow_invalid_certs())
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to build HTTP client for notification: {}", e);
+            server::remove_pending_notification(notification.id()).await;
+            diagnostics::increment_notification_failed().await;
+            return;
+        }
+    };
+
+    for attempt in 1..=3u32 {
+        let response = client
+            .get(url.clone())
+            .query(&[("notification_id", notification_id.as_str())])
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!(
+                    "Notification [{}] fetched by web portal: {}",
+                    notification.id(),
+                    notification.event()
+                );
+                server::remove_pending_notification(notification.id()).await;
+                diagnostics::increment_notification_sent().await;
+                return;
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "Attempt {}: notification [{}] signal rejected by web portal with status {}",
+                    attempt,
+                    notification.id(),
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Attempt {}: failed to signal notification [{}]: {}",
+                    attempt,
+                    notification.id(),
+                    e
+                );
+            }
+        }
+
+        if attempt < 3 {
+            sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    tracing::error!(
+        "Dropping notification [{}] after 3 failed signal attempts: {}",
+        notification.id(),
+        notification.event()
+    );
+    server::remove_pending_notification(notification.id()).await;
+    diagnostics::increment_notification_failed().await;
 }
 
 fn should_allow_invalid_certs() -> bool {

@@ -505,7 +505,7 @@ pub struct Quota {
     limit: QuotaLimit,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Current usage expressed as a human-readable size string (e.g. "2.5GB")
-    #[ts(as = "Option<String>")]
+    #[ts(as = "Option<String>", optional)]
     usage: Option<StorageUsage>,
 }
 

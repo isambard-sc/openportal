@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent;
+use crate::command::Command;
+use crate::destination::Destination;
 use crate::error::Error;
 use crate::job::Job;
+use crate::notification::{Notification, NotificationEvent};
 use crate::state;
 
 use anyhow::Result;
@@ -34,6 +37,52 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
             tracing::error!("No portal agent found");
             Err(Error::NoPortal(
                 "Cannot get the job status because there is no portal agent".to_string(),
+            ))
+        }
+    }
+}
+
+/// Send a fire-and-forget notification southbound into the agent network.
+/// The command string has the same format as a notification string:
+///   `<destination> <event> [<argument>]`
+/// where `<destination>` must start with the portal name.
+/// The bridge wraps the notification in a `Forward` event addressed to the
+/// portal so the portal can strip the bridge from the path before forwarding.
+pub async fn notify(command: &str) -> Result<(), Error> {
+    tracing::info!("Received notification command: {}", command);
+
+    let my_name = agent::name().await;
+
+    match agent::portal(5).await {
+        Some(portal) => {
+            let inner = Notification::parse(command)?;
+
+            if !inner
+                .destination()
+                .agents()
+                .iter()
+                .any(|a| a == portal.name())
+            {
+                return Err(Error::Delivery(format!(
+                    "Notification destination '{}' must include the portal name '{}'",
+                    inner.destination(),
+                    portal.name()
+                )));
+            }
+
+            // Wrap in a Forward notification addressed bridge.portal. The portal
+            // finds its own position in the inner destination and routes to the
+            // next agent — works for both southbound (portal first) and northbound
+            // (portal in the middle, e.g. isambard-ai.brics.ukri).
+            let outer_dest = Destination::parse(&format!("{}.{}", my_name, portal.name()))?;
+            let outer = Notification::new(outer_dest, NotificationEvent::Forward(Box::new(inner)));
+
+            Ok(Command::notify(&outer).send_to(&portal).await?)
+        }
+        None => {
+            tracing::error!("No portal agent found");
+            Err(Error::NoPortal(
+                "Cannot send notification because there is no portal agent".to_string(),
             ))
         }
     }

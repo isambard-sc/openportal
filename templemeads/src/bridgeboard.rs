@@ -17,6 +17,8 @@ pub struct BridgeBoard {
 
     signal_url: Option<Url>,
 
+    notification_url: Option<Url>,
+
     // do not serialise or clone the waiters
     #[serde(skip)]
     waiters: HashMap<Uuid, Vec<Listener>>,
@@ -28,6 +30,7 @@ impl Clone for BridgeBoard {
         Self {
             jobs: self.jobs.clone(),
             signal_url: self.signal_url.clone(),
+            notification_url: self.notification_url.clone(),
             waiters: HashMap::new(),
         }
     }
@@ -38,6 +41,7 @@ impl BridgeBoard {
         Self {
             jobs: HashMap::new(),
             signal_url: None,
+            notification_url: None,
             waiters: HashMap::new(),
         }
     }
@@ -236,5 +240,13 @@ impl BridgeBoard {
 
     pub fn signal_url(&self) -> Option<Url> {
         self.signal_url.clone()
+    }
+
+    pub fn set_notification_url(&mut self, url: Url) {
+        self.notification_url = Some(url);
+    }
+
+    pub fn notification_url(&self) -> Option<Url> {
+        self.notification_url.clone()
     }
 }

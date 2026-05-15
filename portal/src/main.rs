@@ -7,6 +7,9 @@ use templemeads::agent;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
+use templemeads::command::Command;
+use templemeads::notification::{NotificationEnvelope, NotificationEvent};
+use templemeads::set_notify_runner;
 
 use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
@@ -337,6 +340,125 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    async_runnable! {
+        /// Notify runner for the portal. Handles Forward notifications from the bridge
+        /// agent: strips the bridge from the path and re-sends the inner notification
+        /// to the next southbound agent. All other senders are ignored.
+        pub async fn portal_notify_runner(envelope: NotificationEnvelope) -> Result<(), Error> {
+            let sender = envelope.sender();
+            let notification = envelope.notification();
+
+            match agent::agent_type(&sender).await {
+                Some(Bridge) => {
+                    match notification.event() {
+                        NotificationEvent::Forward(inner) => {
+                            let destination = inner.destination();
+                            let agents = destination.agents();
+                            let my_name = agent::name().await;
+
+                            // Find this portal's position in the inner destination,
+                            // then route to the next agent. This handles both directions:
+                            //   southbound: portal.provider.cluster → portal at 0 → next = provider
+                            //   northbound: isambard-ai.portal.ukri → portal at 1 → next = ukri
+                            let portal_index = agents.iter().position(|a| a == &my_name);
+
+                            let next_index = match portal_index {
+                                None => {
+                                    return Err(Error::InvalidInstruction(format!(
+                                        "Forward notification destination '{}' does not include this portal ({})",
+                                        destination, my_name
+                                    )));
+                                }
+                                Some(0) => 1,
+                                Some(1) => {
+                                    // Northbound: agents()[0] must be a registered virtual agent.
+                                    let is_valid = match agent::find(&agents[0], 0).await {
+                                        Some(peer) => agent::is_virtual(&peer).await,
+                                        None => false,
+                                    };
+                                    if !is_valid {
+                                        return Err(Error::InvalidInstruction(format!(
+                                            "Forward notification destination '{}': '{}' must be a virtual agent when portal is at position 1",
+                                            destination, agents[0]
+                                        )));
+                                    }
+                                    2
+                                }
+                                Some(i) => {
+                                    return Err(Error::InvalidInstruction(format!(
+                                        "Forward notification destination '{}': portal at position {} is not allowed (max 1)",
+                                        destination, i
+                                    )));
+                                }
+                            };
+
+                            if next_index >= agents.len() {
+                                return Err(Error::InvalidInstruction(format!(
+                                    "Forward notification destination '{}' has no agent after this portal",
+                                    destination
+                                )));
+                            }
+
+                            let next_agent =
+                                agent::find(&agents[next_index], 5)
+                                    .await
+                                    .ok_or_else(|| {
+                                        Error::MissingAgent(format!(
+                                            "Cannot find next agent '{}' for notification forwarding",
+                                            agents[next_index]
+                                        ))
+                                    })?;
+
+                            if let Err(e) = Command::notify(inner).send_to(&next_agent).await {
+                                tracing::warn!(
+                                    "Failed to forward notification [{}] to {}: {}",
+                                    inner.id(),
+                                    next_agent,
+                                    e
+                                );
+                            }
+
+                            Ok(())
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "Portal received unexpected notification event from bridge: {}",
+                                notification.event()
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+                _ => {
+                    // Notification from a southbound agent — forward it to the bridge
+                    // so the bridge can deliver it to the web portal.
+                    match agent::bridge(BRIDGE_WAIT_TIME).await {
+                        Some(bridge) => {
+                            if let Err(e) = Command::notify(notification).send_to(&bridge).await {
+                                tracing::warn!(
+                                    "Failed to forward notification [{}] to bridge: {}",
+                                    notification.id(),
+                                    e
+                                );
+                            }
+                            Ok(())
+                        }
+                        None => {
+                            tracing::warn!(
+                                "Portal received notification [{}] from {} but no bridge agent found; dropping",
+                                notification.id(),
+                                sender
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    set_notify_runner(portal_notify_runner).await?;
 
     // run the portal agent
     run(config, portal_runner).await?;

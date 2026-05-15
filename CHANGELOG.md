@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **New notification system** — notifications now flow end-to-end between
+  infrastructure agents and the web portal via the bridge. Infrastructure
+  agents can fire events (e.g. `user_added`) that are pushed to the web portal
+  as JSON POSTs to a configurable `notification_url`. The web portal can also
+  send notifications into the agent network (including to peer portals) via the
+  new `POST /notify` bridge endpoint and the `openportal.notify()` Python
+  function. A new `Notification` Python class provides `event_type` and
+  `event_argument` properties for straightforward dispatch in portal code. See
+  [notification-protocol.md](docs/specifications/notification-protocol.md),
+  [bridge-api.md](docs/specifications/bridge-api.md), and
+  [python-api.md](docs/specifications/python-api.md) for full details.
+
 - **TypeScript bindings for `templemeads` types** — the `templemeads` crate
   now derives TypeScript type definitions from its Rust structs and enums via
   [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Running

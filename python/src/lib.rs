@@ -21,6 +21,7 @@ use templemeads::diagnostics as mod_diagnostics;
 use templemeads::grammar;
 use templemeads::health as mod_health;
 use templemeads::job;
+use templemeads::notification as mod_notification;
 use templemeads::server::sign_api_call;
 use templemeads::storagereport;
 use templemeads::usagereport;
@@ -588,6 +589,57 @@ impl From<mod_diagnostics::LogEntry> for LogEntry {
 }
 
 ///
+/// Notification send/receive/failure totals for a single agent
+///
+#[gen_stub_pyclass]
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationStatistics(mod_diagnostics::NotificationStatistics);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl NotificationStatistics {
+    #[getter]
+    fn total_received(&self) -> PyResult<usize> {
+        Ok(self.0.total_received)
+    }
+
+    #[getter]
+    fn total_sent(&self) -> PyResult<usize> {
+        Ok(self.0.total_sent)
+    }
+
+    #[getter]
+    fn total_failed(&self) -> PyResult<usize> {
+        Ok(self.0.total_failed)
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(format!(
+            "NotificationStatistics(received={}, sent={}, failed={})",
+            self.0.total_received, self.0.total_sent, self.0.total_failed
+        ))
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<NotificationStatistics> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<NotificationStatistics> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_diagnostics::NotificationStatistics> for NotificationStatistics {
+    fn from(s: mod_diagnostics::NotificationStatistics) -> Self {
+        NotificationStatistics(s)
+    }
+}
+
 /// The DiagnosticsReport object returned from diagnostics requests
 ///
 #[gen_stub_pyclass]
@@ -653,6 +705,11 @@ impl DiagnosticsReport {
     #[getter]
     fn warnings(&self) -> PyResult<Vec<String>> {
         Ok(self.0.warnings.clone())
+    }
+
+    #[getter]
+    fn notification_statistics(&self) -> PyResult<NotificationStatistics> {
+        Ok(self.0.notification_statistics.clone().into())
     }
 
     /// Return log entries in chronological order (oldest first).
@@ -4954,6 +5011,136 @@ fn run(command: String, max_ms: i64) -> PyResult<Job> {
     }
 }
 
+/// A fire-and-forget notification received from the OpenPortal network.
+///
+/// Construct from the JSON body posted to `notification_url`:
+///   `n = Notification.from_json(request.body)`
+///
+/// Or parse from the canonical string format:
+///   `n = Notification.parse("portal.clusters.shared user_added chris.p.portal")`
+#[gen_stub_pyclass]
+#[pyclass(module = "openportal")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Notification(mod_notification::Notification);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl Notification {
+    #[new]
+    fn new(command: &str) -> PyResult<Self> {
+        match mod_notification::Notification::parse(command) {
+            Ok(n) => Ok(Self(n)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    /// Parse from a `"<destination> <event> [<args>]"` string.
+    #[staticmethod]
+    fn parse(command: &str) -> PyResult<Self> {
+        match mod_notification::Notification::parse(command) {
+            Ok(n) => Ok(Self(n)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    /// Deserialise from the JSON body posted to `notification_url`.
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        match serde_json::from_str::<mod_notification::Notification>(json) {
+            Ok(n) => Ok(Self(n)),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    /// Serialise to a JSON string.
+    fn to_json(&self) -> PyResult<String> {
+        match serde_json::to_string(&self.0) {
+            Ok(s) => Ok(s),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
+    /// UUID of this notification (string form). For logging only — not stored anywhere.
+    #[getter]
+    fn id(&self) -> PyResult<String> {
+        Ok(self.0.id().to_string())
+    }
+
+    /// Dot-separated destination path, e.g. `"portal.clusters.shared"`.
+    #[getter]
+    fn destination(&self) -> PyResult<String> {
+        Ok(self.0.destination().to_string())
+    }
+
+    /// Full event string including all arguments, e.g. `"user_added chris.p.portal"`.
+    #[getter]
+    fn event(&self) -> PyResult<String> {
+        Ok(self.0.event().to_string())
+    }
+
+    /// The event keyword alone, e.g. `"user_added"`. Use this for dispatch.
+    #[getter]
+    fn event_type(&self) -> PyResult<String> {
+        let s = self.0.event().to_string();
+        Ok(match s.split_once(' ') {
+            Some((typ, _)) => typ.to_string(),
+            None => s,
+        })
+    }
+
+    /// Everything after the event keyword, e.g. `"chris.p.portal"`.
+    /// Empty string if the event carries no arguments.
+    #[getter]
+    fn event_argument(&self) -> PyResult<String> {
+        let s = self.0.event().to_string();
+        Ok(match s.split_once(' ') {
+            Some((_, rest)) => rest.to_string(),
+            None => String::new(),
+        })
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self.0.to_string())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+
+    fn __copy__(&self) -> PyResult<Notification> {
+        Ok(self.clone())
+    }
+
+    fn __deepcopy__(&self, _memo: Py<PyAny>) -> PyResult<Notification> {
+        Ok(self.clone())
+    }
+}
+
+impl From<mod_notification::Notification> for Notification {
+    fn from(n: mod_notification::Notification) -> Self {
+        Notification(n)
+    }
+}
+
+///
+/// Send a fire-and-forget notification into the OpenPortal network.
+/// The command string has the same format as a notification:
+///   `<destination> <event> [<argument>]`
+/// e.g. `brics.aip1.clusters.shared user_added chris.project.brics`
+///
+/// Returns immediately — no result or acknowledgement is ever received back.
+/// Raises an error only if the notification could not be handed off to the
+/// bridge (e.g. malformed command, bridge unreachable).
+///
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn notify(command: String) -> PyResult<()> {
+    match call_post::<serde_json::Value>("notify", serde_json::json!({"command": command})) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+    }
+}
+
 ///
 /// Get the status of the passed job on the OpenPortal System
 /// This will return the job updated to the latest version.
@@ -5578,6 +5765,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(initialize_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(remove_offerings, m)?)?;
     m.add_function(wrap_pyfunction!(restart, m)?)?;
+    m.add_function(wrap_pyfunction!(notify, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(send_result, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
@@ -5587,11 +5775,13 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RestartResponse>()?;
     m.add_class::<Diagnostics>()?;
     m.add_class::<DiagnosticsReport>()?;
+    m.add_class::<NotificationStatistics>()?;
     m.add_class::<FailedJobEntry>()?;
     m.add_class::<SlowJobEntry>()?;
     m.add_class::<ExpiredJobEntry>()?;
     m.add_class::<RunningJobEntry>()?;
     m.add_class::<Job>()?;
+    m.add_class::<Notification>()?;
     m.add_class::<UserIdentifier>()?;
     m.add_class::<ProjectIdentifier>()?;
     m.add_class::<PortalIdentifier>()?;

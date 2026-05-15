@@ -15,6 +15,7 @@ mod filesystem;
 mod handler;
 mod instance;
 mod jobtiming;
+mod notificationstate;
 mod platform;
 mod portal;
 mod provider;
@@ -35,6 +36,7 @@ pub use error::Error;
 pub mod grammar;
 pub mod health;
 pub mod job;
+pub mod notification;
 pub mod runnable;
 pub mod state;
 pub mod storage;
@@ -44,10 +46,18 @@ pub mod usagereport;
 pub mod server {
     pub use crate::bridge_server::sign_api_call;
     pub use crate::bridgestate::get as get_board;
+    pub use crate::notificationstate::add as add_pending_notification;
+    pub use crate::notificationstate::enqueue as enqueue_notification;
+    pub use crate::notificationstate::get as get_pending_notification;
+    pub use crate::notificationstate::pop_queued as pop_queued_notification;
+    pub use crate::notificationstate::remove as remove_pending_notification;
 }
 
 // Re-export system info monitor for agents to use at startup
 pub use systeminfo::spawn_monitor as spawn_system_monitor;
+
+// Re-export notification runner setter so agent binaries can register handlers
+pub use handler::set_notify_runner;
 
 #[cfg(test)]
 mod tests {

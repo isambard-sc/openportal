@@ -28,6 +28,26 @@ a portal or agent that needs to construct or parse OpenPortal commands.
 
 ---
 
+### [notification-protocol.md](notification-protocol.md)
+**The OpenPortal notification protocol**
+
+Specifies the fire-and-forget `Notification` system — the lightweight,
+unacknowledged signalling mechanism that complements the robust Job system.
+Covers:
+
+- The conceptual distinction between Jobs (TCP-like) and Notifications (UDP-like)
+- The full `NotificationEvent` grammar: all 10 user and project events
+  (`user_added`, `user_removed`, `user_changed`, `user_blocked`,
+  `user_unblocked`, and the project equivalents)
+- Wire representation (the `Notify` `Command` variant and `Notification` JSON)
+- Per-hop routing behaviour (`Downstream` → forward, `Destination` → call
+  notify runner)
+- How to register a `notify_runner` in a Rust agent
+- How to construct and send a notification
+- Delivery guarantees and limitations
+
+---
+
 ### [json-types.md](json-types.md)
 **JSON serialisation of result types**
 
@@ -128,6 +148,7 @@ The complete configuration reference for all eight agent types. Covers:
 │    ↕  bridge-api.md                                      │
 ├──────────────────────────────────────────────────────────┤
 │  Instruction text protocol   instruction-protocol.md     │
+│  Notification event grammar  notification-protocol.md    │
 │  Result JSON types           json-types.md               │
 ├──────────────────────────────────────────────────────────┤
 │  Templemeads: Envelope + Command   wire-protocol.md §1   │

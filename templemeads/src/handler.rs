@@ -11,6 +11,7 @@ use crate::error::Error;
 use crate::health;
 use crate::job::{sync_from_peer, Envelope, Status};
 use crate::jobtiming;
+use crate::notification::{default_notify_runner, AsyncNotifyRunnable, NotificationEnvelope};
 use crate::restart;
 use crate::runnable::{default_runner, AsyncRunnable};
 
@@ -28,6 +29,7 @@ struct ServiceDetails {
     service: String,
     agent_type: AgentType,
     runner: AsyncRunnable,
+    notify_runner: AsyncNotifyRunnable,
     keepalives: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -37,6 +39,7 @@ impl Default for ServiceDetails {
             service: String::new(),
             agent_type: agent::Type::Portal,
             runner: default_runner,
+            notify_runner: default_notify_runner,
             keepalives: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -69,6 +72,12 @@ pub async fn set_my_service_details(
     Ok(())
 }
 
+pub async fn set_notify_runner(runner: AsyncNotifyRunnable) -> Result<()> {
+    let mut service_details = SERVICE_DETAILS.write().await;
+    service_details.notify_runner = runner;
+    Ok(())
+}
+
 ///
 /// This is the main function that processes a command sent via the OpenPortal system
 /// This will either route the command to the right place, or if the command has reached
@@ -80,12 +89,16 @@ async fn process_command(
     zone: &str,
     command: &Command,
     runner: &AsyncRunnable,
+    notify_runner: &AsyncNotifyRunnable,
 ) -> Result<(), Error> {
     // Block new jobs during soft restart
     // Allow Register, HealthCheck, and Restart commands to pass through
     if paddington::is_soft_restart_in_progress() {
         match command {
-            Command::Register { .. } | Command::HealthCheck { .. } | Command::Restart { .. } => {
+            Command::Register { .. }
+            | Command::HealthCheck { .. }
+            | Command::Restart { .. }
+            | Command::Notify { .. } => {
                 // Allow these commands during soft restart
             }
             Command::Put { job } | Command::Update { job } => {
@@ -488,6 +501,98 @@ async fn process_command(
             diagnostics::cache_diagnostics_response(report.agent_name.clone(), *report.clone())
                 .await;
         }
+        Command::Notify { notification } => {
+            diagnostics::increment_notification_received().await;
+            tracing::debug!(
+                "Notification [{}] from {}: {}",
+                notification.id(),
+                sender,
+                notification.event()
+            );
+
+            match notification.destination().position(recipient, sender) {
+                Position::Downstream => {
+                    if let Some(next) = notification.destination().next(recipient) {
+                        let next_peer = Peer::new(&next, zone);
+                        let cmd = Command::notify(notification);
+                        if let Err(e) = cmd.send_to(&next_peer).await {
+                            tracing::warn!(
+                                "Failed to forward notification [{}] to {}: {}",
+                                notification.id(),
+                                next_peer,
+                                e
+                            );
+                        }
+                    }
+                }
+                Position::Destination => {
+                    tracing::debug!(
+                        "Notification [{}] arrived at destination",
+                        notification.id()
+                    );
+                    let envelope = NotificationEnvelope::new(recipient, sender, zone, notification);
+                    if let Err(e) = notify_runner(envelope).await {
+                        tracing::warn!("Error in notify runner for [{}]: {}", notification.id(), e);
+                    }
+                }
+                Position::Error => {
+                    // The recipient is not in the destination path. The only
+                    // legitimate case is a bridge agent receiving a notification
+                    // whose destination ends at (or one step past) the portal it
+                    // is connected to — i.e. the portal is the last or penultimate
+                    // agent in the path (penultimate covers virtual-agent suffixes).
+                    let mut handled = false;
+
+                    let my_agent_type = SERVICE_DETAILS.read().await.agent_type.clone();
+                    if my_agent_type == AgentType::Bridge {
+                        if let Some(portal) = agent::portal(0).await {
+                            let agents = notification.destination().agents();
+                            let n = agents.len();
+                            let portal_is_last = n >= 1 && agents[n - 1] == portal.name();
+                            let portal_is_penultimate = n >= 2 && agents[n - 2] == portal.name();
+
+                            if portal_is_last || portal_is_penultimate {
+                                tracing::debug!(
+                                    "Notification [{}] accepted by bridge sidecar (portal={} is {} in path)",
+                                    notification.id(),
+                                    portal.name(),
+                                    if portal_is_last { "last" } else { "penultimate" },
+                                );
+                                let envelope = NotificationEnvelope::new(
+                                    recipient,
+                                    sender,
+                                    zone,
+                                    notification,
+                                );
+                                if let Err(e) = notify_runner(envelope).await {
+                                    tracing::warn!(
+                                        "Error in notify runner for [{}]: {}",
+                                        notification.id(),
+                                        e
+                                    );
+                                }
+                                handled = true;
+                            }
+                        }
+                    }
+
+                    if !handled {
+                        tracing::warn!(
+                            "Notification [{}] in errored position (recipient={}, sender={})",
+                            notification.id(),
+                            recipient,
+                            sender
+                        );
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        "Notification [{}] in unexpected position",
+                        notification.id()
+                    );
+                }
+            }
+        }
         _ => {
             tracing::warn!("Command {} not recognised", command);
         }
@@ -577,7 +682,15 @@ async_message_handler! {
                     }
                 }
 
-                process_command(&recipient, &sender, &zone, &command, &service_info.runner).await?;
+                process_command(
+                    &recipient,
+                    &sender,
+                    &zone,
+                    &command,
+                    &service_info.runner,
+                    &service_info.notify_runner,
+                )
+                .await?;
 
                 Ok(())
             }

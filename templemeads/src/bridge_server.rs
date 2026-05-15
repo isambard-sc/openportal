@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent;
-use crate::bridge::{run as bridge_run, status as bridge_status};
+use crate::bridge::{notify as bridge_notify, run as bridge_run, status as bridge_status};
 use crate::bridgestate::get as get_board;
 use crate::command::Command;
 use crate::destination::Destinations;
@@ -11,6 +11,8 @@ use crate::error::Error;
 use crate::grammar::PortalIdentifier;
 use crate::health::collect_health;
 use crate::job::Job;
+use crate::notification::Notification;
+use crate::notificationstate;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -91,6 +93,7 @@ pub struct Config {
     pub port: u16,
     pub key: SecretKey,
     pub signal_url: Option<Url>,
+    pub notification_url: Option<Url>,
 }
 
 fn create_webserver_url(url: &str) -> Result<Url, Error> {
@@ -143,7 +146,7 @@ fn create_signal_url(signal_url: &str) -> Result<Option<Url>, Error> {
 }
 
 impl Config {
-    pub fn new(url: &str, ip: IpAddr, port: u16, signal_url: &str) -> Self {
+    pub fn new(url: &str, ip: IpAddr, port: u16, signal_url: &str, notification_url: &str) -> Self {
         Self {
             url: create_webserver_url(url).unwrap_or_else(|e| {
                 tracing::error!(
@@ -163,7 +166,14 @@ impl Config {
                     signal_url,
                     e
                 );
-                #[allow(clippy::unwrap_used)]
+                None
+            }),
+            notification_url: create_signal_url(notification_url).unwrap_or_else(|e| {
+                tracing::error!(
+                    "Could not parse notification URL: {} because '{}'. Using None",
+                    notification_url,
+                    e
+                );
                 None
             }),
         }
@@ -176,6 +186,7 @@ pub struct Defaults {
     ip: String,
     port: u16,
     signal_url: String,
+    notification_url: String,
 }
 
 impl Defaults {
@@ -184,12 +195,15 @@ impl Defaults {
         ip: Option<String>,
         port: Option<u16>,
         signal_url: Option<String>,
+        notification_url: Option<String>,
     ) -> Self {
         Self {
             url: url.unwrap_or("http://localhost:8042".to_owned()),
             ip: ip.unwrap_or("127.0.0.1".to_owned()),
             port: port.unwrap_or(8042),
             signal_url: signal_url.unwrap_or("http://localhost/signal".to_owned()),
+            notification_url: notification_url
+                .unwrap_or("http://localhost/notification".to_owned()),
         }
     }
 
@@ -207,6 +221,10 @@ impl Defaults {
 
     pub fn signal_url(&self) -> String {
         self.signal_url.clone()
+    }
+
+    pub fn notification_url(&self) -> String {
+        self.notification_url.clone()
     }
 }
 
@@ -680,6 +698,32 @@ async fn run(
 }
 
 //
+// The 'notify' endpoint for the web API. Sends a fire-and-forget notification
+// into the agent network via the portal. Returns immediately once the notification
+// has been handed off — no result or acknowledgement is ever received back.
+//
+#[tracing::instrument(skip_all)]
+async fn notify(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    verify_headers(&state, &headers, "post", "notify", &body).await?;
+
+    let payload: RunRequest = serde_json::from_slice(&body)?;
+
+    tracing::debug!("Sending notification: {}", payload.command);
+
+    match bridge_notify(&payload.command).await {
+        Ok(()) => Ok(Json(json!({"status": "ok"}))),
+        Err(e) => {
+            tracing::error!("Error sending notification: {:?}", e);
+            Err(AppError(e.into(), None))
+        }
+    }
+}
+
+//
 // Struct to represent the requests to the 'run' endpoint
 //
 #[derive(Deserialize, Debug)]
@@ -779,6 +823,32 @@ async fn fetch_job(
             tracing::error!("Error getting jobs: {:?}", e);
             Err(AppError(e.into(), None))
         }
+    }
+}
+
+///
+/// The 'fetch_notification' endpoint for the web API. Returns a pending notification
+/// by its UUID. The web portal calls this after receiving a fetch_notification signal
+/// from the bridge, then returns 200 OK to confirm receipt.
+///
+#[tracing::instrument(skip_all)]
+async fn fetch_notification(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<Notification>, AppError> {
+    verify_headers(&state, &headers, "post", "fetch_notification", &body).await?;
+
+    let uid: Uuid = serde_json::from_slice(&body)?;
+
+    tracing::debug!("fetch_notification: {:?}", uid);
+
+    match notificationstate::get(uid).await {
+        Some(notification) => Ok(Json(notification)),
+        None => Err(AppError(
+            anyhow::anyhow!("Notification not found: {}", uid),
+            Some(StatusCode::NOT_FOUND),
+        )),
     }
 }
 
@@ -1100,9 +1170,11 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
         .route("/restart", post(restart))
         .route("/diagnostics", post(diagnostics))
         .route("/run", post(run))
+        .route("/notify", post(notify))
         .route("/status", post(status))
         .route("/fetch_job", post(fetch_job))
         .route("/fetch_jobs", get(fetch_jobs))
+        .route("/fetch_notification", post(fetch_notification))
         .route("/get_portal", get(get_portal))
         .route("/send_result", post(send_result))
         .route("/sync_offerings", post(sync_offerings))

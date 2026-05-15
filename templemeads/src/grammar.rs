@@ -1962,10 +1962,12 @@ impl<'de> Deserialize<'de> for DomainPattern {
 pub struct Link {
     /// Human-readable identifier, e.g. "EP/X000000/1" or "061-4738952-1"
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     id: Option<String>,
 
     /// URL pointing to the resource (must be a valid URL if provided)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     url: Option<String>,
 }
 
@@ -2210,18 +2212,22 @@ pub struct AwardDetails {
 
     /// Link back to the award record on the funding body's system
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     award: Option<Link>,
 
     /// Link to the funding call from which the award was made
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     call: Option<Link>,
 
     /// Link to the project page on the remote/awarding portal
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     project_link: Option<Link>,
 
     /// Link to the page where more time / renewal can be requested
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     renewal: Option<Link>,
 
     /// Notes attached to this award (append-only log of messages)
@@ -2232,11 +2238,13 @@ pub struct AwardDetails {
     /// receiving portal. Lets the awarder make corrections in the window
     /// between creating the award and it being provisioned.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     earliest_approve: Option<DateTime<Utc>>,
 
     /// Controls whether the receiving portal may independently modify
     /// membership or roles. When absent, behaviour is `Open`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     membership_control: Option<MembershipControl>,
 
     /// The list of allowed domains for this project.

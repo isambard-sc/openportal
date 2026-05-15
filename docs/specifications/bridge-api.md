@@ -41,6 +41,7 @@ The bridge handles two directions of communication:
 | Bridge API listen address | `127.0.0.1:3000` |
 | Bridge API public URL | `http://localhost:3000` |
 | Signal URL | `http://localhost/signal` |
+| Notification URL | `http://localhost/notification` |
 
 ### 1.2 Bridge Invite File
 
@@ -370,6 +371,39 @@ Retrieves a specific unfinished job from the bridge board by UUID. Returns HTTP
 
 ---
 
+### `POST /fetch_notification`
+
+Retrieves a pending notification by UUID. Called by the web portal after
+receiving a `GET <notification_url>?notification_id=<uuid>` signal from the
+bridge. Returns HTTP 404 if the UUID is not found (already removed or never
+stored).
+
+**Authentication:** required (POST signature over `"fetch_notification"` and
+request body)
+
+**Request body:** a JSON UUID string
+
+```json
+"a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
+**Response:** the `Notification` object
+
+```json
+{
+  "id":          "<uuid-string>",
+  "destination": "<dot-separated-agent-path>",
+  "event":       "<event-string>"
+}
+```
+
+The web portal should return HTTP 200 to the original `GET <notification_url>`
+request after successfully fetching and processing the notification. The bridge
+interprets the 200 as delivery confirmation and removes the notification from
+the pending store.
+
+---
+
 ### `POST /send_result`
 
 Posts the result of a bridge-board job back to the bridge. Used by the portal
@@ -503,6 +537,50 @@ Collects a diagnostic report from the specified agent.
 
 ---
 
+### `POST /notify`
+
+Sends a fire-and-forget notification into the OpenPortal agent network via the
+portal. Returns immediately once the notification has been handed off — no
+result or acknowledgement is ever received back.
+
+**Authentication:** required (POST signature over `"notify"` and request body)
+
+**Request body:**
+
+```json
+{"command": "<destination> <event> [<argument>]"}
+```
+
+The `command` string follows the notification format described in
+[notification-protocol.md](notification-protocol.md) §2. The destination must
+contain the connected portal's name.
+
+**Examples:**
+
+```json
+{"command": "portal.clusters.instance user_added chris.project.portal"}
+{"command": "isambard-ai.brics.ukri user_added chris.project.brics"}
+```
+
+The second example uses a virtual agent (`isambard-ai`) as the apparent sender,
+routing northbound through the `brics` portal to notify the `ukri` peer portal.
+
+**Response:**
+
+```json
+{"status": "ok"}
+```
+
+Returns HTTP 500 if the portal agent is not connected or the destination is
+invalid.
+
+**Routing note:** The bridge wraps the notification in a `Forward` event
+addressed to `<bridge-name>.<portal-name>`. The portal unwraps it and routes
+to the next agent in the inner destination path (see
+[notification-protocol.md](notification-protocol.md) §5.1–5.2).
+
+---
+
 ## 5. Bridge Board: OpenPortal → Portal Flow
 
 Certain instructions are not initiated by the portal but by OpenPortal itself.
@@ -540,7 +618,87 @@ response body.
 
 ---
 
-## 6. Instructions Handled by the Bridge Board
+## 6. OpenPortal → Portal Notification Delivery (Pull Model)
+
+When a notification arrives at the bridge from the OpenPortal network, it is
+placed on an internal **delivery queue**. A single background task drains the
+queue and delivers each notification to the web portal using a pull model:
+rather than pushing the notification body to an unauthenticated endpoint, the
+bridge stores the notification and signals the web portal to fetch it.
+
+### 6.1 Delivery Queue
+
+All notifications — whether from the agent network or from award events
+(`award_added`, `award_removed`, `award_changed`) — are pushed onto an internal
+bounded queue before delivery. This serialises all web-portal signals through
+a single consumer and protects the web portal from notification storms.
+
+| Property | Value |
+|----------|-------|
+| Queue capacity | 500 notifications |
+| On overflow | Clear **all** queued entries, log at `WARN`, increment failed counter |
+| Delivery rate | ≤ 100 notifications/s (10 ms sleep after each delivery) |
+| Consumer tasks | 1 (serialised delivery) |
+
+When the queue overflows, dropping the entire stale backlog and accepting the
+newest notification is preferred over dropping the newest entry: during a
+prolonged outage the older notifications represent superseded state.
+
+### 6.2 Pull Flow
+
+```
+ 1. An OpenPortal agent emits a notification (e.g. cluster fires user_added).
+ 2. The notification travels up the agent hierarchy to the portal.
+ 3. The portal's notify runner forwards the notification to the bridge.
+ 4. The bridge accepts it via the sidecar check and pushes it onto the queue.
+ 5. Background delivery task pops the notification from the queue.
+ 6. Bridge stores the notification in a pending map keyed by its UUID.
+ 7. Bridge sends GET <notification_url>?notification_id=<uuid> to the web portal.
+ 8. Web portal calls POST /fetch_notification on the bridge with the UUID.
+ 9. Bridge returns the Notification JSON; web portal processes the event.
+10. Web portal returns HTTP 200 to the original GET.
+11. Bridge removes the notification from the pending store.
+```
+
+### 6.3 Notification URL Signal
+
+The bridge sends:
+
+```
+GET <notification_url>?notification_id=<uuid>
+```
+
+The bridge makes up to **3 attempts** with a **2-second delay** between
+attempts. If all attempts fail the notification is logged at `ERROR` level and
+dropped. No error is returned to the OpenPortal sender (notifications are
+fire-and-forget).
+
+The `notification_url` endpoint only receives a UUID in a query parameter — no
+body. It should respond HTTP 2xx after the web portal has fetched and processed
+the notification via `POST /fetch_notification` (§4). The response body is
+ignored.
+
+### 6.4 Fetching the Notification
+
+After receiving the signal, the web portal calls `POST /fetch_notification`
+(§4) with the UUID to retrieve the full `Notification` object. This endpoint
+is authenticated with the bridge HMAC key (§2), so the notification content is
+never exposed to unauthenticated callers.
+
+### 6.5 Notification URL Configuration
+
+The `notification_url` is set at initialisation time:
+
+```bash
+op-bridge init --notification-url http://localhost/notification
+```
+
+To update it, reinitialise the bridge with `--force`, or edit the config file
+directly. The default is `http://localhost/notification`.
+
+---
+
+## 7. Instructions Handled by the Bridge Board
 
 The following instructions, when sent from the OpenPortal network to the bridge,
 are placed on the bridge board for the portal to handle:
@@ -563,12 +721,14 @@ grammar and argument formats.
 
 ---
 
-## 7. Source File Reference
+## 8. Source File Reference
 
 | Concept | Source file |
 |---------|-------------|
-| HTTP API server (all endpoints) | `templemeads/src/bridge_server.rs` |
+| HTTP API server (all endpoints including `/notify`) | `templemeads/src/bridge_server.rs` |
 | `sign_api_call` function | `templemeads/src/bridge_server.rs` |
-| Bridge board (OpenPortal → portal jobs) | `templemeads/src/bridgeboard.rs` |
-| `run` and `status` logic | `templemeads/src/bridge.rs` |
+| Bridge board (OpenPortal → portal jobs), `notification_url` storage | `templemeads/src/bridgeboard.rs` |
+| `run`, `status`, and `notify` logic | `templemeads/src/bridge.rs` |
+| `deliver_notification`, `spawn_notification_delivery_task`, `bridge_notify_runner` | `bridge/src/main.rs` |
+| Delivery queue, pending-fetch map (`enqueue`, `pop_queued`, `add`, `get`, `remove`) | `templemeads/src/notificationstate.rs` |
 | Bridge agent main (instruction dispatch) | `bridge/src/main.rs` |

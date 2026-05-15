@@ -319,6 +319,29 @@ d.logs(level="WARN+", search="timeout")  # warning/error messages containing "ti
 
 ---
 
+### `NotificationStatistics`
+
+All-time notification counters for a single agent. Returned by
+`DiagnosticsReport.notification_statistics`.
+
+| Property | Type | Description |
+|---|---|---|
+| `total_received` | `int` | Notifications received by this agent from the network |
+| `total_sent` | `int` | Notifications successfully delivered (to next hop or web portal) |
+| `total_failed` | `int` | Notifications dropped after all delivery attempts failed |
+
+```python
+report = openportal.diagnostics("brics.aip1.clusters.shared").detail()
+ns = report.notification_statistics
+print(f"received={ns.total_received} sent={ns.total_sent} failed={ns.total_failed}")
+# or just
+print(ns)  # NotificationStatistics(received=12, sent=12, failed=0)
+```
+
+A non-zero `total_failed` also appears as a string in `report.warnings`.
+
+---
+
 ### `LogEntry`
 
 A single log message captured from the agent's tracing framework.

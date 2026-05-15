@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.30.1] - 2026-05-15
+
 ### Added
 
 - **`fetch_notification` Python function** — `openportal.fetch_notification(uuid)`
@@ -1509,6 +1511,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.30.1]: https://github.com/isambard-sc/openportal/releases/tag/0.30.1
 [0.30.0]: https://github.com/isambard-sc/openportal/releases/tag/0.30.0
 [0.29.0]: https://github.com/isambard-sc/openportal/releases/tag/0.29.0
 [0.28.0]: https://github.com/isambard-sc/openportal/releases/tag/0.28.0

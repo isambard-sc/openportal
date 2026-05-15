@@ -49,7 +49,7 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
 /// The bridge wraps the notification in a `Forward` event addressed to the
 /// portal so the portal can strip the bridge from the path before forwarding.
 pub async fn notify(command: &str) -> Result<(), Error> {
-    tracing::info!("Received notification command: {}", command);
+    tracing::debug!("Received notification command: {}", command);
 
     let my_name = agent::name().await;
 

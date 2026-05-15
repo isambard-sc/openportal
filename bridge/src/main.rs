@@ -661,7 +661,7 @@ async fn deliver_notification(notification_url: &Option<Url>, notification: &Not
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                tracing::info!(
+                tracing::debug!(
                     "Notification [{}] fetched by web portal: {}",
                     notification.id(),
                     notification.event()

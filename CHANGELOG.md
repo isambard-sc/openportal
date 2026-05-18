@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **`forwarded_for` field on `Job`** — bridge-board jobs created by the portal's
+  virtual resource runner now carry the original job destination (e.g.
+  `remove.local.resource`) in a `forwarded_for` field. Web-portal code can read
+  this via `job.forwarded_for` (Python `Destination | None`) instead of
+  reconstructing the originating portal from the bridge destination. The field is
+  absent (`null`) on all other jobs and is backwards-compatible with older agents
+  that do not set it.
+
 ## [0.30.1] - 2026-05-15
 
 ### Added

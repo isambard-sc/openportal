@@ -298,6 +298,9 @@ pub struct Job {
     state: Status,
     result: Option<String>,
     result_type: Option<String>,
+    #[serde(default)]
+    #[ts(as = "Option<String>")]
+    forwarded_for: Option<Destination>,
     #[serde(skip)]
     #[ts(skip)]
     board: Option<Peer>,
@@ -343,6 +346,7 @@ impl Job {
             state: Status::Created,
             result: None,
             result_type: None,
+            forwarded_for: None,
             board: None,
         })
     }
@@ -382,6 +386,7 @@ impl Job {
             state: self.state.clone(),
             result: self.result.clone(),
             result_type: self.result_type.clone(),
+            forwarded_for: self.forwarded_for.clone(),
             board: self.board.clone(),
         }
     }
@@ -422,6 +427,17 @@ impl Job {
         self.version
     }
 
+    pub fn forwarded_for(&self) -> Option<Destination> {
+        self.forwarded_for.clone()
+    }
+
+    pub fn with_forwarded_for(self, dest: Destination) -> Self {
+        Self {
+            forwarded_for: Some(dest),
+            ..self
+        }
+    }
+
     pub fn increment_version(&self) -> Self {
         Self {
             id: self.id,
@@ -433,6 +449,7 @@ impl Job {
             state: self.state.clone(),
             result: self.result.clone(),
             result_type: self.result_type.clone(),
+            forwarded_for: self.forwarded_for.clone(),
             board: self.board.clone(),
         }
     }
@@ -487,6 +504,7 @@ impl Job {
                 state: Status::Pending,
                 result: self.result.clone(),
                 result_type: self.result_type.clone(),
+                forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),
             Status::Pending => Ok(self.clone()),
@@ -529,6 +547,7 @@ impl Job {
                 state: Status::Duplicate,
                 result: job.id.to_string().into(),
                 result_type: None,
+                forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -549,6 +568,7 @@ impl Job {
                 state: Status::Running,
                 result: progress,
                 result_type: None,
+                forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -576,6 +596,7 @@ impl Job {
                 state: other.state.clone(),
                 result: other.result.clone(),
                 result_type: other.result_type.clone(),
+                forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -596,6 +617,7 @@ impl Job {
                 state: Status::Complete,
                 result: None,
                 result_type: Some("None".to_string()),
+                forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -620,6 +642,7 @@ impl Job {
                 state: Status::Complete,
                 result: Some(serde_json::to_string(&result)?),
                 result_type: Some(T::type_name().to_string()),
+                forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -640,6 +663,7 @@ impl Job {
                 state: Status::Error,
                 result: Some(message.to_owned()),
                 result_type: Some("Error".to_string()),
+                forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(

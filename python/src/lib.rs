@@ -1324,6 +1324,11 @@ impl Job {
     }
 
     #[getter]
+    fn forwarded_for(&self) -> PyResult<Option<Destination>> {
+        Ok(self.0.forwarded_for().map(|d| d.into()))
+    }
+
+    #[getter]
     fn instruction(&self) -> PyResult<Instruction> {
         Ok(self.0.instruction().into())
     }

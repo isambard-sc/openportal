@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
                     tracing::debug!("Creating project {} with details {}", project, details);
 
                     job.completed(
-                        create_project(&me, &resource, &project, &details).await?)
+                        create_project(&me, &resource, &project, &details, &job.destination()).await?)
                 }
                 RemoveProject(project) => {
                     tracing::debug!("Removing project {}", project);
@@ -97,31 +97,31 @@ async fn main() -> Result<()> {
                     // from the portal, and also removes the project from the
                     // bridge agent
                     job.completed(
-                        remove_project(&me, &resource, &project).await?)
+                        remove_project(&me, &resource, &project, &job.destination()).await?)
                 }
                 UpdateProject(project, details) => {
                     tracing::debug!("Updating project {} with details {}", project, details);
 
                     job.completed(
-                        update_project(&me, &resource, &project, &details).await?)
+                        update_project(&me, &resource, &project, &details, &job.destination()).await?)
                 }
                 GetProject(project) => {
                     tracing::debug!("Getting project {}", project);
 
                     job.completed(
-                        get_project(&me, &resource, &project).await?)
+                        get_project(&me, &resource, &project, &job.destination()).await?)
                 }
                 GetAward(project) => {
                     tracing::debug!("Getting award for project {}", project);
 
                     job.completed(
-                        get_award(&me, &resource, &project).await?)
+                        get_award(&me, &resource, &project, &job.destination()).await?)
                 }
                 GetAwards(portal) => {
                     tracing::debug!("Getting all awards for portal {}", portal);
 
                     job.completed(
-                        get_awards(&me, &resource, &portal).await?)
+                        get_awards(&me, &resource, &portal, &job.destination()).await?)
                 }
                 GetProjects(portal) => {
                     tracing::debug!("Getting all projects");
@@ -129,25 +129,25 @@ async fn main() -> Result<()> {
                     // This is a special instruction that returns all projects
                     // that this portal has access to
                     job.completed(
-                        get_projects(&me, &resource, &portal).await?)
+                        get_projects(&me, &resource, &portal, &job.destination()).await?)
                 }
                 GetProjectMapping(project) => {
                     tracing::debug!("Getting project mapping for {}", project);
 
                     job.completed(
-                        get_project_mapping(&me, &resource, &project).await?)
+                        get_project_mapping(&me, &resource, &project, &job.destination()).await?)
                 }
                 GetUsers(project) => {
                     tracing::debug!("Getting users for project {}", project);
 
                     job.completed(
-                        get_users(&me, &resource, &project).await?)
+                        get_users(&me, &resource, &project, &job.destination()).await?)
                 }
                 GetUsageReport(project, dates) => {
                     tracing::debug!("Getting usage report for {} for dates {}", project, dates);
 
                     job.completed(
-                        get_usage_report(&me, &resource, &project, &dates).await?)
+                        get_usage_report(&me, &resource, &project, &dates, &job.destination()).await?)
                 }
                 GetUsageReports(portal, dates) => {
                     tracing::debug!("Getting usage reports for portal {}", portal);
@@ -155,19 +155,19 @@ async fn main() -> Result<()> {
                     // This is a special instruction that returns all usage reports
                     // that this portal has access to
                     job.completed(
-                        get_usage_reports(&me, &resource, &portal, &dates).await?)
+                        get_usage_reports(&me, &resource, &portal, &dates, &job.destination()).await?)
                 }
                 GetStorageReport(project, dates) => {
                     tracing::debug!("Getting storage report for {}", project);
 
                     job.completed(
-                        get_storage_report(&me, &resource, &project, &dates).await?)
+                        get_storage_report(&me, &resource, &project, &dates, &job.destination()).await?)
                 }
                 GetStorageReports(portal, dates) => {
                     tracing::debug!("Getting storage reports for portal {}", portal);
 
                     job.completed(
-                        get_storage_reports(&me, &resource, &portal, &dates).await?)
+                        get_storage_reports(&me, &resource, &portal, &dates, &job.destination()).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -648,6 +648,7 @@ pub async fn create_project(
     resource: &str,
     project: &ProjectIdentifier,
     details: &ProjectDetails,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -668,6 +669,7 @@ pub async fn create_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -704,6 +706,7 @@ pub async fn update_project(
     resource: &str,
     project: &ProjectIdentifier,
     details: &ProjectDetails,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -724,6 +727,7 @@ pub async fn update_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -759,6 +763,7 @@ pub async fn remove_project(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to remove the project.
@@ -778,6 +783,7 @@ pub async fn remove_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -813,6 +819,7 @@ pub async fn get_project(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<ProjectDetails, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -832,6 +839,7 @@ pub async fn get_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -868,6 +876,7 @@ pub async fn get_award(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<ProjectDetails, Error> {
     match agent::bridge(BRIDGE_WAIT_TIME).await {
         Some(bridge) => {
@@ -881,6 +890,7 @@ pub async fn get_award(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -916,6 +926,7 @@ pub async fn get_awards(
     me: &str,
     resource: &str,
     portal: &PortalIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<Vec<ProjectDetails>, Error> {
     match agent::bridge(BRIDGE_WAIT_TIME).await {
         Some(bridge) => {
@@ -929,6 +940,7 @@ pub async fn get_awards(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -965,6 +977,7 @@ pub async fn get_projects(
     me: &str,
     resource: &str,
     portal: &PortalIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<Vec<ProjectMapping>, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to get the projects.
@@ -982,6 +995,7 @@ pub async fn get_projects(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -1018,6 +1032,7 @@ pub async fn get_project_mapping(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -1037,6 +1052,7 @@ pub async fn get_project_mapping(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -1076,6 +1092,7 @@ pub async fn get_users(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<Vec<UserMapping>, Error> {
     match agent::bridge(BRIDGE_WAIT_TIME).await {
         Some(bridge) => {
@@ -1089,6 +1106,7 @@ pub async fn get_users(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -1123,6 +1141,7 @@ pub async fn get_usage_report(
     resource: &str,
     project: &ProjectIdentifier,
     dates: &DateRange,
+    forwarded_for: &Destination,
 ) -> Result<ProjectUsageReport, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -1143,6 +1162,7 @@ pub async fn get_usage_report(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -1180,6 +1200,7 @@ pub async fn get_storage_report(
     resource: &str,
     project: &ProjectIdentifier,
     dates: &DateRange,
+    forwarded_for: &Destination,
 ) -> Result<ProjectStorageReport, Error> {
     match agent::bridge(BRIDGE_WAIT_TIME).await {
         Some(bridge) => {
@@ -1194,6 +1215,7 @@ pub async fn get_storage_report(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -1228,6 +1250,7 @@ pub async fn get_storage_reports(
     resource: &str,
     portal: &PortalIdentifier,
     dates: &DateRange,
+    forwarded_for: &Destination,
 ) -> Result<StorageReport, Error> {
     match agent::bridge(BRIDGE_WAIT_TIME).await {
         Some(bridge) => {
@@ -1242,6 +1265,7 @@ pub async fn get_storage_reports(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -1276,6 +1300,7 @@ pub async fn get_usage_reports(
     resource: &str,
     portal: &PortalIdentifier,
     dates: &DateRange,
+    forwarded_for: &Destination,
 ) -> Result<UsageReport, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to get the reports.
@@ -1294,6 +1319,7 @@ pub async fn get_usage_reports(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 

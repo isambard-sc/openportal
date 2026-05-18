@@ -110,6 +110,7 @@ Represents a unit of work in the OpenPortal system.
 |---|---|---|
 | `id` | `Uuid` | Unique job identifier |
 | `destination` | `Destination` | Full routing path (e.g. `portal.provider.clusters.cluster`) |
+| `forwarded_for` | `Destination \| None` | Original destination before the portal rewrote it for the bridge (e.g. `remote.local.resource`). Set on bridge-board jobs created by the portal's virtual resource runner; `None` on all other jobs. Identifies the true originating portal. |
 | `instruction` | `Instruction` | The parsed instruction (e.g. `AddUser`) |
 | `state` | `Status` | Current job state |
 | `version` | `int` | Monotonically increasing version counter |

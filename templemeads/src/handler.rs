@@ -78,6 +78,16 @@ pub async fn set_notify_runner(runner: AsyncNotifyRunnable) -> Result<()> {
     Ok(())
 }
 
+/// Deliver a notification directly to this agent's registered notify runner.
+/// Used when the current agent is the final destination in the notification path.
+pub async fn invoke_notify_runner(envelope: NotificationEnvelope) -> Result<()> {
+    let runner = SERVICE_DETAILS.read().await.notify_runner;
+    if let Err(e) = runner(envelope).await {
+        tracing::warn!("Local notify runner returned error: {}", e);
+    }
+    Ok(())
+}
+
 ///
 /// This is the main function that processes a command sent via the OpenPortal system
 /// This will either route the command to the right place, or if the command has reached

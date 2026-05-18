@@ -8,9 +8,6 @@ use templemeads::agent;
 use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::command::Command;
-use templemeads::destination::Destination;
-use templemeads::diagnostics;
 use templemeads::grammar::Instruction::{
     AddProject, AddUser, BlockProject, BlockUser, ClearProjectQuota, ClearUserQuota, GetHomeDir,
     GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs,
@@ -23,7 +20,7 @@ use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
-use templemeads::notification::{default_notify_runner, Notification, NotificationEvent};
+use templemeads::notification::{self, default_notify_runner, NotificationEvent};
 use templemeads::set_notify_runner;
 use templemeads::storage::{Quota, Volume};
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};
@@ -141,7 +138,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    send_notification(&envelope, NotificationEvent::ProjectAdded(project.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectAdded(project.clone())).await;
                     job.completed(mapping)
                 },
                 RemoveProject(project) => {
@@ -149,7 +146,7 @@ async fn main() -> Result<()> {
 
                     // remove the project from the cluster
                     let mapping = remove_project_from_cluster(me.name(), &project).await?;
-                    send_notification(&envelope, NotificationEvent::ProjectRemoved(project.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectRemoved(project.clone())).await;
                     job.completed(mapping)
                 },
                 AddUser(user) => {
@@ -219,7 +216,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    send_notification(&envelope, NotificationEvent::UserAdded(user.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserAdded(user.clone())).await;
                     job.completed(mapping)
                 }
                 RemoveUser(user) => {
@@ -240,17 +237,17 @@ async fn main() -> Result<()> {
 
                     // remove the user from the cluster
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
-                    send_notification(&envelope, NotificationEvent::UserRemoved(user.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserRemoved(user.clone())).await;
                     job.completed(mapping)
                 }
                 BlockUser(user) => {
                     let mapping = block_user_on_cluster(me.name(), &user).await?;
-                    send_notification(&envelope, NotificationEvent::UserBlocked(user.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserBlocked(user.clone())).await;
                     job.completed(mapping)
                 }
                 UnblockUser(user) => {
                     let mapping = unblock_user_on_cluster(me.name(), &user).await?;
-                    send_notification(&envelope, NotificationEvent::UserUnblocked(user.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserUnblocked(user.clone())).await;
                     job.completed(mapping)
                 }
                 IsBlockedUser(user) => {
@@ -259,12 +256,12 @@ async fn main() -> Result<()> {
                 }
                 BlockProject(project) => {
                     let mappings = block_project_on_cluster(me.name(), &project).await?;
-                    send_notification(&envelope, NotificationEvent::ProjectBlocked(project.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectBlocked(project.clone())).await;
                     job.completed(mappings)
                 }
                 UnblockProject(project) => {
                     let mappings = unblock_project_on_cluster(me.name(), &project).await?;
-                    send_notification(&envelope, NotificationEvent::ProjectUnblocked(project.clone())).await;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectUnblocked(project.clone())).await;
                     job.completed(mappings)
                 }
                 IsBlockedProject(project) => {
@@ -389,56 +386,6 @@ async fn main() -> Result<()> {
 /// e.g. a job addressed to `brics.aip1.clusters.shared` produces a notification
 /// addressed to `shared.clusters.aip1.brics`. The notification is forwarded to
 /// the platform agent (next hop upward) and routed from there.
-async fn send_notification(envelope: &Envelope, event: NotificationEvent) {
-    let agents = envelope.job().destination().agents();
-
-    if agents.len() < 2 {
-        tracing::warn!(
-            "Cannot send notification: job destination too short: {:?}",
-            agents
-        );
-        diagnostics::increment_notification_failed().await;
-        return;
-    }
-
-    let reversed: Vec<&str> = agents.iter().rev().map(|s| s.as_str()).collect();
-    let dest_str = reversed.join(".");
-
-    let dest = match Destination::parse(&dest_str) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(
-                "Cannot send notification: could not parse destination '{}': {}",
-                dest_str,
-                e
-            );
-            diagnostics::increment_notification_failed().await;
-            return;
-        }
-    };
-
-    let notification = Notification::new(dest, event);
-
-    // Next hop is the second agent in the reversed path (the platform above us)
-    match agent::find(reversed[1], 0).await {
-        Some(peer) => {
-            if let Err(e) = Command::notify(&notification).send_to(&peer).await {
-                tracing::warn!("Could not send notification [{}]: {}", notification.id(), e);
-                diagnostics::increment_notification_failed().await;
-            } else {
-                diagnostics::increment_notification_sent().await;
-            }
-        }
-        None => {
-            tracing::warn!(
-                "Cannot send notification [{}]: upstream agent '{}' not found",
-                notification.id(),
-                reversed[1]
-            );
-            diagnostics::increment_notification_failed().await;
-        }
-    }
-}
 
 async fn assert_agents_connected() -> Result<(), Error> {
     // check that we are connected to the filesystem and scheduler agents.

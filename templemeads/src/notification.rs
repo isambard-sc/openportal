@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::agent;
 use crate::agent::Peer;
+use crate::command::Command;
 use crate::destination::Destination;
+use crate::diagnostics;
 use crate::error::Error;
 use crate::grammar::{ProjectIdentifier, UserIdentifier};
+use crate::handler::invoke_notify_runner;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -198,6 +202,71 @@ impl NotificationEnvelope {
 pub type AsyncNotifyRunnable =
     fn(NotificationEnvelope) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 
+/// Send a notification to the next hop in `destination`.
+///
+/// Finds the agent immediately after the current agent in `destination` and
+/// sends a `Notification` carrying `event` to it. Fire-and-forget: failures
+/// are logged and counted but not propagated to the caller.
+pub async fn send(destination: &Destination, event: NotificationEvent) {
+    let my_name = agent::name().await;
+    let notification = Notification::new(destination.clone(), event);
+
+    if destination.last() == my_name {
+        // We are the final destination — deliver to our own notify runner.
+        let self_peer = agent::get_self(None).await;
+        let envelope = NotificationEnvelope::new(
+            self_peer.name(),
+            self_peer.name(),
+            self_peer.zone(),
+            &notification,
+        );
+        if let Err(e) = invoke_notify_runner(envelope).await {
+            tracing::warn!(
+                "Local notify runner error for [{}]: {}",
+                notification.id(),
+                e
+            );
+            diagnostics::increment_notification_failed().await;
+        } else {
+            diagnostics::increment_notification_sent().await;
+        }
+        return;
+    }
+
+    match destination.next(&my_name) {
+        Some(next_name) => match agent::find(&next_name, 0).await {
+            Some(peer) => {
+                if let Err(e) = Command::notify(&notification).send_to(&peer).await {
+                    tracing::warn!(
+                        "Could not send notification [{}] to {}: {}",
+                        notification.id(),
+                        peer,
+                        e
+                    );
+                    diagnostics::increment_notification_failed().await;
+                } else {
+                    diagnostics::increment_notification_sent().await;
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "Cannot send notification: upstream agent '{}' not found",
+                    next_name
+                );
+                diagnostics::increment_notification_failed().await;
+            }
+        },
+        None => {
+            tracing::warn!(
+                "Cannot send notification: '{}' not found in destination '{}'",
+                my_name,
+                destination
+            );
+            diagnostics::increment_notification_failed().await;
+        }
+    }
+}
+
 /// Default notify runner — logs the notification and does nothing else.
 pub fn default_notify_runner(
     envelope: NotificationEnvelope,
@@ -206,7 +275,7 @@ pub fn default_notify_runner(
         tracing::info!(
             "Notification [{}] from {} : {}",
             envelope.notification().id(),
-            envelope.sender(),
+            envelope.notification().destination(),
             envelope.notification().event()
         );
         Ok(())

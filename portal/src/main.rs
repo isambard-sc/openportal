@@ -8,7 +8,7 @@ use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::command::Command;
-use templemeads::notification::{NotificationEnvelope, NotificationEvent};
+use templemeads::notification::{self, NotificationEnvelope, NotificationEvent};
 use templemeads::set_notify_runner;
 
 use templemeads::agent::Type::Bridge;
@@ -87,23 +87,23 @@ async fn main() -> Result<()> {
                 CreateProject(project, details) => {
                     tracing::debug!("Creating project {} with details {}", project, details);
 
-                    job.completed(
-                        create_project(&me, &resource, &project, &details, &job.destination()).await?)
+                    let result = create_project(&me, &resource, &project, &details, &job.destination()).await?;
+                    notification::send(&job.destination().reverse(), NotificationEvent::AwardAdded(project.clone())).await;
+                    job.completed(result)
                 }
                 RemoveProject(project) => {
                     tracing::debug!("Removing project {}", project);
 
-                    // This is a special instruction that removes a project
-                    // from the portal, and also removes the project from the
-                    // bridge agent
-                    job.completed(
-                        remove_project(&me, &resource, &project, &job.destination()).await?)
+                    let result = remove_project(&me, &resource, &project, &job.destination()).await?;
+                    notification::send(&job.destination().reverse(), NotificationEvent::AwardRemoved(project.clone())).await;
+                    job.completed(result)
                 }
                 UpdateProject(project, details) => {
                     tracing::debug!("Updating project {} with details {}", project, details);
 
-                    job.completed(
-                        update_project(&me, &resource, &project, &details, &job.destination()).await?)
+                    let result = update_project(&me, &resource, &project, &details, &job.destination()).await?;
+                    notification::send(&job.destination().reverse(), NotificationEvent::AwardChanged(project.clone())).await;
+                    job.completed(result)
                 }
                 GetProject(project) => {
                     tracing::debug!("Getting project {}", project);
@@ -394,10 +394,27 @@ async fn main() -> Result<()> {
                             };
 
                             if next_index >= agents.len() {
-                                return Err(Error::InvalidInstruction(format!(
-                                    "Forward notification destination '{}' has no agent after this portal",
-                                    destination
-                                )));
+                                // The portal is both the local and remote portal
+                                // (single-portal setup). Deliver inner directly to
+                                // our own bridge.
+                                match agent::bridge(BRIDGE_WAIT_TIME).await {
+                                    Some(bridge) => {
+                                        if let Err(e) = Command::notify(inner).send_to(&bridge).await {
+                                            tracing::warn!(
+                                                "Failed to forward notification [{}] to bridge (self-portal): {}",
+                                                inner.id(),
+                                                e
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            "Forward notification [{}]: no bridge found for self-portal delivery",
+                                            inner.id()
+                                        );
+                                    }
+                                }
+                                return Ok(());
                             }
 
                             let next_agent =
@@ -467,6 +484,7 @@ async fn main() -> Result<()> {
 }
 
 const BRIDGE_WAIT_TIME: u64 = 5;
+
 
 ///
 /// Return all of the currently configured offerings

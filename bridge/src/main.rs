@@ -18,7 +18,7 @@ use templemeads::grammar::Instruction::{
     SyncOfferings, UpdateProject,
 };
 use templemeads::job::{send_queued, Envelope, Job};
-use templemeads::notification::{Notification, NotificationEnvelope, NotificationEvent};
+use templemeads::notification::{Notification, NotificationEnvelope};
 use templemeads::server;
 use templemeads::set_notify_runner;
 use templemeads::Error;
@@ -161,9 +161,6 @@ async fn main() -> Result<()> {
                     }
 
                     let completed = job.copy_result_from(&result)?;
-                    if !completed.is_error() {
-                        send_award_notification(job.destination().clone(), NotificationEvent::AwardAdded(project.clone())).await;
-                    }
                     Ok(completed)
                 }
                 RemoveProject(project) => {
@@ -198,9 +195,6 @@ async fn main() -> Result<()> {
                     }
 
                     let completed = job.copy_result_from(&result)?;
-                    if !completed.is_error() {
-                        send_award_notification(job.destination().clone(), NotificationEvent::AwardRemoved(project.clone())).await;
-                    }
                     Ok(completed)
                 }
                 UpdateProject(project, details) => {
@@ -235,9 +229,6 @@ async fn main() -> Result<()> {
                     }
 
                     let completed = job.copy_result_from(&result)?;
-                    if !completed.is_error() {
-                        send_award_notification(job.destination().clone(), NotificationEvent::AwardChanged(project.clone())).await;
-                    }
                     Ok(completed)
                 }
                 GetProject(project) => {
@@ -593,11 +584,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build an award notification and push it onto the delivery queue.
-async fn send_award_notification(destination: Destination, event: NotificationEvent) {
-    server::enqueue_notification(Notification::new(destination, event)).await;
-}
-
 /// Spawn the single background task that drains the notification delivery queue.
 /// Rate-limited to ~100 notifications/s (10 ms sleep after each delivery).
 fn spawn_notification_delivery_task() {
@@ -694,7 +680,8 @@ async fn deliver_notification(notification_url: &Option<Url>, notification: &Not
     }
 
     tracing::error!(
-        "Dropping notification [{}] after 3 failed signal attempts: {}",
+        "Dropping notification from {} [{}] after 3 failed signal attempts: {}",
+        notification.destination(),
         notification.id(),
         notification.event()
     );

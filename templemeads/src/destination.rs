@@ -105,6 +105,12 @@ impl Destination {
         self.agents.last().unwrap_or(&"".to_string()).clone()
     }
 
+    pub fn reverse(&self) -> Self {
+        let mut agents = self.agents.clone();
+        agents.reverse();
+        Self { agents }
+    }
+
     pub fn position(&self, agent: &str, previous: &str) -> Position {
         match self.agents.contains(&previous.to_string()) {
             false => Position::Error,

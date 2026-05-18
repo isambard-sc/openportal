@@ -3683,6 +3683,10 @@ impl Destination {
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
+
+    fn reverse(&self) -> PyResult<Destination> {
+        Ok(Destination(self.0.reverse()))
+    }
 }
 
 impl From<destination::Destination> for Destination {

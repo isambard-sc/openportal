@@ -10,6 +10,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`notification::send` — shared notification helper** — `templemeads` now
+  provides `notification::send(destination, event)` that routes a notification
+  to the next hop in `destination`, or delivers it locally if this agent is the
+  final destination (via `invoke_notify_runner`). Award notifications in the
+  portal and user/project notifications in the cluster both use this function;
+  the old per-crate `send_notification` / `send_award_notification` helpers are
+  removed. `Destination::reverse()` is also new, returning a copy of the path
+  with agents in reversed order.
+
 - **`forwarded_for` field on `Job`** — bridge-board jobs created by the portal's
   virtual resource runner now carry the original job destination (e.g.
   `remove.local.resource`) in a `forwarded_for` field. Web-portal code can read

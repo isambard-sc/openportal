@@ -56,7 +56,8 @@ pub mod server {
 // Re-export system info monitor for agents to use at startup
 pub use systeminfo::spawn_monitor as spawn_system_monitor;
 
-// Re-export notification runner setter so agent binaries can register handlers
+// Re-export notification runner setter and local invoker
+pub use handler::invoke_notify_runner;
 pub use handler::set_notify_runner;
 
 #[cfg(test)]

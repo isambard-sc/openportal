@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.32.0] - 2026-05-22
+
 ### Added
 
 - **`AwardDetails` member validation and atomic batch operations** —
@@ -17,7 +19,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   replaces all members; both validate every entry before making any change so
   callers never need to roll back a partial update. The Python bindings expose
   all three methods.
-
 - **Email addresses in `allowed_domains`** — `DomainPattern` now accepts exact
   email addresses (e.g. `"collaborator@gmail.com"`) alongside domain patterns
   (`"example.com"`, `"*.university.ac.uk"`). The new `is_email_allowed(email)`
@@ -38,7 +39,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   the old per-crate `send_notification` / `send_award_notification` helpers are
   removed. `Destination::reverse()` is also new, returning a copy of the path
   with agents in reversed order.
-
 - **`forwarded_for` field on `Job`** — bridge-board jobs created by the portal's
   virtual resource runner now carry the original job destination (e.g.
   `remove.local.resource`) in a `forwarded_for` field. Web-portal code can read
@@ -1552,6 +1552,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.32.0]: https://github.com/isambard-sc/openportal/releases/tag/0.32.0
 [0.31.0]: https://github.com/isambard-sc/openportal/releases/tag/0.31.0
 [0.30.1]: https://github.com/isambard-sc/openportal/releases/tag/0.30.1
 [0.30.0]: https://github.com/isambard-sc/openportal/releases/tag/0.30.0

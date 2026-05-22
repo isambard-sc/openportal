@@ -59,19 +59,19 @@ breakdown: { [key in string]?: string },
 /**
  * Link back to the award record on the funding body's system
  */
-award: Link | null, 
+award?: Link, 
 /**
  * Link to the funding call from which the award was made
  */
-call: Link | null, 
+call?: Link, 
 /**
  * Link to the project page on the remote/awarding portal
  */
-project_link: Link | null, 
+project_link?: Link, 
 /**
  * Link to the page where more time / renewal can be requested
  */
-renewal: Link | null, 
+renewal?: Link, 
 /**
  * Notes attached to this award (append-only log of messages)
  */
@@ -81,12 +81,12 @@ notes: Array<Note>,
  * receiving portal. Lets the awarder make corrections in the window
  * between creating the award and it being provisioned.
  */
-earliest_approve: string | null, 
+earliest_approve?: string, 
 /**
  * Controls whether the receiving portal may independently modify
  * membership or roles. When absent, behaviour is `Open`.
  */
-membership_control: MembershipControl | null, 
+membership_control?: MembershipControl, 
 /**
  * The list of allowed domains for this project.
  * If this is None, then all domains are allowed.

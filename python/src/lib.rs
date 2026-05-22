@@ -4975,6 +4975,10 @@ impl AwardDetails {
         Ok(self.0.is_domain_allowed(domain))
     }
 
+    fn is_email_allowed(&self, email: &str) -> PyResult<bool> {
+        Ok(self.0.is_email_allowed(email))
+    }
+
     fn merge(&self, other: &AwardDetails) -> PyResult<AwardDetails> {
         match self.0.merge(&other.0) {
             Ok(merged) => Ok(merged.into()),

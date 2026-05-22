@@ -1836,8 +1836,9 @@ impl<'de> Deserialize<'de> for Allocation {
 /// Serializes to/from JSON as a plain string (e.g., "*.example.com")
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DomainPattern {
-    /// The pattern string to match the domain
-    /// e.g. "example.com" for exact match or "*.example.com" for wildcard match
+    /// The pattern string to match a domain or a specific email address.
+    /// Domain forms: "example.com" (exact) or "*.example.com" (wildcard subdomain).
+    /// Email form: "chris@example.com" (exact, case-insensitive).
     pattern: String,
 }
 
@@ -1849,13 +1850,13 @@ impl NamedType for DomainPattern {
 
 impl DomainPattern {
     pub fn parse(pattern: &str) -> Result<Self, Error> {
-        // Validate the pattern
         if pattern.is_empty() {
             return Err(Error::Parse("Domain pattern cannot be empty".to_string()));
         }
 
-        // Check if it's a wildcard pattern
-        if pattern.starts_with("*.") {
+        if pattern.contains('@') {
+            Self::validate_email(pattern)?;
+        } else if pattern.starts_with("*.") {
             let domain_part = pattern
                 .strip_prefix("*.")
                 .ok_or_else(|| Error::Parse("Invalid wildcard pattern".to_string()))?;
@@ -1871,7 +1872,6 @@ impl DomainPattern {
             }
             Self::validate_domain_name(domain_part)?;
         } else {
-            // Exact match pattern - no wildcards allowed
             if pattern.contains('*') {
                 return Err(Error::Parse(
                     "Wildcard '*' can only appear at the start as '*.'".to_string(),
@@ -1883,6 +1883,43 @@ impl DomainPattern {
         Ok(Self {
             pattern: pattern.to_string(),
         })
+    }
+
+    /// Validates that a string is a well-formed email address: local@domain.
+    fn validate_email(email: &str) -> Result<(), Error> {
+        let mut parts = email.splitn(2, '@');
+        let local = parts
+            .next()
+            .ok_or_else(|| Error::Parse("Invalid email address".to_string()))?;
+        let domain = parts
+            .next()
+            .ok_or_else(|| Error::Parse("Email address must contain '@'".to_string()))?;
+
+        if local.is_empty() {
+            return Err(Error::Parse(
+                "Email local part cannot be empty".to_string(),
+            ));
+        }
+        if !local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
+        {
+            return Err(Error::Parse(format!(
+                "Email local part '{}' contains invalid characters",
+                local
+            )));
+        }
+        if domain.contains('@') {
+            return Err(Error::Parse(
+                "Email address must contain exactly one '@'".to_string(),
+            ));
+        }
+        Self::validate_domain_name(domain)
+    }
+
+    /// Returns true if this pattern is a specific email address rather than a domain pattern.
+    pub fn is_email_pattern(&self) -> bool {
+        self.pattern.contains('@')
     }
 
     /// Validates that a domain name contains only valid characters
@@ -1924,12 +1961,24 @@ impl DomainPattern {
         self.pattern.clone()
     }
 
-    /// Tests if a concrete domain matches this pattern
-    /// - For exact patterns (e.g., "example.com"), only exact matches return true
-    /// - For wildcard patterns (e.g., "*.example.com"), matches any subdomain of example.com
+    /// Tests if a concrete domain matches this pattern. Only valid for domain patterns;
+    /// always returns false for email patterns.
+    /// - Exact pattern (e.g., "example.com"): only exact match returns true
+    /// - Wildcard pattern (e.g., "*.example.com"): matches any single subdomain
     pub fn matches(&self, domain: &str) -> bool {
-        // Use wildmatch for case-insensitive pattern matching
+        if self.is_email_pattern() {
+            return false;
+        }
         WildMatch::new(&self.pattern.to_lowercase()).matches(&domain.to_lowercase())
+    }
+
+    /// Tests if a concrete email address matches this pattern. Only valid for email patterns;
+    /// always returns false for domain patterns. Match is case-insensitive.
+    pub fn matches_email(&self, email: &str) -> bool {
+        if !self.is_email_pattern() {
+            return false;
+        }
+        self.pattern.to_lowercase() == email.to_lowercase()
     }
 }
 
@@ -2614,6 +2663,8 @@ impl AwardDetails {
         self.allowed_domains = None;
     }
 
+    /// Returns true if the given domain is permitted by the allowed-domains list.
+    /// Email patterns in the list are ignored — use `is_email_allowed` for full email checks.
     pub fn is_domain_allowed(&self, domain: &str) -> bool {
         if let Some(allowed_domains) = &self.allowed_domains {
             if allowed_domains.is_empty() {
@@ -2630,6 +2681,33 @@ impl AwardDetails {
         } else {
             true
         }
+    }
+
+    /// Returns true if the given email address is permitted by the allowed-domains list.
+    /// An email is permitted when the list is absent (no restriction), or when at least one
+    /// entry in the list matches: either an exact email pattern matches the full address, or
+    /// a domain pattern matches the domain part of the address.
+    pub fn is_email_allowed(&self, email: &str) -> bool {
+        let Some(allowed_domains) = &self.allowed_domains else {
+            return true;
+        };
+
+        if allowed_domains.is_empty() {
+            return false;
+        }
+
+        let domain_part = email.splitn(2, '@').nth(1).unwrap_or("");
+
+        for d in allowed_domains {
+            if d.matches_email(email) {
+                return true;
+            }
+            if !domain_part.is_empty() && d.matches(domain_part) {
+                return true;
+            }
+        }
+
+        false
     }
 
     pub fn merge(&self, other: &AwardDetails) -> Result<AwardDetails, Error> {
@@ -5011,5 +5089,72 @@ mod tests {
             instruction,
             Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string())
         );
+    }
+
+    #[test]
+    fn test_domain_pattern_parse() {
+        #[allow(clippy::unwrap_used)]
+        {
+            assert!(DomainPattern::parse("example.com").is_ok());
+            assert!(DomainPattern::parse("*.example.com").is_ok());
+            assert!(DomainPattern::parse("chris@gmail.com").is_ok());
+            assert!(DomainPattern::parse("Chris.Woods@bristol.ac.uk").is_ok());
+        }
+        assert!(DomainPattern::parse("").is_err());
+        assert!(DomainPattern::parse("@gmail.com").is_err());
+        assert!(DomainPattern::parse("chris@").is_err());
+        assert!(DomainPattern::parse("chris@@gmail.com").is_err());
+        assert!(DomainPattern::parse("*.*.com").is_err());
+    }
+
+    #[test]
+    fn test_domain_pattern_is_email_pattern() {
+        #[allow(clippy::unwrap_used)]
+        {
+            assert!(!DomainPattern::parse("example.com").unwrap().is_email_pattern());
+            assert!(!DomainPattern::parse("*.example.com").unwrap().is_email_pattern());
+            assert!(DomainPattern::parse("chris@gmail.com").unwrap().is_email_pattern());
+        }
+    }
+
+    #[test]
+    fn test_domain_pattern_matches_email() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let email_pattern = DomainPattern::parse("chris@gmail.com").unwrap();
+            assert!(email_pattern.matches_email("chris@gmail.com"));
+            assert!(email_pattern.matches_email("Chris@Gmail.COM"));
+            assert!(!email_pattern.matches_email("other@gmail.com"));
+            assert!(!email_pattern.matches_email("chris@example.com"));
+
+            // domain patterns never match via matches_email
+            let domain_pattern = DomainPattern::parse("*.gmail.com").unwrap();
+            assert!(!domain_pattern.matches_email("chris@gmail.com"));
+        }
+    }
+
+    #[test]
+    fn test_is_email_allowed() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+
+            // None = all allowed
+            assert!(details.is_email_allowed("anyone@anywhere.com"));
+
+            // Add patterns: wildcard domain + specific email
+            details.add_allowed_domain(DomainPattern::parse("*.example.com").unwrap());
+            details.add_allowed_domain(DomainPattern::parse("chris@gmail.com").unwrap());
+
+            // Subdomain matches via domain pattern
+            assert!(details.is_email_allowed("user@sub.example.com"));
+            // Exact email match (and case-insensitive)
+            assert!(details.is_email_allowed("chris@gmail.com"));
+            assert!(details.is_email_allowed("CHRIS@GMAIL.COM"));
+            // Different user at gmail is not allowed
+            assert!(!details.is_email_allowed("other@gmail.com"));
+            // Wildcard *.example.com does not match bare example.com
+            assert!(!details.is_email_allowed("user@example.com"));
+        }
     }
 }

@@ -2,6 +2,7 @@
 import type { ExpiredJobEntry } from "./ExpiredJobEntry";
 import type { FailedJobEntry } from "./FailedJobEntry";
 import type { LogEntry } from "./LogEntry";
+import type { NotificationStatistics } from "./NotificationStatistics";
 import type { RunningJobEntry } from "./RunningJobEntry";
 import type { SlowJobEntry } from "./SlowJobEntry";
 
@@ -40,4 +41,8 @@ warnings: Array<string>,
 /**
  * Recent log messages (most recent first, up to 100)
  */
-recent_logs: Array<LogEntry>, };
+recent_logs: Array<LogEntry>, 
+/**
+ * Notification send/receive/failure totals
+ */
+notification_statistics: NotificationStatistics, };

@@ -9,8 +9,8 @@ export type Link = {
 /**
  * Human-readable identifier, e.g. "EP/X000000/1" or "061-4738952-1"
  */
-id: string | null, 
+id?: string, 
 /**
  * URL pointing to the resource (must be a valid URL if provided)
  */
-url: string | null, };
+url?: string, };

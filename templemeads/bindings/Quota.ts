@@ -11,4 +11,4 @@ limit: string,
 /**
  * Current usage expressed as a human-readable size string (e.g. "2.5GB")
  */
-usage: string | null, };
+usage?: string, };

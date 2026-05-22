@@ -413,6 +413,38 @@ See [json-types.md](json-types.md) for the full JSON schema.
 `openportal.ProjectDetails` is an alias for `AwardDetails` for backward
 compatibility; both refer to the same class.
 
+**Member management methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `add_member` | `(email: str, role: str) → None` | Add or update one member. Validates that `email` is a well-formed address and is permitted by `allowed_domains`. Raises `OSError` if either check fails. |
+| `add_members` | `(members: dict[str, str]) → None` | Atomically add or update multiple members (email → role). All entries are validated before any change is applied; raises `OSError` and leaves members unchanged if any entry is invalid. |
+| `set_members` | `(members: dict[str, str]) → None` | Atomically replace all members. All entries are validated before any change is applied; raises `OSError` and leaves members unchanged if any entry is invalid. |
+| `remove_member` | `(email: str) → None` | Remove one member by email. No-op if not present. |
+| `clear_members` | `() → None` | Remove all members. |
+
+**Domain allow-list methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `is_domain_allowed` | `(domain: str) → bool` | Return `True` if the bare domain (e.g. `"example.com"`) is permitted by the allow-list. Email patterns in the list are ignored. |
+| `is_email_allowed` | `(email: str) → bool` | Return `True` if the full email address is permitted. Checks exact email patterns and domain patterns against the address's domain. |
+| `add_allowed_domain` | `(domain: str \| DomainPattern) → None` | Append one entry to the allow-list. Accepts a domain pattern (`"example.com"`, `"*.example.com"`) or an exact email address (`"user@example.com"`). |
+| `set_allowed_domains` | `(domains: list[str \| DomainPattern] \| None) → None` | Replace the allow-list. Pass `None` to remove all restrictions. |
+| `clear_allowed_domains` | `() → None` | Remove the allow-list (all emails become permitted). |
+
+**Allow-list behaviour:**
+
+- `allowed_domains` is `None` (unset) — all email addresses are permitted.
+- `allowed_domains` is `[]` (empty list) — no email addresses are permitted.
+- Otherwise — an email is permitted if it matches at least one entry: either an
+  exact email pattern matches the full address (case-insensitive), or a domain
+  pattern matches the domain part of the address.
+
+`add_member`, `add_members`, and `set_members` enforce the allow-list at call
+time. Existing members are never retroactively removed if the allow-list changes
+after they were added.
+
 ---
 
 ### `Usage`

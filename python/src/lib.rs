@@ -4678,8 +4678,9 @@ impl AwardDetails {
 
     #[setter]
     fn set_members(&mut self, members: std::collections::BTreeMap<String, String>) -> PyResult<()> {
-        self.0.set_members(members);
-        Ok(())
+        self.0
+            .set_members(members)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
 
     fn clear_members(&mut self) -> PyResult<()> {
@@ -4688,8 +4689,15 @@ impl AwardDetails {
     }
 
     fn add_member(&mut self, username: &str, role: &str) -> PyResult<()> {
-        self.0.add_member(username, role);
-        Ok(())
+        self.0
+            .add_member(username, role)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    }
+
+    fn add_members(&mut self, members: std::collections::BTreeMap<String, String>) -> PyResult<()> {
+        self.0
+            .add_members(members)
+            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
     }
 
     fn remove_member(&mut self, username: &str) -> PyResult<()> {

@@ -1831,6 +1831,38 @@ impl<'de> Deserialize<'de> for Allocation {
     }
 }
 
+/// Validates that a string is a well-formed email address (local@domain).
+pub(crate) fn validate_email_address(email: &str) -> Result<(), Error> {
+    let mut parts = email.splitn(2, '@');
+    let local = parts
+        .next()
+        .ok_or_else(|| Error::Parse("Invalid email address".to_string()))?;
+    let domain = parts
+        .next()
+        .ok_or_else(|| Error::Parse("Email address must contain '@'".to_string()))?;
+
+    if local.is_empty() {
+        return Err(Error::Parse(
+            "Email local part cannot be empty".to_string(),
+        ));
+    }
+    if !local
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
+    {
+        return Err(Error::Parse(format!(
+            "Email local part '{}' contains invalid characters",
+            local
+        )));
+    }
+    if domain.contains('@') {
+        return Err(Error::Parse(
+            "Email address must contain exactly one '@'".to_string(),
+        ));
+    }
+    DomainPattern::validate_domain_name(domain)
+}
+
 /// A domain pattern - this can be used to match domains that are allowed / denied
 /// Supports exact matches (e.g., "example.com") and wildcard matches (e.g., "*.example.com")
 /// Serializes to/from JSON as a plain string (e.g., "*.example.com")
@@ -1885,36 +1917,8 @@ impl DomainPattern {
         })
     }
 
-    /// Validates that a string is a well-formed email address: local@domain.
     fn validate_email(email: &str) -> Result<(), Error> {
-        let mut parts = email.splitn(2, '@');
-        let local = parts
-            .next()
-            .ok_or_else(|| Error::Parse("Invalid email address".to_string()))?;
-        let domain = parts
-            .next()
-            .ok_or_else(|| Error::Parse("Email address must contain '@'".to_string()))?;
-
-        if local.is_empty() {
-            return Err(Error::Parse(
-                "Email local part cannot be empty".to_string(),
-            ));
-        }
-        if !local
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
-        {
-            return Err(Error::Parse(format!(
-                "Email local part '{}' contains invalid characters",
-                local
-            )));
-        }
-        if domain.contains('@') {
-            return Err(Error::Parse(
-                "Email address must contain exactly one '@'".to_string(),
-            ));
-        }
-        Self::validate_domain_name(domain)
+        validate_email_address(email)
     }
 
     /// Returns true if this pattern is a specific email address rather than a domain pattern.
@@ -1964,7 +1968,7 @@ impl DomainPattern {
     /// Tests if a concrete domain matches this pattern. Only valid for domain patterns;
     /// always returns false for email patterns.
     /// - Exact pattern (e.g., "example.com"): only exact match returns true
-    /// - Wildcard pattern (e.g., "*.example.com"): matches any single subdomain
+    /// - Wildcard pattern (e.g., "*.example.com"): matches any subdomain at any depth
     pub fn matches(&self, domain: &str) -> bool {
         if self.is_email_pattern() {
             return false;
@@ -2422,21 +2426,42 @@ impl AwardDetails {
         self.members.clone()
     }
 
-    pub fn add_member(&mut self, email: &str, role: &str) {
+    /// Validates a single (email, role) pair against the allowed-domains list.
+    fn validate_member(&self, email: &str, role: &str) -> Result<(), Error> {
+        if role.is_empty() {
+            return Err(Error::Parse("Member role cannot be empty".to_string()));
+        }
+        validate_email_address(email)?;
+        if !self.is_email_allowed(email) {
+            return Err(Error::Parse(format!(
+                "Email '{}' is not in the allowed domains for this project",
+                email
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn add_member(&mut self, email: &str, role: &str) -> Result<(), Error> {
         let email = email.trim();
         let role = role.trim();
-
-        if email.is_empty() || role.is_empty() {
-            tracing::warn!(
-                "Invalid ProjectDetails - email or role cannot be empty: email='{}', role='{}'",
-                email,
-                role
-            );
-            return;
-        };
-
+        self.validate_member(email, role)?;
         let members = self.members.get_or_insert_with(BTreeMap::new);
         members.insert(email.to_string(), role.to_string());
+        Ok(())
+    }
+
+    /// Validates and adds all members in `new_members` without replacing existing ones.
+    /// All entries are validated before any are applied; if any entry is invalid the
+    /// existing members are left unchanged.
+    pub fn add_members(&mut self, new_members: BTreeMap<String, String>) -> Result<(), Error> {
+        for (email, role) in &new_members {
+            self.validate_member(email.trim(), role.trim())?;
+        }
+        let members = self.members.get_or_insert_with(BTreeMap::new);
+        for (email, role) in new_members {
+            members.insert(email, role);
+        }
+        Ok(())
     }
 
     pub fn remove_member(&mut self, email: &str) {
@@ -2452,12 +2477,18 @@ impl AwardDetails {
         }
     }
 
-    pub fn set_members(&mut self, members: BTreeMap<String, String>) {
+    /// Validates and replaces all members atomically. All entries are validated before
+    /// any changes are made; if any entry is invalid the existing members are unchanged.
+    pub fn set_members(&mut self, members: BTreeMap<String, String>) -> Result<(), Error> {
+        for (email, role) in &members {
+            self.validate_member(email.trim(), role.trim())?;
+        }
         if members.is_empty() {
             self.members = None;
         } else {
             self.members = Some(members);
         }
+        Ok(())
     }
 
     pub fn clear_members(&mut self) {
@@ -5092,6 +5123,19 @@ mod tests {
     }
 
     #[test]
+    fn test_domain_pattern_wildcard_depth() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let p = DomainPattern::parse("*.ac.uk").unwrap();
+            assert!(p.matches("bristol.ac.uk"));
+            assert!(p.matches("cs.bristol.ac.uk"));
+            assert!(p.matches("dept.cs.bristol.ac.uk"));
+            assert!(!p.matches("ac.uk"));
+            assert!(!p.matches("notac.uk"));
+        }
+    }
+
+    #[test]
     fn test_domain_pattern_parse() {
         #[allow(clippy::unwrap_used)]
         {
@@ -5130,6 +5174,99 @@ mod tests {
             // domain patterns never match via matches_email
             let domain_pattern = DomainPattern::parse("*.gmail.com").unwrap();
             assert!(!domain_pattern.matches_email("chris@gmail.com"));
+        }
+    }
+
+    #[test]
+    fn test_validate_email_address() {
+        assert!(validate_email_address("alice@example.com").is_ok());
+        assert!(validate_email_address("chris.woods+tag@bristol.ac.uk").is_ok());
+        assert!(validate_email_address("").is_err());
+        assert!(validate_email_address("notanemail").is_err());
+        assert!(validate_email_address("@example.com").is_err());
+        assert!(validate_email_address("alice@").is_err());
+        assert!(validate_email_address("alice@@example.com").is_err());
+    }
+
+    #[test]
+    fn test_add_member_validation() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+
+            // Basic valid add
+            assert!(details.add_member("alice@example.com", "member").is_ok());
+
+            // Non-email strings are errors
+            assert!(details.add_member("notanemail", "member").is_err());
+            assert!(details.add_member("", "member").is_err());
+            assert!(details.add_member("alice@example.com", "").is_err());
+
+            // Domain restriction enforced
+            details.add_allowed_domain(DomainPattern::parse("*.example.com").unwrap());
+            assert!(details.add_member("bob@sub.example.com", "member").is_ok());
+            assert!(details.add_member("chris@gmail.com", "member").is_err());
+
+            // Explicit email allowance overrides domain restriction
+            details.add_allowed_domain(DomainPattern::parse("chris@gmail.com").unwrap());
+            assert!(details.add_member("chris@gmail.com", "member").is_ok());
+        }
+    }
+
+    #[test]
+    fn test_set_members_atomic() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.add_allowed_domain(DomainPattern::parse("example.com").unwrap());
+
+            // Seed an existing member
+            details.add_member("alice@example.com", "pi").unwrap();
+
+            // set_members with one invalid entry must leave members unchanged
+            let mut bad = BTreeMap::new();
+            bad.insert("bob@example.com".to_string(), "member".to_string());
+            bad.insert("intruder@evil.com".to_string(), "member".to_string());
+            assert!(details.set_members(bad).is_err());
+            // alice is still there, bob was not added
+            let members = details.members().unwrap();
+            assert!(members.contains_key("alice@example.com"));
+            assert!(!members.contains_key("bob@example.com"));
+
+            // set_members with all valid entries replaces atomically
+            let mut good = BTreeMap::new();
+            good.insert("bob@example.com".to_string(), "member".to_string());
+            assert!(details.set_members(good).is_ok());
+            let members = details.members().unwrap();
+            assert!(members.contains_key("bob@example.com"));
+            assert!(!members.contains_key("alice@example.com"));
+        }
+    }
+
+    #[test]
+    fn test_add_members_atomic() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.add_allowed_domain(DomainPattern::parse("example.com").unwrap());
+            details.add_member("alice@example.com", "pi").unwrap();
+
+            // add_members with one invalid entry must leave members unchanged
+            let mut bad = BTreeMap::new();
+            bad.insert("bob@example.com".to_string(), "member".to_string());
+            bad.insert("intruder@evil.com".to_string(), "member".to_string());
+            assert!(details.add_members(bad).is_err());
+            let members = details.members().unwrap();
+            assert!(members.contains_key("alice@example.com"));
+            assert!(!members.contains_key("bob@example.com"));
+
+            // add_members with all valid entries adds without replacing alice
+            let mut good = BTreeMap::new();
+            good.insert("bob@example.com".to_string(), "member".to_string());
+            assert!(details.add_members(good).is_ok());
+            let members = details.members().unwrap();
+            assert!(members.contains_key("alice@example.com"));
+            assert!(members.contains_key("bob@example.com"));
         }
     }
 

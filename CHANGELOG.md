@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **`AwardDetails` member validation and atomic batch operations** —
+  `add_member` now validates that the supplied address is a well-formed email
+  and is permitted by the project's `allowed_domains` list; it returns
+  `Result<(), Error>` (Python: raises `OSError`) instead of silently ignoring
+  bad input. Two new batch operations provide atomic semantics: `add_members`
+  adds multiple members without replacing existing ones, and `set_members`
+  replaces all members; both validate every entry before making any change so
+  callers never need to roll back a partial update. The Python bindings expose
+  all three methods.
+
+- **Email addresses in `allowed_domains`** — `DomainPattern` now accepts exact
+  email addresses (e.g. `"collaborator@gmail.com"`) alongside domain patterns
+  (`"example.com"`, `"*.university.ac.uk"`). The new `is_email_allowed(email)`
+  method on `AwardDetails` checks an email against both email-pattern entries
+  (exact, case-insensitive) and domain-pattern entries (matched against the
+  domain part). `is_domain_allowed` is unchanged and ignores email entries.
+  The Python binding exposes `is_email_allowed`.
+
 ## [0.31.0] - 2026-05-18
 
 ### Added

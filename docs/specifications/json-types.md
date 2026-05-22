@@ -216,7 +216,8 @@ Fields that are `null` or unset are omitted from the serialised JSON.
   "membership_control": "members_only",
   "allowed_domains": [
     "example.com",
-    "*.university.ac.uk"
+    "*.university.ac.uk",
+    "collaborator@gmail.com"
   ]
 }
 ```
@@ -241,7 +242,7 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 | `notes` | array of `Note` | Append-only timestamped messages; omitted when empty |
 | `earliest_approve` | string | RFC 3339 UTC — do not approve before this time; omitted when unset |
 | `membership_control` | string | `"open"` / `"members_only"` / `"roles_only"` / `"locked"` — see below; omitted when unset (defaults to `open`) |
-| `allowed_domains` | array of strings | Domain allow-list; `null` = all; `[]` = none |
+| `allowed_domains` | array of strings | Member email allow-list; `null` = all allowed; `[]` = none allowed. Each entry is either a domain pattern (`"example.com"`, `"*.university.ac.uk"`) or an exact email address (`"collaborator@gmail.com"`). See below. |
 
 **`MembershipControl` values:**
 
@@ -254,6 +255,27 @@ Fields that are `null` or unset are omitted from the serialised JSON.
 
 Absent field is equivalent to `"open"`. On merge, the incoming value overwrites
 the existing value if present.
+
+**`allowed_domains` entries:**
+
+Each string in the `allowed_domains` array is either a *domain pattern* or a
+*specific email address*. Both are validated at parse time.
+
+| Form | Example | Matches |
+|------|---------|---------|
+| Exact domain | `"example.com"` | Any email whose domain is exactly `example.com` |
+| Wildcard subdomain | `"*.university.ac.uk"` | Any email whose domain ends with `.university.ac.uk`, e.g. `user@cs.university.ac.uk` or `user@dept.cs.university.ac.uk` |
+| Exact email | `"collaborator@gmail.com"` | Only that specific address (case-insensitive) |
+
+The `*.` prefix matches any number of subdomain levels — `*.ac.uk` matches
+`bristol.ac.uk`, `cs.bristol.ac.uk`, and `dept.cs.bristol.ac.uk`. The bare
+domain itself (`ac.uk`) is not matched. Wildcards are not permitted elsewhere
+in the pattern.
+
+When `allowed_domains` is absent (`null`), all email addresses are permitted.
+When it is present but empty (`[]`), no email addresses are permitted. The
+three-state semantics allow a portal to explicitly express "no members allowed"
+as distinct from "unrestricted".
 
 **`Link` object:**
 

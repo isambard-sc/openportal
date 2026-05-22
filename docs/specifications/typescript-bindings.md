@@ -198,6 +198,49 @@ behaviour when the `membership_control` field is absent from `AwardDetails`.
 | `"roles_only"` | `false` | `true` |
 | `"locked"` | `false` | `false` |
 
+#### AwardDetails allow-list helpers
+
+```typescript
+isEmailAllowed(allowedDomains: AwardDetails["allowed_domains"], email: string): boolean
+isDomainAllowed(allowedDomains: AwardDetails["allowed_domains"], domain: string): boolean
+```
+
+Both mirror the corresponding Rust methods on `AwardDetails`.
+
+`isEmailAllowed` accepts the `allowed_domains` array (or `null`) and a full
+email address. An entry in the list is either a domain pattern or an exact
+email address:
+
+| Entry form | Example | Matches |
+|---|---|---|
+| Exact domain | `"example.com"` | Any email whose domain is exactly `example.com` |
+| Wildcard subdomain | `"*.university.ac.uk"` | Any email whose domain ends with `.university.ac.uk`, at any depth |
+| Exact email | `"collaborator@gmail.com"` | Only that address (case-insensitive) |
+
+`isDomainAllowed` accepts a bare domain (no `@`) and ignores any email-pattern
+entries in the list.
+
+**Three-state allow-list semantics** (same as Rust):
+
+| `allowedDomains` value | Result |
+|---|---|
+| `null` | All addresses / domains permitted |
+| `[]` (empty array) | None permitted |
+| `["a", "b", ...]` | Permitted if at least one entry matches |
+
+**Usage example:**
+
+```typescript
+import { isEmailAllowed } from "./helpers";
+
+const award: AwardDetails = /* ... */;
+
+// Check before displaying an "add member" form
+if (isEmailAllowed(award.allowed_domains, "alice@cs.bristol.ac.uk")) {
+  // show the form
+}
+```
+
 ## Identifier utilities
 
 ### Interfaces

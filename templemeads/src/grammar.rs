@@ -1842,9 +1842,7 @@ pub(crate) fn validate_email_address(email: &str) -> Result<(), Error> {
         .ok_or_else(|| Error::Parse("Email address must contain '@'".to_string()))?;
 
     if local.is_empty() {
-        return Err(Error::Parse(
-            "Email local part cannot be empty".to_string(),
-        ));
+        return Err(Error::Parse("Email local part cannot be empty".to_string()));
     }
     if !local
         .chars()
@@ -5155,9 +5153,15 @@ mod tests {
     fn test_domain_pattern_is_email_pattern() {
         #[allow(clippy::unwrap_used)]
         {
-            assert!(!DomainPattern::parse("example.com").unwrap().is_email_pattern());
-            assert!(!DomainPattern::parse("*.example.com").unwrap().is_email_pattern());
-            assert!(DomainPattern::parse("chris@gmail.com").unwrap().is_email_pattern());
+            assert!(!DomainPattern::parse("example.com")
+                .unwrap()
+                .is_email_pattern());
+            assert!(!DomainPattern::parse("*.example.com")
+                .unwrap()
+                .is_email_pattern());
+            assert!(DomainPattern::parse("chris@gmail.com")
+                .unwrap()
+                .is_email_pattern());
         }
     }
 

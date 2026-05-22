@@ -485,7 +485,6 @@ async fn main() -> Result<()> {
 
 const BRIDGE_WAIT_TIME: u64 = 5;
 
-
 ///
 /// Return all of the currently configured offerings
 ///

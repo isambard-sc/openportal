@@ -303,6 +303,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --target aarch64-unknown-linux-musl
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
       - name: Rename binaries
         run: |
           for bin in op-bridge op-cluster op-clusters op-filesystem op-freeipa op-portal op-provider op-slurm; do

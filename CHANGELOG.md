@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Changed
+
+- **GitHub Actions updated to Node.js 24-compatible versions** —
+  `actions/checkout` (v6), `actions/upload-artifact` (v7),
+  `actions/download-artifact` (v8), `actions/attest-build-provenance` (v4),
+  `actions/attest-sbom` (v4), `softprops/action-gh-release` (v3),
+  `actions/setup-python` (v6), and `PyO3/maturin-action` (v1, pinned from
+  `main`).
+
 ## [0.32.1] - 2026-05-29
 
 ### Added

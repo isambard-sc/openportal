@@ -1554,12 +1554,8 @@ async fn get_groups_for_user(
     let groups = result
         .groups()?
         .into_iter()
-        .chain(result.internal_groups(&internal_groups)?.into_iter())
-        .chain(
-            result
-                .legacy_groups(&user.identifier().portal_identifier())?
-                .into_iter(),
-        )
+        .chain(result.internal_groups(&internal_groups)?)
+        .chain(result.legacy_groups(&user.identifier().portal_identifier())?)
         .collect::<Vec<IPAGroup>>();
 
     // remove duplicates from this list

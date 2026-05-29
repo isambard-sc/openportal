@@ -457,7 +457,7 @@ impl DiagnosticsTracker {
             .collect();
 
         // Sort running jobs by how long they've been running (longest first)
-        running_jobs.sort_by(|a, b| b.running_for_seconds.cmp(&a.running_for_seconds));
+        running_jobs.sort_by_key(|b| std::cmp::Reverse(b.running_for_seconds));
 
         // Generate warnings
         let mut warnings = Vec::new();
@@ -981,10 +981,10 @@ impl DiagnosticsReport {
     pub fn logs(&self, max: usize, level: Option<&str>, search: Option<&str>) -> Vec<LogEntry> {
         let search_lower = search.map(|s| s.to_lowercase());
         let iter = self.recent_logs.iter().filter(|e| {
-            level.map_or(true, |l| log_level_matches(&e.level, l))
+            level.is_none_or(|l| log_level_matches(&e.level, l))
                 && search_lower
                     .as_ref()
-                    .map_or(true, |s| e.message.to_lowercase().contains(s.as_str()))
+                    .is_none_or(|s| e.message.to_lowercase().contains(s.as_str()))
         });
         let mut result: Vec<LogEntry> = if max == 0 {
             iter.cloned().collect()

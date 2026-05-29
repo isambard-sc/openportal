@@ -36,7 +36,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Build op-bridge OCI image
         run: oci/bridge/build.sh --release
@@ -58,7 +58,7 @@ jobs:
       - name: Get version
         id: get_version
         run: |
-          echo version="$(target/release/op-portal --version | tail -n1 | cut -d' ' -f 2)" >> "${GITHUB_OUTPUT}"
+          echo version="$(target/x86_64-unknown-linux-musl/release/op-portal --version | tail -n1 | cut -d' ' -f 2)" >> "${GITHUB_OUTPUT}"
       - name: Get version for Helm
         id: get_helm_version
         run: |
@@ -240,46 +240,111 @@ jobs:
         with:
           name: op-bridge
           path: |
-            target/release/op-bridge
+            target/x86_64-unknown-linux-musl/release/op-bridge
       - name: Store cluster artefact
         uses: actions/upload-artifact@v4
         with:
           name: op-cluster
           path: |
-            target/release/op-cluster
+            target/x86_64-unknown-linux-musl/release/op-cluster
       - name: Store clusters artefact
         uses: actions/upload-artifact@v4
         with:
           name: op-clusters
           path: |
-            target/release/op-clusters
+            target/x86_64-unknown-linux-musl/release/op-clusters
       - name: Store filesystem artefact
         uses: actions/upload-artifact@v4
         with:
           name: op-filesystem
           path: |
-            target/release/op-filesystem
+            target/x86_64-unknown-linux-musl/release/op-filesystem
       - name: Store freeipa artefact
         uses: actions/upload-artifact@v4
         with:
           name: op-freeipa
           path: |
-            target/release/op-freeipa
+            target/x86_64-unknown-linux-musl/release/op-freeipa
       - name: Store portal artefact
         uses: actions/upload-artifact@v4
         with:
           name: op-portal
           path: |
-            target/release/op-portal
+            target/x86_64-unknown-linux-musl/release/op-portal
       - name: Store provider artefact
         uses: actions/upload-artifact@v4
         with:
           name: op-provider
           path: |
-            target/release/op-provider
+            target/x86_64-unknown-linux-musl/release/op-provider
       - name: Store slurm artefact
         uses: actions/upload-artifact@v4
         with:
           name: op-slurm
           path: |
-            target/release/op-slurm
+            target/x86_64-unknown-linux-musl/release/op-slurm
+
+  build-binaries-aarch64:
+    name: "Build binaries (aarch64-unknown-linux-musl)"
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
+          fetch-depth: 0
+      - name: Install MUSL
+        run: sudo apt install musl-tools
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-musl
+      - name: Rename binaries
+        run: |
+          for bin in op-bridge op-cluster op-clusters op-filesystem op-freeipa op-portal op-provider op-slurm; do
+            cp "target/aarch64-unknown-linux-musl/release/${bin}" "${bin}-aarch64"
+          done
+      - name: Store bridge artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-bridge-aarch64
+          path: op-bridge-aarch64
+      - name: Store cluster artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-cluster-aarch64
+          path: op-cluster-aarch64
+      - name: Store clusters artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-clusters-aarch64
+          path: op-clusters-aarch64
+      - name: Store filesystem artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-filesystem-aarch64
+          path: op-filesystem-aarch64
+      - name: Store freeipa artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-freeipa-aarch64
+          path: op-freeipa-aarch64
+      - name: Store portal artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-portal-aarch64
+          path: op-portal-aarch64
+      - name: Store provider artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-provider-aarch64
+          path: op-provider-aarch64
+      - name: Store slurm artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-slurm-aarch64
+          path: op-slurm-aarch64

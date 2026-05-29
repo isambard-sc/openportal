@@ -2725,7 +2725,7 @@ impl AwardDetails {
             return false;
         }
 
-        let domain_part = email.splitn(2, '@').nth(1).unwrap_or("");
+        let domain_part = email.split_once('@').map(|x| x.1).unwrap_or("");
 
         for d in allowed_domains {
             if d.matches_email(email) {

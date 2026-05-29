@@ -554,8 +554,8 @@ impl Board {
     pub fn remove_expired_jobs(&mut self) -> Vec<Job> {
         let mut expired_jobs: Vec<Job> = self
             .jobs
-            .iter()
-            .filter_map(|(_, job)| {
+            .values()
+            .filter_map(|job| {
                 if job.is_expired() {
                     Some(job.clone())
                 } else {

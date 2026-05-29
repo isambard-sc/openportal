@@ -134,9 +134,8 @@ impl LinuxEngine {
         match limit {
             QuotaLimit::Unlimited => 0,
             QuotaLimit::Limited(size) => {
-                // round up to the nearest kilobyte
                 let bytes = size.as_bytes();
-                (bytes + 1023) / 1024
+                bytes.div_ceil(1024)
             }
         }
     }

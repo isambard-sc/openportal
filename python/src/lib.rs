@@ -3676,12 +3676,29 @@ impl Destination {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &Destination, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_dest) = other.extract::<Destination>() {
+            self.0 == other_dest.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare Destination with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.to_string().hash(&mut hasher);
+        Ok(hasher.finish())
     }
 
     fn reverse(&self) -> PyResult<Destination> {
@@ -3727,12 +3744,29 @@ impl Instruction {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &Instruction, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_instr) = other.extract::<Instruction>() {
+            self.0 == other_instr.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare Instruction with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.to_string().hash(&mut hasher);
+        Ok(hasher.finish())
     }
 
     #[getter]
@@ -3784,12 +3818,29 @@ impl Uuid {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &Uuid, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_uuid) = other.extract::<Uuid>() {
+            self.0 == other_uuid.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare Uuid with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        Ok(hasher.finish())
     }
 
     #[staticmethod]
@@ -3846,10 +3897,19 @@ impl Status {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &Status, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_status) = other.extract::<Status>() {
+            self.0 == other_status.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare Status with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
@@ -3915,10 +3975,19 @@ impl UserIdentifier {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &UserIdentifier, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_uid) = other.extract::<UserIdentifier>() {
+            self.0 == other_uid.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare UserIdentifier with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
@@ -4018,10 +4087,19 @@ impl ProjectIdentifier {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &ProjectIdentifier, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_pid) = other.extract::<ProjectIdentifier>() {
+            self.0 == other_pid.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare ProjectIdentifier with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
@@ -4078,10 +4156,19 @@ impl PortalIdentifier {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &PortalIdentifier, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_pid) = other.extract::<PortalIdentifier>() {
+            self.0 == other_pid.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare PortalIdentifier with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
@@ -4252,12 +4339,29 @@ impl DomainPattern {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &DomainPattern, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_dp) = other.extract::<DomainPattern>() {
+            self.0 == other_dp.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.pattern() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare DomainPattern with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.pattern().hash(&mut hasher);
+        Ok(hasher.finish())
     }
 
     #[getter]
@@ -4465,12 +4569,29 @@ impl ProjectTemplate {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &ProjectTemplate, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_pt) = other.extract::<ProjectTemplate>() {
+            self.0 == other_pt.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare ProjectTemplate with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
+    }
+
+    fn __hash__(&self) -> PyResult<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.0.to_string().hash(&mut hasher);
+        Ok(hasher.finish())
     }
 }
 
@@ -4484,7 +4605,7 @@ impl From<grammar::ProjectTemplate> for ProjectTemplate {
 /// membership or roles.  Access via `award.can_change_membership()` /
 /// `award.can_change_roles()` rather than comparing enum values directly.
 #[gen_stub_pyclass_enum]
-#[pyclass(module = "openportal", eq)]
+#[pyclass(module = "openportal")]
 #[derive(Debug, Clone, PartialEq)]
 enum MembershipControl {
     /// Receiving portal may add/remove members and change roles (default).
@@ -4530,6 +4651,46 @@ impl MembershipControl {
                 Self::Locked => "Locked",
             }
         )
+    }
+
+    #[staticmethod]
+    fn from_string(s: &str) -> PyResult<Self> {
+        match s {
+            "open" => Ok(Self::Open),
+            "members_only" => Ok(Self::MembersOnly),
+            "roles_only" => Ok(Self::RolesOnly),
+            "locked" => Ok(Self::Locked),
+            _ => Err(PyErr::new::<PyOSError, _>(format!(
+                "Unknown MembershipControl value: '{}'. Expected one of: open, members_only, roles_only, locked",
+                s
+            ))),
+        }
+    }
+
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_mc) = other.extract::<MembershipControl>() {
+            self == &other_mc
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.__str__() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare MembershipControl with this type",
+            ));
+        };
+        match op {
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
+            _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
+        }
+    }
+
+    fn __hash__(&self) -> u64 {
+        match self {
+            Self::Open => 0,
+            Self::MembersOnly => 1,
+            Self::RolesOnly => 2,
+            Self::Locked => 3,
+        }
     }
 }
 
@@ -5586,10 +5747,19 @@ impl QuotaLimit {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &QuotaLimit, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_limit) = other.extract::<QuotaLimit>() {
+            self.0 == other_limit.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare QuotaLimit with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }
@@ -5750,10 +5920,19 @@ impl Volume {
         Ok(self.clone())
     }
 
-    fn __richcmp__(&self, other: &Volume, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<bool> {
+        let equal = if let Ok(other_vol) = other.extract::<Volume>() {
+            self.0 == other_vol.0
+        } else if let Ok(other_str) = other.extract::<&str>() {
+            self.0.to_string() == other_str
+        } else {
+            return Err(PyErr::new::<PyOSError, _>(
+                "Cannot compare Volume with this type",
+            ));
+        };
         match op {
-            CompareOp::Eq => Ok(self.0 == other.0),
-            CompareOp::Ne => Ok(self.0 != other.0),
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
             _ => Err(PyErr::new::<PyOSError, _>("Invalid comparison operator")),
         }
     }

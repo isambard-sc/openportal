@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **Static binaries as GitHub release assets** — Each release now attaches
+  plain statically-linked binaries for all eight agents (`op-bridge`,
+  `op-cluster`, `op-clusters`, `op-filesystem`, `op-freeipa`, `op-portal`,
+  `op-provider`, `op-slurm`) directly to the GitHub release, enabling simple
+  `curl`/`wget` downloads and automatable upgrades without requiring a
+  container runtime. Both `x86_64-unknown-linux-musl` (named `op-*`) and
+  `aarch64-unknown-linux-musl` (named `op-*-aarch64`) builds are provided.
+
+### Changed
+
+- **Python bindings — string comparison and hashability for wrapper types** —
+  All Python-wrapped types that are thin string wrappers now support equality
+  and inequality comparison directly against plain Python strings (`x == "value"`,
+  `x != "value"`), in addition to comparing against objects of the same type.
+  Types that did not already support hashing have gained `__hash__`, making them
+  usable as `dict` keys and in `set`s. Affected types: `Status`, `MembershipControl`,
+  `QuotaLimit`, `DomainPattern`, `Uuid`, `Destination`, `Instruction`,
+  `UserIdentifier`, `ProjectIdentifier`, `PortalIdentifier`, `ProjectTemplate`,
+  and `Volume`. `MembershipControl` also gains a `from_string` static constructor
+  (accepted values: `"open"`, `"members_only"`, `"roles_only"`, `"locked"`).
+
 ## [0.32.0] - 2026-05-22
 
 ### Added

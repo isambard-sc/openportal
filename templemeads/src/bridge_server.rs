@@ -117,15 +117,11 @@ fn create_webserver_url(url: &str) -> Result<Url, Error> {
 
     // don't add the port if it is the default for the protocol
     match scheme {
-        "http" => {
-            if port == 80 {
-                return Ok(format!("{}://{}{}", scheme, host, path).parse::<Url>()?);
-            }
+        "http" if port == 80 => {
+            return Ok(format!("{}://{}{}", scheme, host, path).parse::<Url>()?);
         }
-        "https" => {
-            if port == 443 {
-                return Ok(format!("{}://{}{}", scheme, host, path).parse::<Url>()?);
-            }
+        "https" if port == 443 => {
+            return Ok(format!("{}://{}{}", scheme, host, path).parse::<Url>()?);
         }
         _ => {}
     }

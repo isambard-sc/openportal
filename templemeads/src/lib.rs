@@ -77,6 +77,7 @@ mod tests {
     };
     use ts_rs::TS;
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn export_ts_bindings() {
         AgentType::export_all().expect("Could not export AgentType");

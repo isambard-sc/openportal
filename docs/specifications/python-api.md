@@ -111,7 +111,7 @@ Represents a unit of work in the OpenPortal system.
 | `id` | `Uuid` | Unique job identifier |
 | `destination` | `Destination` | Full routing path (e.g. `portal.provider.clusters.cluster`) |
 | `forwarded_for` | `Destination \| None` | Original destination before the portal rewrote it for the bridge (e.g. `remote.local.resource`). Set on bridge-board jobs created by the portal's virtual resource runner; `None` on all other jobs. Identifies the true originating portal. |
-| `instruction` | `Instruction` | The parsed instruction (e.g. `AddUser`) |
+| `instruction` | `Instruction` | The parsed instruction (e.g. `AddUser`). `str(i)` returns the full instruction string; supports `==` / `!=` against another `Instruction` or a plain string. |
 | `state` | `Status` | Current job state |
 | `version` | `int` | Monotonically increasing version counter |
 | `created` | `datetime` | UTC creation time |
@@ -256,6 +256,10 @@ names used throughout the protocol.
 **Static constructors:** `Status.pending()`, `Status.running()`,
 `Status.complete()`, `Status.error()`, `Status.expired()`, `Status.duplicate()`
 
+`Status("running")` constructs from a string. `str(s)` returns the lowercase
+state name. Supports `==` and `!=` against another `Status` or a plain string
+(e.g. `job.state == "complete"`). Usable as a `dict` key or in a `set`.
+
 ---
 
 ### `Health`
@@ -383,6 +387,10 @@ A dot-separated routing path identifying an agent, e.g.
 `myportal.clusters.shared`. Used for `offerings` and for constructing
 job commands.
 
+`Destination("myportal.clusters.shared")` constructs from a string. `str(d)`
+returns the dot-path. Supports `==` / `!=` against another `Destination` or a
+plain string. Usable as a `dict` key or in a `set`.
+
 ---
 
 ### `UserIdentifier`
@@ -390,17 +398,29 @@ job commands.
 A triple `username.project.portal` that uniquely identifies a user within
 the OpenPortal network.
 
+`UserIdentifier("alice.myproject.myportal")` constructs from a string.
+`str(uid)` returns the dot-triple. Supports `==` / `!=` against another
+`UserIdentifier` or a plain string. Usable as a `dict` key or in a `set`.
+
 ---
 
 ### `ProjectIdentifier`
 
 A pair `project.portal` that uniquely identifies a project.
 
+`ProjectIdentifier("myproject.myportal")` constructs from a string.
+`str(pid)` returns the dot-pair. Supports `==` / `!=` against another
+`ProjectIdentifier` or a plain string. Usable as a `dict` key or in a `set`.
+
 ---
 
 ### `PortalIdentifier`
 
 The name of a portal, e.g. `myportal`.
+
+`PortalIdentifier("myportal")` constructs from a string. `str(pid)` returns
+the portal name. Supports `==` / `!=` against another `PortalIdentifier` or a
+plain string. Usable as a `dict` key or in a `set`.
 
 ---
 
@@ -444,6 +464,23 @@ compatibility; both refer to the same class.
 `add_member`, `add_members`, and `set_members` enforce the allow-list at call
 time. Existing members are never retroactively removed if the allow-list changes
 after they were added.
+
+**Related types used in `AwardDetails`:**
+
+- **`ProjectTemplate`** — `ProjectTemplate("standard")` constructs from a
+  string. `str(pt)` returns the template name. Supports `==` / `!=` against
+  another `ProjectTemplate` or a plain string. Usable as a `dict` key or in a `set`.
+- **`MembershipControl`** — controls whether the receiving portal may change
+  project membership or roles. Values: `MembershipControl.Open` (default),
+  `MembershipControl.MembersOnly`, `MembershipControl.RolesOnly`,
+  `MembershipControl.Locked`. `MembershipControl.from_string("locked")`
+  constructs from a string. `str(mc)` returns the snake_case name. Supports
+  `==` / `!=` against another `MembershipControl` or a plain string.
+  Usable as a `dict` key or in a `set`.
+- **`DomainPattern`** — `DomainPattern("*.example.com")` or
+  `DomainPattern("user@example.com")` constructs from a string. `str(dp)`
+  returns the pattern. Supports `==` / `!=` against another `DomainPattern`
+  or a plain string. Usable as a `dict` key or in a `set`.
 
 ---
 
@@ -675,12 +712,19 @@ per-project reports using `ProjectStorageReport` merge semantics.
 Storage and quota types returned by filesystem-related instructions.
 See [json-types.md](json-types.md) for full schemas.
 
+`QuotaLimit` supports `==` / `!=` against another `QuotaLimit` or a plain
+string (e.g. `limit == "unlimited"`, `limit == "100GB"`). `Volume` similarly
+supports string comparison (e.g. `vol == "home"`) and is usable as a `dict`
+key or in a `set`.
+
 ---
 
 ### `Uuid`
 
-A UUID value, usable wherever a job ID is required. Supports `str(uuid)` and
-equality comparison.
+A UUID value, usable wherever a job ID is required. `Uuid("…")` and
+`Uuid.from_string("…")` both construct from a string. `str(u)` returns the
+canonical UUID string. Supports `==` / `!=` against another `Uuid` or a plain
+string (e.g. `job.id == "abc123…"`). Usable as a `dict` key or in a `set`.
 
 ---
 

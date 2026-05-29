@@ -51,8 +51,8 @@ impl BridgeBoard {
     ///
     pub fn unfinished_jobs(&self) -> Vec<Job> {
         self.jobs
-            .iter()
-            .filter_map(|(_, job)| {
+            .values()
+            .filter_map(|job| {
                 if job.is_finished() {
                     None
                 } else {

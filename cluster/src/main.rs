@@ -386,7 +386,6 @@ async fn main() -> Result<()> {
 /// e.g. a job addressed to `brics.aip1.clusters.shared` produces a notification
 /// addressed to `shared.clusters.aip1.brics`. The notification is forwarded to
 /// the platform agent (next hop upward) and routed from there.
-
 async fn assert_agents_connected() -> Result<(), Error> {
     // check that we are connected to the filesystem and scheduler agents.
     // Do nothing if we aren't

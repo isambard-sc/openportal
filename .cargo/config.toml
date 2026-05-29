@@ -6,3 +6,8 @@
 # toolchain's default deployment target (11.0). Set to 13.0 as a reasonable
 # minimum that covers all arm64 Macs.
 MACOSX_DEPLOYMENT_TARGET = { value = "13.0", force = false }
+
+[target.aarch64-unknown-linux-musl]
+# musl-tools on Ubuntu arm64 provides aarch64-linux-musl-gcc; Rust does not
+# discover it automatically for this target unlike x86_64-unknown-linux-musl.
+linker = "aarch64-linux-musl-gcc"

@@ -180,15 +180,11 @@ fn create_websocket_url(url: &str) -> Result<String, Error> {
 
     // don't specify the port if it's the default for the protocol
     match scheme {
-        "ws" => {
-            if port == 80 {
-                return Ok(format!("{}://{}", scheme, host));
-            }
+        "ws" if port == 80 => {
+            return Ok(format!("{}://{}", scheme, host));
         }
-        "wss" => {
-            if port == 443 {
-                return Ok(format!("{}://{}", scheme, host));
-            }
+        "wss" if port == 443 => {
+            return Ok(format!("{}://{}", scheme, host));
         }
         _ => {}
     }

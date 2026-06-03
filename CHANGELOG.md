@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- **Python bindings — `AwardDetails` setters now accept `None`** — The
+  `name`, `key`, `description`, `project_template`, and `members` setters
+  previously rejected Python `None` even though the underlying Rust fields are
+  `Option<T>`. Assigning `None` now clears the field, consistent with the
+  other optional setters (`start_date`, `end_date`, `allocation`, `award`,
+  etc.).
+
 ### Changed
 
 - **GitHub Actions updated to Node.js 24-compatible versions** —

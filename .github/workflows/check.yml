@@ -23,7 +23,7 @@ jobs:
     name: License REUSE spec
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
       - name: Install reuse
@@ -36,7 +36,7 @@ jobs:
     name: Changelog format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
       - name: Install kacl
@@ -49,7 +49,7 @@ jobs:
     name: Tests and lints
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0  # This is needed so that git-describe works properly to set the version

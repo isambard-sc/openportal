@@ -47,7 +47,7 @@ jobs:
       ref: "${{ steps.get_version.outputs.version }}"
       changelog: "${{ steps.changelog.outputs.changelog }}"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.ref }} # Use ref here since we must commit on a branch
           ssh-key: ${{secrets.DEPLOY_KEY}}
@@ -114,7 +114,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -124,17 +124,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-bridge --output-format=spdx_json_2_3 > sbom-bridge.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-bridge
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-bridge
           sbom-path: sbom-bridge.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-bridge.spdx.json
           path: sbom-bridge.spdx.json
@@ -148,7 +148,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -158,17 +158,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-cluster --output-format=spdx_json_2_3 > sbom-cluster.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-cluster
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-cluster
           sbom-path: sbom-cluster.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-cluster.spdx.json
           path: sbom-cluster.spdx.json
@@ -182,7 +182,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -192,17 +192,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-clusters --output-format=spdx_json_2_3 > sbom-clusters.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-clusters
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-clusters
           sbom-path: sbom-clusters.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-clusters.spdx.json
           path: sbom-clusters.spdx.json
@@ -216,7 +216,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -226,17 +226,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-filesystem --output-format=spdx_json_2_3 > sbom-filesystem.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-filesystem
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-filesystem
           sbom-path: sbom-filesystem.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-filesystem.spdx.json
           path: sbom-filesystem.spdx.json
@@ -250,7 +250,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -260,17 +260,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-freeipa --output-format=spdx_json_2_3 > sbom-freeipa.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-freeipa
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-freeipa
           sbom-path: sbom-freeipa.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-freeipa.spdx.json
           path: sbom-freeipa.spdx.json
@@ -284,7 +284,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -294,17 +294,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-portal --output-format=spdx_json_2_3 > sbom-portal.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-portal
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-portal
           sbom-path: sbom-portal.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-portal.spdx.json
           path: sbom-portal.spdx.json
@@ -318,7 +318,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -328,17 +328,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-provider --output-format=spdx_json_2_3 > sbom-provider.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-provider
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-provider
           sbom-path: sbom-provider.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-provider.spdx.json
           path: sbom-provider.spdx.json
@@ -352,7 +352,7 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-sbom
@@ -362,17 +362,17 @@ jobs:
       - name: Generate SBOM
         run: cargo sbom --cargo-package op-slurm --output-format=spdx_json_2_3 > sbom-slurm.spdx.json
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-slurm
           merge-multiple: true
       - name: Attest SBOM
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v4
         with:
           subject-path: op-slurm
           sbom-path: sbom-slurm.spdx.json
       - name: Store SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-slurm.spdx.json
           path: sbom-slurm.spdx.json
@@ -397,12 +397,12 @@ jobs:
       contents: write
     steps:
       - name: Fetch release artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: op-*
           merge-multiple: true
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.tag-release.outputs.ref }}
           files: op-*

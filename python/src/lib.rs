@@ -4774,8 +4774,11 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_name(&mut self, name: &str) -> PyResult<()> {
-        self.0.set_name(name);
+    fn set_name(&mut self, name: Option<&str>) -> PyResult<()> {
+        match name {
+            Some(n) => self.0.set_name(n),
+            None => self.0.clear_name(),
+        }
         Ok(())
     }
 
@@ -4790,8 +4793,11 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_project_template(&mut self, template: &ProjectTemplate) -> PyResult<()> {
-        self.0.set_template(template.0.clone());
+    fn set_project_template(&mut self, template: Option<ProjectTemplate>) -> PyResult<()> {
+        match template {
+            Some(t) => self.0.set_template(t.0),
+            None => self.0.clear_template(),
+        }
         Ok(())
     }
 
@@ -4806,8 +4812,11 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_key(&mut self, key: &str) -> PyResult<()> {
-        self.0.set_key(key);
+    fn set_key(&mut self, key: Option<&str>) -> PyResult<()> {
+        match key {
+            Some(k) => self.0.set_key(k),
+            None => self.0.clear_key(),
+        }
         Ok(())
     }
 
@@ -4822,8 +4831,11 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_description(&mut self, description: &str) -> PyResult<()> {
-        self.0.set_description(description);
+    fn set_description(&mut self, description: Option<&str>) -> PyResult<()> {
+        match description {
+            Some(d) => self.0.set_description(d),
+            None => self.0.clear_description(),
+        }
         Ok(())
     }
 
@@ -4838,10 +4850,20 @@ impl AwardDetails {
     }
 
     #[setter]
-    fn set_members(&mut self, members: std::collections::BTreeMap<String, String>) -> PyResult<()> {
-        self.0
-            .set_members(members)
-            .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e)))
+    fn set_members(
+        &mut self,
+        members: Option<std::collections::BTreeMap<String, String>>,
+    ) -> PyResult<()> {
+        match members {
+            Some(m) => self
+                .0
+                .set_members(m)
+                .map_err(|e| PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+            None => {
+                self.0.clear_members();
+                Ok(())
+            }
+        }
     }
 
     fn clear_members(&mut self) -> PyResult<()> {

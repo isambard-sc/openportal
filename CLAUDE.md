@@ -59,7 +59,7 @@ cargo run --bin provider-svc
 cargo run --bin <binary-name>
 # Available binaries: portal-svc, provider-svc, op-bridge, op-cluster,
 # op-clusters, op-filesystem, op-freeipa, op-slurm, op-cloudaccount,
-# and example binaries in docs/
+# op-cloudportal, and example binaries in docs/
 ```
 
 ## Workspace Structure
@@ -92,6 +92,8 @@ Each agent type is its own binary crate that implements specific infrastructure 
 
 - **cloudaccount** (`op-cloudaccount`): Represents a single cloud account (e.g. an AWS account) assigned to a project. This is a deliberately rough prototype agent, co-developed alongside cloud operators who are still building out their side of the integration - it collapses what would normally be separate Instance + Account/Scheduler agents into one process (see `docs/plans/op-cloudaccount-design.md`), holds its own project/user assignment state as plain JSON files (there's no cloud-side API for this yet), and reconstructs usage reports by parsing whatever cost-report JSON files the operators drop into a directory. Expect this to need reshaping once the cloud side of the integration matures.
 
+- **cloudportal** (`op-cloudportal`): A self-contained `Portal` agent representing the "cloud" side of a portal-to-portal relationship (e.g. a central portal creating Awards on it). Also a deliberately rough prototype (see `docs/plans/op-cloudportal-design.md`): there's no real portal management software (no Waldur) behind it, so it stores Award state itself as plain JSON files, addresses/is addressed directly by the upstream portal (no virtual-resource/offering indirection - that mechanism turned out to be same-process-only, see the design doc §4), and requires a human operator to `approve`/`reject` a pending Award via CLI subcommands before a background poller provisions it on whichever `cloudaccount` its `AwardDetails.template` maps to. Also added one-shot CLI support (`run --one-shot`) to `templemeads::portal::run()`, previously only available to Account/Filesystem/Scheduler agents.
+
 - **bridge** (`op-bridge`): Bridges non-Rust portal implementations to the OpenPortal network. Runs a local HTTP server to translate API calls into OpenPortal Jobs.
 
 - **python**: Python library (via pyo3) for calling into OpenPortal via the bridge agent.
@@ -111,6 +113,8 @@ Jobs flow through the system in a hierarchical manner:
 Each agent only has the permissions needed for its specific role, avoiding centralized privileged access.
 
 Exception: **op-cloudaccount** is an Instance agent that does *not* delegate to separate Account/Scheduler agents - it's a rough prototype that merges those roles into one process (see the crate note above and `docs/plans/op-cloudaccount-design.md`).
+
+Exception: **op-cloudportal** is a Portal agent that receives Jobs directly from its upstream portal rather than via a bridge, and provisions approved Awards on **op-cloudaccount** directly rather than via a Provider/Platform layer (see the crate note above and `docs/plans/op-cloudportal-design.md`).
 
 ### Jobs and Job Boards
 

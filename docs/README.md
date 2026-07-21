@@ -152,7 +152,21 @@ The key types of Agent are:
    [docs/plans/op-cloudaccount-design.md](plans/op-cloudaccount-design.md)
    for the full design.
 
-9. `bridge` - OpenPortal is implemented in Rust, while portals are typically
+9. `cloudportal` - this is an Agent that acts as a self-contained "cloud"
+   portal in a portal-to-portal relationship - for example, a central
+   portal creating Awards on it, the same way any OpenPortal portal can
+   create Awards on a downstream portal. Like `cloudaccount`, it is a
+   deliberately rough prototype agent: there is no real portal management
+   software (no Waldur) behind it, so it stores Award state itself,
+   requires a human operator to approve an Award (via CLI subcommands)
+   before anything is provisioned, and then provisions the approved Award
+   on whichever `cloudaccount` Agent its `template` field maps to. The
+   `op-cloudportal` executable implements this Agent, with source code in
+   the [cloudportal](../cloudportal) directory. See
+   [docs/plans/op-cloudportal-design.md](plans/op-cloudportal-design.md)
+   for the full design.
+
+10. `bridge` - OpenPortal is implemented in Rust, while portals are typically
    implemented in other languages (e.g. Python). The `bridge` Agent is
    responsible for bridging between the Rust-based OpenPortal network and
    the actual code in the portal. For example, the `op-bridge` executable

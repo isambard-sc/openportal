@@ -797,6 +797,64 @@ duration-formatting `Display` impl.
 
 ---
 
+### 3.10 Cloud Portal (`op-cloudportal`)
+
+The cloud portal agent is a self-contained `Portal` agent representing the
+"cloud" side of a portal-to-portal relationship (e.g. a central "airr"
+portal creating Awards on it). There is no real portal management
+software (no Waldur) behind it - like `op-cloudaccount`, it is a
+deliberately rough prototype that stores Award state itself instead of
+relaying to a bridge. See `docs/plans/op-cloudportal-design.md` for the
+full design and rationale.
+
+| Default | Value |
+|---------|-------|
+| Name | `cloudportal` |
+| Config file | `~/.config/openportal/cloudportal-config.toml` |
+| WebSocket port | `8050` |
+| Agent type | `Portal` |
+
+**Optional extras:**
+
+| Key | Set via | Default | Description |
+|-----|---------|---------|-------------|
+| `state-dir` | `extra` | `~/.config/openportal/cloudportal-state` | Directory holding one JSON file per Award, recording its `AwardDetails`, approval `status` (`pending`/`approved`/`rejected`), and which members have been provisioned so far. Written to atomically; read fresh from disk on every instruction (no in-memory cache - see the design doc §5). |
+| `offerings` | `extra` | `""` | Comma-separated `template:peer` pairs mapping an `AwardDetails.template` value to the `op-cloudaccount` peer name that offering should provision against, e.g. `"aws:cloudaccount-aws,azure:cloudaccount-azure"`. `create_project` fails with a clear error if `template` is missing or not present in this table - there's no sensible default cloud provider to fall back to. |
+
+**Addressing model:** `airr` (or whichever upstream portal) addresses
+`cloudportal` directly - a plain, ordinary portal-to-portal connection,
+no different in kind from any other pair of connected agents. There is
+no virtual-resource/offering indirection (`op-portal`'s
+`sync_offerings`/`virtual_resource_runner` mechanism does not work for
+this - see the design doc §4 for why); which cloud provider an Award
+targets is carried entirely in `AwardDetails.template`.
+
+**Approval workflow:** Award creation (`create_project`) and
+infrastructure provisioning are deliberately decoupled - there is a
+human in the loop, since provisioning spends real money on a real cloud
+account. Three bespoke CLI subcommands, alongside the common ones in
+§2, manage this (they are pure state-file edits and never touch the
+network themselves):
+
+```bash
+op-cloudportal list-pending
+op-cloudportal approve --project someproject.cloud
+op-cloudportal reject  --project someproject.cloud --reason "..."
+```
+
+`approve` only flips the Award's status - the actual `add_project`/
+`add_user` calls against the resolved `op-cloudaccount` are made by a
+background poller inside the running `op-cloudportal run` process
+(checks every 30 seconds), so provisioning naturally retries if it
+partially fails.
+
+**Typical peer relationships:**
+- **Server:** the upstream portal (e.g. `airr`)
+- **Client:** one or more `op-cloudaccount` agents, resolved per-Award via
+  the `offerings` table
+
+---
+
 ## 4. Default Port Reference
 
 | Agent | Binary | Default port |
@@ -811,6 +869,7 @@ duration-formatting `Display` impl.
 | Filesystem | `op-filesystem` | 8047 |
 | Slurm | `op-slurm` | 8048 |
 | Cloud Account | `op-cloudaccount` | 8049 |
+| Cloud Portal | `op-cloudportal` | 8050 |
 
 Note: `op-cluster` and `op-freeipa` share the same default port (8046) because
 they are typically deployed on different machines. Adjust with `--port` if
@@ -872,3 +931,7 @@ op-freeipa  run
 | Cloud account main (option names) | `cloudaccount/src/main.rs` |
 | Cloud account assignment state | `cloudaccount/src/state.rs` |
 | Cloud account usage-report reconstruction | `cloudaccount/src/accounting.rs` |
+| Cloud portal main (option names, CLI subcommands, poller) | `cloudportal/src/main.rs` |
+| Cloud portal Award state | `cloudportal/src/state.rs` |
+| Cloud portal email/UserIdentifier mapping | `cloudportal/src/identity.rs` |
+| Portal one-shot CLI mode | `templemeads/src/portal.rs` |

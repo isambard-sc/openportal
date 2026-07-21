@@ -124,7 +124,7 @@ the OpenPortal network. Covers:
 ### [agent-configuration.md](agent-configuration.md)
 **Agent configuration reference**
 
-The complete configuration reference for all nine agent types. Covers:
+The complete configuration reference for all ten agent types. Covers:
 
 - Common TOML config fields shared by all agents (`name`, `url`, `ip`,
   `port`, peer lists, encryption)
@@ -138,6 +138,8 @@ The complete configuration reference for all nine agent types. Covers:
   - **Slurm** (sacctmgr mode and REST API mode)
   - **Cloud Account** (assignment state directory, accounting directory,
     currency)
+  - **Cloud Portal** (Award state directory, offerings table, approval
+    CLI subcommands)
 - Default port reference table and a typical deployment walkthrough
 
 ---

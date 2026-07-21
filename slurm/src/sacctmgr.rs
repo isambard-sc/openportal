@@ -1047,6 +1047,19 @@ async fn get_hourly_report(
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
 
+                daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+                daily_report.add_component_usage(
+                    "memory",
+                    job.user(),
+                    Usage::new(job.memory_seconds()),
+                );
+                daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+                daily_report.add_component_usage(
+                    "billing",
+                    job.user(),
+                    Usage::new(job.billing_seconds()),
+                );
+
                 if job.original_start_time() >= &hour_start_time {
                     num_jobs += 1;
                     total_wait_seconds += job.wait_time().num_seconds() as u64;
@@ -1127,6 +1140,19 @@ async fn get_hourly_report(
         for job in jobs {
             total_usage += job.billed_node_seconds();
             daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+            daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+            daily_report.add_component_usage(
+                "memory",
+                job.user(),
+                Usage::new(job.memory_seconds()),
+            );
+            daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+            daily_report.add_component_usage(
+                "billing",
+                job.user(),
+                Usage::new(job.billing_seconds()),
+            );
 
             // only count wait time for jobs that started in this hour
             if job.original_start_time() >= &start_time {

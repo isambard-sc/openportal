@@ -752,6 +752,51 @@ All of the sacctmgr-mode options above apply, plus:
 
 ---
 
+### 3.9 Cloud Account (`op-cloudaccount`)
+
+The cloud account agent represents a single cloud account (e.g. one AWS
+account) assigned to a project. Unlike the cluster/slurm split, it is a
+single agent that merges the Instance and Scheduler roles: there is no
+cloud-side API yet to record project/user assignment or to query usage, so
+this agent is both the source of truth for assignment and the thing that
+turns whatever cost-report files the cloud operators drop into a
+`ProjectUsageReport`. See `docs/plans/op-cloudaccount-design.md` for the
+full design and rationale.
+
+| Default | Value |
+|---------|-------|
+| Name | `cloudaccount` |
+| Config file | `~/.config/openportal/cloudaccount-config.toml` |
+| WebSocket port | `8049` |
+| Agent type | `Instance` |
+
+**Optional extras:**
+
+| Key | Set via | Default | Description |
+|-----|---------|---------|-------------|
+| `state-dir` | `extra` | `~/.config/openportal/cloudaccount-state` | Directory holding one JSON file per assigned project, recording which projects/users have been added to this cloud account. Written to atomically; safe to inspect or edit by hand while debugging. |
+| `accounting-dir` | `extra` | `~/.config/openportal/cloudaccount-accounting` | Directory the cloud operators' cron job drops cost-report JSON files into (same shape as `cost_payload_example.json`). Read-only to this agent - files here are never modified or deleted. |
+| `currency` | `extra` | `"USD"` | Expected currency code. A cost-report file reporting a different currency is logged as a warning, not converted (no FX support). |
+
+**Usage reporting:**
+
+`Usage` (normally a count of compute-seconds elsewhere in OpenPortal) is
+reinterpreted here as micro-currency-units: 1 `Usage` second = 1e-6 of the
+configured currency. Cost-report totals are cumulative from
+`time_period.start`, so usage reports are reconstructed by diffing
+consecutive reports and spreading the delta evenly across the calendar
+days it spans - see the design doc for the full algorithm. Anything
+consuming a cloud account's `ProjectUsageReport` needs to know to divide
+by 1e6 and format as currency rather than using `Usage`'s default
+duration-formatting `Display` impl.
+
+**Typical peer relationships:**
+- **Server:** one `provider` agent (this agent plays the Instance role
+  directly - it has no platform agent equivalent to `op-clusters` yet, and
+  no separate account/filesystem/scheduler peers)
+
+---
+
 ## 4. Default Port Reference
 
 | Agent | Binary | Default port |
@@ -765,6 +810,7 @@ All of the sacctmgr-mode options above apply, plus:
 | FreeIPA | `op-freeipa` | 8046 |
 | Filesystem | `op-filesystem` | 8047 |
 | Slurm | `op-slurm` | 8048 |
+| Cloud Account | `op-cloudaccount` | 8049 |
 
 Note: `op-cluster` and `op-freeipa` share the same default port (8046) because
 they are typically deployed on different machines. Adjust with `--port` if
@@ -823,3 +869,6 @@ op-freeipa  run
 | Slurm main (option names) | `slurm/src/main.rs` |
 | Filesystem volume config | `filesystem/src/volumeconfig.rs` |
 | Lustre quota engine | `filesystem/src/lustreengine.rs` |
+| Cloud account main (option names) | `cloudaccount/src/main.rs` |
+| Cloud account assignment state | `cloudaccount/src/state.rs` |
+| Cloud account usage-report reconstruction | `cloudaccount/src/accounting.rs` |

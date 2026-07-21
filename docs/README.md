@@ -140,7 +140,19 @@ The key types of Agent are:
    implements the `slurm` Agent, with source code in the
    [slurm](../slurm) directory.
 
-8. `bridge` - OpenPortal is implemented in Rust, while portals are typically
+8. `cloudaccount` - this is an Agent that represents a single cloud account
+   (e.g. one AWS account) assigned to a project. It is a prototype agent
+   that merges the `instance` and `slurm`-style roles into one process:
+   there is no cloud-side API yet to record which projects/users have been
+   assigned to the account, so this Agent is the source of truth for that,
+   and it turns whatever cost-report files the cloud operators drop into a
+   directory into a usage report. The `op-cloudaccount` executable
+   implements this Agent, with source code in the
+   [cloudaccount](../cloudaccount) directory. See
+   [docs/plans/op-cloudaccount-design.md](plans/op-cloudaccount-design.md)
+   for the full design.
+
+9. `bridge` - OpenPortal is implemented in Rust, while portals are typically
    implemented in other languages (e.g. Python). The `bridge` Agent is
    responsible for bridging between the Rust-based OpenPortal network and
    the actual code in the portal. For example, the `op-bridge` executable

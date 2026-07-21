@@ -33,6 +33,7 @@ the [docs](docs) directory. For formal protocol and API specifications, see
 | `op-freeipa` | Account management via FreeIPA |
 | `op-filesystem` | Filesystem and quota management |
 | `op-slurm` | Slurm account management |
+| `op-cloudaccount` | Represents a single cloud account (e.g. an AWS account) assigned to a project |
 | `op-bridge` | HTTP bridge for Python portal software |
 
 ## Compiling OpenPortal

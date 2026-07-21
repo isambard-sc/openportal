@@ -117,6 +117,10 @@ pub struct Exchange {
     // whether or not we are a secondary server
     is_secondary: bool,
 
+    // whether or not this agent is client-only (no server connections expected)
+    // HA standby-only logic only applies to client-only agents
+    is_client_only: bool,
+
     // a hash counting the number of standby connections
     // per peer
     standby_peers: HashMap<String, u32>,
@@ -359,9 +363,14 @@ impl Exchange {
             handler: None,
             watchdogs: Arc::new(Mutex::new(HashSet::new())),
             is_secondary: false,
+            is_client_only: true,
             standby_peers: HashMap::new(),
             worker_count: Arc::new(Mutex::new(0)),
         }
+    }
+
+    pub fn is_client_only(&self) -> bool {
+        self.is_client_only
     }
 }
 
@@ -410,6 +419,23 @@ pub async fn set_is_secondary() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+///
+/// Mark this agent as having server connections (not client-only).
+/// This disables the HA standby-only logic that would otherwise cause
+/// the agent to shut down when it receives secondary status from a peer.
+///
+pub fn set_is_server() {
+    match SINGLETON_EXCHANGE.write() {
+        Ok(mut exchange) => {
+            exchange.is_client_only = false;
+            tracing::debug!("Agent marked as server - HA standby-only logic disabled");
+        }
+        Err(e) => {
+            tracing::error!("Error getting write lock in set_is_server: {}", e);
+        }
+    }
 }
 
 pub async fn set_name(name: &str) -> Result<(), Error> {
@@ -489,33 +515,70 @@ pub async fn get_standby_waiter(name: &str, zone: &str) -> Result<Arc<StandbyWai
 }
 
 pub async fn check_standby(name: &str, zone: &str) -> Result<StandbyStatus, Error> {
-    let exchange = match SINGLETON_EXCHANGE.read() {
-        Ok(exchange) => exchange,
-        Err(e) => {
-            return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+    // Hold the read lock only long enough to read state — we must release it
+    // before any await point (std::sync lock cannot be held across awaits).
+    let existing_connection = {
+        let exchange = match SINGLETON_EXCHANGE.read() {
+            Ok(exchange) => exchange,
+            Err(e) => {
+                return Err(Error::Poison(format!("Error getting read lock: {}", e)));
+            }
+        };
+
+        // if the number of standby connections is greater than 16 then raise
+        // an error to terminate the connection - this prevents a DoS attack
+        if get_standby_count(&exchange, name, zone) > 16 {
+            return Err(Error::TooManyStandbyConnections(format!(
+                "Too many standby connections for {}@{}",
+                name, zone
+            )));
         }
+
+        if exchange.is_secondary {
+            return Ok(StandbyStatus::secondary_server());
+        }
+
+        exchange
+            .connections
+            .get(&get_key_from_str(name, zone))
+            .cloned()
+        // read lock released here
     };
 
-    // if the number of standby connections is greater than 16 then raise
-    // an error to terminate the connection - this prevents a DoS attack
-    if get_standby_count(&exchange, name, zone) > 16 {
-        return Err(Error::TooManyStandbyConnections(format!(
-            "Too many standby connections for {}@{}",
-            name, zone
-        )));
-    }
+    if let Some(mut conn) = existing_connection {
+        // Safeguard: the watchdog should have already expired any stale
+        // connection, but if for some reason it hasn't, check here.
+        // If the existing connection has not received any message in over
+        // 300 seconds, disconnect it immediately so the new connection
+        // can become primary rather than waiting indefinitely in standby.
+        conn.watchdog().await.unwrap_or_else(|e| {
+            tracing::warn!("Error running watchdog on existing connection: {}", e);
+        });
 
-    if exchange.is_secondary {
-        return Ok(StandbyStatus::secondary_server());
-    }
+        // Re-check: if watchdog disconnected the stale connection it will
+        // have been unregistered from exchange.connections.
+        let still_exists = match SINGLETON_EXCHANGE.read() {
+            Ok(exchange) => exchange
+                .connections
+                .contains_key(&get_key_from_str(name, zone)),
+            Err(_) => true, // conservative: assume it still exists on lock error
+        };
 
-    if exchange
-        .connections
-        .contains_key(&get_key_from_str(name, zone))
-    {
-        // there is a connection with this name and zone, so any more
-        // connections will become secondary
-        Ok(StandbyStatus::secondary_client())
+        if still_exists {
+            // there is a connection with this name and zone, so any more
+            // connections will become secondary
+            Ok(StandbyStatus::secondary_client())
+        } else {
+            tracing::info!(
+                "Stale connection to {}@{} was disconnected - new connection can become primary",
+                name,
+                zone
+            );
+            // there isn't, so this could be a primary connection
+            // (subject to the race condition - it will only become primary
+            //  if it wins the race)
+            Ok(StandbyStatus::primary())
+        }
     } else {
         // there isn't, so this could be a primary connection
         // (subject to the race condition - it will only become primary
@@ -556,14 +619,19 @@ async fn locked_register(connection: Connection) -> Result<bool, Error> {
         )));
     }
 
-    // go through and see if we have any standby connections that
+    // For client-only agents: check if we have any standby connections that
     // are for keys that are alphabetically more than this one.
     // If so, then we need to disconnect them all, as this is a
-    // standby-only agent
-    let is_standby_only = exchange
-        .standby_peers
-        .iter()
-        .any(|(k, v)| *v > 0 && k > &key);
+    // standby-only agent.
+    //
+    // This logic only applies to client-only agents. Agents that also act
+    // as servers cannot reliably determine HA status from peer responses,
+    // so they should not enter standby-only mode based on this check.
+    let is_standby_only = exchange.is_client_only()
+        && exchange
+            .standby_peers
+            .iter()
+            .any(|(k, v)| *v > 0 && k > &key);
 
     if !is_standby_only {
         exchange.connections.insert(key, connection);

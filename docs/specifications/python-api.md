@@ -1,0 +1,745 @@
+<!--
+SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-License-Identifier: CC0-1.0
+-->
+
+# OpenPortal Python API Reference
+
+The `openportal` Python module is a compiled Rust extension (built with
+[pyo3](https://pyo3.rs)) that wraps the bridge HTTP API in a synchronous,
+blocking Python interface. It communicates with a running `op-bridge` agent
+over localhost HTTP.
+
+## Installation
+
+Build and install the Python module from the workspace root:
+
+```bash
+make python
+# or
+maturin develop -m python/Cargo.toml
+```
+
+This installs the `openportal` module into the current Python environment.
+
+## Initialisation
+
+Before calling any other function you must load the bridge configuration
+file that was created when the bridge agent was initialised.
+
+```python
+import openportal
+
+# Enable logging to stdout (optional but recommended during development)
+openportal.initialize_tracing()
+
+# Load the bridge config (default path: ~/.config/openportal/bridge.toml)
+openportal.load_config("/path/to/bridge.toml")
+
+# Check the config loaded successfully
+assert openportal.is_config_loaded()
+```
+
+---
+
+## Top-level functions
+
+### Configuration
+
+| Function | Signature | Description |
+|---|---|---|
+| `load_config` | `(config_file: str \| Path) → None` | Load the bridge TOML config and connect to the running `op-bridge` agent. Raises `OSError` on failure. |
+| `is_config_loaded` | `() → bool` | Return `True` if a valid config has been loaded. |
+| `initialize_tracing` | `() → None` | Enable tracing/logging output to stdout. |
+
+### Running jobs
+
+| Function | Signature | Description |
+|---|---|---|
+| `run` | `(command: str, max_ms: int = 0) → Job` | Submit a command to OpenPortal and return a `Job`. If `max_ms > 0`, blocks until the job finishes or the timeout elapses. If `max_ms < 0`, blocks indefinitely. If `max_ms == 0` (default), returns immediately without waiting. |
+| `status` | `(job: Job) → Job` | Fetch the latest version of the given job from the bridge. |
+| `get` | `(job_id: str \| Uuid) → Job` | Fetch the job with the specified ID. Raises `OSError` if the job does not exist. |
+| `notify` | `(command: str) → None` | Send a fire-and-forget notification into the OpenPortal agent network. `command` is a notification string: `<destination> <event> [<argument>]`. Returns immediately — no result or acknowledgement is ever received. Raises `OSError` if the portal is not connected or the destination is invalid. See [notification-protocol.md](notification-protocol.md) for the full notification grammar and routing rules. |
+
+### Bridge board (portal callbacks)
+
+These functions are used when OpenPortal needs the portal to take action
+(the OpenPortal → portal direction). See [bridge-api.md](bridge-api.md)
+for the full two-direction communication model.
+
+| Function | Signature | Description |
+|---|---|---|
+| `fetch_jobs` | `() → list[Job]` | Fetch all jobs that OpenPortal has queued for the portal to handle. |
+| `fetch_job` | `(job_id: str \| Uuid) → Job` | Fetch a single queued job by ID. |
+| `fetch_notification` | `(notification_id: str \| Uuid) → Notification` | Fetch a pending notification from the bridge by UUID. Called from the `notification_url` handler after the bridge sends its GET signal. Raises `OSError` if the UUID is not found. |
+| `send_result` | `(job: Job) → None` | Send the completed or errored result of a bridge-board job back to OpenPortal. |
+| `get_portal` | `() → PortalIdentifier` | Return the `PortalIdentifier` of the portal connected to the bridge. |
+
+### Offerings
+
+Offerings are `Destination` paths that this portal advertises as available
+to the OpenPortal network. They are used by the provider and platform agents
+to know which jobs can be routed to this portal.
+
+| Function | Signature | Description |
+|---|---|---|
+| `sync_offerings` | `(offerings: list[Destination]) → list[Destination]` | Atomically replace the set of current offerings with the provided list. Returns the new active list. |
+| `add_offerings` | `(offerings: list[Destination]) → list[Destination]` | Add destinations to the current offerings. Returns the updated list. |
+| `remove_offerings` | `(offerings: list[Destination]) → list[Destination]` | Remove destinations from the current offerings. Returns the updated list. |
+| `get_offerings` | `() → list[Destination]` | Return the current list of active offerings. |
+
+### Operations
+
+| Function | Signature | Description |
+|---|---|---|
+| `health` | `() → Health` | Return the health status of the bridge and connected agents. |
+| `diagnostics` | `(destination: str) → Diagnostics` | Fetch a diagnostics report from the agent at `destination` (dot-path, e.g. `"portal.clusters"`). Pass `""` to query the bridge itself. |
+| `restart` | `(restart_type: str, destination: str) → RestartResponse` | Request a restart of the agent at `destination`. `restart_type` is `"soft"` (graceful) or `"hard"` (immediate). Pass `""` to restart the bridge itself. |
+
+---
+
+## Classes
+
+### `Job`
+
+Represents a unit of work in the OpenPortal system.
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | `Uuid` | Unique job identifier |
+| `destination` | `Destination` | Full routing path (e.g. `portal.provider.clusters.cluster`) |
+| `forwarded_for` | `Destination \| None` | Original destination before the portal rewrote it for the bridge (e.g. `remote.local.resource`). Set on bridge-board jobs created by the portal's virtual resource runner; `None` on all other jobs. Identifies the true originating portal. |
+| `instruction` | `Instruction` | The parsed instruction (e.g. `AddUser`). `str(i)` returns the full instruction string; supports `==` / `!=` against another `Instruction` or a plain string. |
+| `state` | `Status` | Current job state |
+| `version` | `int` | Monotonically increasing version counter |
+| `created` | `datetime` | UTC creation time |
+| `changed` | `datetime` | UTC time of last state change |
+| `is_finished` | `bool` | `True` if the job is in a terminal state (complete, error, expired, or duplicate) |
+| `is_error` | `bool` | `True` if the job failed with an error |
+| `is_expired` | `bool` | `True` if the job expired before completion |
+| `is_duplicate` | `bool` | `True` if the job was detected as a duplicate of another pending job |
+| `result` | `Any` | The deserialized job result once finished. Raises `OSError` if the job is not yet finished, or if the job is in an error state (use `error_message` instead). Returns `None` if the job completed with no result value. |
+| `error_message` | `str` | Error description if `is_error`, otherwise `""` |
+| `progress_message` | `str` | In-progress status message if set, otherwise `""` |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `update` | `() → None` | Refresh this job in-place by fetching its latest status from the bridge. No-op if already finished. |
+| `wait` | `(max_ms: int = 1000) → bool` | Block until the job is finished or `max_ms` milliseconds elapse. Pass a negative value to wait indefinitely. Returns `True` if the job is now finished. |
+| `completed` | `(result) → Job` | Return a new copy of this job marked as complete with the given result. `result` may be a `str`, `bool`, `UserIdentifier`, `ProjectIdentifier`, `AwardDetails`, `ProjectUsageReport`, `UsageReport`, `ProjectStorageReport`, `StorageReport`, `Quota`, `Volume`, `StorageSize`, `StorageUsage`, `QuotaLimit`, `ProjectTemplate`, `DateRange`, or a `list` or `dict` of those types. Used when handling bridge-board jobs. |
+| `errored` | `(error: str) → Job` | Return a new copy of this job marked as failed with the given error message. Used when handling bridge-board jobs. |
+| `to_json` | `() → str` | Serialise the job to a JSON string. |
+| `from_json` | `(json: str) → Job` | *(static)* Deserialise a job from a JSON string. |
+
+**Usage pattern for a portal-side job:**
+
+```python
+# Submit and wait up to 30 seconds
+job = openportal.run("portal.provider.clusters.mycluster add_user alice.myproject.myportal",
+                     max_ms=30_000)
+
+if job.is_error:
+    print(f"Failed: {job.error_message}")
+elif job.is_finished:
+    print("Done")
+else:
+    print("Timed out, job still running")
+```
+
+**Usage pattern for a bridge-board job (OpenPortal → portal):**
+
+```python
+jobs = openportal.fetch_jobs()
+for job in jobs:
+    instruction = str(job.instruction)
+    if instruction.startswith("GetProject "):
+        project_id = instruction.split(" ", 1)[1]
+        details = look_up_project(project_id)   # portal-side business logic
+        completed_job = job.completed(details)
+        openportal.send_result(completed_job)
+    else:
+        errored_job = job.errored(f"Unknown instruction: {instruction}")
+        openportal.send_result(errored_job)
+```
+
+---
+
+### `Notification`
+
+A fire-and-forget notification received from the OpenPortal network. Construct
+one from the JSON body that the bridge POSTs to `notification_url`, or parse
+from a notification command string.
+
+**Constructors:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `Notification` | `(command: str) → Notification` | Parse from `"<destination> <event> [<args>]"` string. Raises `OSError` on invalid input. |
+| `Notification.parse` | `(command: str) → Notification` | Same as the constructor. |
+| `Notification.from_json` | `(json: str) → Notification` | Deserialise from the JSON body posted to `notification_url`. |
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | `str` | UUID string. For logging only — not stored anywhere. |
+| `destination` | `str` | Dot-separated routing path, e.g. `"portal.clusters.shared"`. |
+| `event` | `str` | Full event string including all arguments, e.g. `"user_added chris.p.portal"`. |
+| `event_type` | `str` | The event keyword alone, e.g. `"user_added"`. Use this for dispatch. |
+| `event_argument` | `str` | Everything after the event keyword. Empty string if the event carries no arguments. For multi-argument events this will include all arguments and their spaces. |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `to_json` | `() → str` | Serialise to a JSON string. |
+
+**Usage pattern — pull model:**
+
+The bridge signals your `notification_url` endpoint with a GET request
+carrying the notification UUID. Your handler fetches the full notification
+via `fetch_notification`, processes it, and returns HTTP 200:
+
+```python
+import openportal
+
+# Django view for GET <notification_url>?notification_id=<uuid>
+def notification_signal(request):
+    notification_id = request.GET.get("notification_id")
+    if not notification_id:
+        return HttpResponseBadRequest("missing notification_id")
+
+    try:
+        n = openportal.fetch_notification(notification_id)
+    except OSError:
+        # UUID not found — bridge may have already removed it; ignore
+        return HttpResponse(status=200)
+
+    match n.event_type:
+        case "user_added":
+            provision_user(openportal.UserIdentifier(n.event_argument))
+        case "user_removed":
+            deprovision_user(openportal.UserIdentifier(n.event_argument))
+        case "project_added":
+            create_project(openportal.ProjectIdentifier(n.event_argument))
+        case "project_removed":
+            delete_project(openportal.ProjectIdentifier(n.event_argument))
+        case "award_added" | "award_changed":
+            sync_award(openportal.ProjectIdentifier(n.event_argument))
+        case "award_removed":
+            remove_award(openportal.ProjectIdentifier(n.event_argument))
+        case _:
+            pass  # ignore events we don't handle
+
+    return HttpResponse(status=200)
+```
+
+Returning a non-2xx response causes the bridge to retry up to 3 times with a
+2-second delay between attempts, so transient failures are handled
+automatically. Make your handler idempotent — the same notification may be
+delivered more than once if a retry races with a successful fetch.
+
+`str(notification)` returns the full notification string:
+`"<destination> <event_type> <event_argument>"`.
+
+---
+
+### `Status`
+
+Represents the state of a job. String representation matches the job state
+names used throughout the protocol.
+
+**Static constructors:** `Status.pending()`, `Status.running()`,
+`Status.complete()`, `Status.error()`, `Status.expired()`, `Status.duplicate()`
+
+`Status("running")` constructs from a string. `str(s)` returns the lowercase
+state name. Supports `==` and `!=` against another `Status` or a plain string
+(e.g. `job.state == "complete"`). Usable as a `dict` key or in a `set`.
+
+---
+
+### `Health`
+
+Return type of `health()`.
+
+| Property | Type | Description |
+|---|---|---|
+| `status` | `str` | `"healthy"`, `"degraded"`, or `"error"` |
+| `detail` | `HealthInfo \| None` | Detailed health data if available |
+
+---
+
+### `Diagnostics`
+
+Return type of `diagnostics()`.
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `status` | `str` | `"ok"` or an error description |
+| `detail` | `DiagnosticsReport \| None` | Full diagnostics report if available |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `is_healthy` | `() → bool` | `True` if `status == "ok"` |
+| `logs` | `(max: int = 0, level: str \| None = None, search: str \| None = None) → list[LogEntry]` | Return log entries from the contained report. See [`DiagnosticsReport.logs`](#diagnosticsreport) for full details. Returns `[]` if no report is available. |
+
+See [notes.md](notes.md) for the provisional `HealthInfo` and
+`DiagnosticsReport` schemas (these types are still evolving).
+
+---
+
+### `DiagnosticsReport`
+
+Full diagnostics data for a single agent. Returned by `Diagnostics.detail` and
+passed directly when iterating cached reports.
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `agent_name` | `str` | Name of the agent that generated the report |
+| `generated_at` | `datetime` | UTC time the report was generated |
+| `failed_jobs` | `list[FailedJobEntry]` | Recent failed jobs (deduplicated) |
+| `slowest_jobs` | `list[SlowJobEntry]` | Slowest successful jobs (>10 s) |
+| `expired_jobs` | `list[ExpiredJobEntry]` | Recent expired jobs (deduplicated) |
+| `running_jobs` | `list[RunningJobEntry]` | Currently running jobs |
+| `warnings` | `list[str]` | Auto-generated alert strings |
+| `notification_statistics` | `NotificationStatistics` | All-time notification counters |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `logs` | `(max: int = 0, level: str \| None = None, search: str \| None = None) → list[LogEntry]` | Return captured log entries in chronological order (oldest first). |
+
+`logs` parameters:
+
+- **`max`** — maximum number of entries to return; `0` (default) returns all captured entries. Applied *after* any filtering, so `.logs(50, level="ERROR")` returns the 50 most recent errors.
+- **`level`** — filter by log level (case-insensitive):
+  - `"INFO"` — exact match; only INFO entries.
+  - `"INFO+"` — threshold; INFO and above (INFO, WARN, ERROR).
+  - `"WARN"` and `"WARNING"` are accepted interchangeably.
+  - Available levels, from lowest to highest: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.
+- **`search`** — case-insensitive substring match against the message text.
+
+All supplied filters are ANDed together.
+
+```python
+d = openportal.diagnostics("brics")
+
+d.logs()                               # all captured entries, oldest first
+d.logs(100)                            # last 100 entries
+d.logs(level="ERROR")                  # all errors
+d.logs(level="WARN+")                  # warnings and errors
+d.logs(50, level="WARN+")             # last 50 warnings/errors
+d.logs(level="WARN+", search="timeout")  # warning/error messages containing "timeout"
+```
+
+---
+
+### `NotificationStatistics`
+
+All-time notification counters for a single agent. Returned by
+`DiagnosticsReport.notification_statistics`.
+
+| Property | Type | Description |
+|---|---|---|
+| `total_received` | `int` | Notifications received by this agent from the network |
+| `total_sent` | `int` | Notifications successfully delivered (to next hop or web portal) |
+| `total_failed` | `int` | Notifications dropped after all delivery attempts failed |
+
+```python
+report = openportal.diagnostics("brics.aip1.clusters.shared").detail()
+ns = report.notification_statistics
+print(f"received={ns.total_received} sent={ns.total_sent} failed={ns.total_failed}")
+# or just
+print(ns)  # NotificationStatistics(received=12, sent=12, failed=0)
+```
+
+A non-zero `total_failed` also appears as a string in `report.warnings`.
+
+---
+
+### `LogEntry`
+
+A single log message captured from the agent's tracing framework.
+
+| Property | Type | Description |
+|---|---|---|
+| `timestamp` | `datetime` | UTC time the message was logged |
+| `level` | `str` | Log level: `"TRACE"`, `"DEBUG"`, `"INFO"`, `"WARN"`, or `"ERROR"` |
+| `target` | `str` | Rust module path that produced the message (e.g. `"templemeads::agent"`) |
+| `message` | `str` | The log message text |
+
+---
+
+### `Destination`
+
+A dot-separated routing path identifying an agent, e.g.
+`myportal.clusters.shared`. Used for `offerings` and for constructing
+job commands.
+
+`Destination("myportal.clusters.shared")` constructs from a string. `str(d)`
+returns the dot-path. Supports `==` / `!=` against another `Destination` or a
+plain string. Usable as a `dict` key or in a `set`.
+
+---
+
+### `UserIdentifier`
+
+A triple `username.project.portal` that uniquely identifies a user within
+the OpenPortal network.
+
+`UserIdentifier("alice.myproject.myportal")` constructs from a string.
+`str(uid)` returns the dot-triple. Supports `==` / `!=` against another
+`UserIdentifier` or a plain string. Usable as a `dict` key or in a `set`.
+
+---
+
+### `ProjectIdentifier`
+
+A pair `project.portal` that uniquely identifies a project.
+
+`ProjectIdentifier("myproject.myportal")` constructs from a string.
+`str(pid)` returns the dot-pair. Supports `==` / `!=` against another
+`ProjectIdentifier` or a plain string. Usable as a `dict` key or in a `set`.
+
+---
+
+### `PortalIdentifier`
+
+The name of a portal, e.g. `myportal`.
+
+`PortalIdentifier("myportal")` constructs from a string. `str(pid)` returns
+the portal name. Supports `==` / `!=` against another `PortalIdentifier` or a
+plain string. Usable as a `dict` key or in a `set`.
+
+---
+
+### `AwardDetails`
+
+Details about an award (and the project it creates), including the project
+identifier, template, member users, award identifiers, and resource allocation.
+See [json-types.md](json-types.md) for the full JSON schema.
+
+`openportal.ProjectDetails` is an alias for `AwardDetails` for backward
+compatibility; both refer to the same class.
+
+**Member management methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `add_member` | `(email: str, role: str) → None` | Add or update one member. Validates that `email` is a well-formed address and is permitted by `allowed_domains`. Raises `OSError` if either check fails. |
+| `add_members` | `(members: dict[str, str]) → None` | Atomically add or update multiple members (email → role). All entries are validated before any change is applied; raises `OSError` and leaves members unchanged if any entry is invalid. |
+| `set_members` | `(members: dict[str, str]) → None` | Atomically replace all members. All entries are validated before any change is applied; raises `OSError` and leaves members unchanged if any entry is invalid. |
+| `remove_member` | `(email: str) → None` | Remove one member by email. No-op if not present. |
+| `clear_members` | `() → None` | Remove all members. |
+
+**Domain allow-list methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `is_domain_allowed` | `(domain: str) → bool` | Return `True` if the bare domain (e.g. `"example.com"`) is permitted by the allow-list. Email patterns in the list are ignored. |
+| `is_email_allowed` | `(email: str) → bool` | Return `True` if the full email address is permitted. Checks exact email patterns and domain patterns against the address's domain. |
+| `add_allowed_domain` | `(domain: str \| DomainPattern) → None` | Append one entry to the allow-list. Accepts a domain pattern (`"example.com"`, `"*.example.com"`) or an exact email address (`"user@example.com"`). |
+| `set_allowed_domains` | `(domains: list[str \| DomainPattern] \| None) → None` | Replace the allow-list. Pass `None` to remove all restrictions. |
+| `clear_allowed_domains` | `() → None` | Remove the allow-list (all emails become permitted). |
+
+**Allow-list behaviour:**
+
+- `allowed_domains` is `None` (unset) — all email addresses are permitted.
+- `allowed_domains` is `[]` (empty list) — no email addresses are permitted.
+- Otherwise — an email is permitted if it matches at least one entry: either an
+  exact email pattern matches the full address (case-insensitive), or a domain
+  pattern matches the domain part of the address.
+
+`add_member`, `add_members`, and `set_members` enforce the allow-list at call
+time. Existing members are never retroactively removed if the allow-list changes
+after they were added.
+
+**Related types used in `AwardDetails`:**
+
+- **`ProjectTemplate`** — `ProjectTemplate("standard")` constructs from a
+  string. `str(pt)` returns the template name. Supports `==` / `!=` against
+  another `ProjectTemplate` or a plain string. Usable as a `dict` key or in a `set`.
+- **`MembershipControl`** — controls whether the receiving portal may change
+  project membership or roles. Values: `MembershipControl.Open` (default),
+  `MembershipControl.MembersOnly`, `MembershipControl.RolesOnly`,
+  `MembershipControl.Locked`. `MembershipControl.from_string("locked")`
+  constructs from a string. `str(mc)` returns the snake_case name. Supports
+  `==` / `!=` against another `MembershipControl` or a plain string.
+  Usable as a `dict` key or in a `set`.
+- **`DomainPattern`** — `DomainPattern("*.example.com")` or
+  `DomainPattern("user@example.com")` constructs from a string. `str(dp)`
+  returns the pattern. Supports `==` / `!=` against another `DomainPattern`
+  or a plain string. Usable as a `dict` key or in a `set`.
+
+---
+
+### `Usage`
+
+A compute-time quantity (internally stored as an integer number of seconds).
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `seconds` | `int` | Raw value in seconds |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `in_hours` | `() → str` | Return a human-readable string with all values expressed in hours (e.g. `"2.000 hours"`). Useful for consistent unit display when comparing across days. |
+
+`str(usage)` auto-scales to the most appropriate unit (seconds, minutes, or
+hours) with up to 3 decimal places, e.g. `"2.000 hours"`, `"40.433 minutes"`,
+`"1 second"`.
+
+---
+
+### `DailyProjectUsageReport`
+
+Compute usage for a single project on a single calendar day, broken down by
+local username. Arithmetic operators (`+`, `+=`) are supported for merging
+reports.
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `num_jobs` | `int` | Total number of jobs that started on this day (scalar total across all users) |
+| `total_wait_seconds` | `int` | Total queue wait time in seconds for all jobs that started on this day |
+| `average_wait_seconds` | `float` | Mean queue wait time in seconds per job (`0.0` if `num_jobs == 0`) |
+| `is_complete` | `bool` | `True` if all usage data for the day has been collected |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `num_jobs_for_user` | `(user: str) → int` | Number of jobs started by the named local user. Returns `0` for unknown users or legacy data without per-user counts. |
+| `wait_seconds_for_user` | `(user: str) → int` | Total queue wait seconds for the named local user. Returns `0` for unknown users or legacy data. |
+| `average_wait_seconds_for_user` | `(user: str) → float` | Mean queue wait seconds per job for the named local user. Returns `0.0` if the user has no jobs or data is unavailable. |
+| `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user job counts and average wait times. |
+
+`str(report)` auto-scales usage units per user and includes per-user job
+counts and average wait times.
+
+---
+
+### `ProjectUsageReport`
+
+Compute usage for a single project over a date range, indexed by calendar
+date. Arithmetic operators (`+`, `+=`) are supported.
+
+**Properties:**
+
+| Property | Type | Description |
+|---|---|---|
+| `total_wait_seconds` | `int` | Total queue wait time in seconds across all days in this report |
+| `average_wait_seconds` | `float` | Mean queue wait time in seconds per job across the whole report (`0.0` if no jobs) |
+| `users` | `list[UserIdentifier]` | Sorted list of portal users with mappings in this report |
+| `user_mapping` | `dict[UserIdentifier, str]` | Map of portal user identifier → local username |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `daily_reports` | `(with_usage_only: bool = True) → list[DailyProjectUsageReport]` | Return the daily reports sorted by date. If `with_usage_only=True` (default), only days with non-zero usage are returned; pass `False` to include all days. |
+| `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user breakdowns, job counts, and average wait times. |
+| `filter` | `(range: DateRange) → ProjectUsageReport` | Return a copy of this report containing only days that fall within `range` (inclusive on both ends). |
+| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping each project name unchanged, e.g. `project.portal` → `project.new_portal`. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
+
+`str(report)` auto-scales usage units per user per day.
+
+---
+
+### `UsageReport`
+
+Portal-level aggregate report containing `ProjectUsageReport` objects for all
+active projects. Arithmetic operators (`+`, `+=`) are supported.
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `portal` | `PortalIdentifier` | The portal this report covers |
+| `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
+| `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `get_report` | `(project: ProjectIdentifier) → ProjectUsageReport` | Return the usage report for `project`, or an empty report if not present |
+| `get_component` | `(component: str) → UsageReport` | Return a new `UsageReport` containing only the named component's usage |
+| `filter` | `(range: DateRange) → UsageReport` | Return a copy of this report with every contained `ProjectUsageReport` filtered to only days that fall within `range` (inclusive on both ends). |
+| `combine` | `(reports: list[UsageReport]) → UsageReport` | *(static)* Merge a list of portal-level reports |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Update `self.portal` and remap every contained project to the new portal, e.g. `project.portal` → `project.new_portal`. |
+| `remap_project` | `(old_project: ProjectIdentifier, new_project: ProjectIdentifier) → None` | Remap a single contained project from `old_project` to `new_project`. Does nothing if `old_project` is not present. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings across all contained project reports. Raises `OSError` on clash within any project. |
+| `to_json` | `() → str` | Serialise to a JSON string |
+| `from_json` | `(json: str) → UsageReport` | *(static)* Deserialise from a JSON string |
+
+See [json-types.md](json-types.md) for full schemas.
+
+---
+
+### `ProjectStorageReport`
+
+Returned by `job.result` after a `get_storage_report` or `get_local_storage_report`
+call. Reflects the current (point-in-time) storage quota state for a single project.
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `project` | `ProjectIdentifier` | The project this report covers |
+| `generated_at` | `datetime` | UTC timestamp when the report was generated |
+| `project_quotas` | `dict[Volume, Quota]` | Project-level quotas keyed by volume |
+| `user_quotas` | `dict[UserIdentifier, dict[Volume, Quota]]` | Per-user quotas keyed by user identifier then volume |
+| `users` | `list[UserIdentifier]` | Sorted list of portal users with mappings in this report |
+| `user_mapping` | `dict[UserIdentifier, str]` | Map of portal user identifier → local username |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `is_empty` | `() → bool` | `True` if the top-level snapshot has no quota data (historical entries are not considered) |
+| `daily_reports` | `(with_usage_only: bool = True) → list[ProjectStorageReport]` | Return all snapshots sorted by date (oldest first), including both historical entries and the current top-level snapshot. When `with_usage_only=True` (default), only snapshots with quota data are returned. When `False`, every calendar date between the earliest and latest snapshot is included (empty reports for missing days), mirroring `ProjectUsageReport.daily_reports()`. |
+| `get_report` | `(date: datetime.date) → ProjectStorageReport` | Return the snapshot for a specific date. Returns the top-level data if `date` matches the current snapshot's date, or an empty report if not found. |
+| `filter` | `(range: DateRange) → ProjectStorageReport` | Return a copy of this report containing only historical snapshots whose date falls within `range` (inclusive). The top-level (current) snapshot fields are preserved unchanged. |
+| `combine` | `(reports: list[ProjectStorageReport]) → ProjectStorageReport` | *(static)* Merge a list of reports for the same project using the merge semantics: newest snapshot wins at the top level; older snapshots are retained in history (one per date, newest wins). |
+| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys (in `users`, `user_quotas`, and historical snapshots) so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping the project name unchanged. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
+| `to_json` | `() → str` | Serialise to a JSON string |
+| `from_json` | `(json: str) → ProjectStorageReport` | *(static)* Deserialise from a JSON string |
+
+`+` and `+=` operators merge two `ProjectStorageReport` objects using the same
+semantics as `combine`.
+
+`str(report)` returns a human-readable multi-line summary including a list of
+historical snapshot dates if any are present.
+
+**Example:**
+
+```python
+import datetime
+
+job = openportal.run("portal.provider.clusters.mycluster get_storage_report myproject.myportal",
+                     max_ms=30_000)
+if job.is_finished and not job.is_error:
+    report = job.result   # ProjectStorageReport
+    for volume, quota in report.project_quotas.items():
+        print(f"  {volume}: {quota}")
+    for user, local in report.user_mapping.items():
+        vol_quotas = report.user_quotas.get(user, {})
+        for volume, quota in vol_quotas.items():
+            print(f"  {user} ({local}) — {volume}: {quota}")
+
+# Accumulate reports fetched on different days
+combined = report_day1 + report_day2 + report_day3
+for snap in combined.daily_reports():   # oldest first, only days with data
+    print(f"  {snap.generated_at}: {snap.project_quotas}")
+
+# Zip with a usage report (both fill every date in the range)
+for usage, storage in zip(usage_report.daily_reports(with_usage_only=False),
+                          storage_report.daily_reports(with_usage_only=False)):
+    print(f"  usage={usage.total_usage}  storage={storage.project_quotas}")
+
+# Retrieve a specific day
+snap = combined.get_report(datetime.date(2024, 3, 10))
+
+# Translate a report from one portal to another
+old_project = ProjectIdentifier.parse("myproject.myportal")
+new_project = ProjectIdentifier.parse("myproject.newportal")
+report.remap_project(new_project)
+
+# Remap local usernames (e.g. unix names → email addresses)
+uid = UserIdentifier.parse("alice.myproject.newportal")
+report.remap_users({uid: "alice@example.com"})
+```
+
+---
+
+### `StorageReport`
+
+Returned by `job.result` after a `get_storage_reports` call. Portal-level
+aggregate of `ProjectStorageReport` objects for all active projects.
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `portal` | `PortalIdentifier` | The portal this report covers |
+| `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
+| `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `get_report` | `(project: ProjectIdentifier) → ProjectStorageReport` | Return the storage report for `project`, or an empty report if not present |
+| `is_empty` | `() → bool` | `True` if there are no project reports |
+| `filter` | `(range: DateRange) → StorageReport` | Return a copy of this report with every contained `ProjectStorageReport` filtered to only historical snapshots that fall within `range` (inclusive). Top-level snapshot fields of each project report are preserved unchanged. |
+| `combine` | `(reports: list[StorageReport]) → StorageReport` | *(static)* Merge a list of portal-level reports, merging per-project history |
+| `remap_portal` | `(new_portal: PortalIdentifier) → None` | Update `self.portal` and remap every contained project to the new portal. |
+| `remap_project` | `(old_project: ProjectIdentifier, new_project: ProjectIdentifier) → None` | Remap a single contained project from `old_project` to `new_project`. Does nothing if `old_project` is not present. |
+| `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings across all contained project reports. Raises `OSError` on clash within any project. |
+| `to_json` | `() → str` | Serialise to a JSON string |
+| `from_json` | `(json: str) → StorageReport` | *(static)* Deserialise from a JSON string |
+
+`+` and `+=` operators merge two `StorageReport` objects, combining the
+per-project reports using `ProjectStorageReport` merge semantics.
+
+`str(report)` returns a human-readable multi-line summary.
+
+---
+
+### `StorageSize` / `StorageUsage` / `QuotaLimit` / `Quota` / `Volume`
+
+Storage and quota types returned by filesystem-related instructions.
+See [json-types.md](json-types.md) for full schemas.
+
+`QuotaLimit` supports `==` / `!=` against another `QuotaLimit` or a plain
+string (e.g. `limit == "unlimited"`, `limit == "100GB"`). `Volume` similarly
+supports string comparison (e.g. `vol == "home"`) and is usable as a `dict`
+key or in a `set`.
+
+---
+
+### `Uuid`
+
+A UUID value, usable wherever a job ID is required. `Uuid("…")` and
+`Uuid.from_string("…")` both construct from a string. `str(u)` returns the
+canonical UUID string. Supports `==` / `!=` against another `Uuid` or a plain
+string (e.g. `job.id == "abc123…"`). Usable as a `dict` key or in a `set`.
+
+---
+
+## Error handling
+
+All functions raise `OSError` on failure. The error message contains the
+underlying Rust error chain. There is no separate exception hierarchy — check
+`job.is_error` and `job.error_message` for job-level failures, and catch
+`OSError` for connectivity or protocol failures.
+
+---
+
+## Thread safety
+
+The module is safe to call from multiple threads. Each call makes an
+independent HTTP request to the bridge. However, `job.wait()` and
+`job.update()` modify the `Job` object in-place, so a single `Job` instance
+should not be shared between threads without external locking.

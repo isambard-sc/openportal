@@ -414,16 +414,6 @@ impl Connection {
         .await
         .with_context(|| "Error sending message to peer")?;
 
-        // record the last time we successfully sent a message
-        match self.state.lock() {
-            Ok(mut state) => {
-                state.register_activity();
-            }
-            Err(e) => {
-                tracing::warn!("Error registering activity: {:?}", e);
-            }
-        }
-
         Ok(())
     }
 
@@ -967,6 +957,7 @@ impl Connection {
     /// This function will handle the handshake and then enter an event
     /// loop to handle the sending and receiving of messages.
     ///
+    #[allow(clippy::result_large_err)]
     pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
         // Reject new connections during soft restart
         if crate::exchange::is_soft_restart_in_progress() {
@@ -1464,6 +1455,16 @@ impl Connection {
                 .unwrap_or_else(|e| {
                     tracing::warn!("Error handling message: {:?}", e);
                 });
+
+            // record the last time we successfully received a message
+            match self.state.lock() {
+                Ok(mut state) => {
+                    state.register_activity();
+                }
+                Err(e) => {
+                    tracing::warn!("Error registering activity: {:?}", e);
+                }
+            }
 
             future::ok(())
         });

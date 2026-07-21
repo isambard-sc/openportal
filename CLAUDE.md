@@ -143,6 +143,7 @@ When writing or modifying code:
 - Follow existing patterns for agent implementation
 - Maintain the security model - agents should only have necessary permissions
 - Add tests to the appropriate crate's lib.rs or separate test files
+- After making changes, run `cargo fmt` to format the code and `cargo clippy` to check for warnings. Fix any warnings introduced by the changes before finishing.
 
 ## Examples
 

@@ -6,6 +6,714 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.32.2] - 2026-06-03
+
+### Fixed
+
+- **Python bindings — `AwardDetails` setters now accept `None`** — The
+  `name`, `key`, `description`, `project_template`, and `members` setters
+  previously rejected Python `None` even though the underlying Rust fields are
+  `Option<T>`. Assigning `None` now clears the field, consistent with the
+  other optional setters (`start_date`, `end_date`, `allocation`, `award`,
+  etc.).
+
+### Changed
+
+- **GitHub Actions updated to Node.js 24-compatible versions** —
+  `actions/checkout` (v6), `actions/upload-artifact` (v7),
+  `actions/download-artifact` (v8), `actions/attest-build-provenance` (v4),
+  `actions/attest-sbom` (v4), `softprops/action-gh-release` (v3),
+  `actions/setup-python` (v6), and `PyO3/maturin-action` (v1, pinned from
+  `main`).
+
+## [0.32.1] - 2026-05-29
+
+### Added
+
+- **Static binaries as GitHub release assets** — Each release now attaches
+  plain statically-linked binaries for all eight agents (`op-bridge`,
+  `op-cluster`, `op-clusters`, `op-filesystem`, `op-freeipa`, `op-portal`,
+  `op-provider`, `op-slurm`) directly to the GitHub release, enabling simple
+  `curl`/`wget` downloads and automatable upgrades without requiring a
+  container runtime. Both `x86_64-unknown-linux-musl` (named `op-*`) and
+  `aarch64-unknown-linux-musl` (named `op-*-aarch64`) builds are provided.
+
+### Changed
+
+- **Python bindings — string comparison and hashability for wrapper types** —
+  All Python-wrapped types that are thin string wrappers now support equality
+  and inequality comparison directly against plain Python strings (`x == "value"`,
+  `x != "value"`), in addition to comparing against objects of the same type.
+  Types that did not already support hashing have gained `__hash__`, making them
+  usable as `dict` keys and in `set`s. Affected types: `Status`, `MembershipControl`,
+  `QuotaLimit`, `DomainPattern`, `Uuid`, `Destination`, `Instruction`,
+  `UserIdentifier`, `ProjectIdentifier`, `PortalIdentifier`, `ProjectTemplate`,
+  and `Volume`. `MembershipControl` also gains a `from_string` static constructor
+  (accepted values: `"open"`, `"members_only"`, `"roles_only"`, `"locked"`).
+
+## [0.32.0] - 2026-05-22
+
+### Added
+
+- **`AwardDetails` member validation and atomic batch operations** —
+  `add_member` now validates that the supplied address is a well-formed email
+  and is permitted by the project's `allowed_domains` list; it returns
+  `Result<(), Error>` (Python: raises `OSError`) instead of silently ignoring
+  bad input. Two new batch operations provide atomic semantics: `add_members`
+  adds multiple members without replacing existing ones, and `set_members`
+  replaces all members; both validate every entry before making any change so
+  callers never need to roll back a partial update. The Python bindings expose
+  all three methods.
+- **Email addresses in `allowed_domains`** — `DomainPattern` now accepts exact
+  email addresses (e.g. `"collaborator@gmail.com"`) alongside domain patterns
+  (`"example.com"`, `"*.university.ac.uk"`). The new `is_email_allowed(email)`
+  method on `AwardDetails` checks an email against both email-pattern entries
+  (exact, case-insensitive) and domain-pattern entries (matched against the
+  domain part). `is_domain_allowed` is unchanged and ignores email entries.
+  The Python binding exposes `is_email_allowed`.
+
+## [0.31.0] - 2026-05-18
+
+### Added
+
+- **`notification::send` — shared notification helper** — `templemeads` now
+  provides `notification::send(destination, event)` that routes a notification
+  to the next hop in `destination`, or delivers it locally if this agent is the
+  final destination (via `invoke_notify_runner`). Award notifications in the
+  portal and user/project notifications in the cluster both use this function;
+  the old per-crate `send_notification` / `send_award_notification` helpers are
+  removed. `Destination::reverse()` is also new, returning a copy of the path
+  with agents in reversed order.
+- **`forwarded_for` field on `Job`** — bridge-board jobs created by the portal's
+  virtual resource runner now carry the original job destination (e.g.
+  `remove.local.resource`) in a `forwarded_for` field. Web-portal code can read
+  this via `job.forwarded_for` (Python `Destination | None`) instead of
+  reconstructing the originating portal from the bridge destination. The field is
+  absent (`null`) on all other jobs and is backwards-compatible with older agents
+  that do not set it.
+
+## [0.30.1] - 2026-05-15
+
+### Added
+
+- **`fetch_notification` Python function** — `openportal.fetch_notification(uuid)`
+  fetches a pending notification from the bridge by UUID. Called from the web
+  portal's `notification_url` handler after the bridge sends its GET signal.
+  Accepts a UUID string, `Uuid` object, or `Notification` object. Raises
+  `OSError` if the UUID is not found. Complements the existing `fetch_job` /
+  `fetch_jobs` pattern.
+
+## [0.30.0] - 2026-05-15
+
+### Added
+
+- **New notification system** — notifications now flow end-to-end between
+  infrastructure agents and the web portal via the bridge. Infrastructure
+  agents can fire events (e.g. `user_added`) that are notified to the
+  web portal via a `notification_url`. The web portal can also
+  send notifications into the agent network (including to peer portals) via the
+  new `POST /notify` bridge endpoint and the `openportal.notify()` Python
+  function. A new `Notification` Python class provides `event_type` and
+  `event_argument` properties for straightforward dispatch in portal code. See
+  [notification-protocol.md](docs/specifications/notification-protocol.md),
+  [bridge-api.md](docs/specifications/bridge-api.md), and
+  [python-api.md](docs/specifications/python-api.md) for full details.
+- **TypeScript bindings for `templemeads` types** — the `templemeads` crate
+  now derives TypeScript type definitions from its Rust structs and enums via
+  [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Running
+  `cargo test -p templemeads export_ts_bindings` regenerates
+  `templemeads/bindings/` with one `.ts` file per exported type. Exported
+  types cover jobs (`Job`, `Status`), diagnostics (`DiagnosticsReport` and
+  all sub-entries), health (`HealthInfo`), storage (`Quota`, `Volume`,
+  `StorageReport`, `ProjectStorageReport`), usage (`UsageReport`,
+  `ProjectUsageReport`, `DailyProjectUsageReport`, `Usage`), and award
+  details (`AwardDetails`, `Link`, `Note`, `MembershipControl`).
+- **`templemeads/bindings/identifiers.ts`** — hand-written TypeScript utility
+  providing parse and stringify helpers for the five string-encoded identifier
+  types (`PortalIdentifier`, `ProjectIdentifier`, `UserIdentifier`,
+  `ProjectMapping`, `UserMapping`). Allows React components to decompose
+  e.g. `"alice.myproject.brics"` into `{ username, project, portal }` and
+  reassemble when sending instructions back to OpenPortal.
+- **`docs/specifications/typescript-bindings.md`** — specification document
+  covering the bindings: how to generate them, the full table of exported
+  types, serialisation notes (timestamp formats, HashMap key conventions,
+  custom-format strings), and instructions for adding new exported types.
+
+## [0.29.0] - 2026-05-05
+
+### Added
+
+- **`block_user` / `unblock_user` / `is_blocked_user` instructions** — new
+  account-level instructions to suspend and reinstate users without touching the
+  filesystem or Slurm scheduler:
+  - `block_user <user>` — adds the user to the `openportal.blocked` group and
+    disables their account (FreeIPA: `user_disable`; localaccount: `usermod -L`).
+    Idempotent; no-ops if the user is already blocked or is protected.
+  - `unblock_user <user>` — removes the user from `openportal.blocked` and
+    re-enables their account. Idempotent; no-ops if the user is not blocked or
+    is protected.
+  - `is_blocked_user <user>` — returns `true` if the user is currently in the
+    `openportal.blocked` group.
+- **`block_project` / `unblock_project` / `is_blocked_project` instructions** —
+  cluster-level convenience instructions that operate on all users in a project:
+  - `block_project` / `unblock_project` call `block_user` / `unblock_user` for
+    each member. Per-user errors are logged but do not abort the fan-out. Note:
+    `unblock_project` unblocks **all** users in the project, including any that
+    were individually blocked beforehand.
+  - `is_blocked_project` returns `true` if the project has at least one member
+    **and** every member is currently blocked; `false` if the project is empty or
+    any member is unblocked.
+- **`openportal.blocked` group** — the `op-freeipa` and `op-localaccount` agents
+  use a `{managed-group}.blocked` group (default: `openportal.blocked`) as the
+  canonical source of truth for blocked status. This lets blocked users be
+  distinguished from users removed for other reasons — both are account-disabled,
+  but only blocked users appear in the group.
+- **`gpasswd` configurable command in `op-localaccount`** — needed to remove a
+  user from a single supplementary group cleanly during `unblock_user`. Defaults
+  to `gpasswd`; can be overridden in the agent config (e.g.
+  `gpasswd = "docker exec slurmctld gpasswd"`).
+
+### Changed
+
+- **`add_user` will not re-enable a blocked user** — if a user is in the
+  `openportal.blocked` group at the time `add_user` is called, the call returns
+  the existing mapping immediately without re-enabling the account. Only
+  `unblock_user` can reinstate a blocked user. A corresponding guard was added
+  at the cluster level to avoid unnecessary downstream agent calls.
+- **`is_existing_user` returns `true` for blocked users** — a blocked user is
+  still a managed, existing user and should continue to appear in queries.
+  Previously, disabled accounts that were not protected were treated as
+  non-existent.
+- **`remove_user` can remove blocked users** — a blocked user can be fully
+  removed by `remove_user`; the early-exit guard for disabled accounts now skips
+  only users who are disabled but *not* blocked.
+
+## [0.28.0] - 2026-05-01
+
+### Added
+
+- **Log ring buffer in diagnostics** — agents now capture tracing log messages
+  into an in-memory ring buffer (up to 500 entries) via a custom
+  `tracing_subscriber::Layer` installed at startup. The full buffer is included
+  in every `DiagnosticsReport` as `recent_logs` (newest-first in JSON; field is
+  `serde(default)` so old responses deserialise cleanly).
+- **`DiagnosticsReport.logs()` / `Diagnostics.logs()` (Python)** — retrieve log
+  entries in chronological order (oldest first) with optional filtering:
+  - `max` (default `0` = all) — limits entries returned, applied *after* any
+    level/search filter, so `.logs(50, level="ERROR")` gives the 50 most recent
+    errors.
+  - `level` — exact match (`"INFO"`) or minimum-level threshold (`"INFO+"`);
+    accepts `"WARN"` and `"WARNING"` interchangeably. Levels from lowest to
+    highest: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`.
+  - `search` — case-insensitive substring match against the message text.
+  - All filters are ANDed.
+
+  ```python
+  d = openportal.diagnostics("brics")
+  d.logs()                                    # all entries, oldest first
+  d.logs(level="WARN+")                       # warnings and errors
+  d.logs(50, level="WARN+", search="timeout") # last 50 matching entries
+  ```
+- **`LogEntry` Python class** — properties: `timestamp` (UTC `datetime`),
+  `level` (`str`), `target` (Rust module path, e.g. `"templemeads::agent"`),
+  `message` (`str`).
+
+## [0.27.1] - 2026-04-01
+
+### Fixed
+
+- Watchdog false disconnections (paddington) — after removing `register_activity()`
+  from `send_message()` to fix zombie connection detection, the client-side
+  (`make_connection`) receive path was missing a `register_activity()` call.
+  Client-initiated connections had no activity tracking at all and were
+  disconnected by the watchdog after 300 seconds even when healthy. Activity
+  is now registered on every successfully received message on both the
+  server-side (`handle_connection`) and client-side (`make_connection`) paths.
+
+## [0.27.0] - 2026-04-01
+
+### Added
+
+- **`Link` and `Note` types** — new reusable types in `templemeads::grammar`:
+  - `Link { id: Option<String>, url: Option<String> }` — a reference to an
+    external resource with an optional human-readable ID and an optional validated
+    URL. Used for all the link fields on `AwardDetails`.
+  - `Note { timestamp: DateTime<Utc>, author: String, text: String }` — a
+    timestamped message. `Note::new(author, text)` stamps with `Utc::now()`;
+    `Note::with_timestamp(dt, author, text)` accepts an explicit timestamp.
+    `Display` format: `[YYYY-MM-DD HH:MM UTC — Author] text`.
+- **New fields on `AwardDetails`**:
+  - `award: Option<Link>` — link to the award record on the funding body's system
+    (e.g. UKRI GtR). Replaces the previous flat `award_id` / `award_url` fields.
+  - `call: Option<Link>` — link to the funding call that produced the award.
+  - `project_link: Option<Link>` — link to the project page on the remote/awarding
+    portal, so local users can navigate there.
+  - `renewal: Option<Link>` — link to the renewal / more-time application page.
+  - `notes: Vec<Note>` — append-only list of timestamped messages from the awarder.
+    Serialises as `[]`-omitted (field absent when empty); deserialises with
+    `#[serde(default)]` so old JSON is backward compatible.
+  - `earliest_approve: Option<DateTime<Utc>>` — RFC 3339 UTC timestamp before
+    which the receiving portal must not approve or provision the award. Lets the
+    awarder make corrections in the window between creating the award and it being
+    acted on (e.g. set to one hour in the future on creation).
+  - `breakdown: BTreeMap<String, String>` — a free-form map of portal-defined
+    allocation component names to human-readable values (e.g.
+    `"project_storage" → "5 TB"`). OpenPortal carries this map transparently and
+    does not interpret its contents. Keys and values are both arbitrary strings;
+    ordering is deterministic (alphabetical by key). On merge, entries from the
+    incoming `AwardDetails` overwrite or add to existing entries (no keys are
+    deleted). Absent from serialised JSON when empty.
+- **Python bindings**: `openportal.Link` and `openportal.Note` classes exported.
+  `AwardDetails` gains `award`, `call`, `project_link`, `renewal`, `notes`,
+  `add_note`, `clear_notes`, `earliest_approve`, `set_earliest_approve`,
+  `clear_earliest_approve`, `breakdown` (getter/setter), `set_breakdown_entry`,
+  `remove_breakdown_entry`, and `clear_breakdown`. `earliest_approve` is exposed
+  as a UTC-aware `datetime.datetime`.
+- **`MembershipControl` enum and `membership_control` field on `AwardDetails`** —
+  the sending portal can now declare a policy that constrains whether the receiving
+  portal may independently modify project membership or roles:
+  - `open` (default, field absent) — receiving portal manages membership and roles
+    freely.
+  - `members_only` — receiving portal may add/remove members; roles are
+    authoritative in `AwardDetails` updates from the sender.
+  - `roles_only` — receiving portal may change the role of existing members; it
+    must not add or remove members.
+  - `locked` — receiving portal must not change membership or roles; both are
+    authoritative in `AwardDetails` updates from the sender.
+  On merge, the incoming value overwrites the existing value if present; absent
+  is treated as `open` at runtime (field is omitted from serialised JSON).
+  Python: `award.membership_control` getter/setter, `award.clear_membership_control()`,
+  and convenience methods `award.can_change_membership()` / `award.can_change_roles()`.
+  `openportal.MembershipControl` is exported as a Python class with `Open`,
+  `MembersOnly`, `RolesOnly`, and `Locked` attributes, each of which also exposes
+  `can_change_membership()` and `can_change_roles()` directly.
+- **`get_users` instruction at portal level** — the portal and bridge agents now
+  handle `get_users <project_id>`, forwarding it to the connected web portal via
+  the bridge. The response is `Vec<UserMapping>` where `local_user` = email
+  address (the portal-level equivalent of a Unix username). The Python bindings
+  already supported `Vec<UserMapping>` so no Python changes were required.
+- **`get_award` and `get_awards` instructions** — new portal-level instructions
+  to retrieve award details. `get_award <project_id>` returns the `AwardDetails`
+  for a single project; `get_awards <portal_id>` (also accepted as `list_awards`)
+  returns all award details for a portal as a `Vec<AwardDetails>`. Both are
+  handled by the portal agent and forwarded to the bridge.
+
+### Fixed
+
+- Zombie connection prevents reconnection (paddington) — when a network
+  fault silently dropped a websocket connection without closing the TCP socket,
+  the server retained the stale connection in its registry. Any reconnection
+  attempt from that peer was incorrectly classified as a secondary (standby)
+  connection and never promoted to primary, causing all messages to that peer
+  to be lost indefinitely until the server was restarted.
+  - Root cause: `send_message()` was calling `register_activity()` on every
+    outgoing send, so the watchdog's 300-second inactivity timer was
+    continuously reset by keepalive sends to the zombie connection. Only
+    received messages now count as activity.
+  - Extra safeguard: `check_standby()` now proactively runs the watchdog
+    check on the existing connection whenever a new connection arrives for
+    the same peer. If the existing connection is stale it is disconnected
+    immediately, allowing the new connection to become primary without
+    waiting for the background watchdog loop.
+
+### Changed
+
+- **`ProjectDetails` renamed to `AwardDetails`** — the data structure that
+  carries project/award metadata is now called `AwardDetails`, reflecting that
+  it describes a funding award (with its members, dates, allocation, etc.) from
+  which a project is created. `ProjectDetails` remains as a type alias so
+  existing Rust code compiles without changes.
+  - Wire protocol unchanged: `NamedType::type_name()` still returns
+    `"ProjectDetails"` for `AwardDetails`, so result-type tags in Job payloads
+    are unchanged. `create_project` and `update_project` remain the canonical
+    command names (Display still emits the old names). `create_award` and
+    `update_award` are accepted as synonyms by the parser.
+  - Python: the class is now `openportal.AwardDetails`. `openportal.ProjectDetails`
+    is registered as an alias pointing to the same class object
+    (`openportal.ProjectDetails is openportal.AwardDetails` is `True`).
+- **`members` field migrated to `BTreeMap`** — `AwardDetails::members` was
+  `Option<HashMap<String, String>>` serialised through a custom `ordered_map`
+  helper that sorted keys on every serialise. It is now
+  `Option<BTreeMap<String, String>>`, which provides the same deterministic
+  alphabetical key ordering without the helper. The change is fully
+  backward-compatible: existing JSON deserialises identically and the wire
+  representation is unchanged. The `ordered_map` helper function has been
+  removed from `templemeads::grammar`.
+
+## [0.26.0] - 2026-03-25
+
+### Added
+
+- **`filter(range: DateRange)`** on all four report types — returns a copy of
+  the report restricted to days that fall within the given date range
+  (inclusive on both ends):
+  - `ProjectUsageReport::filter` — keeps only the daily-report entries whose
+    date is within `range`; the `users` map is preserved.
+  - `UsageReport::filter` — delegates to `ProjectUsageReport::filter` for each
+    contained project report.
+  - `ProjectStorageReport::filter` — keeps only the `daily_reports` entries
+    whose date is within `range`; the top-level (current) snapshot fields
+    (`generated_at`, `project_quotas`, `user_quotas`, `users`) are preserved
+    unchanged.
+  - `StorageReport::filter` — delegates to `ProjectStorageReport::filter` for
+    each contained project report.
+  - Python bindings added for all four types.
+- **Date-range support for storage report instructions** — `get_storage_report`,
+  `get_storage_reports`, and `get_local_storage_report` now accept an optional
+  `<date_range>` argument (default: `today`). The filesystem agent enforces that
+  the range must be `today`; any other range causes the job to fail with an
+  error. This mirrors the existing `[<date_range>]` argument on the usage report
+  instructions.
+
+### Fixed
+
+- **`ProjectUsageReport` `+` / `+=` now correctly merges `users` maps** — both
+  operators previously merged the daily-report data but silently discarded the
+  `users` map from the right-hand operand. Both now perform a union: existing
+  entries in `self` are preserved and any missing entries are filled from the
+  other report.
+
+### Changed
+
+- **`ProjectStorageReport::daily_reports` key type changed from `NaiveDate` to
+  `Date`** — the `HashMap<NaiveDate, DailyStorageReport>` field is now
+  `HashMap<Date, DailyStorageReport>`, consistent with `ProjectUsageReport`.
+  The wire/JSON format is unchanged (`Date` serialises as the same `YYYY-MM-DD`
+  string). `ProjectStorageReport::get_report` now takes `&Date` instead of
+  `&NaiveDate`; the Python binding is unchanged (still accepts
+  `datetime.date`).
+
+## [0.25.0] - 2026-03-25
+
+### Added
+
+- **Report remapping** — all four report types (`ProjectUsageReport`,
+  `UsageReport`, `ProjectStorageReport`, `StorageReport`) now support
+  remapping identifiers, enabling reports to be translated from one portal
+  to another before merging or publishing:
+
+  - `remap_project(&new_project: ProjectIdentifier)` on
+    `ProjectUsageReport` / `ProjectStorageReport` — replaces the top-level
+    project identifier and rebuilds all `UserIdentifier` keys in the users
+    map so that `username.old_project.old_portal` becomes
+    `username.new_project.new_portal`. For `ProjectStorageReport`, also
+    rebuilds the `user_quotas` keys and updates historical snapshots in
+    `daily_reports`.
+  - `remap_portal(&new_portal: PortalIdentifier)` on all four types —
+    convenience wrapper that keeps each project's name unchanged and only
+    swaps the portal, e.g. `aiproject.brics` → `aiproject.ukri`.
+  - `remap_project(old: &ProjectIdentifier, new: &ProjectIdentifier)` on
+    `UsageReport` / `StorageReport` — remaps a single contained project
+    report from `old` to `new`. Does nothing if `old` is not present.
+  - `remap_portal(&new_portal: PortalIdentifier)` on `UsageReport` /
+    `StorageReport` — bulk-remaps every contained project to the new portal
+    and updates `self.portal`.
+  - `remap_users(&new_usermapping: HashMap<UserIdentifier, String>)` on all
+    four types — updates the local-username strings for the specified users.
+    Returns an error if the remapping would cause two distinct users to share
+    the same local username. For `ProjectUsageReport`, also propagates the
+    rename into all daily-report `HashMap<String, Usage>` entries (including
+    component breakdowns, per-user job counts, and per-user wait seconds).
+- **`user_mapping()`** added to all four report types — returns the full
+  `HashMap<UserIdentifier, String>` (portal user → local username) for the
+  report. For `UsageReport` and `StorageReport`, aggregates mappings across
+  all contained project reports.
+
+### Changed
+
+- `ProjectStorageReport::users()` now returns `Vec<UserIdentifier>` (sorted)
+  instead of `&HashMap<UserIdentifier, String>`, consistent with
+  `ProjectUsageReport::users()`. Use `user_mapping()` to obtain the full
+  identifier → local-username map.
+- Python: `ProjectStorageReport.users` is now `list[UserIdentifier]`
+  (was `dict[UserIdentifier, str]`). Use `user_mapping` for the dict.
+- Python bindings added for all of the above on `ProjectUsageReport`,
+  `UsageReport`, `ProjectStorageReport`, and `StorageReport`. `remap_users`
+  accepts a plain Python `dict[UserIdentifier, str]`.
+
+## [0.24.0] - 2026-03-13
+
+### Added
+
+- `ProjectStorageReport` now supports temporal history alongside its
+  point-in-time snapshot, mirroring the `ProjectUsageReport` / `UsageReport`
+  API:
+  - New internal `DailyStorageReport` type (not exposed publicly) stores
+    per-day snapshots inside `ProjectStorageReport`. Callers always receive
+    `ProjectStorageReport` even for individual days, so there is no silent
+    type change.
+  - New `daily_reports: HashMap<NaiveDate, DailyStorageReport>` field on
+    `ProjectStorageReport`, serialised as `"daily_reports"` in JSON.
+    The field is omitted from JSON when empty (`skip_serializing_if`), so
+    existing serialised reports remain valid (fully backwards-compatible).
+  - Merge semantics (`+` / `+=`): the newer snapshot (by `generated_at`)
+    becomes the top-level state; the older snapshot is stored in
+    `daily_reports` under its calendar date. If both snapshots fall on the
+    same day, the older is discarded. Historical entries from both sides are
+    merged keeping the newest snapshot per date. The current top-level date
+    is never duplicated in `daily_reports`.
+  - `ProjectStorageReport::daily_reports(with_usage_only)` — returns all
+    snapshots (historical + current) sorted by date (oldest first), each as a
+    `ProjectStorageReport` with an empty history map. When `with_usage_only`
+    is `true`, only snapshots with quota data are returned. When `false`,
+    every calendar date in the range [earliest, latest] is included (empty
+    reports for missing days), mirroring `ProjectUsageReport::daily_reports`.
+  - `ProjectStorageReport::get_report(date)` — returns the snapshot for a
+    specific `NaiveDate` as a `ProjectStorageReport`. If the date matches the
+    top-level snapshot's date, the top-level data is returned (without nested
+    history). Returns an empty report for unknown dates.
+  - `ProjectStorageReport::combine(reports)` — combines a slice of reports
+    using the merge semantics above.
+  - `StorageReport` gains `+` / `+=` operators and a `combine(reports)`
+    function, merging per-project history across portal-level reports.
+  - Python bindings updated: `ProjectStorageReport.daily_reports(with_usage_only=True)`
+    → `list[ProjectStorageReport]`; `ProjectStorageReport.get_report(date)`
+    accepts a `datetime.date`; `+` / `+=` / `combine()` on both
+    `ProjectStorageReport` and `StorageReport`.
+
+## [0.23.1] - 2026-03-12
+
+### Changed
+
+- Slurm job wait time (`SlurmJob::wait_time()`) is now computed from
+  Slurm's `time.eligible` timestamp rather than `time.submission`. The
+  eligible time is when the job first became runnable (after any holds,
+  `--dependency`, or `--begin` constraints are resolved), which is a more
+  accurate measure of scheduler queue wait time than the raw submission
+  timestamp. The internal field has been renamed from `submit_time` to
+  `eligible_time` accordingly. For jobs with no holds or dependencies the
+  two values are identical.
+
+### Fixed
+
+- `op-localaccount`: `userdel` no longer passes `-r`, so the user's home
+  directory is not deleted by the account agent. Home directories are managed
+  exclusively by the filesystem agent, which recycles them rather than
+  permanently deleting them.
+- `op-filesystem`: symlink removal in `RemoveLocalProject` now works correctly
+  in prefix (remote/container) mode. Previously, `std::fs::remove_file` was
+  called against the local filesystem, so symlinks on the remote system were
+  silently left in place. The new `filesystem::remove_link` helper dispatches
+  to `rm -f` via the exec prefix when a prefix is configured.
+
+## [0.23.0] - 2026-03-11
+
+### Added
+
+- Job accounting improvements for the Slurm agent:
+  - Jobs are now counted only on the day they **start**, preventing
+    multi-day jobs from being double-counted in daily usage reports.
+  - Added `submit_time` and `original_start_time` fields to `SlurmJob` so
+    queue wait time can be computed. `original_start_time` records the
+    true start time before any day-boundary clamping.
+  - `SlurmJob::wait_time()` returns the time between job submission and
+    start (clamped to zero for jobs that started immediately).
+  - `DailyProjectUsageReport` gains per-user job counts
+    (`user_job_counts`) and per-user queue wait time (`user_wait_seconds`),
+    alongside the existing scalar totals `num_jobs` and the new
+    `total_wait_seconds`. New accessors: `num_jobs_for_user`,
+    `wait_seconds_for_user`, `average_wait_seconds_for_user`,
+    `average_wait_seconds`, `is_consistent`.
+  - `ProjectUsageReport` gains `total_wait_seconds`, `average_wait_seconds`,
+    and `daily_reports(with_usage_only)`.
+  - All new fields use `#[serde(default)]` so they are fully
+    backwards-compatible with JSON produced by older releases.
+  - Runtime consistency check in the Slurm sacctmgr path: local shadow
+    counters are compared against the report's scalar totals after each
+    daily report is built; a warning is logged if they diverge.
+- `Usage`, `DailyProjectUsageReport`, and `ProjectUsageReport` now have an
+  `in_hours()` method that returns a human-readable string with all values
+  expressed in hours — useful for comparing across days with consistent
+  units.
+- `Usage::Display` now auto-scales to seconds/minutes/hours, limits output
+  to 3 decimal places, and uses correct singular/plural forms
+  (e.g. `"1 second"`, `"1 job"` instead of `"1 seconds"`, `"1 jobs"`).
+- Display output for `DailyProjectUsageReport` and `ProjectUsageReport`
+  now includes per-user job counts and average queue wait times inline.
+- All new Rust functionality exposed through the Python bindings:
+  `DailyProjectUsageReport.total_wait_seconds`, `average_wait_seconds`,
+  `num_jobs_for_user()`, `wait_seconds_for_user()`,
+  `average_wait_seconds_for_user()`, `is_consistent`, `in_hours()`;
+  `ProjectUsageReport.total_wait_seconds`, `average_wait_seconds`,
+  `daily_reports()`, `in_hours()`; `Usage.in_hours()`.
+- Updated `docs/specifications/json-types.md` and
+  `docs/specifications/python-api.md` to document all new fields and
+  methods, including backwards-compatibility notes.
+- Storage quota reporting: new point-in-time storage report for projects
+  and portals, complementing the existing time-ranged usage reports:
+  - New `templemeads/src/storagereport.rs` containing `ProjectStorageReport`
+    and `StorageReport` types (with `NamedType` implementations for result
+    dispatch). `ProjectStorageReport` captures project-level and per-user
+    quotas across all volumes, plus the user identifier→local username
+    mapping. `StorageReport` is the portal-level aggregate.
+  - Three new `Instruction` variants in `templemeads/src/grammar.rs`:
+    `GetStorageReport(ProjectIdentifier)`,
+    `GetStorageReports(PortalIdentifier)`, and
+    `GetLocalStorageReport(ProjectMapping)`.
+  - `get_storage_report <project_id>` and `get_storage_reports <portal_id>`
+    commands handled by the portal, bridge, and cluster agents.
+  - `get_local_storage_report <project_mapping>` is an internal instruction
+    sent by the cluster instance agent to the filesystem agent. The
+    filesystem agent builds the full `ProjectStorageReport` locally: it
+    fetches project and per-user quotas from the filesystem, and calls back
+    to the sender (cluster) with `get_users <project_id>` to obtain the
+    project member list. This keeps the business logic in the agent that
+    owns the quota data and reduces inter-agent round trips.
+  - Python bindings in `python/src/lib.rs`: `ProjectStorageReport` and
+    `StorageReport` exposed as PyO3 classes with `project`, `generated_at`,
+    `project_quotas`, `user_quotas`, `users`, `portal`, `projects`,
+    `get_report()`, `is_empty()`, `to_json()`, `from_json()`, and standard
+    `__str__`/`__repr__`/`__copy__`/`__deepcopy__` methods.
+  - `docs/specifications/instruction-protocol.md`: new "Storage Reporting
+    Instructions" section documenting all three commands.
+  - `docs/specifications/json-types.md`: full JSON schemas for
+    `ProjectStorageReport` and `StorageReport`, plus new entries in the
+    `result_type` reference table.
+  - `docs/specifications/python-api.md`: `ProjectStorageReport` and
+    `StorageReport` class references with property tables and usage example.
+- Added `SECURITY.md` with vulnerability reporting contact, supported version
+  policy, scope definition, and link to the security model specification.
+- Added `CONTRIBUTING.md` covering bug reporting, dev setup, code standards,
+  and pull request guidelines.
+- Added `CODE_OF_CONDUCT.md` (adapted from Contributor Covenant v2.1).
+- Added root `LICENSE` file (MIT) for tool and platform compatibility.
+- New `op-localaccount` agent (`localaccount/`) — an Account agent that
+  implements the full Account instruction set (`AddUser`, `RemoveUser`,
+  `AddProject`, `RemoveProject`, `GetUsers`, `GetProjects`,
+  `GetUserMapping`, `GetProjectMapping`, `IsExistingUser`,
+  `IsExistingProject`, `IsProtectedUser`, `UpdateHomeDir`) using standard
+  Unix commands (`useradd`, `userdel`, `groupadd`, `groupdel`, `usermod`,
+  `getent`). All commands are individually configurable so they can be
+  prefixed for container execution (e.g.
+  `useradd = "docker exec slurmctld useradd"`). Intended for testing
+  without a FreeIPA installation.
+  - All required groups are created before the user is added: project
+    group, managed group (`openportal` by default), an auto-generated
+    per-instance group (`op-<instance-name>`), plus any extra groups
+    specified via the `system-groups` and `instance-groups` config keys.
+  - Home directory is obtained by calling back to the instance agent
+    (`get_local_home_dir`), matching the protocol used by `op-freeipa`.
+  - Documented in `docs/specifications/agent-configuration.md` §3.6.1.
+- `op-filesystem` exec-prefix support: a new optional `exec-prefix` extra
+  redirects all filesystem operations (mkdir, chown, chmod, mv, ln -s,
+  touch, rm -rf, test, readlink) through an external command prefix
+  instead of the native Rust stdlib/nix calls. Setting
+  `exec-prefix = "docker exec slurmctld"` lets the filesystem agent run
+  on the host while performing all operations inside a container.
+  Documented in `docs/specifications/agent-configuration.md` §3.7.
+- New `linux` quota engine (`filesystem/src/linuxquotaengine.rs`) for
+  `op-filesystem`. Uses the standard `setquota` / `repquota` utilities to
+  manage per-user and per-group quotas on any Linux filesystem that
+  supports the kernel quota interface (ext4, xfs, etc.). Both commands
+  are configurable for container execution. Configure with
+  `type = "linux"` in a `[quota_engines.*]` block.
+  Documented in `docs/specifications/agent-configuration.md` §3.7.5.
+- New `fake` quota engine (`filesystem/src/fakequotaengine.rs`) for
+  `op-filesystem`. Designed for local testing on Mac / Docker where real
+  quota filesystems are unavailable. Quota limits are persisted as
+  plain-text files in a configurable `quota_dir` on the agent host; disk
+  usage is measured with `du -sk` (configurable for container execution).
+  No quota enforcement happens — it reports the stored limit against real
+  `du` usage, which is sufficient to exercise the full portal-to-filesystem
+  quota plumbing. Configure with `type = "fake"` in a `[quota_engines.*]`
+  block. Documented in `docs/specifications/agent-configuration.md` §3.7.6.
+
+### Fixed
+
+- Added missing parse arms for `get_user_dirs` and `get_local_user_dirs` in
+  `Instruction::parse()` (`templemeads/src/grammar.rs`). These instructions
+  were already fully implemented (enum variants, `Display`, argument
+  serialisation) but could not be parsed from a command string, making them
+  unreachable over the wire. Removed the corresponding errata entry from
+  `docs/specifications/notes.md`.
+
+### Changed
+
+- Extended documentation: added `docs/bridge/README.md` (bridge and Python
+  example), `docs/specifications/python-api.md` (full Python API reference),
+  and updated the specifications index with links to both.
+- Fixed several issues in the existing docs: corrected a copy-paste error in
+  the `cmdline` example (portal config was showing cluster config), replaced
+  a stale note about config encryption with current information, fixed a
+  dangling link to the (now created) bridge example, corrected several typos,
+  added the `slurm` agent to the agent type list in `docs/README.md`, added
+  cross-links between the specifications and narrative documentation, and
+  expanded the root `README.md` with an agent type table and description.
+
+## [0.22.4] - 2026-03-05
+
+### Changed
+
+- Ensured that any slurm job that would round down to zero usage would be billed
+  at least 1 node second. This ensures that super small jobs are still
+  billed.
+- Added protocol specifications and docs into docs/specifications, with
+  links from the README. This should make it easier for
+  developers to understand the protocol and to implement new agents.
+
+## [0.22.3] - 2026-03-04
+
+### Changed
+
+- Added `--sender` and `--zone` options to the `--one-shot` commands, so that
+  you can set the sender and zone for the command. This is useful for testing
+  commands that include the sender information, e.g. those involving
+  FreeIPA. Also added `--one-shot` support to the accounting / freeipa
+  agent.
+
+### Fixed
+
+- Fixed get_users and get_projects commands so that they only return the
+  active users and projects for the specified portal for the specified
+  instance. Previously, get_users would return users that may not have
+  been fully added (preventing fixing this in case the user addition failed),
+  and get_projects returned all projects in FreeIPA related to OpenPortal,
+  for that portal, even if they were for different instances.
+
+## [0.22.2] - 2026-01-21
+
+### Fixed
+
+- Fixed Lustre quota parsing failing when usage exceeds the quota limit.
+  Lustre's `lfs quota` command appends a `*` suffix to values that exceed
+  quota (e.g., `2000*` instead of `2000`). The parser now strips this suffix
+  before parsing the numeric value.
+- Fixed HA standby-only logic incorrectly triggering for agents that act as
+  servers. The standby-only shutdown behavior now only applies to client-only
+  agents. Agents that also accept server connections (indicated by calling
+  `set_is_server()`) will no longer incorrectly enter standby mode based on
+  peer connection status.
+
+### Changed
+
+- Volume configuration subpath templates now accept case-insensitive
+  placeholders. `{PROJECT}`, `{Project}`, `{USER}`, `{User}`, and other case
+  variants are automatically normalized to lowercase `{project}` and `{user}`
+  during validation. This prevents configuration errors from placeholder
+  case mismatches.
+- Added validation to ensure user and project volume subpaths contain the
+  required `{project}` placeholder. Invalid configurations now fail early
+  with a descriptive error message.
+
+## [0.22.1] - 2026-01-20
+
+### Fixed
+
+- Fixed a stack overflow bug in the slurm agent caused by infinite recursion
+  when logging SlurmJob objects. The Display implementation for SlurmJob
+  called billed_node_seconds(), which called billed_node_fraction(), which
+  logged self using Display, causing infinite recursion. The fix logs just
+  the job ID instead of the full object.
+
+### Changed
+
+- Added separate priority runner pool for time-sensitive slurm commands.
+  Commands like adding/removing users, getting/setting limits, and cancelling
+  jobs now use a dedicated pool of runners that won't be blocked by
+  long-running usage report queries (sacct). This ensures that priority
+  operations remain responsive even when multiple usage reports are being
+  generated.
+
 ## [0.22.0] - 2026-01-14
 
 ### Added
@@ -889,6 +1597,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.32.2]: https://github.com/isambard-sc/openportal/releases/tag/0.32.2
+[0.32.1]: https://github.com/isambard-sc/openportal/releases/tag/0.32.1
+[0.32.0]: https://github.com/isambard-sc/openportal/releases/tag/0.32.0
+[0.31.0]: https://github.com/isambard-sc/openportal/releases/tag/0.31.0
+[0.30.1]: https://github.com/isambard-sc/openportal/releases/tag/0.30.1
+[0.30.0]: https://github.com/isambard-sc/openportal/releases/tag/0.30.0
+[0.29.0]: https://github.com/isambard-sc/openportal/releases/tag/0.29.0
+[0.28.0]: https://github.com/isambard-sc/openportal/releases/tag/0.28.0
+[0.27.1]: https://github.com/isambard-sc/openportal/releases/tag/0.27.1
+[0.27.0]: https://github.com/isambard-sc/openportal/releases/tag/0.27.0
+[0.26.0]: https://github.com/isambard-sc/openportal/releases/tag/0.26.0
+[0.25.0]: https://github.com/isambard-sc/openportal/releases/tag/0.25.0
+[0.24.0]: https://github.com/isambard-sc/openportal/releases/tag/0.24.0
+[0.23.1]: https://github.com/isambard-sc/openportal/releases/tag/0.23.1
+[0.23.0]: https://github.com/isambard-sc/openportal/releases/tag/0.23.0
+[0.22.4]: https://github.com/isambard-sc/openportal/releases/tag/0.22.4
+[0.22.3]: https://github.com/isambard-sc/openportal/releases/tag/0.22.3
+[0.22.2]: https://github.com/isambard-sc/openportal/releases/tag/0.22.2
+[0.22.1]: https://github.com/isambard-sc/openportal/releases/tag/0.22.1
 [0.22.0]: https://github.com/isambard-sc/openportal/releases/tag/0.22.0
 [0.21.1]: https://github.com/isambard-sc/openportal/releases/tag/0.21.1
 [0.21.0]: https://github.com/isambard-sc/openportal/releases/tag/0.21.0

@@ -9,7 +9,7 @@ This requires extra configuration to set the details used to connect
 to the FreeIPA server.
 
 To test, the demo server provided by FreeIPA is very useful.
-This is at `[ipa.demo1.freeipa.org](https://ipa.demo1.freeipa.org/),
+This is at [ipa.demo1.freeipa.org](https://ipa.demo1.freeipa.org/),
 and you can use the username `admin` and password `Secret123`.
 
 First, turn on simple encryption for the FreeIPA password

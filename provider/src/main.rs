@@ -5,6 +5,8 @@ use anyhow::Result;
 
 use templemeads::agent::provider::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 
 ///
 /// Main function for the bridge application
@@ -57,6 +59,7 @@ async fn main() -> Result<()> {
     };
 
     // run the portal agent
+    set_notify_runner(default_notify_runner).await?;
     run(config).await?;
 
     Ok(())

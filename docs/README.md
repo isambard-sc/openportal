@@ -10,7 +10,7 @@ and digital research infrastructure (e.g. the Isambard supercomputers).
 
 Its aim is to separate the communication of user and infrastructure management
 tasks (e.g. "create an account on a cluster for a user who has been added
-to a project") from the business logic of actually implmenting those
+to a project") from the business logic of actually implementing those
 tasks (e.g. logging into FreeIPA and adding accounts, getting root access
 to the filesystem to create user and project directories etc).
 
@@ -59,8 +59,10 @@ The two main components of OpenPortal are:
    communicate with each other, sending Jobs (tasks) to each other which
    are managed on Job Boards. The Agents collectively manage a distributed
    set of Jobs in a robust manner, such that the system can recover from
-   the failure of individual Agents. The source code is in the
-   [templemeads](../templemeads) directory.
+   the failure of individual Agents. In addition to Jobs, `templemeads`
+   provides a lightweight fire-and-forget **Notification** system for
+   signalling events between agents without requiring acknowledgement or
+   a result. The source code is in the [templemeads](../templemeads) directory.
 
 ### Agents
 
@@ -102,7 +104,7 @@ The key types of Agent are:
    for clusters, with source code in the [clusters](../clusters) directory.
 
 4. `instance` - these are agents that represent individual instances of
-   a platform. For example, each indvidual slurm cluster or Jupyter notebook
+   a platform. For example, each individual slurm cluster or Jupyter notebook
    service would have an accompanying `instance` Agent. The `instance`
    Agent is responsible for managing the lifecycle of the instance and
    tasks relating to that instance. For example, the `provider` Agent for
@@ -130,7 +132,15 @@ The key types of Agent are:
    The `op-filesystem` executable implements the `filesystem` Agent,
    with source code in the [filesystem](../filesystem) directory.
 
-7. `bridge` - OpenPortal is implemented in Rust, while portals are typically
+7. `slurm` - this is an Agent that interfaces directly with the Slurm
+   workload manager. It can be configured to use either the `sacctmgr`
+   command-line tools or the Slurm REST API. The `slurm` Agent handles
+   Jobs relating to Slurm account management (creating and removing
+   accounts, setting resource limits etc). The `op-slurm` executable
+   implements the `slurm` Agent, with source code in the
+   [slurm](../slurm) directory.
+
+8. `bridge` - OpenPortal is implemented in Rust, while portals are typically
    implemented in other languages (e.g. Python). The `bridge` Agent is
    responsible for bridging between the Rust-based OpenPortal network and
    the actual code in the portal. For example, the `op-bridge` executable
@@ -183,3 +193,16 @@ The [command line](cmdline) example demonstrates how to create agents
 in a more standardised way, e.g. with a standardised command line interface
 and configuration file. This example shows how to easily create new agents
 that will look and feel like other agents in the OpenPortal system.
+
+### Example 4: bridge and Python
+
+The [bridge](bridge) example demonstrates how to connect the OpenPortal
+agent network to portal software written in Python using the `op-bridge`
+agent and the `openportal` Python library.
+
+## Protocol Specifications
+
+The [specifications](specifications) directory contains formal protocol
+and API reference documentation covering the instruction grammar, notification
+event grammar, JSON result types, wire protocol, security model, bridge HTTP
+API, and agent configuration reference.

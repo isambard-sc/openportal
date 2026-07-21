@@ -80,6 +80,7 @@ impl Defaults {
         bridge_ip: Option<String>,
         bridge_port: Option<u16>,
         signal_url: Option<String>,
+        notification_url: Option<String>,
     ) -> Self {
         Self {
             service: ServiceDefaults::parse(
@@ -91,7 +92,13 @@ impl Defaults {
                 healthcheck_port,
                 proxy_header,
             ),
-            bridge: BridgeDefaults::parse(bridge_url, bridge_ip, bridge_port, signal_url),
+            bridge: BridgeDefaults::parse(
+                bridge_url,
+                bridge_ip,
+                bridge_port,
+                signal_url,
+                notification_url,
+            ),
         }
     }
 }
@@ -134,6 +141,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             healthcheck_port,
             proxy_header,
             signal_url,
+            notification_url,
             force,
         }) => {
             let local_healthcheck_port;
@@ -168,6 +176,9 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                     &signal_url
                         .clone()
                         .unwrap_or_else(|| defaults.bridge.signal_url()),
+                    &notification_url
+                        .clone()
+                        .unwrap_or_else(|| defaults.bridge.notification_url()),
                 ),
                 agent: AgentType::Bridge,
             };
@@ -508,6 +519,13 @@ enum Commands {
             help = "URL to call to signal when a new job is available to be processed"
         )]
         signal_url: Option<String>,
+
+        #[arg(
+            long,
+            short = 'N',
+            help = "URL to POST to when an inbound notification arrives from the agent network"
+        )]
+        notification_url: Option<String>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

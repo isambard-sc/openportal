@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
 use tokio::sync::RwLock;
+use ts_rs::TS;
 
 use crate::error::Error;
 
-#[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize, TS)]
+#[ts(export)]
 pub enum Type {
     Portal,
     Provider,

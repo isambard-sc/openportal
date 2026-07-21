@@ -114,7 +114,7 @@ while not job.is_finished:
     job.update()
 
 if job.is_error:
-    raise ValueError(f"Error: {job.error}")
+    raise ValueError(f"Error: {job.error_message}")
 
 print(f"Result of job: {job.result}")
 ```

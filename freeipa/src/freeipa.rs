@@ -821,10 +821,24 @@ impl IPAUser {
     }
 
     ///
+    /// Return whether this user is a member of the passed named group
+    ///
+    pub fn in_group_cn(&self, group_cn: &str) -> bool {
+        self.memberof().contains(&group_cn.to_string())
+    }
+
+    ///
     /// Return whether this user is in the passed group
     ///
-    pub fn in_group(&self, group: &str) -> bool {
-        self.memberof().contains(&group.to_string())
+    pub fn in_group(&self, group: &IPAGroup) -> bool {
+        self.in_group_cn(group.groupid())
+    }
+
+    ///
+    /// Return whether or not this user is in all of the passed groups
+    ///
+    pub fn in_all_groups(&self, groups: &[IPAGroup]) -> bool {
+        groups.iter().all(|group| self.in_group(group))
     }
 
     ///
@@ -833,14 +847,14 @@ impl IPAUser {
     ///
     pub fn is_managed(&self) -> bool {
         let managed_group = match get_managed_group() {
-            Ok(group) => group.groupid().to_string(),
+            Ok(group) => group,
             Err(_) => return false,
         };
 
         match std::env::var("OPENPORTAL_REQUIRE_MANAGED_CLASS") {
             Ok(value) => match value.to_lowercase().as_str() {
                 "true" | "yes" | "1" => {
-                    self.in_group(&managed_group) && self.userclass() == managed_group
+                    self.in_group(&managed_group) && self.userclass() == managed_group.groupid()
                 }
                 _ => self.in_group(&managed_group),
             },
@@ -868,6 +882,16 @@ impl IPAUser {
     ///
     pub fn is_disabled(&self) -> bool {
         !self.is_enabled()
+    }
+
+    ///
+    /// Return whether or not this user is blocked by OpenPortal.
+    /// Blocked users are disabled and are members of the "openportal.blocked"
+    /// group. This distinguishes them from users that have been removed
+    /// (also disabled, but not in the blocked group).
+    ///
+    pub fn is_blocked(&self) -> bool {
+        self.in_group_cn("openportal.blocked")
     }
 
     ///
@@ -1299,6 +1323,10 @@ async fn force_get_users_in_group(
 ) -> Result<Vec<IPAUser>, Error> {
     if !group.is_project_group() {
         // we only list users in project groups
+        tracing::warn!(
+            "Not listing users in group {} as it is not a project group",
+            group.identifier()
+        );
         return Ok(Vec::new());
     }
 
@@ -1312,12 +1340,19 @@ async fn force_get_users_in_group(
 
     let result = call_post::<IPAResponse>("user_find", None, Some(kwargs), expires).await?;
 
-    // filter out users who are not enabled - we do list unmanaged users,
-    // so that OpenPortal isn't repeatedly told to add users who already exist
+    tracing::debug!(
+        "user_find result for group {}: {:?}",
+        group.identifier(),
+        result
+    );
+
+    // filter out users who are not enabled, except for blocked users which are
+    // intentionally disabled - we do list unmanaged users, so that OpenPortal
+    // isn't repeatedly told to add users who already exist
     Ok(result
         .users(group.identifier())?
         .iter()
-        .filter(|u| u.is_enabled())
+        .filter(|u| u.is_enabled() || u.is_blocked())
         .cloned()
         .collect())
 }
@@ -1519,12 +1554,8 @@ async fn get_groups_for_user(
     let groups = result
         .groups()?
         .into_iter()
-        .chain(result.internal_groups(&internal_groups)?.into_iter())
-        .chain(
-            result
-                .legacy_groups(&user.identifier().portal_identifier())?
-                .into_iter(),
-        )
+        .chain(result.internal_groups(&internal_groups)?)
+        .chain(result.legacy_groups(&user.identifier().portal_identifier())?)
         .collect::<Vec<IPAGroup>>();
 
     // remove duplicates from this list
@@ -1542,6 +1573,70 @@ async fn get_groups_for_user(
     );
 
     Ok(groups)
+}
+
+///
+/// Get the UIDs of all direct members of a group via group_show.
+/// Returns an empty set if the group does not exist in FreeIPA.
+///
+async fn get_instance_group_member_uids(
+    group: &IPAGroup,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<HashSet<String>, Error> {
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("all".to_string(), "true".to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>(
+        "group_show",
+        Some(vec![group.groupid().to_string()]),
+        Some(kwargs),
+        expires,
+    )
+    .await
+    {
+        Err(Error::NotFound(_)) => {
+            tracing::warn!("Instance group {} not found in FreeIPA", group.groupid());
+            Ok(HashSet::new())
+        }
+        Err(e) => Err(e),
+        Ok(response) => {
+            let raw = response.result.clone().unwrap_or_default();
+
+            let uids: HashSet<String> = raw
+                .get("member_user")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            tracing::debug!(
+                "Instance group {} has {} direct member UIDs",
+                group.groupid(),
+                uids.len()
+            );
+            Ok(uids)
+        }
+    }
+}
+
+///
+/// Extract memberuser UIDs from a raw FreeIPA group JSON object.
+///
+fn raw_group_member_uids(raw_group: &serde_json::Value) -> HashSet<String> {
+    raw_group
+        .get("member_user")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 ///
@@ -1750,7 +1845,7 @@ async fn sync_groups(
     }
 
     // which groups are missing?
-    group_cns.retain(|group| !user.in_group(group));
+    group_cns.retain(|group| !user.in_group_cn(group));
 
     let userid = user.userid().to_string();
 
@@ -2024,6 +2119,16 @@ pub async fn add_user(
             return Ok(user);
         }
 
+        // blocked users must be explicitly unblocked - don't re-enable them here
+        if user.is_blocked() {
+            tracing::info!(
+                "User {} is blocked - not re-enabling during add_user. Use unblock_user to unblock.",
+                user.identifier()
+            );
+            cache::add_existing_user(&user).await?;
+            return Ok(user);
+        }
+
         // make sure to re-enable if needed
         if user.is_disabled() {
             user = match reenable_user(&user, expires).await {
@@ -2112,7 +2217,15 @@ pub async fn add_user(
 
             match get_user(user, expires).await? {
                 Some(mut user) => {
-                    if user.is_disabled() {
+                    if user.is_blocked() {
+                        // blocked users must be explicitly unblocked - don't re-enable them here
+                        tracing::info!(
+                            "User {} is blocked - not re-enabling during add_user. Use unblock_user to unblock.",
+                            user.identifier()
+                        );
+                        cache::add_existing_user(&user).await?;
+                        return Ok(user);
+                    } else if user.is_disabled() {
                         if user.is_managed() {
                             // the user should be enabled...
                             user = reenable_user(&user, expires).await?;
@@ -2372,8 +2485,8 @@ pub async fn remove_user(
         )));
     }
 
-    if user.is_disabled() {
-        // nothing to do
+    if user.is_disabled() && !user.is_blocked() {
+        // nothing to do - user has already been removed
         tracing::info!(
             "User {} is already disabled. No changes needed.",
             user.identifier()
@@ -2385,7 +2498,7 @@ pub async fn remove_user(
     let instance_group = get_op_instance_group(instance)?;
 
     // maybe don't do anything if the user isn't a member of this group
-    if !user.in_group(instance_group.groupid()) {
+    if !user.in_group(&instance_group) {
         // check that they are in any groups...
         let in_other_instance_groups = match get_groups_for_user(&user, expires).await {
             Ok(groups) => !groups
@@ -2677,6 +2790,7 @@ pub async fn update_homedir(
 ///
 pub async fn get_groups(
     portal: &PortalIdentifier,
+    peer: &Peer,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Vec<IPAGroup>, Error> {
     tracing::debug!("Getting managed groups for portal: {}", portal);
@@ -2685,35 +2799,144 @@ pub async fn get_groups(
         return Ok(Vec::new());
     }
 
-    // calling group_find with no arguments should list all groups
-    // I don't like setting a high size limit, but I am unsure how to
-    // get all groups otherwise, as freeipa doesn't look like it has
-    // a paging option? This could in theory be reduced by searching
-    // for groups using a glob pattern, e.g. "portal.*"
-    let kwargs = {
-        let mut kwargs = HashMap::new();
-        kwargs.insert("sizelimit".to_string(), "2048".to_string());
-        kwargs
-    };
+    // Strategy: search for groups by portal name prefix, then filter to those
+    // that have at least one member in the instance group. This avoids enumerating
+    // all users on the system and performing N+1 group lookups per user.
+    let instance_group = get_op_instance_group(peer)?;
 
-    let result = call_post::<IPAResponse>("group_find", None, Some(kwargs), expires).await?;
+    // Step 1: get the UIDs of all direct members of the instance group (single API call,
+    // no full user object construction needed)
+    tracing::info!(
+        "Getting members of instance group '{}' for portal {}",
+        instance_group.groupid(),
+        portal
+    );
+
+    let instance_members = get_instance_group_member_uids(&instance_group, expires).await?;
 
     assert_not_expired(expires)?;
 
-    // construct groups as the combination of both result.groups() and result.legacy_groups()
-    let groups = result
-        .groups()?
+    if instance_members.is_empty() {
+        tracing::warn!(
+            "No users in instance group '{}' for portal {}",
+            instance_group.groupid(),
+            portal
+        );
+        return Ok(Vec::new());
+    }
+
+    tracing::info!(
+        "Instance group '{}' has {} members for portal {}",
+        instance_group.groupid(),
+        instance_members.len(),
+        portal
+    );
+
+    // Step 2: find all groups for this portal using the server-side name prefix filter.
+    // Group names are "{portal}.{project}", so passing "{portal}." as the positional
+    // search criteria restricts FreeIPA's substring match to only this portal's groups.
+    // Note: cn must be a positional arg (not a kwarg) for FreeIPA to use substring matching;
+    // passing it as a kwarg triggers exact matching.
+    let portal_prefix = format!("{}.", portal.portal());
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("all".to_string(), "true".to_string());
+        kwargs.insert("sizelimit".to_string(), "4096".to_string());
+        kwargs
+    };
+
+    let result = call_post::<IPAResponse>(
+        "group_find",
+        Some(vec![portal_prefix]),
+        Some(kwargs),
+        expires,
+    )
+    .await?;
+
+    if result.truncated.unwrap_or(false) {
+        tracing::warn!(
+            "group_find for portal {} was truncated at 4096 results; \
+             some groups may be missing.",
+            portal
+        );
+    }
+
+    // Step 3: filter to groups that have at least one member in the instance group,
+    // then construct IPAGroup objects from the filtered raw entries
+    let raw_groups = result.result.clone().unwrap_or_default();
+    let raw_groups = raw_groups.as_array().cloned().unwrap_or_default();
+
+    let filtered: Vec<serde_json::Value> = raw_groups
         .into_iter()
-        .chain(result.legacy_groups(portal)?.into_iter())
-        .collect::<Vec<IPAGroup>>();
+        .filter(|raw| {
+            let members = raw_group_member_uids(raw);
+            members.iter().any(|uid| instance_members.contains(uid))
+        })
+        .collect();
 
-    cache::add_existing_groups(&groups).await?;
+    let mut groups = IPAGroup::construct(&serde_json::Value::Array(filtered))?;
 
-    Ok(groups
-        .iter()
-        .filter(|group| group.identifier().portal() == portal.portal())
-        .cloned()
-        .collect())
+    assert_not_expired(expires)?;
+
+    // Step 4: also search for legacy groups (named "group.{project}").
+    // Only include those whose description encodes a ProjectIdentifier for this portal
+    // AND which have at least one member in the instance group.
+    let legacy_kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("all".to_string(), "true".to_string());
+        kwargs.insert("sizelimit".to_string(), "4096".to_string());
+        kwargs
+    };
+
+    let legacy_result = call_post::<IPAResponse>(
+        "group_find",
+        Some(vec!["group.".to_string()]),
+        Some(legacy_kwargs),
+        expires,
+    )
+    .await?;
+
+    if legacy_result.truncated.unwrap_or(false) {
+        tracing::warn!(
+            "group_find for legacy groups was truncated at 4096 results; \
+             some legacy groups may be missing."
+        );
+    }
+
+    let raw_legacy = legacy_result.result.clone().unwrap_or_default();
+    let raw_legacy = raw_legacy.as_array().cloned().unwrap_or_default();
+
+    let filtered_legacy: Vec<serde_json::Value> = raw_legacy
+        .into_iter()
+        .filter(|raw| {
+            let members = raw_group_member_uids(raw);
+            members.iter().any(|uid| instance_members.contains(uid))
+        })
+        .collect();
+
+    let legacy_groups =
+        IPAGroup::construct_legacy(&serde_json::Value::Array(filtered_legacy), portal)?;
+
+    for group in legacy_groups {
+        if !groups
+            .iter()
+            .any(|g: &IPAGroup| g.identifier() == group.identifier())
+        {
+            groups.push(group);
+        }
+    }
+
+    tracing::info!(
+        "Got groups for portal {}: {}",
+        portal,
+        groups
+            .iter()
+            .map(|g| g.groupid())
+            .collect::<Vec<&str>>()
+            .join(", ")
+    );
+
+    Ok(groups)
 }
 
 ///
@@ -2753,14 +2976,25 @@ pub async fn get_users(
 
     assert_not_expired(expires)?;
 
-    let instance_group = get_op_instance_group(instance)?;
+    // now collect all of the groups that the users would need to belong
+    // to for them to be managed by OpenPortal in this project
+    let mut required_groups = cache::get_system_groups().await?;
+
+    // add in the groups for this instance
+    required_groups.extend(cache::get_instance_groups(instance).await?);
+
+    // add in the "openportal" group, to which all users managed by
+    // OpenPortal must belong
+    required_groups.push(get_managed_group()?);
+
+    // now get all users in the project group
     let cached_users = cache::get_users_in_group(&project_group).await?;
 
     if !cached_users.is_empty() {
-        // filter out users who are not in the instance group for this peer
+        // filter out users who are not in all required groups for this peer
         let users = cached_users
             .into_iter()
-            .filter(|user| user.is_protected() || user.in_group(instance_group.groupid()))
+            .filter(|user| user.is_protected() || user.in_all_groups(&required_groups))
             .collect::<Vec<IPAUser>>();
 
         return Ok(users);
@@ -2774,10 +3008,10 @@ pub async fn get_users(
 
     assert_not_expired(expires)?;
 
-    // filter out users who are not in the instance group for this peer
+    // filter out users who are not in all required groups for this peer
     let users = users
         .into_iter()
-        .filter(|user| user.is_protected() || user.in_group(instance_group.groupid()))
+        .filter(|user| user.is_protected() || user.in_all_groups(&required_groups))
         .collect::<Vec<IPAUser>>();
 
     Ok(users)
@@ -2830,7 +3064,7 @@ pub async fn is_existing_user(
 ) -> Result<bool, Error> {
     match get_user(user, expires).await? {
         Some(user) => {
-            if user.is_enabled() || user.is_protected() {
+            if user.is_enabled() || user.is_protected() || user.is_blocked() {
                 Ok(true)
             } else {
                 Ok(false)
@@ -2848,4 +3082,246 @@ pub async fn is_existing_project(
         Some(_) => Ok(true),
         None => Ok(false),
     }
+}
+
+///
+/// Ensure the "openportal.blocked" group exists in FreeIPA, creating it if
+/// necessary. This group is the source of truth for which users are blocked.
+///
+async fn ensure_blocked_group_exists(expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    let blocked_cn = "openportal.blocked";
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), blocked_cn.to_string());
+        kwargs.insert(
+            "description".to_string(),
+            "Group for all users blocked by OpenPortal".to_string(),
+        );
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            tracing::info!("Created {} group in FreeIPA", blocked_cn);
+            Ok(())
+        }
+        Err(Error::Duplicate(_)) => {
+            // group already exists - that's fine
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to ensure {} group exists: {}", blocked_cn, e);
+            Err(e)
+        }
+    }
+}
+
+pub async fn is_blocked_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    match force_get_user(user, expires).await? {
+        Some(user) => Ok(user.is_blocked()),
+        None => Ok(false),
+    }
+}
+
+///
+/// Block the user in FreeIPA by adding them to the "openportal.blocked" group
+/// and disabling their account. This prevents login without removing their
+/// account, home directory, or scheduler configuration. Only unblock_user
+/// should re-enable them.
+///
+pub async fn block_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_user_mutex(user).await?.try_lock_owned() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to block user {} - another task is adding or removing.",
+                        user
+                    )));
+                }
+                assert_not_expired(expires)?;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
+    assert_not_expired(expires)?;
+
+    let user = match force_get_user(user, expires).await? {
+        Some(user) => user,
+        None => {
+            return Err(Error::NotFound(format!(
+                "Could not find user {} to block.",
+                user
+            )));
+        }
+    };
+
+    if !user.is_managed() {
+        return Err(Error::UnmanagedUser(format!(
+            "User {} is not managed by OpenPortal - cannot block.",
+            user.identifier()
+        )));
+    }
+
+    if user.is_blocked() {
+        tracing::info!(
+            "User {} is already blocked - nothing to do.",
+            user.identifier()
+        );
+        return Ok(user);
+    }
+
+    assert_not_expired(expires)?;
+
+    ensure_blocked_group_exists(expires).await?;
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), "openportal.blocked".to_string());
+        kwargs.insert("user".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            tracing::info!(
+                "Added user {} to openportal.blocked group",
+                user.identifier()
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not add user {} to openportal.blocked group: {}",
+                user.identifier(),
+                e
+            );
+            return Err(e);
+        }
+    }
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("uid".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    let mut user = user;
+    match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            user.set_disabled();
+            tracing::info!("Blocked user: {}", user.identifier());
+            cache::remove_existing_user(&user).await?;
+        }
+        Err(Error::NotFound(_)) => {
+            tracing::warn!(
+                "User {} not found when disabling during block - they may have been removed.",
+                user.identifier()
+            );
+            cache::clear().await?;
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not disable user {} when blocking: {}",
+                user.identifier(),
+                e
+            );
+            return Err(e);
+        }
+    }
+
+    Ok(user)
+}
+
+///
+/// Unblock a previously blocked user by removing them from "openportal.blocked"
+/// and re-enabling their account.
+///
+pub async fn unblock_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_user_mutex(user).await?.try_lock_owned() {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to unblock user {} - another task is adding or removing.",
+                        user
+                    )));
+                }
+                assert_not_expired(expires)?;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
+    assert_not_expired(expires)?;
+
+    let user = match force_get_user(user, expires).await? {
+        Some(user) => user,
+        None => {
+            return Err(Error::NotFound(format!(
+                "Could not find user {} to unblock.",
+                user
+            )));
+        }
+    };
+
+    if !user.is_managed() {
+        return Err(Error::UnmanagedUser(format!(
+            "User {} is not managed by OpenPortal - cannot unblock.",
+            user.identifier()
+        )));
+    }
+
+    if !user.is_blocked() {
+        tracing::info!("User {} is not blocked - nothing to do.", user.identifier());
+        return Ok(user);
+    }
+
+    assert_not_expired(expires)?;
+
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), "openportal.blocked".to_string());
+        kwargs.insert("user".to_string(), user.userid().to_string());
+        kwargs
+    };
+
+    match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+        Ok(_) => {
+            tracing::info!(
+                "Removed user {} from openportal.blocked group",
+                user.identifier()
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "Could not remove user {} from openportal.blocked group: {}",
+                user.identifier(),
+                e
+            );
+            return Err(e);
+        }
+    }
+
+    let user = reenable_user(&user, expires).await?;
+
+    tracing::info!("Unblocked user: {}", user.identifier());
+
+    Ok(user)
 }

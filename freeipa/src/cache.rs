@@ -383,20 +383,6 @@ pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
 }
 
 ///
-/// Add a number of existing groups to the database
-///
-pub async fn add_existing_groups(groups: &[IPAGroup]) -> Result<(), Error> {
-    let mut cache = CACHE.write().await;
-    groups.iter().for_each(|g| {
-        cache
-            .groups
-            .entry(g.identifier().clone())
-            .or_insert_with(|| g.clone());
-    });
-    Ok(())
-}
-
-///
 /// Remove a group from the database
 ///
 #[allow(dead_code)]

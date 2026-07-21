@@ -9,16 +9,21 @@ use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, ClearProjectQuota, ClearUserQuota, GetHomeDir, GetLimit, GetLocalHomeDir,
-    GetLocalProjectDirs, GetProjectDirs, GetProjectMapping, GetProjectQuota, GetProjectQuotas,
-    GetProjects, GetUsageReport, GetUsageReports, GetUserMapping, GetUserQuota, GetUserQuotas,
-    GetUsers, IsProtectedUser, RemoveProject, RemoveUser, SetLimit, SetProjectQuota, SetUserQuota,
+    AddProject, AddUser, BlockProject, BlockUser, ClearProjectQuota, ClearUserQuota, GetHomeDir,
+    GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs,
+    GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects, GetStorageReport,
+    GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs, GetUserMapping, GetUserQuota,
+    GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser, IsProtectedUser, RemoveProject,
+    RemoveUser, SetLimit, SetProjectQuota, SetUserQuota, UnblockProject, UnblockUser,
 };
 use templemeads::grammar::{
     DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
+use templemeads::notification::{self, default_notify_runner, NotificationEvent};
+use templemeads::set_notify_runner;
 use templemeads::storage::{Quota, Volume};
+use templemeads::storagereport::{ProjectStorageReport, StorageReport};
 use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
 
@@ -133,6 +138,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectAdded(project.clone())).await;
                     job.completed(mapping)
                 },
                 RemoveProject(project) => {
@@ -140,6 +146,7 @@ async fn main() -> Result<()> {
 
                     // remove the project from the cluster
                     let mapping = remove_project_from_cluster(me.name(), &project).await?;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectRemoved(project.clone())).await;
                     job.completed(mapping)
                 },
                 AddUser(user) => {
@@ -156,6 +163,16 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
+                    }
+
+                    // blocked users must not be re-enabled by add_user;
+                    // only unblock_user should do that
+                    if is_blocked_user(me.name(), &user).await? {
+                        tracing::info!(
+                            "User {} is blocked - not re-adding. Use unblock_user to unblock.",
+                            user
+                        );
+                        return job.completed(get_user_mapping(me.name(), &user).await?);
                     }
 
                     // does the user already exist?
@@ -199,6 +216,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserAdded(user.clone())).await;
                     job.completed(mapping)
                 }
                 RemoveUser(user) => {
@@ -219,7 +237,36 @@ async fn main() -> Result<()> {
 
                     // remove the user from the cluster
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserRemoved(user.clone())).await;
                     job.completed(mapping)
+                }
+                BlockUser(user) => {
+                    let mapping = block_user_on_cluster(me.name(), &user).await?;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserBlocked(user.clone())).await;
+                    job.completed(mapping)
+                }
+                UnblockUser(user) => {
+                    let mapping = unblock_user_on_cluster(me.name(), &user).await?;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserUnblocked(user.clone())).await;
+                    job.completed(mapping)
+                }
+                IsBlockedUser(user) => {
+                    let is_blocked = is_blocked_user(me.name(), &user).await?;
+                    job.completed(is_blocked)
+                }
+                BlockProject(project) => {
+                    let mappings = block_project_on_cluster(me.name(), &project).await?;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectBlocked(project.clone())).await;
+                    job.completed(mappings)
+                }
+                UnblockProject(project) => {
+                    let mappings = unblock_project_on_cluster(me.name(), &project).await?;
+                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectUnblocked(project.clone())).await;
+                    job.completed(mappings)
+                }
+                IsBlockedProject(project) => {
+                    let is_blocked = is_blocked_project_on_cluster(me.name(), &project).await?;
+                    job.completed(is_blocked)
                 }
                 IsProtectedUser(user) => {
                     let is_protected = is_protected_user(me.name(), &user).await?;
@@ -240,6 +287,14 @@ async fn main() -> Result<()> {
                 }
                 GetUsageReports(portal, dates) => {
                     let report = get_usage_reports(me.name(), &portal, &dates).await?;
+                    job.completed(report)
+                }
+                GetStorageReport(project, dates) => {
+                    let report = get_storage_report(me.name(), &project, &dates).await?;
+                    job.completed(report)
+                }
+                GetStorageReports(portal, dates) => {
+                    let report = get_storage_reports(me.name(), &portal, &dates).await?;
                     job.completed(report)
                 }
                 GetLimit(project) => {
@@ -292,12 +347,21 @@ async fn main() -> Result<()> {
                     let dirs = get_project_dirs(me.name(), &mapping).await?;
                     job.completed(dirs)
                 }
+                GetUserDirs(user) => {
+                    let mapping = get_user_mapping(me.name(), &user).await?;
+                    let dirs = get_user_dirs(me.name(), &mapping).await?;
+                    job.completed(dirs)
+                }
                 GetLocalHomeDir(mapping) => {
                     let homedir = get_home_dir(me.name(), &mapping).await?;
                     job.completed(homedir)
                 }
                 GetLocalProjectDirs(mapping) => {
                     let dirs = get_project_dirs(me.name(), &mapping).await?;
+                    job.completed(dirs)
+                }
+                GetLocalUserDirs(mapping) => {
+                    let dirs = get_user_dirs(me.name(), &mapping).await?;
                     job.completed(dirs)
                 }
                 _ => {
@@ -311,11 +375,17 @@ async fn main() -> Result<()> {
     }
 
     // run the agent
+    set_notify_runner(default_notify_runner).await?;
     run(config, cluster_runner).await?;
 
     Ok(())
 }
 
+/// Send a fire-and-forget notification back up the path that the triggering
+/// job came from. The notification destination is the job destination reversed,
+/// e.g. a job addressed to `brics.aip1.clusters.shared` produces a notification
+/// addressed to `shared.clusters.aip1.brics`. The notification is forwarded to
+/// the platform agent (next hop upward) and routed from there.
 async fn assert_agents_connected() -> Result<(), Error> {
     // check that we are connected to the filesystem and scheduler agents.
     // Do nothing if we aren't
@@ -1168,6 +1238,60 @@ async fn get_usage_reports(
     Ok(report)
 }
 
+async fn get_storage_report(
+    me: &str,
+    project: &ProjectIdentifier,
+    dates: &DateRange,
+) -> Result<ProjectStorageReport, Error> {
+    let mapping = get_project_mapping(me, project).await?;
+
+    let filesystem = match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => filesystem,
+        None => {
+            tracing::error!("No filesystem agent found");
+            return Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ));
+        }
+    };
+
+    // Delegate to the filesystem agent, which will call back with get_users
+    let job = Job::parse(
+        &format!(
+            "{}.{} get_local_storage_report {} {}",
+            me,
+            filesystem.name(),
+            mapping,
+            dates
+        ),
+        false,
+    )?
+    .put(&filesystem)
+    .await?;
+
+    match job.wait().await?.result::<ProjectStorageReport>()? {
+        Some(report) => Ok(report),
+        None => Ok(ProjectStorageReport::new(project)),
+    }
+}
+
+async fn get_storage_reports(
+    me: &str,
+    portal: &PortalIdentifier,
+    dates: &DateRange,
+) -> Result<StorageReport, Error> {
+    let projects = get_projects(me, portal).await?;
+
+    let mut report = StorageReport::new(portal);
+
+    for project in projects {
+        let project_report = get_storage_report(me, project.project(), dates).await?;
+        report.set_report(project_report)?;
+    }
+
+    Ok(report)
+}
+
 async fn get_project_limit(me: &str, project: &ProjectIdentifier) -> Result<Usage, Error> {
     // get the mapping for this project
     let mapping = get_project_mapping(me, project).await?;
@@ -1697,6 +1821,178 @@ async fn is_existing_user(me: &str, user: &UserIdentifier) -> Result<bool, Error
     }
 }
 
+async fn is_blocked_user(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            let job = Job::parse(
+                &format!("{}.{} is_blocked_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            let result = job.wait().await?.result::<bool>()?;
+
+            match result {
+                Some(is_blocked) => {
+                    tracing::debug!("User is blocked: {}", is_blocked);
+                    Ok(is_blocked)
+                }
+                None => Err(Error::MissingUser(format!(
+                    "Could not find information for user {}",
+                    user
+                ))),
+            }
+        }
+        None => Err(Error::MissingAgent(
+            "Cannot run the job because there is no account agent".to_string(),
+        )),
+    }
+}
+
+async fn block_user_on_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    match is_protected_user(me, user).await {
+        Ok(true) => return get_user_mapping(me, user).await,
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => return Err(e),
+        _ => {}
+    }
+
+    tracing::info!("Blocking user on cluster: {}", user);
+
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            let job = Job::parse(
+                &format!("{}.{} block_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            let result = job.wait().await?.result::<UserMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!("User blocked: {:?}", mapping);
+                    Ok(mapping)
+                }
+                None => Err(Error::Call(
+                    format!("Error blocking user: {:?}", job).to_string(),
+                )),
+            }
+        }
+        None => Err(Error::MissingAgent(
+            "Cannot run the job because there is no account agent".to_string(),
+        )),
+    }
+}
+
+async fn block_project_on_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<Vec<UserMapping>, Error> {
+    tracing::info!("Blocking all users in project: {}", project);
+
+    let users = get_accounts(me, project).await?;
+
+    let mut mappings = Vec::new();
+
+    for user_mapping in &users {
+        match block_user_on_cluster(me, user_mapping.user()).await {
+            Ok(mapping) => mappings.push(mapping),
+            Err(e) => tracing::error!(
+                "Error blocking user {} in project {}: {:?}",
+                user_mapping.user(),
+                project,
+                e
+            ),
+        }
+    }
+
+    Ok(mappings)
+}
+
+async fn unblock_project_on_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<Vec<UserMapping>, Error> {
+    tracing::info!("Unblocking all users in project: {}", project);
+
+    let users = get_accounts(me, project).await?;
+
+    let mut mappings = Vec::new();
+
+    for user_mapping in &users {
+        match unblock_user_on_cluster(me, user_mapping.user()).await {
+            Ok(mapping) => mappings.push(mapping),
+            Err(e) => tracing::error!(
+                "Error unblocking user {} in project {}: {:?}",
+                user_mapping.user(),
+                project,
+                e
+            ),
+        }
+    }
+
+    Ok(mappings)
+}
+
+async fn is_blocked_project_on_cluster(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<bool, Error> {
+    let users = get_accounts(me, project).await?;
+
+    if users.is_empty() {
+        return Ok(false);
+    }
+
+    for user_mapping in &users {
+        if !is_blocked_user(me, user_mapping.user()).await? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn unblock_user_on_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapping, Error> {
+    match is_protected_user(me, user).await {
+        Ok(true) => return get_user_mapping(me, user).await,
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => return Err(e),
+        _ => {}
+    }
+
+    tracing::info!("Unblocking user on cluster: {}", user);
+
+    match agent::account(AGENT_WAIT_TIME).await {
+        Some(account) => {
+            let job = Job::parse(
+                &format!("{}.{} unblock_user {}", me, account.name(), user),
+                false,
+            )?
+            .put(&account)
+            .await?;
+
+            let result = job.wait().await?.result::<UserMapping>()?;
+
+            match result {
+                Some(mapping) => {
+                    tracing::info!("User unblocked: {:?}", mapping);
+                    Ok(mapping)
+                }
+                None => Err(Error::Call(
+                    format!("Error unblocking user: {:?}", job).to_string(),
+                )),
+            }
+        }
+        None => Err(Error::MissingAgent(
+            "Cannot run the job because there is no account agent".to_string(),
+        )),
+    }
+}
+
 async fn is_existing_project(me: &str, project: &ProjectIdentifier) -> Result<bool, Error> {
     // find the Account agent
     match agent::account(AGENT_WAIT_TIME).await {
@@ -1807,6 +2103,49 @@ async fn get_project_dirs(me: &str, mapping: &ProjectMapping) -> Result<Vec<Stri
                     tracing::error!("No directories found?");
                     Err(Error::MissingProject(format!(
                         "Could not find directories for project {}",
+                        mapping
+                    )))
+                }
+            }
+        }
+        None => {
+            tracing::error!("No filesystem agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no filesystem agent".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_user_dirs(me: &str, mapping: &UserMapping) -> Result<Vec<String>, Error> {
+    // find the Filesystem agent
+    match agent::filesystem(AGENT_WAIT_TIME).await {
+        Some(filesystem) => {
+            // send the job to the filesystem agent
+            let job = Job::parse(
+                &format!(
+                    "{}.{} get_local_user_dirs {}",
+                    me,
+                    filesystem.name(),
+                    mapping
+                ),
+                false,
+            )?
+            .put(&filesystem)
+            .await?;
+
+            // Wait for the job to complete
+            let result = job.wait().await?.result::<Vec<String>>()?;
+
+            match result {
+                Some(dirs) => {
+                    tracing::debug!("User directories retrieved: {:?}", dirs);
+                    Ok(dirs)
+                }
+                None => {
+                    tracing::error!("No directories found?");
+                    Err(Error::MissingUser(format!(
+                        "Could not find directories for user {}",
                         mapping
                     )))
                 }

@@ -4,22 +4,28 @@
 use anyhow::Result;
 use chrono::Utc;
 
+use templemeads::agent;
 use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
     AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
-    GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalUserDirs,
-    GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
+    GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalStorageReport,
+    GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
     SetLocalProjectQuota, SetLocalUserQuota,
 };
-use templemeads::grammar::{ProjectMapping, UserMapping};
+use templemeads::grammar::{Date, ProjectMapping, UserMapping};
 use templemeads::job::{Envelope, Job};
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 use templemeads::storage::Quota;
+use templemeads::storagereport::ProjectStorageReport;
 use templemeads::Error;
 
 mod cache;
+mod fakequotaengine;
 mod filesystem;
+mod linuxquotaengine;
 mod lustreengine;
 mod quotaengine;
 mod volumeconfig;
@@ -73,6 +79,24 @@ async fn main() -> Result<()> {
 
     cache::set_filesystem_config(config.agent_config.clone()).await?;
 
+    // Optional exec prefix for redirecting filesystem operations into a
+    // container or remote host.  When set, every mkdir/chown/chmod/mv/ln-s
+    // call is prefixed with these tokens instead of using the Rust stdlib.
+    // Example: exec-prefix = "docker exec slurmctld"
+    // Leave unset (or empty) to use native Rust calls (production default).
+    let exec_prefix_str = config.option("exec-prefix", "");
+    let exec_prefix = if exec_prefix_str.is_empty() {
+        None
+    } else {
+        Some(
+            exec_prefix_str
+                .split_whitespace()
+                .map(|s| s.to_owned())
+                .collect::<Vec<String>>(),
+        )
+    };
+    filesystem::set_exec_prefix(exec_prefix)?;
+
     async_runnable! {
         ///
         /// Runnable function that will be called when a job is received
@@ -80,9 +104,24 @@ async fn main() -> Result<()> {
         ///
         pub async fn filesystem_runner(envelope: Envelope) -> Result<Job, templemeads::Error>
         {
+            let me = envelope.recipient();
+            let sender = envelope.sender();
             let job = envelope.job();
 
             match job.instruction() {
+                GetLocalStorageReport(mapping, dates) => {
+                    let today = Date::today().day();
+                    if dates != today {
+                        return job.errored(&format!(
+                            "Storage reports only support today's date; requested range: {}",
+                            dates
+                        ));
+                    }
+                    let report = get_local_storage_report(
+                        me.name(), &sender, &mapping, job.expires()
+                    ).await?;
+                    job.completed(report)
+                },
                 AddLocalProject(mapping) => {
                     create_project_dirs_and_links(&mapping, job.expires()).await?;
                     job.completed_none()
@@ -193,6 +232,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    set_notify_runner(default_notify_runner).await?;
     run(config, filesystem_runner).await?;
 
     Ok(())
@@ -381,19 +421,7 @@ async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
         for path_config in volume_config.path_configs() {
             if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
                 tracing::info!("    - Link path to remove: {}", link_path.to_string_lossy());
-                if link_path.exists() && link_path.is_symlink() {
-                    tracing::info!("      - Removing symlink '{}'", link_path.to_string_lossy());
-                    match std::fs::remove_file(&link_path) {
-                        Ok(_) => tracing::info!("Successfully removed symlink"),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Could not remove symlink '{}': {}",
-                                link_path.to_string_lossy(),
-                                e
-                            )
-                        }
-                    }
-                }
+                filesystem::remove_link(&link_path).await?;
             }
 
             match path_config.path(mapping.clone().into()) {
@@ -758,4 +786,70 @@ pub async fn get_user_quotas(
     }
 
     Ok(quotas)
+}
+
+///
+/// Build a ProjectStorageReport for the given project mapping.
+///
+/// The sender (cluster agent) is called back with get_users to retrieve
+/// the list of users in the project. All quota queries are then handled
+/// locally by this filesystem agent.
+///
+pub async fn get_local_storage_report(
+    me: &str,
+    sender: &agent::Peer,
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<ProjectStorageReport, Error> {
+    let project = mapping.project();
+    let mut report = ProjectStorageReport::new(project);
+
+    // Fetch project-level quotas locally
+    match get_project_quotas(mapping, expires).await {
+        Ok(quotas) => {
+            report.set_project_quotas(quotas);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to get project quotas for {}: {}", mapping, e);
+        }
+    }
+
+    // Call back to the sender (cluster agent) to get the users for this project
+    let user_mappings: Vec<UserMapping> = {
+        let job = Job::parse(
+            &format!("{}.{} get_users {}", me, sender.name(), project),
+            false,
+        )?
+        .put(sender)
+        .await?;
+
+        match job.wait().await?.result::<Vec<UserMapping>>()? {
+            Some(users) => users,
+            None => {
+                tracing::warn!("No users returned for project {}", project);
+                vec![]
+            }
+        }
+    };
+
+    // Fetch per-user quotas locally for each user in the project
+    for user_mapping in &user_mappings {
+        match get_user_quotas(user_mapping, expires).await {
+            Ok(quotas) => {
+                report.add_user_quotas(user_mapping.user(), quotas);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get user quotas for {}: {}",
+                    user_mapping.local_user(),
+                    e
+                );
+            }
+        }
+    }
+
+    // Record portal-user → local-username mappings
+    report.add_mappings(&user_mappings)?;
+
+    Ok(report)
 }

@@ -15,11 +15,14 @@ use templemeads::agent::account::{process_args, run, Defaults};
 use templemeads::agent::{Peer, Type as AgentType};
 use templemeads::async_runnable;
 use templemeads::grammar::Instruction::{
-    AddProject, AddUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
-    IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser, UpdateHomeDir,
+    AddProject, AddUser, BlockUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
+    IsBlockedUser, IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser,
+    UnblockUser, UpdateHomeDir,
 };
 use templemeads::grammar::UserMapping;
 use templemeads::job::{assert_not_expired, Envelope, Job};
+use templemeads::notification::default_notify_runner;
+use templemeads::set_notify_runner;
 use templemeads::Error;
 
 ///
@@ -38,7 +41,7 @@ async fn main() -> Result<()> {
     templemeads::spawn_system_monitor();
 
     // create the OpenPortal paddington defaults
-    let defaults = Defaults::parse(
+    let defaults: Defaults = Defaults::parse(
         Some("freeipa".to_owned()),
         Some(
             dirs::config_local_dir()
@@ -120,7 +123,7 @@ async fn main() -> Result<()> {
 
             match job.instruction() {
                 GetProjects(portal) => {
-                    let groups = freeipa::get_groups(&portal, job.expires()).await?;
+                    let groups = freeipa::get_groups(&portal, &sender, job.expires()).await?;
                     job.completed(groups.iter().map(|g| g.mapping()).collect::<Result<Vec<_>, _>>()?)
                 },
                 AddProject(project) => {
@@ -148,6 +151,18 @@ async fn main() -> Result<()> {
                 RemoveUser(user) => {
                     let user = freeipa::remove_user(&user, &sender, job.expires()).await?;
                     job.completed(user.mapping()?)
+                },
+                BlockUser(user) => {
+                    let user = freeipa::block_user(&user, job.expires()).await?;
+                    job.completed(user.mapping()?)
+                },
+                UnblockUser(user) => {
+                    let user = freeipa::unblock_user(&user, job.expires()).await?;
+                    job.completed(user.mapping()?)
+                },
+                IsBlockedUser(user) => {
+                    let is_blocked = freeipa::is_blocked_user(&user, job.expires()).await?;
+                    job.completed(is_blocked)
                 },
                 UpdateHomeDir(user, homedir) => {
                     let _ = freeipa::update_homedir(&user, &homedir, job.expires()).await?;
@@ -182,6 +197,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    set_notify_runner(default_notify_runner).await?;
     run(config, freeipa_runner).await?;
 
     Ok(())

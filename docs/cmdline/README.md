@@ -421,29 +421,29 @@ Running this, you should see that the portal has been added.
 
 Calling the above functions has modified the configuration files for
 the `portal` and `cluster` agents. Information about the agents are
-added to these files, including the secret pair of synmmetric keys
+added to these files, including the secret pair of symmetric keys
 used for the handshake between the two agents. For example, here is
 the `example-portal.toml` file after the `cluster` agent has been
 added;
 
 ```toml
-agent = "Instance"
+agent = "Portal"
 
 [service]
-name = "example-cluster"
-url = "ws://localhost:8091/"
-ip = "127.0.0.1"
-port = 8091
-clients = []
-
-[[service.servers]]
 name = "portal"
 url = "ws://localhost:8090/"
+ip = "127.0.0.1"
+port = 8090
+servers = []
 
-[service.servers.inner_key]
+[[service.clients]]
+name = "cluster"
+ip = "127.0.0.1"
+
+[service.clients.inner_key]
 data = "2c79e38168ef4b4b323415f88a5f9872cf2d40bc324ed9f30ed3b38fb22542de"
 
-[service.servers.outer_key]
+[service.clients.outer_key]
 data = "c27997a3e2c4e745d16a7b57e4ad19b242afb1ce02e129e267b9e6645b9725cd"
 
 [extras]
@@ -477,12 +477,12 @@ data = "c27997a3e2c4e745d16a7b57e4ad19b242afb1ce02e129e267b9e6645b9725cd"
 You can see that the key pairs match up.
 
 > [!NOTE]
-> The data in this configuration file is currently *not* encrypted.
-> The keys are very sensitive data, so please make sure to keep the
-> configuration files of the agent secure. We are working on a way to
-> encrypt the configuration file using a secret, and will update this
-> example when the code is available. Note also that the above keys are
-> examples, and are not in production use anywhere.
+> The keys stored in the configuration file are sensitive. You can
+> encrypt the configuration file using the `encryption` subcommand,
+> which protects the key material at rest using Argon2-derived
+> symmetric encryption (see `--help` on the `encryption` subcommand for
+> details). Note also that the above keys are examples, and are not in
+> production use anywhere.
 
 ## Running the agents
 
@@ -507,9 +507,9 @@ reconnect if the `portal` restarts.
 ## What next?
 
 Now that you've seen how to write standardised `templemeads` agents,
-we will next look at how to connect these agents, via a bridge,
-to a Python script.
-
-We will do this in the [bridge example](../bridge/README.md).
+the next step is to connect them, via a bridge, to portal software
+written in Python. The [bridge example](../bridge/README.md) walks
+through setting up the `op-bridge` agent and using the `openportal`
+Python library to submit jobs and handle callbacks.
 
 

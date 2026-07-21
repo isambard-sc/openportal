@@ -2435,6 +2435,8 @@ pub struct SlurmJob {
     cluster: String,
     node_info: SlurmNode,
     start_time: chrono::DateTime<chrono::Utc>,
+    original_start_time: chrono::DateTime<chrono::Utc>,
+    eligible_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
     duration: u64,
     state: String,
@@ -2456,7 +2458,7 @@ impl Display for SlurmJob {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, node_info: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, requested_nodes: {}, requested_cpus: {}, requested_gpus: {}, requested_memory: {}, energy: {}, billing: {}, requested_billing: {} }}",
+            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, node_info: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, requested_nodes: {}, requested_cpus: {}, requested_gpus: {}, requested_memory: {}, energy: {}, billing: {}, requested_billing: {}, node_fraction: {}, billed_node_seconds: {} }}",
             self.id(),
             self.user(),
             self.account(),
@@ -2478,7 +2480,9 @@ impl Display for SlurmJob {
             self.requested_memory(),
             self.energy(),
             self.billing(),
-            self.requested_billing()
+            self.requested_billing(),
+            self.node_fraction(),
+            self.billed_node_seconds()
         )
     }
 }
@@ -2617,6 +2621,26 @@ impl SlurmJob {
                 tracing::warn!("Could not get end_time from job: {:?}", value);
                 return Err(Error::Call("Could not get end_time from job".to_string()));
             }
+        };
+
+        let eligible_time = match time.get("eligible") {
+            Some(eligible_time) => match eligible_time.as_i64() {
+                Some(eligible_time) => match chrono::Utc.timestamp_opt(eligible_time, 0).single() {
+                    Some(eligible_time) => eligible_time,
+                    None => {
+                        tracing::warn!("Could not get eligible_time as DateTime from job");
+                        start_time
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        "Could not get eligible_time as i64 from job: {:?}",
+                        eligible_time
+                    );
+                    start_time
+                }
+            },
+            None => start_time,
         };
 
         let duration: chrono::Duration = match time.get("elapsed") {
@@ -2915,6 +2939,8 @@ impl SlurmJob {
             cluster,
             node_info,
             start_time,
+            original_start_time: start_time,
+            eligible_time,
             end_time,
             duration,
             state,
@@ -2972,6 +2998,7 @@ impl SlurmJob {
                                 }
 
                                 if job.duration().num_seconds() > 0 {
+                                    tracing::debug!("Recording job {}", job);
                                     slurm_jobs.push(job)
                                 }
                             }
@@ -3016,6 +3043,25 @@ impl SlurmJob {
 
     pub fn start_time(&self) -> &chrono::DateTime<chrono::Utc> {
         &self.start_time
+    }
+
+    pub fn original_start_time(&self) -> &chrono::DateTime<chrono::Utc> {
+        &self.original_start_time
+    }
+
+    pub fn eligible_time(&self) -> &chrono::DateTime<chrono::Utc> {
+        &self.eligible_time
+    }
+
+    /// The time the job spent waiting in the queue before it started running.
+    /// Clamped to zero if eligible_time is after start_time (handles bogus Slurm timestamps).
+    pub fn wait_time(&self) -> chrono::Duration {
+        let wait = self.start_time.signed_duration_since(self.eligible_time());
+        if wait.num_seconds() < 0 {
+            chrono::Duration::seconds(0)
+        } else {
+            wait
+        }
     }
 
     pub fn end_time(&self) -> &chrono::DateTime<chrono::Utc> {
@@ -3123,11 +3169,13 @@ impl SlurmJob {
         // node fraction. This indicates that slurm accepted a job that requested too few resources,
         // and then had to uprate it to the actual amount
         if requested_node_fraction < actual_node_fraction {
+            // Note: we log the job id instead of self to avoid infinite recursion,
+            // since Display::fmt calls billed_node_seconds which calls this function
             tracing::warn!(
-                "Job used more resources than requested: {} > {}: {}",
+                "Job {} used more resources than requested: {} > {}",
+                self.id,
                 actual_node_fraction,
-                requested_node_fraction,
-                self
+                requested_node_fraction
             );
         }
 
@@ -3135,23 +3183,84 @@ impl SlurmJob {
     }
 
     pub fn billed_node_seconds(&self) -> u64 {
-        (self.duration().num_seconds() as f64 * self.billed_node_fraction()) as u64
+        let billed_seconds =
+            (self.duration().num_seconds() as f64 * self.billed_node_fraction()).ceil() as u64;
+
+        if billed_seconds == 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has a non-zero duration but zero billed node seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            billed_seconds
+        }
     }
 
     pub fn cpu_seconds(&self) -> u64 {
-        self.cpus * self.duration().num_seconds() as u64
+        let cpu_seconds = self.cpus * self.duration().num_seconds() as u64;
+
+        if cpu_seconds == 0 && self.cpus > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero cpus and duration but zero cpu seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            cpu_seconds
+        }
     }
 
     pub fn gpu_seconds(&self) -> u64 {
-        self.gpus * self.duration().num_seconds() as u64
+        let gpu_seconds = self.gpus * self.duration().num_seconds() as u64;
+
+        if gpu_seconds == 0 && self.gpus > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero gpus and duration but zero gpu seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            gpu_seconds
+        }
     }
 
     pub fn memory_seconds(&self) -> u64 {
-        self.memory * self.duration().num_seconds() as u64
+        let memory_seconds = self.memory * self.duration().num_seconds() as u64;
+
+        if memory_seconds == 0 && self.memory > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero memory and duration but zero memory seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            memory_seconds
+        }
     }
 
     pub fn billing_seconds(&self) -> u64 {
-        self.billing * self.duration().num_seconds() as u64
+        let billing_seconds = self.billing * self.duration().num_seconds() as u64;
+
+        if billing_seconds == 0 && self.billing > 0 && self.duration().num_seconds() > 0 {
+            tracing::warn!(
+                "Job {} has non-zero billing and duration but zero billing seconds - this may indicate an issue with the slurm configuration",
+                self.id
+            );
+
+            // return at least 1 second to avoid issues with zero billing
+            1
+        } else {
+            billing_seconds
+        }
     }
 }
 

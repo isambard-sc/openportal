@@ -1469,11 +1469,14 @@ impl LustreEngine {
 
             // parts[1] = current kbytes usage
             // parts[3] = hard limit in kbytes (0 = unlimited)
-            let usage_kb = parts[1].parse::<u64>().map_err(|e| {
+            // Note: Lustre adds a '*' suffix to values that exceed quota, so we strip it
+            let usage_str = parts[1].trim_end_matches('*');
+            let usage_kb = usage_str.parse::<u64>().map_err(|e| {
                 Error::Parse(format!("Failed to parse usage '{}': {}", parts[1], e))
             })?;
 
-            let limit_kb = parts[3].parse::<u64>().map_err(|e| {
+            let limit_str = parts[3].trim_end_matches('*');
+            let limit_kb = limit_str.parse::<u64>().map_err(|e| {
                 Error::Parse(format!("Failed to parse limit '{}': {}", parts[3], e))
             })?;
 

@@ -8,10 +8,15 @@ use crate::handler::{process_message, set_my_service_details};
 use crate::job::{Envelope, Job};
 use crate::runnable::AsyncRunnable;
 
+use serde::{Deserialize, Serialize};
+
 ///
 /// Run the scheduler service
 ///
-pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
+pub async fn run<T>(config: Config<T>, runner: AsyncRunnable) -> Result<(), Error>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
+{
     if config.service().name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
@@ -36,15 +41,21 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
             tracing::info!("Executing one-shot command: {}", one_shot_command);
 
             let job = Job::parse(
-                format!("oneshot.{} {}", config.service().name(), one_shot_command).as_str(),
+                format!(
+                    "{}.{} {}",
+                    config.one_shot_sender(),
+                    config.service().name(),
+                    one_shot_command
+                )
+                .as_str(),
                 false,
             )?
             .pending()?;
 
             let envelope = Envelope::new(
                 &config.service().name(),
-                &config.service().name(),
-                "one-shot",
+                &config.one_shot_sender(),
+                &config.one_shot_zone(),
                 &job,
             );
 

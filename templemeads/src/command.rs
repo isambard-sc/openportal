@@ -9,6 +9,7 @@ use crate::diagnostics::DiagnosticsReport;
 use crate::error::Error;
 use crate::health::HealthInfo;
 use crate::job::Job;
+use crate::notification::Notification;
 use crate::virtual_agent::send as send_to_virtual;
 
 use anyhow::Result;
@@ -64,6 +65,9 @@ pub enum Command {
     DiagnosticsResponse {
         report: Box<DiagnosticsReport>,
     },
+    Notify {
+        notification: Notification,
+    },
 }
 
 impl std::fmt::Display for Command {
@@ -101,6 +105,7 @@ impl std::fmt::Display for Command {
             Command::DiagnosticsResponse { report } => {
                 write!(f, "DiagnosticsResponse: {}", report)
             }
+            Command::Notify { notification } => write!(f, "Notify: {}", notification),
         }
     }
 }
@@ -173,6 +178,12 @@ impl Command {
         }
     }
 
+    pub fn notify(notification: &Notification) -> Self {
+        Self::Notify {
+            notification: notification.clone(),
+        }
+    }
+
     pub async fn send_to(&self, peer: &Peer) -> Result<(), Error> {
         // Check if sending to ourselves
         let my_name = agent::name().await;
@@ -230,6 +241,7 @@ impl Command {
             } => None,
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
+            Command::Notify { notification: _ } => None,
         }
     }
 
@@ -253,6 +265,7 @@ impl Command {
             } => None,
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
+            Command::Notify { notification: _ } => None,
         }
     }
 
@@ -276,6 +289,7 @@ impl Command {
             } => None,
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
+            Command::Notify { notification } => Some(notification.destination().clone()),
         }
     }
 }

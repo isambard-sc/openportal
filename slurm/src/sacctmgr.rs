@@ -43,6 +43,12 @@ impl Default for SlurmRunner {
 static SLURM_RUNNERS: Lazy<Mutex<Vec<Arc<Mutex<SlurmRunner>>>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
 
+// Priority runners are used for time-sensitive commands like adding/removing users,
+// getting/setting limits, etc. These are kept separate from the main runners to
+// ensure they are not blocked by long-running usage report queries.
+static PRIORITY_RUNNERS: Lazy<Mutex<Vec<Arc<Mutex<SlurmRunner>>>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
 #[derive(Debug)]
 pub struct LockedRunner {
     runner: tokio::sync::OwnedMutexGuard<SlurmRunner>,
@@ -250,6 +256,41 @@ pub async fn runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Err
     }
 }
 
+// function to return a priority runner - used for time-sensitive commands
+// like adding/removing users, getting/setting limits, etc.
+pub async fn priority_runner(expires: &chrono::DateTime<Utc>) -> Result<LockedRunner, Error> {
+    let runners = PRIORITY_RUNNERS.lock().await;
+
+    if runners.is_empty() {
+        return Err(Error::Call(
+            "No priority Slurm runners have been configured".to_string(),
+        ));
+    }
+
+    let mut rng = rand::rngs::StdRng::from_os_rng();
+
+    loop {
+        // try all the runners in a random order
+        for runner in runners.iter().choose_multiple(&mut rng, runners.len()) {
+            assert_not_expired(expires)?;
+
+            match runner.clone().try_lock_owned() {
+                Ok(guard) => {
+                    return Ok(LockedRunner { runner: guard });
+                }
+                Err(_) => {
+                    // the runner is already locked, so try the next one
+                    continue;
+                }
+            }
+        }
+
+        // wait a bit before trying again
+        assert_not_expired(expires)?;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 async fn force_add_slurm_account(
     account: &SlurmAccount,
     expires: &chrono::DateTime<Utc>,
@@ -271,7 +312,7 @@ async fn force_add_slurm_account(
     // get the parent account name from the cache
     let parent_account = cache::get_parent_account().await?;
 
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SACCTMGR",
         vec![
             "--immediate".to_string(),
@@ -285,7 +326,10 @@ async fn force_add_slurm_account(
         ],
     )?;
 
-    runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     Ok(account.clone())
 }
@@ -298,7 +342,7 @@ async fn get_account_from_slurm(
 
     let cluster = cache::get_cluster().await?;
 
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SACCTMGR",
         vec![
             "--json".to_string(),
@@ -310,7 +354,11 @@ async fn get_account_from_slurm(
         ],
     )?;
 
-    let response = match runner(expires).await?.run_json(&cmd, DEFAULT_TIMEOUT).await {
+    let response = match priority_runner(expires)
+        .await?
+        .run_json(&cmd, DEFAULT_TIMEOUT)
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             tracing::warn!("Could not get account {}: {}", account, e);
@@ -479,7 +527,7 @@ async fn get_user_from_slurm(
     let user = clean_user_name(user)?;
     let cluster = cache::get_cluster().await?;
 
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SACCTMGR",
         vec![
             "--json".to_string(),
@@ -491,7 +539,7 @@ async fn get_user_from_slurm(
         ],
     )?;
 
-    let response = runner(expires)
+    let response = priority_runner(expires)
         .await?
         .run_json(&cmd, DEFAULT_TIMEOUT)
         .await?;
@@ -621,7 +669,7 @@ async fn add_account_association(
     // get the parent account name from the cache
     let parent_account = cache::get_parent_account().await?;
 
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SACCTMGR",
         vec![
             "--immediate".to_string(),
@@ -635,7 +683,10 @@ async fn add_account_association(
         ],
     )?;
 
-    runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     Ok(())
 }
@@ -674,7 +725,7 @@ async fn add_user_association(
         add_account_association(account, expires).await?;
 
         // add the association
-        let cmd = runner(expires).await?.build_command(
+        let cmd = priority_runner(expires).await?.build_command(
             "SACCTMGR",
             vec![
                 "--immediate".to_string(),
@@ -687,7 +738,10 @@ async fn add_user_association(
             ],
         )?;
 
-        runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+        priority_runner(expires)
+            .await?
+            .run(&cmd, DEFAULT_TIMEOUT)
+            .await?;
 
         // update the user
         user = match get_user_from_slurm(user.name(), expires).await? {
@@ -708,7 +762,7 @@ async fn add_user_association(
     if make_default && *user.default_account() != Some(account.name().to_string()) {
         tracing::debug!("Will set user default account here");
 
-        let cmd = runner(expires).await?.build_command(
+        let cmd = priority_runner(expires).await?.build_command(
             "SACCTMGR",
             vec![
                 "--immediate".to_string(),
@@ -721,7 +775,10 @@ async fn add_user_association(
             ],
         )?;
 
-        runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+        priority_runner(expires)
+            .await?
+            .run(&cmd, DEFAULT_TIMEOUT)
+            .await?;
 
         // update the user
         user = match get_user_from_slurm(user.name(), expires).await? {
@@ -789,7 +846,7 @@ async fn get_user_create_if_not_exists(
 
     let cluster = cache::get_cluster().await?;
 
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SACCTMGR",
         vec![
             "--immediate".to_string(),
@@ -803,7 +860,10 @@ async fn get_user_create_if_not_exists(
         ],
     )?;
 
-    runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     // now load the user from slurm to make sure it exists
     let slurm_user = match get_user(user.local_user(), expires).await? {
@@ -860,6 +920,21 @@ pub async fn set_commands(
             scancel: scancel.to_string(),
         })));
     }
+
+    // Also set up priority runners for time-sensitive commands
+    // that should not be blocked by usage queries
+    let mut priority_runners = PRIORITY_RUNNERS.lock().await;
+
+    priority_runners.clear();
+
+    for _ in 0..max_slurm_runners {
+        priority_runners.push(Arc::new(Mutex::new(SlurmRunner {
+            sacct: sacct.to_string(),
+            sacctmgr: sacctmgr.to_string(),
+            scontrol: scontrol.to_string(),
+            scancel: scancel.to_string(),
+        })));
+    }
 }
 
 pub async fn find_cluster() -> Result<(), Error> {
@@ -869,7 +944,7 @@ pub async fn find_cluster() -> Result<(), Error> {
     let expires = chrono::Utc::now() + chrono::Duration::minutes(1);
 
     // ask slurm for all of the clusters
-    let cmd = runner(&expires).await?.build_command(
+    let cmd = priority_runner(&expires).await?.build_command(
         "SACCTMGR",
         vec![
             "--noheader".to_string(),
@@ -879,7 +954,10 @@ pub async fn find_cluster() -> Result<(), Error> {
         ],
     )?;
 
-    let clusters = runner(&expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+    let clusters = priority_runner(&expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
 
     // the output is the list of clusters, one per line, separated by '|', where
     // the cluster name is the first column
@@ -950,6 +1028,7 @@ async fn get_hourly_report(
     let mut daily_report = DailyProjectUsageReport::default();
     let mut total_usage: u64 = 0;
     let mut num_jobs: u64 = 0;
+    let mut total_wait_seconds: u64 = 0;
 
     // we need to get the report hour by hour from slurm, as users may have
     // run very large numbers of jobs in a day, and sacct may time out
@@ -962,11 +1041,18 @@ async fn get_hourly_report(
                 hourly_report.len()
             );
 
-            num_jobs += hourly_report.len() as u64;
+            let hour_start_time = hour.start_time().and_utc();
 
             for job in hourly_report {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                if job.original_start_time() >= &hour_start_time {
+                    num_jobs += 1;
+                    total_wait_seconds += job.wait_time().num_seconds() as u64;
+                    daily_report.add_jobs(job.user(), 1);
+                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
+                }
             }
 
             continue;
@@ -1038,15 +1124,19 @@ async fn get_hourly_report(
             }
         }
 
-        num_jobs += jobs.len() as u64;
-
         for job in jobs {
             total_usage += job.billed_node_seconds();
             daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+            // only count wait time for jobs that started in this hour
+            if job.original_start_time() >= &start_time {
+                num_jobs += 1;
+                total_wait_seconds += job.wait_time().num_seconds() as u64;
+                daily_report.add_jobs(job.user(), 1);
+                daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
+            }
         }
     }
-
-    daily_report.set_num_jobs(num_jobs);
 
     tracing::debug!(
         "Got {} jobs consuming {} seconds for project {} on {}",
@@ -1055,6 +1145,23 @@ async fn get_hourly_report(
         project.project(),
         day
     );
+
+    // runtime consistency check: local shadow counters must match the report's scalar totals
+    if daily_report.num_jobs() != num_jobs
+        || daily_report.total_wait_seconds() != total_wait_seconds
+    {
+        tracing::warn!(
+            "Job count/wait time inconsistency for project {} on {}: \
+             local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
+             This may indicate a bug.",
+            project.project(),
+            day,
+            num_jobs,
+            total_wait_seconds,
+            daily_report.num_jobs(),
+            daily_report.total_wait_seconds()
+        );
+    }
 
     // check that the total usage in the daily report matches the total usage calculated manually
     if daily_report.total_usage().seconds() != total_usage {
@@ -1168,12 +1275,20 @@ async fn get_daily_report(
 
             let mut daily_report = DailyProjectUsageReport::default();
             let mut total_usage: u64 = 0;
-
-            daily_report.set_num_jobs(jobs.len() as u64);
+            let mut num_jobs_started: u64 = 0;
+            let mut total_wait_seconds: u64 = 0;
 
             for job in jobs {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                // only count jobs and wait time for jobs that started in this day
+                if job.original_start_time() >= &start_time {
+                    num_jobs_started += 1;
+                    total_wait_seconds += job.wait_time().num_seconds() as u64;
+                    daily_report.add_jobs(job.user(), 1);
+                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
+                }
 
                 // also add in all of the components
                 daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
@@ -1187,6 +1302,23 @@ async fn get_daily_report(
                     "billing",
                     job.user(),
                     Usage::new(job.billing_seconds()),
+                );
+            }
+
+            // runtime consistency check
+            if daily_report.num_jobs() != num_jobs_started
+                || daily_report.total_wait_seconds() != total_wait_seconds
+            {
+                tracing::warn!(
+                    "Job count/wait time inconsistency for project {} on {}: \
+                     local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
+                     This may indicate a bug.",
+                    project.project(),
+                    day,
+                    num_jobs_started,
+                    total_wait_seconds,
+                    daily_report.num_jobs(),
+                    daily_report.total_wait_seconds()
                 );
             }
 
@@ -1354,7 +1486,7 @@ pub async fn get_limit(
     };
 
     // check that the limits in slurm match up...
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SACCTMGR",
         vec![
             "--json".to_string(),
@@ -1366,7 +1498,7 @@ pub async fn get_limit(
         ],
     )?;
 
-    let response = runner(expires)
+    let response = priority_runner(expires)
         .await?
         .run_json(&cmd, DEFAULT_TIMEOUT)
         .await?;
@@ -1559,7 +1691,7 @@ pub async fn set_limit(
             }
 
             if !tres.is_empty() {
-                let cmd = runner(expires).await?.build_command(
+                let cmd = priority_runner(expires).await?.build_command(
                     "SACCTMGR",
                     vec![
                         "--immediate".to_string(),
@@ -1573,7 +1705,10 @@ pub async fn set_limit(
                     ],
                 )?;
 
-                runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await?;
+                priority_runner(expires)
+                    .await?
+                    .run(&cmd, DEFAULT_TIMEOUT)
+                    .await?;
             }
 
             // now we've made the change, save the account to the cache
@@ -1603,7 +1738,7 @@ pub async fn cancel_pending_user_jobs(
         cluster
     );
 
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SCANCEL",
         vec![
             "--verbose".to_string(),
@@ -1613,7 +1748,11 @@ pub async fn cancel_pending_user_jobs(
         ],
     )?;
 
-    match runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await {
+    match priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await
+    {
         Ok(output) => {
             if !output.is_empty() {
                 tracing::info!("scancel output: {}", output);
@@ -1643,7 +1782,7 @@ pub async fn cancel_pending_project_jobs(
         cluster
     );
 
-    let cmd = runner(expires).await?.build_command(
+    let cmd = priority_runner(expires).await?.build_command(
         "SCANCEL",
         vec![
             "--verbose".to_string(),
@@ -1653,7 +1792,11 @@ pub async fn cancel_pending_project_jobs(
         ],
     )?;
 
-    match runner(expires).await?.run(&cmd, DEFAULT_TIMEOUT).await {
+    match priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await
+    {
         Ok(output) => {
             if !output.is_empty() {
                 tracing::info!("scancel output: {}", output);

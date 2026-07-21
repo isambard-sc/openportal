@@ -7,10 +7,11 @@ use crate::storage::{QuotaLimit, Volume};
 use crate::usagereport::Usage;
 
 use anyhow::Context;
-use chrono::{Datelike, Timelike};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::{hash::Hash, sync::Arc};
+use ts_rs::TS;
 use url::Url;
 use wildmatch::WildMatch;
 
@@ -1830,23 +1831,34 @@ impl<'de> Deserialize<'de> for Allocation {
     }
 }
 
-fn ordered_map<S, K: Ord + Serialize, V: Serialize>(
-    value: &Option<HashMap<K, V>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if let Some(value) = value {
-        if value.is_empty() {
-            serializer.serialize_none()
-        } else {
-            let ordered: BTreeMap<_, _> = value.iter().collect();
-            ordered.serialize(serializer)
-        }
-    } else {
-        serializer.serialize_none()
+/// Validates that a string is a well-formed email address (local@domain).
+pub(crate) fn validate_email_address(email: &str) -> Result<(), Error> {
+    let mut parts = email.splitn(2, '@');
+    let local = parts
+        .next()
+        .ok_or_else(|| Error::Parse("Invalid email address".to_string()))?;
+    let domain = parts
+        .next()
+        .ok_or_else(|| Error::Parse("Email address must contain '@'".to_string()))?;
+
+    if local.is_empty() {
+        return Err(Error::Parse("Email local part cannot be empty".to_string()));
     }
+    if !local
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
+    {
+        return Err(Error::Parse(format!(
+            "Email local part '{}' contains invalid characters",
+            local
+        )));
+    }
+    if domain.contains('@') {
+        return Err(Error::Parse(
+            "Email address must contain exactly one '@'".to_string(),
+        ));
+    }
+    DomainPattern::validate_domain_name(domain)
 }
 
 /// A domain pattern - this can be used to match domains that are allowed / denied
@@ -1854,8 +1866,9 @@ where
 /// Serializes to/from JSON as a plain string (e.g., "*.example.com")
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DomainPattern {
-    /// The pattern string to match the domain
-    /// e.g. "example.com" for exact match or "*.example.com" for wildcard match
+    /// The pattern string to match a domain or a specific email address.
+    /// Domain forms: "example.com" (exact) or "*.example.com" (wildcard subdomain).
+    /// Email form: "chris@example.com" (exact, case-insensitive).
     pattern: String,
 }
 
@@ -1867,13 +1880,13 @@ impl NamedType for DomainPattern {
 
 impl DomainPattern {
     pub fn parse(pattern: &str) -> Result<Self, Error> {
-        // Validate the pattern
         if pattern.is_empty() {
             return Err(Error::Parse("Domain pattern cannot be empty".to_string()));
         }
 
-        // Check if it's a wildcard pattern
-        if pattern.starts_with("*.") {
+        if pattern.contains('@') {
+            Self::validate_email(pattern)?;
+        } else if pattern.starts_with("*.") {
             let domain_part = pattern
                 .strip_prefix("*.")
                 .ok_or_else(|| Error::Parse("Invalid wildcard pattern".to_string()))?;
@@ -1889,7 +1902,6 @@ impl DomainPattern {
             }
             Self::validate_domain_name(domain_part)?;
         } else {
-            // Exact match pattern - no wildcards allowed
             if pattern.contains('*') {
                 return Err(Error::Parse(
                     "Wildcard '*' can only appear at the start as '*.'".to_string(),
@@ -1901,6 +1913,15 @@ impl DomainPattern {
         Ok(Self {
             pattern: pattern.to_string(),
         })
+    }
+
+    fn validate_email(email: &str) -> Result<(), Error> {
+        validate_email_address(email)
+    }
+
+    /// Returns true if this pattern is a specific email address rather than a domain pattern.
+    pub fn is_email_pattern(&self) -> bool {
+        self.pattern.contains('@')
     }
 
     /// Validates that a domain name contains only valid characters
@@ -1942,12 +1963,24 @@ impl DomainPattern {
         self.pattern.clone()
     }
 
-    /// Tests if a concrete domain matches this pattern
-    /// - For exact patterns (e.g., "example.com"), only exact matches return true
-    /// - For wildcard patterns (e.g., "*.example.com"), matches any subdomain of example.com
+    /// Tests if a concrete domain matches this pattern. Only valid for domain patterns;
+    /// always returns false for email patterns.
+    /// - Exact pattern (e.g., "example.com"): only exact match returns true
+    /// - Wildcard pattern (e.g., "*.example.com"): matches any subdomain at any depth
     pub fn matches(&self, domain: &str) -> bool {
-        // Use wildmatch for case-insensitive pattern matching
+        if self.is_email_pattern() {
+            return false;
+        }
         WildMatch::new(&self.pattern.to_lowercase()).matches(&domain.to_lowercase())
+    }
+
+    /// Tests if a concrete email address matches this pattern. Only valid for email patterns;
+    /// always returns false for domain patterns. Match is case-insensitive.
+    pub fn matches_email(&self, email: &str) -> bool {
+        if !self.is_email_pattern() {
+            return false;
+        }
+        self.pattern.to_lowercase() == email.to_lowercase()
     }
 }
 
@@ -1972,27 +2005,28 @@ impl<'de> Deserialize<'de> for DomainPattern {
     }
 }
 
-/// Details about the award itself (e.g. the name, link)
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
-pub struct AwardDetails {
-    /// The ID of the award
+/// A reference to an external resource: an optional human-readable ID
+/// and an optional URL. Used for award, call, project, and renewal links
+/// inside AwardDetails.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct Link {
+    /// Human-readable identifier, e.g. "EP/X000000/1" or "061-4738952-1"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     id: Option<String>,
 
-    /// The link to the award (must be a valid URL if provided)
-    link: Option<String>,
+    /// URL pointing to the resource (must be a valid URL if provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    url: Option<String>,
 }
 
-impl NamedType for AwardDetails {
-    fn type_name() -> &'static str {
-        "AwardDetails"
-    }
-}
-
-impl AwardDetails {
+impl Link {
     pub fn new() -> Self {
         Self {
             id: None,
-            link: None,
+            url: None,
         }
     }
 
@@ -2002,7 +2036,6 @@ impl AwardDetails {
 
     pub fn set_id(&mut self, id: &str) {
         let id = id.trim();
-
         if id.is_empty() {
             self.id = None;
         } else {
@@ -2014,62 +2047,168 @@ impl AwardDetails {
         self.id = None;
     }
 
-    pub fn link(&self) -> Option<String> {
-        self.link.clone()
+    pub fn url(&self) -> Option<String> {
+        self.url.clone()
     }
 
-    pub fn set_link(&mut self, link: &str) -> Result<(), Error> {
-        let link = link.trim();
-
-        if link.is_empty() {
-            self.link = None;
+    pub fn set_url(&mut self, url: &str) -> Result<(), Error> {
+        let url = url.trim();
+        if url.is_empty() {
+            self.url = None;
             Ok(())
         } else {
-            // Validate that the link is a valid URL
-            Url::parse(link)
-                .map_err(|e| Error::Parse(format!("Invalid URL for award link: {}", e)))?;
-            self.link = Some(link.to_string());
+            Url::parse(url).map_err(|e| Error::Parse(format!("Invalid URL for link: {}", e)))?;
+            self.url = Some(url.to_string());
             Ok(())
         }
     }
 
-    pub fn clear_link(&mut self) {
-        self.link = None;
+    pub fn clear_url(&mut self) {
+        self.url = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.id.is_none() && self.url.is_none()
     }
 }
 
-impl std::fmt::Display for AwardDetails {
+impl std::fmt::Display for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", serde_json::to_string(self).unwrap_or_default())
     }
 }
 
-impl<'de> Deserialize<'de> for AwardDetails {
+impl<'de> Deserialize<'de> for Link {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct AwardDetailsHelper {
+        struct LinkHelper {
             id: Option<String>,
-            link: Option<String>,
+            url: Option<String>,
         }
 
-        let helper = AwardDetailsHelper::deserialize(deserializer)?;
+        let helper = LinkHelper::deserialize(deserializer)?;
 
-        // Validate the link if it's provided
-        if let Some(link) = &helper.link {
-            if !link.is_empty() {
-                Url::parse(link).map_err(|e| {
-                    serde::de::Error::custom(format!("Invalid URL for award link: {}", e))
+        if let Some(url) = &helper.url {
+            if !url.is_empty() {
+                Url::parse(url).map_err(|e| {
+                    serde::de::Error::custom(format!("Invalid URL for link: {}", e))
                 })?;
             }
         }
 
-        Ok(AwardDetails {
+        Ok(Link {
             id: helper.id,
-            link: helper.link,
+            url: helper.url,
         })
+    }
+}
+
+/// A timestamped note attached to an award. Notes are append-only
+/// messages, typically used by the awarding portal to communicate
+/// with the project team.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Note {
+    /// When the note was created (UTC)
+    timestamp: DateTime<Utc>,
+
+    /// Name of the person who created the note
+    author: String,
+
+    /// Free-text content of the note
+    text: String,
+}
+
+impl Note {
+    pub fn new(author: &str, text: &str) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            author: author.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    pub fn with_timestamp(timestamp: DateTime<Utc>, author: &str, text: &str) -> Self {
+        Self {
+            timestamp,
+            author: author.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    pub fn timestamp(&self) -> DateTime<Utc> {
+        self.timestamp
+    }
+
+    pub fn author(&self) -> &str {
+        &self.author
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Note {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{} — {}] {}",
+            self.timestamp.format("%Y-%m-%d %H:%M UTC"),
+            self.author,
+            self.text
+        )
+    }
+}
+
+/// Controls whether the receiving portal may independently modify the membership
+/// or roles of a project.
+///
+/// When this field is absent (`None` on `AwardDetails`) the behaviour is
+/// identical to `Open` — the receiving portal manages membership freely.
+/// Explicitly setting a value lets the sending portal declare a policy that
+/// the receiving portal is expected to honour.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MembershipControl {
+    /// Receiving portal may freely add/remove members and change roles (default
+    /// when field is absent).
+    Open,
+    /// Receiving portal may add or remove members, but must not change the
+    /// role of any member — roles are authoritative in `AwardDetails`.
+    MembersOnly,
+    /// Receiving portal may change the role of existing members, but must not
+    /// add new members or remove existing ones.
+    RolesOnly,
+    /// Receiving portal must not change membership or roles; both are
+    /// authoritative in `AwardDetails` updates from the sender.
+    Locked,
+}
+
+impl MembershipControl {
+    /// Returns `true` if the receiving portal may add or remove members.
+    pub fn can_change_membership(&self) -> bool {
+        matches!(self, Self::Open | Self::MembersOnly)
+    }
+
+    /// Returns `true` if the receiving portal may change the role of a member.
+    pub fn can_change_roles(&self) -> bool {
+        matches!(self, Self::Open | Self::RolesOnly)
+    }
+}
+
+impl std::fmt::Display for MembershipControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::MembersOnly => write!(f, "members_only"),
+            Self::RolesOnly => write!(f, "roles_only"),
+            Self::Locked => write!(f, "locked"),
+        }
     }
 }
 
@@ -2079,12 +2218,14 @@ impl<'de> Deserialize<'de> for AwardDetails {
 /// this struct to be used in "update" requests, as only
 /// the fields that are set will be updated.
 ///
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectDetails {
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AwardDetails {
     /// The name of the project
     name: Option<String>,
 
     /// The template used for the project
+    #[ts(as = "Option<String>")]
     template: Option<ProjectTemplate>,
 
     /// The key that may need to be provided to show that the
@@ -2099,36 +2240,86 @@ pub struct ProjectDetails {
 
     /// The email address(es) of the members of the project,
     /// (keys) and their roles (values).
-    #[serde(serialize_with = "ordered_map")]
-    members: Option<HashMap<String, String>>,
+    members: Option<BTreeMap<String, String>>,
 
-    /// Proposed start date of the project
+    /// Proposed start date of the project (ISO 8601 date string)
+    #[ts(as = "Option<String>")]
     start_date: Option<Date>,
 
-    /// Proposed end date of the project
+    /// Proposed end date of the project (ISO 8601 date string)
+    #[ts(as = "Option<String>")]
     end_date: Option<Date>,
 
-    /// The allocation of resource for this project
+    /// The allocation of resource for this project (e.g. "1000 NHR")
+    #[ts(as = "Option<String>")]
     allocation: Option<Allocation>,
 
-    /// Details about the award associated with this project
-    award: Option<AwardDetails>,
+    /// A free-form breakdown of the allocation into named components.
+    /// Keys and values are arbitrary strings agreed between the local
+    /// and remote portals — OpenPortal does not interpret them.
+    /// e.g. {"project_storage": "5 TB", "gpu_hours": "500 GPUHR"}
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    breakdown: BTreeMap<String, String>,
+
+    /// Link back to the award record on the funding body's system
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    award: Option<Link>,
+
+    /// Link to the funding call from which the award was made
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    call: Option<Link>,
+
+    /// Link to the project page on the remote/awarding portal
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    project_link: Option<Link>,
+
+    /// Link to the page where more time / renewal can be requested
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    renewal: Option<Link>,
+
+    /// Notes attached to this award (append-only log of messages)
+    #[serde(default)]
+    notes: Vec<Note>,
+
+    /// The earliest UTC time at which this award may be approved on the
+    /// receiving portal. Lets the awarder make corrections in the window
+    /// between creating the award and it being provisioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    earliest_approve: Option<DateTime<Utc>>,
+
+    /// Controls whether the receiving portal may independently modify
+    /// membership or roles. When absent, behaviour is `Open`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    membership_control: Option<MembershipControl>,
 
     /// The list of allowed domains for this project.
     /// If this is None, then all domains are allowed.
     /// If this is Some(vec![]), then no domains are allowed.
     /// If this is Some(vec![...]), then only the domains that match
     /// those in the list are allowed.
+    #[ts(as = "Option<Vec<String>>")]
     allowed_domains: Option<Vec<DomainPattern>>,
 }
 
-impl NamedType for ProjectDetails {
+impl NamedType for AwardDetails {
     fn type_name() -> &'static str {
         "ProjectDetails"
     }
 }
 
-impl ProjectDetails {
+impl NamedType for Vec<AwardDetails> {
+    fn type_name() -> &'static str {
+        "Vec<ProjectDetails>"
+    }
+}
+
+impl AwardDetails {
     pub fn new() -> Self {
         Self {
             name: None,
@@ -2139,13 +2330,20 @@ impl ProjectDetails {
             start_date: None,
             end_date: None,
             allocation: None,
+            breakdown: BTreeMap::new(),
             award: None,
+            call: None,
+            project_link: None,
+            renewal: None,
+            notes: Vec::new(),
+            earliest_approve: None,
+            membership_control: None,
             allowed_domains: None,
         }
     }
 
     pub fn parse(json: &str) -> Result<Self, Error> {
-        ProjectDetails::from_json(json)
+        AwardDetails::from_json(json)
     }
 
     pub fn from_json(json: &str) -> Result<Self, Error> {
@@ -2222,25 +2420,46 @@ impl ProjectDetails {
         self.description = None;
     }
 
-    pub fn members(&self) -> Option<HashMap<String, String>> {
+    pub fn members(&self) -> Option<BTreeMap<String, String>> {
         self.members.clone()
     }
 
-    pub fn add_member(&mut self, email: &str, role: &str) {
+    /// Validates a single (email, role) pair against the allowed-domains list.
+    fn validate_member(&self, email: &str, role: &str) -> Result<(), Error> {
+        if role.is_empty() {
+            return Err(Error::Parse("Member role cannot be empty".to_string()));
+        }
+        validate_email_address(email)?;
+        if !self.is_email_allowed(email) {
+            return Err(Error::Parse(format!(
+                "Email '{}' is not in the allowed domains for this project",
+                email
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn add_member(&mut self, email: &str, role: &str) -> Result<(), Error> {
         let email = email.trim();
         let role = role.trim();
-
-        if email.is_empty() || role.is_empty() {
-            tracing::warn!(
-                "Invalid ProjectDetails - email or role cannot be empty: email='{}', role='{}'",
-                email,
-                role
-            );
-            return;
-        };
-
-        let members = self.members.get_or_insert_with(HashMap::new);
+        self.validate_member(email, role)?;
+        let members = self.members.get_or_insert_with(BTreeMap::new);
         members.insert(email.to_string(), role.to_string());
+        Ok(())
+    }
+
+    /// Validates and adds all members in `new_members` without replacing existing ones.
+    /// All entries are validated before any are applied; if any entry is invalid the
+    /// existing members are left unchanged.
+    pub fn add_members(&mut self, new_members: BTreeMap<String, String>) -> Result<(), Error> {
+        for (email, role) in &new_members {
+            self.validate_member(email.trim(), role.trim())?;
+        }
+        let members = self.members.get_or_insert_with(BTreeMap::new);
+        for (email, role) in new_members {
+            members.insert(email, role);
+        }
+        Ok(())
     }
 
     pub fn remove_member(&mut self, email: &str) {
@@ -2256,12 +2475,18 @@ impl ProjectDetails {
         }
     }
 
-    pub fn set_members(&mut self, members: HashMap<String, String>) {
+    /// Validates and replaces all members atomically. All entries are validated before
+    /// any changes are made; if any entry is invalid the existing members are unchanged.
+    pub fn set_members(&mut self, members: BTreeMap<String, String>) -> Result<(), Error> {
+        for (email, role) in &members {
+            self.validate_member(email.trim(), role.trim())?;
+        }
         if members.is_empty() {
             self.members = None;
         } else {
             self.members = Some(members);
         }
+        Ok(())
     }
 
     pub fn clear_members(&mut self) {
@@ -2308,16 +2533,140 @@ impl ProjectDetails {
         self.allocation = None;
     }
 
-    pub fn award(&self) -> Option<AwardDetails> {
+    pub fn breakdown(&self) -> &BTreeMap<String, String> {
+        &self.breakdown
+    }
+
+    pub fn set_breakdown_entry(&mut self, key: &str, value: &str) {
+        self.breakdown.insert(key.to_string(), value.to_string());
+    }
+
+    pub fn remove_breakdown_entry(&mut self, key: &str) {
+        self.breakdown.remove(key);
+    }
+
+    pub fn set_breakdown(&mut self, breakdown: BTreeMap<String, String>) {
+        self.breakdown = breakdown;
+    }
+
+    pub fn clear_breakdown(&mut self) {
+        self.breakdown.clear();
+    }
+
+    pub fn award(&self) -> Option<Link> {
         self.award.clone()
     }
 
-    pub fn set_award(&mut self, award: AwardDetails) {
-        self.award = Some(award);
+    pub fn set_award(&mut self, link: Link) {
+        if link.is_empty() {
+            self.award = None;
+        } else {
+            self.award = Some(link);
+        }
     }
 
     pub fn clear_award(&mut self) {
         self.award = None;
+    }
+
+    pub fn call(&self) -> Option<Link> {
+        self.call.clone()
+    }
+
+    pub fn set_call(&mut self, link: Link) {
+        if link.is_empty() {
+            self.call = None;
+        } else {
+            self.call = Some(link);
+        }
+    }
+
+    pub fn clear_call(&mut self) {
+        self.call = None;
+    }
+
+    pub fn project_link(&self) -> Option<Link> {
+        self.project_link.clone()
+    }
+
+    pub fn set_project_link(&mut self, link: Link) {
+        if link.is_empty() {
+            self.project_link = None;
+        } else {
+            self.project_link = Some(link);
+        }
+    }
+
+    pub fn clear_project_link(&mut self) {
+        self.project_link = None;
+    }
+
+    pub fn renewal(&self) -> Option<Link> {
+        self.renewal.clone()
+    }
+
+    pub fn set_renewal(&mut self, link: Link) {
+        if link.is_empty() {
+            self.renewal = None;
+        } else {
+            self.renewal = Some(link);
+        }
+    }
+
+    pub fn clear_renewal(&mut self) {
+        self.renewal = None;
+    }
+
+    pub fn notes(&self) -> &[Note] {
+        &self.notes
+    }
+
+    pub fn add_note(&mut self, note: Note) {
+        self.notes.push(note);
+    }
+
+    pub fn clear_notes(&mut self) {
+        self.notes.clear();
+    }
+
+    pub fn earliest_approve(&self) -> Option<DateTime<Utc>> {
+        self.earliest_approve
+    }
+
+    pub fn set_earliest_approve(&mut self, dt: DateTime<Utc>) {
+        self.earliest_approve = Some(dt);
+    }
+
+    pub fn clear_earliest_approve(&mut self) {
+        self.earliest_approve = None;
+    }
+
+    /// Returns the effective membership control policy. When the field is
+    /// absent the policy is `Open` (receiving portal manages freely).
+    pub fn membership_control(&self) -> MembershipControl {
+        self.membership_control
+            .clone()
+            .unwrap_or(MembershipControl::Open)
+    }
+
+    pub fn set_membership_control(&mut self, control: Option<MembershipControl>) {
+        self.membership_control = control;
+    }
+
+    pub fn clear_membership_control(&mut self) {
+        self.membership_control = None;
+    }
+
+    /// Returns `true` if the receiving portal may add or remove members.
+    /// Equivalent to `self.membership_control().can_change_membership()`.
+    pub fn can_change_membership(&self) -> bool {
+        self.membership_control().can_change_membership()
+    }
+
+    /// Returns `true` if the receiving portal may change the role of a member.
+    /// Equivalent to `self.membership_control().can_change_roles()`.
+    pub fn can_change_roles(&self) -> bool {
+        self.membership_control().can_change_roles()
     }
 
     pub fn allowed_domains(&self) -> Option<Vec<DomainPattern>> {
@@ -2343,6 +2692,8 @@ impl ProjectDetails {
         self.allowed_domains = None;
     }
 
+    /// Returns true if the given domain is permitted by the allowed-domains list.
+    /// Email patterns in the list are ignored — use `is_email_allowed` for full email checks.
     pub fn is_domain_allowed(&self, domain: &str) -> bool {
         if let Some(allowed_domains) = &self.allowed_domains {
             if allowed_domains.is_empty() {
@@ -2361,7 +2712,34 @@ impl ProjectDetails {
         }
     }
 
-    pub fn merge(&self, other: &ProjectDetails) -> Result<ProjectDetails, Error> {
+    /// Returns true if the given email address is permitted by the allowed-domains list.
+    /// An email is permitted when the list is absent (no restriction), or when at least one
+    /// entry in the list matches: either an exact email pattern matches the full address, or
+    /// a domain pattern matches the domain part of the address.
+    pub fn is_email_allowed(&self, email: &str) -> bool {
+        let Some(allowed_domains) = &self.allowed_domains else {
+            return true;
+        };
+
+        if allowed_domains.is_empty() {
+            return false;
+        }
+
+        let domain_part = email.split_once('@').map(|x| x.1).unwrap_or("");
+
+        for d in allowed_domains {
+            if d.matches_email(email) {
+                return true;
+            }
+            if !domain_part.is_empty() && d.matches(domain_part) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn merge(&self, other: &AwardDetails) -> Result<AwardDetails, Error> {
         let mut merged = self.clone();
 
         if merged.template.is_none() {
@@ -2410,6 +2788,10 @@ impl ProjectDetails {
             merged.allocation = other.allocation.clone();
         }
 
+        for (key, value) in &other.breakdown {
+            merged.breakdown.insert(key.clone(), value.clone());
+        }
+
         if other.members.is_some() {
             merged.members = other.members.clone();
         }
@@ -2420,6 +2802,34 @@ impl ProjectDetails {
 
         if other.award.is_some() {
             merged.award = other.award.clone();
+        }
+
+        if other.call.is_some() {
+            merged.call = other.call.clone();
+        }
+
+        if other.project_link.is_some() {
+            merged.project_link = other.project_link.clone();
+        }
+
+        if other.renewal.is_some() {
+            merged.renewal = other.renewal.clone();
+        }
+
+        // Merge notes: append notes from other that are not already present
+        for note in &other.notes {
+            if !merged.notes.contains(note) {
+                merged.notes.push(note.clone());
+            }
+        }
+        merged.notes.sort_by_key(|n| n.timestamp);
+
+        if other.earliest_approve.is_some() {
+            merged.earliest_approve = other.earliest_approve;
+        }
+
+        if other.membership_control.is_some() {
+            merged.membership_control = other.membership_control.clone();
         }
 
         if other.allowed_domains.is_some() {
@@ -2443,11 +2853,15 @@ impl ProjectDetails {
     }
 }
 
-impl std::fmt::Display for ProjectDetails {
+impl std::fmt::Display for AwardDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_json())
     }
 }
+
+/// ProjectDetails is an alias for AwardDetails for backward compatibility.
+/// New code should use AwardDetails directly.
+pub type ProjectDetails = AwardDetails;
 
 ///
 /// Enum of all of the instructions that can be sent to agents
@@ -2468,6 +2882,12 @@ pub enum Instruction {
 
     /// An instruction to get all projects managed by a portal
     GetProjects(PortalIdentifier),
+
+    /// An instruction to get the award details for a single project
+    GetAward(ProjectIdentifier),
+
+    /// An instruction to get the award details for all projects managed by a portal
+    GetAwards(PortalIdentifier),
 
     /// An instruction to add a project
     AddProject(ProjectIdentifier),
@@ -2493,6 +2913,25 @@ pub enum Instruction {
 
     /// An instruction to remove a user
     RemoveUser(UserIdentifier),
+
+    /// An instruction to block a user from logging in without removing their
+    /// account, home directory, or scheduler configuration
+    BlockUser(UserIdentifier),
+
+    /// An instruction to unblock a previously blocked user, re-enabling login
+    UnblockUser(UserIdentifier),
+
+    /// An instruction to check if a user is blocked
+    IsBlockedUser(UserIdentifier),
+
+    /// An instruction to block all users in a project
+    BlockProject(ProjectIdentifier),
+
+    /// An instruction to unblock all users in a project
+    UnblockProject(ProjectIdentifier),
+
+    /// An instruction to check if all users in a project are blocked
+    IsBlockedProject(ProjectIdentifier),
 
     /// An instruction to look up the mapping for a user
     GetUserMapping(UserIdentifier),
@@ -2571,6 +3010,19 @@ pub enum Instruction {
 
     /// An instruction to update the home directory of a user
     UpdateHomeDir(UserIdentifier, String),
+
+    /// An instruction to get the local storage report for a project
+    /// from the filesystem agent in the specified date range (defaults to today)
+    GetLocalStorageReport(ProjectMapping, DateRange),
+
+    /// An instruction to get the storage report for a single
+    /// project in the specified date range (defaults to today)
+    GetStorageReport(ProjectIdentifier, DateRange),
+
+    /// An instruction to get the storage reports for all active
+    /// projects associated with a portal in the specified date range
+    /// (defaults to today)
+    GetStorageReports(PortalIdentifier, DateRange),
 
     /// An instruction to get the usage report for a single
     /// project in the specified date range
@@ -2663,7 +3115,7 @@ impl Instruction {
                     )))
                 }
             },
-            "create_project" => match ProjectIdentifier::parse(parts[1]) {
+            "create_project" | "create_award" => match ProjectIdentifier::parse(parts[1]) {
                 Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
                     Ok(details) => Ok(Instruction::CreateProject(project, details)),
                     Err(_) => {
@@ -2685,7 +3137,7 @@ impl Instruction {
                     )))
                 }
             },
-            "update_project" => match ProjectIdentifier::parse(parts[1]) {
+            "update_project" | "update_award" => match ProjectIdentifier::parse(parts[1]) {
                 Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
                     Ok(details) => Ok(Instruction::UpdateProject(project, details)),
                     Err(_) => {
@@ -2723,6 +3175,26 @@ impl Instruction {
                     tracing::error!("get_projects failed to parse: {}", &parts[1..].join(" "));
                     Err(Error::Parse(format!(
                         "get_projects failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_award" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::GetAward(project)),
+                Err(_) => {
+                    tracing::error!("get_award failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_award failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_awards" | "list_awards" => match PortalIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(portal) => Ok(Instruction::GetAwards(portal)),
+                Err(_) => {
+                    tracing::error!("get_awards failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_awards failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }
@@ -2799,6 +3271,69 @@ impl Instruction {
                     tracing::error!("remove_user failed to parse: {}", &parts[1..].join(" "));
                     Err(Error::Parse(format!(
                         "remove_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "block_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::BlockUser(user)),
+                Err(_) => {
+                    tracing::error!("block_user failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "block_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "unblock_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::UnblockUser(user)),
+                Err(_) => {
+                    tracing::error!("unblock_user failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "unblock_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "is_blocked_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::IsBlockedUser(user)),
+                Err(_) => {
+                    tracing::error!("is_blocked_user failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "is_blocked_user failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "block_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::BlockProject(project)),
+                Err(_) => {
+                    tracing::error!("block_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "block_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "unblock_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::UnblockProject(project)),
+                Err(_) => {
+                    tracing::error!("unblock_project failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "unblock_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "is_blocked_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(project) => Ok(Instruction::IsBlockedProject(project)),
+                Err(_) => {
+                    tracing::error!(
+                        "is_blocked_project failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "is_blocked_project failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }
@@ -2925,6 +3460,98 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_usage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_storage_report" => {
+                if parts.len() < 2 {
+                    tracing::error!(
+                        "get_storage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "get_storage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectIdentifier::parse(parts[1]) {
+                    Ok(project) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
+                            Ok(date_range) => {
+                                Ok(Instruction::GetStorageReport(project, date_range))
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "get_storage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_storage_report failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        )))
+                    }
+                }
+            }
+            "get_storage_reports" => {
+                if parts.len() < 2 {
+                    tracing::error!(
+                        "get_storage_reports failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "get_storage_reports failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match PortalIdentifier::parse(parts[1]) {
+                    Ok(portal) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
+                            Ok(date_range) => {
+                                Ok(Instruction::GetStorageReports(portal, date_range))
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_storage_reports failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_storage_reports failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "get_storage_reports failed to parse '{}': {}",
+                            &parts[1..].join(" "),
+                            e
+                        );
+                        Err(Error::Parse(format!(
+                            "get_storage_reports failed to parse '{}': {}",
                             &parts[1..].join(" "),
                             e
                         )))
@@ -3838,6 +4465,16 @@ impl Instruction {
                     )))
                 }
             },
+            "get_user_dirs" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+                Ok(user) => Ok(Instruction::GetUserDirs(user)),
+                Err(_) => {
+                    tracing::error!("get_user_dirs failed to parse: {}", &parts[1..].join(" "));
+                    Err(Error::Parse(format!(
+                        "get_user_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
             "get_local_home_dir" => match UserMapping::parse(&parts[1..].join(" ")) {
                 Ok(mapping) => Ok(Instruction::GetLocalHomeDir(mapping)),
                 Err(_) => {
@@ -3851,6 +4488,50 @@ impl Instruction {
                     )))
                 }
             },
+            "get_local_storage_report" => {
+                if parts.len() < 2 {
+                    tracing::error!(
+                        "get_local_storage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    return Err(Error::Parse(format!(
+                        "get_local_storage_report failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )));
+                }
+
+                match ProjectMapping::parse(parts[1]) {
+                    Ok(mapping) => {
+                        match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
+                            Ok(date_range) => {
+                                Ok(Instruction::GetLocalStorageReport(mapping, date_range))
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "get_local_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                );
+                                Err(Error::Parse(format!(
+                                    "get_local_storage_report failed to parse '{}': {}",
+                                    &parts[1..].join(" "),
+                                    e
+                                )))
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "get_local_storage_report failed to parse: {}",
+                            &parts[1..].join(" ")
+                        );
+                        Err(Error::Parse(format!(
+                            "get_local_storage_report failed to parse: {}",
+                            &parts[1..].join(" ")
+                        )))
+                    }
+                }
+            }
             "get_local_project_dirs" => match ProjectMapping::parse(&parts[1..].join(" ")) {
                 Ok(mapping) => Ok(Instruction::GetLocalProjectDirs(mapping)),
                 Err(_) => {
@@ -3860,6 +4541,19 @@ impl Instruction {
                     );
                     Err(Error::Parse(format!(
                         "get_local_project_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    )))
+                }
+            },
+            "get_local_user_dirs" => match UserMapping::parse(&parts[1..].join(" ")) {
+                Ok(mapping) => Ok(Instruction::GetLocalUserDirs(mapping)),
+                Err(_) => {
+                    tracing::error!(
+                        "get_local_user_dirs failed to parse: {}",
+                        &parts[1..].join(" ")
+                    );
+                    Err(Error::Parse(format!(
+                        "get_local_user_dirs failed to parse: {}",
                         &parts[1..].join(" ")
                     )))
                 }
@@ -3912,11 +4606,19 @@ impl Instruction {
             Instruction::UpdateProject(_, _) => "update_project".to_string(),
             Instruction::GetProject(_) => "get_project".to_string(),
             Instruction::GetProjects(_) => "get_projects".to_string(),
+            Instruction::GetAward(_) => "get_award".to_string(),
+            Instruction::GetAwards(_) => "get_awards".to_string(),
             Instruction::AddProject(_) => "add_project".to_string(),
             Instruction::RemoveProject(_) => "remove_project".to_string(),
             Instruction::GetUsers(_) => "get_users".to_string(),
             Instruction::AddUser(_) => "add_user".to_string(),
             Instruction::RemoveUser(_) => "remove_user".to_string(),
+            Instruction::BlockUser(_) => "block_user".to_string(),
+            Instruction::UnblockUser(_) => "unblock_user".to_string(),
+            Instruction::IsBlockedUser(_) => "is_blocked_user".to_string(),
+            Instruction::BlockProject(_) => "block_project".to_string(),
+            Instruction::UnblockProject(_) => "unblock_project".to_string(),
+            Instruction::IsBlockedProject(_) => "is_blocked_project".to_string(),
             Instruction::GetUserMapping(_) => "get_user_mapping".to_string(),
             Instruction::GetProjectMapping(_) => "get_project_mapping".to_string(),
             Instruction::GetHomeDir(_) => "get_home_dir".to_string(),
@@ -3941,6 +4643,9 @@ impl Instruction {
             Instruction::GetLocalUserDirs(_) => "get_local_user_dirs".to_string(),
             Instruction::GetLocalProjectDirs(_) => "get_local_project_dirs".to_string(),
             Instruction::UpdateHomeDir(_, _) => "update_homedir".to_string(),
+            Instruction::GetLocalStorageReport(_, _) => "get_local_storage_report".to_string(),
+            Instruction::GetStorageReport(_, _) => "get_storage_report".to_string(),
+            Instruction::GetStorageReports(_, _) => "get_storage_reports".to_string(),
             Instruction::GetUsageReport(_, _) => "get_usage_report".to_string(),
             Instruction::GetUsageReports(_, _) => "get_usage_reports".to_string(),
             Instruction::SetLimit(_, _) => "set_limit".to_string(),
@@ -3976,11 +4681,19 @@ impl Instruction {
             }
             Instruction::GetProject(project) => vec![project.to_string()],
             Instruction::GetProjects(portal) => vec![portal.to_string()],
+            Instruction::GetAward(project) => vec![project.to_string()],
+            Instruction::GetAwards(portal) => vec![portal.to_string()],
             Instruction::AddProject(project) => vec![project.to_string()],
             Instruction::RemoveProject(project) => vec![project.to_string()],
             Instruction::GetUsers(project) => vec![project.to_string()],
             Instruction::AddUser(user) => vec![user.to_string()],
             Instruction::RemoveUser(user) => vec![user.to_string()],
+            Instruction::BlockUser(user) => vec![user.to_string()],
+            Instruction::UnblockUser(user) => vec![user.to_string()],
+            Instruction::IsBlockedUser(user) => vec![user.to_string()],
+            Instruction::BlockProject(project) => vec![project.to_string()],
+            Instruction::UnblockProject(project) => vec![project.to_string()],
+            Instruction::IsBlockedProject(project) => vec![project.to_string()],
             Instruction::GetUserMapping(user) => vec![user.to_string()],
             Instruction::GetProjectMapping(project) => vec![project.to_string()],
             Instruction::GetHomeDir(user) => vec![user.to_string()],
@@ -4020,8 +4733,17 @@ impl Instruction {
             Instruction::GetLocalHomeDir(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalUserDirs(mapping) => vec![mapping.to_string()],
             Instruction::GetLocalProjectDirs(mapping) => vec![mapping.to_string()],
+            Instruction::GetLocalStorageReport(mapping, date_range) => {
+                vec![mapping.to_string(), date_range.to_string()]
+            }
             Instruction::UpdateHomeDir(user, homedir) => {
                 vec![user.to_string(), homedir.clone()]
+            }
+            Instruction::GetStorageReport(project, date_range) => {
+                vec![project.to_string(), date_range.to_string()]
+            }
+            Instruction::GetStorageReports(portal, date_range) => {
+                vec![portal.to_string(), date_range.to_string()]
             }
             Instruction::GetUsageReport(project, date_range) => {
                 vec![project.to_string(), date_range.to_string()]
@@ -4078,11 +4800,19 @@ impl std::fmt::Display for Instruction {
             }
             Instruction::GetProject(project) => write!(f, "get_project {}", project),
             Instruction::GetProjects(portal) => write!(f, "get_projects {}", portal),
+            Instruction::GetAward(project) => write!(f, "get_award {}", project),
+            Instruction::GetAwards(portal) => write!(f, "get_awards {}", portal),
             Instruction::AddProject(project) => write!(f, "add_project {}", project),
             Instruction::RemoveProject(project) => write!(f, "remove_project {}", project),
             Instruction::GetUsers(project) => write!(f, "get_users {}", project),
             Instruction::AddUser(user) => write!(f, "add_user {}", user),
             Instruction::RemoveUser(user) => write!(f, "remove_user {}", user),
+            Instruction::BlockUser(user) => write!(f, "block_user {}", user),
+            Instruction::UnblockUser(user) => write!(f, "unblock_user {}", user),
+            Instruction::IsBlockedUser(user) => write!(f, "is_blocked_user {}", user),
+            Instruction::BlockProject(project) => write!(f, "block_project {}", project),
+            Instruction::UnblockProject(project) => write!(f, "unblock_project {}", project),
+            Instruction::IsBlockedProject(project) => write!(f, "is_blocked_project {}", project),
             Instruction::AddLocalProject(mapping) => write!(f, "add_local_project {}", mapping),
             Instruction::RemoveLocalProject(mapping) => {
                 write!(f, "remove_local_project {}", mapping)
@@ -4096,6 +4826,12 @@ impl std::fmt::Display for Instruction {
             Instruction::GetProjectMapping(project) => write!(f, "get_project_mapping {}", project),
             Instruction::GetLocalUsageReport(mapping, date_range) => {
                 write!(f, "get_local_usage_report {} {}", mapping, date_range)
+            }
+            Instruction::GetStorageReport(project, date_range) => {
+                write!(f, "get_storage_report {} {}", project, date_range)
+            }
+            Instruction::GetStorageReports(portal, date_range) => {
+                write!(f, "get_storage_reports {} {}", portal, date_range)
             }
             Instruction::GetUsageReport(project, date_range) => {
                 write!(f, "get_usage_report {} {}", project, date_range)
@@ -4171,6 +4907,9 @@ impl std::fmt::Display for Instruction {
             Instruction::GetLocalUserDirs(mapping) => write!(f, "get_local_user_dirs {}", mapping),
             Instruction::GetLocalProjectDirs(mapping) => {
                 write!(f, "get_local_project_dirs {}", mapping)
+            }
+            Instruction::GetLocalStorageReport(mapping, date_range) => {
+                write!(f, "get_local_storage_report {} {}", mapping, date_range)
             }
             Instruction::SyncOfferings(offerings) => write!(f, "sync_offerings {}", offerings),
             Instruction::AddOfferings(offerings) => write!(f, "add_offerings {}", offerings),
@@ -4379,5 +5118,184 @@ mod tests {
             instruction,
             Instruction::UpdateHomeDir(user.clone(), "/home/user".to_string())
         );
+    }
+
+    #[test]
+    fn test_domain_pattern_wildcard_depth() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let p = DomainPattern::parse("*.ac.uk").unwrap();
+            assert!(p.matches("bristol.ac.uk"));
+            assert!(p.matches("cs.bristol.ac.uk"));
+            assert!(p.matches("dept.cs.bristol.ac.uk"));
+            assert!(!p.matches("ac.uk"));
+            assert!(!p.matches("notac.uk"));
+        }
+    }
+
+    #[test]
+    fn test_domain_pattern_parse() {
+        #[allow(clippy::unwrap_used)]
+        {
+            assert!(DomainPattern::parse("example.com").is_ok());
+            assert!(DomainPattern::parse("*.example.com").is_ok());
+            assert!(DomainPattern::parse("chris@gmail.com").is_ok());
+            assert!(DomainPattern::parse("Chris.Woods@bristol.ac.uk").is_ok());
+        }
+        assert!(DomainPattern::parse("").is_err());
+        assert!(DomainPattern::parse("@gmail.com").is_err());
+        assert!(DomainPattern::parse("chris@").is_err());
+        assert!(DomainPattern::parse("chris@@gmail.com").is_err());
+        assert!(DomainPattern::parse("*.*.com").is_err());
+    }
+
+    #[test]
+    fn test_domain_pattern_is_email_pattern() {
+        #[allow(clippy::unwrap_used)]
+        {
+            assert!(!DomainPattern::parse("example.com")
+                .unwrap()
+                .is_email_pattern());
+            assert!(!DomainPattern::parse("*.example.com")
+                .unwrap()
+                .is_email_pattern());
+            assert!(DomainPattern::parse("chris@gmail.com")
+                .unwrap()
+                .is_email_pattern());
+        }
+    }
+
+    #[test]
+    fn test_domain_pattern_matches_email() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let email_pattern = DomainPattern::parse("chris@gmail.com").unwrap();
+            assert!(email_pattern.matches_email("chris@gmail.com"));
+            assert!(email_pattern.matches_email("Chris@Gmail.COM"));
+            assert!(!email_pattern.matches_email("other@gmail.com"));
+            assert!(!email_pattern.matches_email("chris@example.com"));
+
+            // domain patterns never match via matches_email
+            let domain_pattern = DomainPattern::parse("*.gmail.com").unwrap();
+            assert!(!domain_pattern.matches_email("chris@gmail.com"));
+        }
+    }
+
+    #[test]
+    fn test_validate_email_address() {
+        assert!(validate_email_address("alice@example.com").is_ok());
+        assert!(validate_email_address("chris.woods+tag@bristol.ac.uk").is_ok());
+        assert!(validate_email_address("").is_err());
+        assert!(validate_email_address("notanemail").is_err());
+        assert!(validate_email_address("@example.com").is_err());
+        assert!(validate_email_address("alice@").is_err());
+        assert!(validate_email_address("alice@@example.com").is_err());
+    }
+
+    #[test]
+    fn test_add_member_validation() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+
+            // Basic valid add
+            assert!(details.add_member("alice@example.com", "member").is_ok());
+
+            // Non-email strings are errors
+            assert!(details.add_member("notanemail", "member").is_err());
+            assert!(details.add_member("", "member").is_err());
+            assert!(details.add_member("alice@example.com", "").is_err());
+
+            // Domain restriction enforced
+            details.add_allowed_domain(DomainPattern::parse("*.example.com").unwrap());
+            assert!(details.add_member("bob@sub.example.com", "member").is_ok());
+            assert!(details.add_member("chris@gmail.com", "member").is_err());
+
+            // Explicit email allowance overrides domain restriction
+            details.add_allowed_domain(DomainPattern::parse("chris@gmail.com").unwrap());
+            assert!(details.add_member("chris@gmail.com", "member").is_ok());
+        }
+    }
+
+    #[test]
+    fn test_set_members_atomic() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.add_allowed_domain(DomainPattern::parse("example.com").unwrap());
+
+            // Seed an existing member
+            details.add_member("alice@example.com", "pi").unwrap();
+
+            // set_members with one invalid entry must leave members unchanged
+            let mut bad = BTreeMap::new();
+            bad.insert("bob@example.com".to_string(), "member".to_string());
+            bad.insert("intruder@evil.com".to_string(), "member".to_string());
+            assert!(details.set_members(bad).is_err());
+            // alice is still there, bob was not added
+            let members = details.members().unwrap();
+            assert!(members.contains_key("alice@example.com"));
+            assert!(!members.contains_key("bob@example.com"));
+
+            // set_members with all valid entries replaces atomically
+            let mut good = BTreeMap::new();
+            good.insert("bob@example.com".to_string(), "member".to_string());
+            assert!(details.set_members(good).is_ok());
+            let members = details.members().unwrap();
+            assert!(members.contains_key("bob@example.com"));
+            assert!(!members.contains_key("alice@example.com"));
+        }
+    }
+
+    #[test]
+    fn test_add_members_atomic() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.add_allowed_domain(DomainPattern::parse("example.com").unwrap());
+            details.add_member("alice@example.com", "pi").unwrap();
+
+            // add_members with one invalid entry must leave members unchanged
+            let mut bad = BTreeMap::new();
+            bad.insert("bob@example.com".to_string(), "member".to_string());
+            bad.insert("intruder@evil.com".to_string(), "member".to_string());
+            assert!(details.add_members(bad).is_err());
+            let members = details.members().unwrap();
+            assert!(members.contains_key("alice@example.com"));
+            assert!(!members.contains_key("bob@example.com"));
+
+            // add_members with all valid entries adds without replacing alice
+            let mut good = BTreeMap::new();
+            good.insert("bob@example.com".to_string(), "member".to_string());
+            assert!(details.add_members(good).is_ok());
+            let members = details.members().unwrap();
+            assert!(members.contains_key("alice@example.com"));
+            assert!(members.contains_key("bob@example.com"));
+        }
+    }
+
+    #[test]
+    fn test_is_email_allowed() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+
+            // None = all allowed
+            assert!(details.is_email_allowed("anyone@anywhere.com"));
+
+            // Add patterns: wildcard domain + specific email
+            details.add_allowed_domain(DomainPattern::parse("*.example.com").unwrap());
+            details.add_allowed_domain(DomainPattern::parse("chris@gmail.com").unwrap());
+
+            // Subdomain matches via domain pattern
+            assert!(details.is_email_allowed("user@sub.example.com"));
+            // Exact email match (and case-insensitive)
+            assert!(details.is_email_allowed("chris@gmail.com"));
+            assert!(details.is_email_allowed("CHRIS@GMAIL.COM"));
+            // Different user at gmail is not allowed
+            assert!(!details.is_email_allowed("other@gmail.com"));
+            // Wildcard *.example.com does not match bare example.com
+            assert!(!details.is_email_allowed("user@example.com"));
+        }
     }
 }

@@ -7,18 +7,22 @@ use templemeads::agent;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
+use templemeads::command::Command;
+use templemeads::notification::{self, NotificationEnvelope, NotificationEvent};
+use templemeads::set_notify_runner;
 
 use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::grammar::Instruction::{
-    AddOfferings, CreateProject, GetOfferings, GetProject, GetProjectMapping, GetProjects,
-    GetUsageReport, GetUsageReports, RemoveOfferings, RemoveProject, Submit, SyncOfferings,
-    UpdateProject,
+    AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
+    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers,
+    RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
 };
 use templemeads::grammar::{
-    DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping,
+    DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
 };
 use templemeads::job::{send_queued, Envelope, Job};
+use templemeads::storagereport::{ProjectStorageReport, StorageReport};
 use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
 
@@ -83,29 +87,41 @@ async fn main() -> Result<()> {
                 CreateProject(project, details) => {
                     tracing::debug!("Creating project {} with details {}", project, details);
 
-                    job.completed(
-                        create_project(&me, &resource, &project, &details).await?)
+                    let result = create_project(&me, &resource, &project, &details, &job.destination()).await?;
+                    notification::send(&job.destination().reverse(), NotificationEvent::AwardAdded(project.clone())).await;
+                    job.completed(result)
                 }
                 RemoveProject(project) => {
                     tracing::debug!("Removing project {}", project);
 
-                    // This is a special instruction that removes a project
-                    // from the portal, and also removes the project from the
-                    // bridge agent
-                    job.completed(
-                        remove_project(&me, &resource, &project).await?)
+                    let result = remove_project(&me, &resource, &project, &job.destination()).await?;
+                    notification::send(&job.destination().reverse(), NotificationEvent::AwardRemoved(project.clone())).await;
+                    job.completed(result)
                 }
                 UpdateProject(project, details) => {
                     tracing::debug!("Updating project {} with details {}", project, details);
 
-                    job.completed(
-                        update_project(&me, &resource, &project, &details).await?)
+                    let result = update_project(&me, &resource, &project, &details, &job.destination()).await?;
+                    notification::send(&job.destination().reverse(), NotificationEvent::AwardChanged(project.clone())).await;
+                    job.completed(result)
                 }
                 GetProject(project) => {
                     tracing::debug!("Getting project {}", project);
 
                     job.completed(
-                        get_project(&me, &resource, &project).await?)
+                        get_project(&me, &resource, &project, &job.destination()).await?)
+                }
+                GetAward(project) => {
+                    tracing::debug!("Getting award for project {}", project);
+
+                    job.completed(
+                        get_award(&me, &resource, &project, &job.destination()).await?)
+                }
+                GetAwards(portal) => {
+                    tracing::debug!("Getting all awards for portal {}", portal);
+
+                    job.completed(
+                        get_awards(&me, &resource, &portal, &job.destination()).await?)
                 }
                 GetProjects(portal) => {
                     tracing::debug!("Getting all projects");
@@ -113,19 +129,25 @@ async fn main() -> Result<()> {
                     // This is a special instruction that returns all projects
                     // that this portal has access to
                     job.completed(
-                        get_projects(&me, &resource, &portal).await?)
+                        get_projects(&me, &resource, &portal, &job.destination()).await?)
                 }
                 GetProjectMapping(project) => {
                     tracing::debug!("Getting project mapping for {}", project);
 
                     job.completed(
-                        get_project_mapping(&me, &resource, &project).await?)
+                        get_project_mapping(&me, &resource, &project, &job.destination()).await?)
+                }
+                GetUsers(project) => {
+                    tracing::debug!("Getting users for project {}", project);
+
+                    job.completed(
+                        get_users(&me, &resource, &project, &job.destination()).await?)
                 }
                 GetUsageReport(project, dates) => {
                     tracing::debug!("Getting usage report for {} for dates {}", project, dates);
 
                     job.completed(
-                        get_usage_report(&me, &resource, &project, &dates).await?)
+                        get_usage_report(&me, &resource, &project, &dates, &job.destination()).await?)
                 }
                 GetUsageReports(portal, dates) => {
                     tracing::debug!("Getting usage reports for portal {}", portal);
@@ -133,7 +155,19 @@ async fn main() -> Result<()> {
                     // This is a special instruction that returns all usage reports
                     // that this portal has access to
                     job.completed(
-                        get_usage_reports(&me, &resource, &portal, &dates).await?)
+                        get_usage_reports(&me, &resource, &portal, &dates, &job.destination()).await?)
+                }
+                GetStorageReport(project, dates) => {
+                    tracing::debug!("Getting storage report for {}", project);
+
+                    job.completed(
+                        get_storage_report(&me, &resource, &project, &dates, &job.destination()).await?)
+                }
+                GetStorageReports(portal, dates) => {
+                    tracing::debug!("Getting storage reports for portal {}", portal);
+
+                    job.completed(
+                        get_storage_reports(&me, &resource, &portal, &dates, &job.destination()).await?)
                 }
                 _ => {
                     tracing::error!("Invalid instruction: {}. Portal agents do not accept this instruction", job.instruction());
@@ -306,6 +340,142 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    async_runnable! {
+        /// Notify runner for the portal. Handles Forward notifications from the bridge
+        /// agent: strips the bridge from the path and re-sends the inner notification
+        /// to the next southbound agent. All other senders are ignored.
+        pub async fn portal_notify_runner(envelope: NotificationEnvelope) -> Result<(), Error> {
+            let sender = envelope.sender();
+            let notification = envelope.notification();
+
+            match agent::agent_type(&sender).await {
+                Some(Bridge) => {
+                    match notification.event() {
+                        NotificationEvent::Forward(inner) => {
+                            let destination = inner.destination();
+                            let agents = destination.agents();
+                            let my_name = agent::name().await;
+
+                            // Find this portal's position in the inner destination,
+                            // then route to the next agent. This handles both directions:
+                            //   southbound: portal.provider.cluster → portal at 0 → next = provider
+                            //   northbound: isambard-ai.portal.ukri → portal at 1 → next = ukri
+                            let portal_index = agents.iter().position(|a| a == &my_name);
+
+                            let next_index = match portal_index {
+                                None => {
+                                    return Err(Error::InvalidInstruction(format!(
+                                        "Forward notification destination '{}' does not include this portal ({})",
+                                        destination, my_name
+                                    )));
+                                }
+                                Some(0) => 1,
+                                Some(1) => {
+                                    // Northbound: agents()[0] must be a registered virtual agent.
+                                    let is_valid = match agent::find(&agents[0], 0).await {
+                                        Some(peer) => agent::is_virtual(&peer).await,
+                                        None => false,
+                                    };
+                                    if !is_valid {
+                                        return Err(Error::InvalidInstruction(format!(
+                                            "Forward notification destination '{}': '{}' must be a virtual agent when portal is at position 1",
+                                            destination, agents[0]
+                                        )));
+                                    }
+                                    2
+                                }
+                                Some(i) => {
+                                    return Err(Error::InvalidInstruction(format!(
+                                        "Forward notification destination '{}': portal at position {} is not allowed (max 1)",
+                                        destination, i
+                                    )));
+                                }
+                            };
+
+                            if next_index >= agents.len() {
+                                // The portal is both the local and remote portal
+                                // (single-portal setup). Deliver inner directly to
+                                // our own bridge.
+                                match agent::bridge(BRIDGE_WAIT_TIME).await {
+                                    Some(bridge) => {
+                                        if let Err(e) = Command::notify(inner).send_to(&bridge).await {
+                                            tracing::warn!(
+                                                "Failed to forward notification [{}] to bridge (self-portal): {}",
+                                                inner.id(),
+                                                e
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            "Forward notification [{}]: no bridge found for self-portal delivery",
+                                            inner.id()
+                                        );
+                                    }
+                                }
+                                return Ok(());
+                            }
+
+                            let next_agent =
+                                agent::find(&agents[next_index], 5)
+                                    .await
+                                    .ok_or_else(|| {
+                                        Error::MissingAgent(format!(
+                                            "Cannot find next agent '{}' for notification forwarding",
+                                            agents[next_index]
+                                        ))
+                                    })?;
+
+                            if let Err(e) = Command::notify(inner).send_to(&next_agent).await {
+                                tracing::warn!(
+                                    "Failed to forward notification [{}] to {}: {}",
+                                    inner.id(),
+                                    next_agent,
+                                    e
+                                );
+                            }
+
+                            Ok(())
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "Portal received unexpected notification event from bridge: {}",
+                                notification.event()
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+                _ => {
+                    // Notification from a southbound agent — forward it to the bridge
+                    // so the bridge can deliver it to the web portal.
+                    match agent::bridge(BRIDGE_WAIT_TIME).await {
+                        Some(bridge) => {
+                            if let Err(e) = Command::notify(notification).send_to(&bridge).await {
+                                tracing::warn!(
+                                    "Failed to forward notification [{}] to bridge: {}",
+                                    notification.id(),
+                                    e
+                                );
+                            }
+                            Ok(())
+                        }
+                        None => {
+                            tracing::warn!(
+                                "Portal received notification [{}] from {} but no bridge agent found; dropping",
+                                notification.id(),
+                                sender
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    set_notify_runner(portal_notify_runner).await?;
 
     // run the portal agent
     run(config, portal_runner).await?;
@@ -495,6 +665,7 @@ pub async fn create_project(
     resource: &str,
     project: &ProjectIdentifier,
     details: &ProjectDetails,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -515,6 +686,7 @@ pub async fn create_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -551,6 +723,7 @@ pub async fn update_project(
     resource: &str,
     project: &ProjectIdentifier,
     details: &ProjectDetails,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -571,6 +744,7 @@ pub async fn update_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -606,6 +780,7 @@ pub async fn remove_project(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to remove the project.
@@ -625,6 +800,7 @@ pub async fn remove_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -660,6 +836,7 @@ pub async fn get_project(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<ProjectDetails, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -679,6 +856,7 @@ pub async fn get_project(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -709,6 +887,106 @@ pub async fn get_project(
 }
 
 ///
+/// Get the award details for an existing project
+///
+pub async fn get_award(
+    me: &str,
+    resource: &str,
+    project: &ProjectIdentifier,
+    forwarded_for: &Destination,
+) -> Result<ProjectDetails, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_award {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
+                false,
+            )?
+            .with_forwarded_for(forwarded_for.clone())
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<ProjectDetails>()?;
+
+            match result {
+                Some(award) => {
+                    tracing::debug!("Award retrieved by bridge agent: {:?}", award);
+                    Ok(award)
+                }
+                None => {
+                    tracing::warn!("No award retrieved?");
+                    Err(Error::MissingProject(
+                        "No award retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the award details for all projects managed for the remote portal
+///
+pub async fn get_awards(
+    me: &str,
+    resource: &str,
+    portal: &PortalIdentifier,
+    forwarded_for: &Destination,
+) -> Result<Vec<ProjectDetails>, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_awards {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    portal
+                ),
+                false,
+            )?
+            .with_forwarded_for(forwarded_for.clone())
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<Vec<ProjectDetails>>()?;
+
+            match result {
+                Some(awards) => {
+                    tracing::debug!("Awards retrieved by bridge agent: {:?}", awards);
+                    Ok(awards)
+                }
+                None => {
+                    tracing::warn!("No awards retrieved?");
+                    Err(Error::MissingProject(
+                        "No awards retrieved by bridge agent".to_string(),
+                    ))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
 /// Get the full set of project mappings for all projects managed
 /// for the remove portal
 ///
@@ -716,6 +994,7 @@ pub async fn get_projects(
     me: &str,
     resource: &str,
     portal: &PortalIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<Vec<ProjectMapping>, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to get the projects.
@@ -733,6 +1012,7 @@ pub async fn get_projects(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -769,6 +1049,7 @@ pub async fn get_project_mapping(
     me: &str,
     resource: &str,
     project: &ProjectIdentifier,
+    forwarded_for: &Destination,
 ) -> Result<ProjectMapping, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -788,6 +1069,7 @@ pub async fn get_project_mapping(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -818,6 +1100,57 @@ pub async fn get_project_mapping(
 }
 
 ///
+/// Get the users (as UserIdentifier → email mappings) for an existing project.
+///
+/// At the portal level the "local username" is the user's email address, since
+/// emails are the portal-level equivalent of Unix usernames.
+///
+pub async fn get_users(
+    me: &str,
+    resource: &str,
+    project: &ProjectIdentifier,
+    forwarded_for: &Destination,
+) -> Result<Vec<UserMapping>, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_users {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project
+                ),
+                false,
+            )?
+            .with_forwarded_for(forwarded_for.clone())
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<Vec<UserMapping>>()?;
+
+            match result {
+                Some(users) => {
+                    tracing::debug!("Users retrieved by bridge agent: {:?}", users);
+                    Ok(users)
+                }
+                None => {
+                    tracing::warn!("No users retrieved?");
+                    Ok(Vec::new())
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
 /// Get the usage report for an existing project
 ///
 pub async fn get_usage_report(
@@ -825,6 +1158,7 @@ pub async fn get_usage_report(
     resource: &str,
     project: &ProjectIdentifier,
     dates: &DateRange,
+    forwarded_for: &Destination,
 ) -> Result<ProjectUsageReport, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to create the project.
@@ -845,6 +1179,7 @@ pub async fn get_usage_report(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 
@@ -875,6 +1210,106 @@ pub async fn get_usage_report(
 }
 
 ///
+/// Get the storage report for an existing project (reflects current state)
+///
+pub async fn get_storage_report(
+    me: &str,
+    resource: &str,
+    project: &ProjectIdentifier,
+    dates: &DateRange,
+    forwarded_for: &Destination,
+) -> Result<ProjectStorageReport, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_storage_report {} {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    project,
+                    dates
+                ),
+                false,
+            )?
+            .with_forwarded_for(forwarded_for.clone())
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<ProjectStorageReport>()?;
+
+            match result {
+                Some(report) => {
+                    tracing::debug!("Storage report retrieved by bridge agent: {:?}", report);
+                    Ok(report)
+                }
+                None => {
+                    tracing::warn!("No storage report retrieved?");
+                    Ok(ProjectStorageReport::new(project))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
+/// Get the storage reports for all projects managed by the specified portal
+///
+pub async fn get_storage_reports(
+    me: &str,
+    resource: &str,
+    portal: &PortalIdentifier,
+    dates: &DateRange,
+    forwarded_for: &Destination,
+) -> Result<StorageReport, Error> {
+    match agent::bridge(BRIDGE_WAIT_TIME).await {
+        Some(bridge) => {
+            let job = Job::parse(
+                &format!(
+                    "{}.{}.{} get_storage_reports {} {}",
+                    me,
+                    bridge.name(),
+                    resource,
+                    portal,
+                    dates
+                ),
+                false,
+            )?
+            .with_forwarded_for(forwarded_for.clone())
+            .put(&bridge)
+            .await?;
+
+            let result = job.wait().await?.result::<StorageReport>()?;
+
+            match result {
+                Some(report) => {
+                    tracing::debug!("Storage reports retrieved by bridge agent: {:?}", report);
+                    Ok(report)
+                }
+                None => {
+                    tracing::warn!("No storage reports retrieved?");
+                    Ok(StorageReport::new(portal))
+                }
+            }
+        }
+
+        None => {
+            tracing::error!("No bridge agent found");
+            Err(Error::MissingAgent(
+                "Cannot run the job because there is no bridge agent".to_string(),
+            ))
+        }
+    }
+}
+
+///
 /// Get the usage reports for all projects managed by the specified portal
 ///
 pub async fn get_usage_reports(
@@ -882,6 +1317,7 @@ pub async fn get_usage_reports(
     resource: &str,
     portal: &PortalIdentifier,
     dates: &DateRange,
+    forwarded_for: &Destination,
 ) -> Result<UsageReport, Error> {
     // we need to connect to our bridge agent, so it can be used
     // to tell the connected portal software to get the reports.
@@ -900,6 +1336,7 @@ pub async fn get_usage_reports(
                 ),
                 false,
             )?
+            .with_forwarded_for(forwarded_for.clone())
             .put(&bridge)
             .await?;
 

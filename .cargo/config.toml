@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
+[env]
+# Prevent linker warnings when building on macOS versions newer than the Rust
+# toolchain's default deployment target (11.0). Set to 13.0 as a reasonable
+# minimum that covers all arm64 Macs.
+MACOSX_DEPLOYMENT_TARGET = { value = "13.0", force = false }

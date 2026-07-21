@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "openportal"
+version = "0.32.2"
+description = "Python wrappers for OpenPortal"
+license = { text = "MIT" }
+authors = [{ name = "Christopher Woods", email = "Christopher.Woods@bristol.ac.uk" }]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "openportal"
+package-name = "openportal"
+
+[tool.pyo3-stub-gen]
+# Optional configuration

@@ -58,7 +58,8 @@ cargo run --bin provider-svc
 # Run specific binary
 cargo run --bin <binary-name>
 # Available binaries: portal-svc, provider-svc, op-bridge, op-cluster,
-# op-clusters, op-filesystem, op-freeipa, and example binaries in docs/
+# op-clusters, op-filesystem, op-freeipa, op-slurm, op-cloudaccount,
+# and example binaries in docs/
 ```
 
 ## Workspace Structure
@@ -89,6 +90,8 @@ Each agent type is its own binary crate that implements specific infrastructure 
 
 - **slurm** (`op-slurm`): Agent that interfaces with the Slurm scheduler.
 
+- **cloudaccount** (`op-cloudaccount`): Represents a single cloud account (e.g. an AWS account) assigned to a project. This is a deliberately rough prototype agent, co-developed alongside cloud operators who are still building out their side of the integration - it collapses what would normally be separate Instance + Account/Scheduler agents into one process (see `docs/plans/op-cloudaccount-design.md`), holds its own project/user assignment state as plain JSON files (there's no cloud-side API for this yet), and reconstructs usage reports by parsing whatever cost-report JSON files the operators drop into a directory. Expect this to need reshaping once the cloud side of the integration matures.
+
 - **bridge** (`op-bridge`): Bridges non-Rust portal implementations to the OpenPortal network. Runs a local HTTP server to translate API calls into OpenPortal Jobs.
 
 - **python**: Python library (via pyo3) for calling into OpenPortal via the bridge agent.
@@ -106,6 +109,8 @@ Jobs flow through the system in a hierarchical manner:
 5. **Account/Filesystem** agents perform actual privileged operations
 
 Each agent only has the permissions needed for its specific role, avoiding centralized privileged access.
+
+Exception: **op-cloudaccount** is an Instance agent that does *not* delegate to separate Account/Scheduler agents - it's a rough prototype that merges those roles into one process (see the crate note above and `docs/plans/op-cloudaccount-design.md`).
 
 ### Jobs and Job Boards
 

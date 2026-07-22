@@ -14,8 +14,8 @@ use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-use serde::{Deserialize, Serialize};
 use greatwestern::grammar::{AwardDetails, Note, ProjectIdentifier, ProjectMapping, UserMapping};
+use serde::{Deserialize, Serialize};
 use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 

@@ -18,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-use serde::{Deserialize, Serialize};
 use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
+use serde::{Deserialize, Serialize};
 use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 

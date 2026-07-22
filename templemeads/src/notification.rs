@@ -79,12 +79,7 @@ pub struct NotificationEnvelope<L: Domain> {
 }
 
 impl<L: Domain> NotificationEnvelope<L> {
-    pub fn new(
-        recipient: &str,
-        sender: &str,
-        zone: &str,
-        notification: &Notification<L>,
-    ) -> Self {
+    pub fn new(recipient: &str, sender: &str, zone: &str, notification: &Notification<L>) -> Self {
         Self {
             recipient: recipient.to_owned(),
             sender: sender.to_owned(),

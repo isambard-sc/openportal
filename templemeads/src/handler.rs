@@ -648,8 +648,12 @@ pub fn process_message<L: Domain>(
                 let recipient: String = message.recipient().to_owned();
                 let zone: String = message.zone().to_owned();
 
-                if (recipient != service_info.service) {
-                    return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                if recipient != service_info.service {
+                    return Err(Error::Delivery(format!(
+                        "Recipient {} does not match service {}",
+                        recipient, service_info.service
+                    ))
+                    .into());
                 }
 
                 // check that we are the only one sending keepalives to this peer
@@ -659,7 +663,11 @@ pub fn process_message<L: Domain>(
                 match service_info.keepalives.lock() {
                     Ok(mut keepalives) => {
                         if keepalives.contains(&name) {
-                            tracing::debug!("Duplicate keepalive message from {} in zone {} - skipping", sender, zone);
+                            tracing::debug!(
+                                "Duplicate keepalive message from {} in zone {} - skipping",
+                                sender,
+                                zone
+                            );
                             return Ok(());
                         }
 
@@ -705,10 +713,14 @@ pub fn process_message<L: Domain>(
                 let zone: String = message.zone().to_owned();
                 let command: Command<L> = message.into();
 
-                if (recipient != service_info.service) {
+                if recipient != service_info.service {
                     // check to see if this is a virtual agent
                     if !agent::is_virtual(&Peer::new(&recipient, &zone)).await {
-                        return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                        return Err(Error::Delivery(format!(
+                            "Recipient {} does not match service {}",
+                            recipient, service_info.service
+                        ))
+                        .into());
                     }
                 }
 

@@ -4,6 +4,8 @@
 use anyhow::Context;
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
+use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::usagereport::{ProjectUsageReport, Usage};
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -15,8 +17,6 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
-use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
-use greatwestern::usagereport::{ProjectUsageReport, Usage};
 use templemeads::job::assert_not_expired;
 use templemeads::Error;
 use tokio::sync::Mutex;

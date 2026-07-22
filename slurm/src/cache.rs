@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use greatwestern::grammar::{Date, Hour, ProjectIdentifier, UserIdentifier};
+use greatwestern::usagereport::DailyProjectUsageReport;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
-use greatwestern::grammar::{Date, Hour, ProjectIdentifier, UserIdentifier};
-use greatwestern::usagereport::DailyProjectUsageReport;
 use templemeads::Error;
 use tokio::sync::{Mutex, RwLock};
 

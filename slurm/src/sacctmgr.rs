@@ -4,12 +4,12 @@
 use anyhow::Context;
 use anyhow::Result;
 use chrono::Utc;
+use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::sync::Arc;
-use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
-use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::job::assert_not_expired;
 use templemeads::Error;
 use tokio::sync::Mutex;

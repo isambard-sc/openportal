@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tokio::sync::RwLock;
 
-use serde::Deserialize;
 use greatwestern::grammar::{Date, DateRange, ProjectIdentifier};
 use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
+use serde::Deserialize;
 use templemeads::Error;
 
 /// 1 `Usage` second = 1 / CURRENCY_SCALE of the configured currency.

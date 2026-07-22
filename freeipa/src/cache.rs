@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use greatwestern::grammar::{ProjectIdentifier, UserIdentifier};
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use templemeads::agent::Peer;
-use greatwestern::grammar::{ProjectIdentifier, UserIdentifier};
 use templemeads::Error;
 use tokio::sync::{Mutex, RwLock};
 

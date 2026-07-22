@@ -10,9 +10,9 @@ use ts_rs::TS;
 use templemeads::Error;
 
 use crate::grammar::{Date, DateRange, ProjectIdentifier, UserIdentifier, UserMapping};
+use crate::storage::{Quota, Volume};
 use templemeads::named::NamedType;
 use templemeads::portal_identifier::PortalIdentifier;
-use crate::storage::{Quota, Volume};
 
 impl NamedType for StorageReport {
     fn type_name() -> String {

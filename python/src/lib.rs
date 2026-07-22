@@ -3,6 +3,9 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use greatwestern::grammar;
+use greatwestern::storagereport;
+use greatwestern::usagereport;
 use once_cell::sync::Lazy;
 use paddington::SecretKey;
 use pyo3::basic::CompareOp;
@@ -18,14 +21,11 @@ use std::path;
 use std::sync::RwLock;
 use templemeads::destination;
 use templemeads::diagnostics as mod_diagnostics;
-use greatwestern::grammar;
 use templemeads::health as mod_health;
 use templemeads::job;
 use templemeads::notification as mod_notification;
 use templemeads::portal_identifier;
 use templemeads::server::sign_api_call;
-use greatwestern::storagereport;
-use greatwestern::usagereport;
 use templemeads::Error;
 use url::Url;
 
@@ -5199,7 +5199,10 @@ impl From<grammar::ProjectDetails> for AwardDetails {
 #[pyfunction]
 #[pyo3(signature = (command, max_ms=0))]
 fn run(command: String, max_ms: i64) -> PyResult<Job> {
-    let mut job: Job = match call_post::<job::Job<greatwestern::Hpc>>("run", serde_json::json!({"command": command})) {
+    let mut job: Job = match call_post::<job::Job<greatwestern::Hpc>>(
+        "run",
+        serde_json::json!({"command": command}),
+    ) {
         Ok(response) => response.into(),
         Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     };
@@ -5353,7 +5356,10 @@ fn notify(command: String) -> PyResult<()> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn status(job: Job) -> PyResult<Job> {
-    match call_post::<job::Job<greatwestern::Hpc>>("status", serde_json::json!({"job": job.0.id().to_string()})) {
+    match call_post::<job::Job<greatwestern::Hpc>>(
+        "status",
+        serde_json::json!({"job": job.0.id().to_string()}),
+    ) {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -5452,8 +5458,10 @@ fn fetch_notification(py: Python<'_>, notification_id: Py<PyAny>) -> PyResult<No
         },
     };
 
-    match call_post::<mod_notification::Notification<greatwestern::Hpc>>("fetch_notification", serde_json::json!(uid))
-    {
+    match call_post::<mod_notification::Notification<greatwestern::Hpc>>(
+        "fetch_notification",
+        serde_json::json!(uid),
+    ) {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }

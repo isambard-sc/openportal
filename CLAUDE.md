@@ -70,7 +70,9 @@ This is a Cargo workspace with multiple crates. The workspace is organized into:
 
 - **paddington**: Low-level secure websocket peer-to-peer protocol for service communication. Handles cryptographic authentication, message passing, and connection management between services.
 
-- **templemeads**: High-level agent framework built on paddington. Implements the Agent concept, Job management, Job Boards, and distributed task coordination. All agent executables depend on this.
+- **templemeads**: High-level agent framework built on paddington. Implements the Agent concept, Job management, Job Boards, and distributed task coordination. All agent executables depend on this. Deliberately domain-agnostic: `Job`, `Board`, `Command`, `Notification`, etc. are generic over one `L: templemeads::domain::Domain` type, chosen at compile time per binary via a type alias (e.g. `type Job = templemeads::job::Job<greatwestern::Hpc>;`). templemeads itself carries no command vocabulary - see `docs/plans/grammar-split-design.md` for why and how this split happened.
+
+- **greatwestern**: The HPC/Waldur command vocabulary (the `Instruction` enum, `ProjectIdentifier`/`UserIdentifier`, usage/storage reports, notification events) that rides on top of templemeads. This is the reference `Domain` - every built-in agent below is compiled against `greatwestern::Hpc`. A developer targeting a different kind of infrastructure entirely would write their own crate implementing `templemeads::domain::Domain` instead, and reuse paddington/templemeads unchanged. Two agents built against different `Domain`s are not expected to interoperate - that's intentional, not a bug.
 
 ### Agent Executable Crates
 

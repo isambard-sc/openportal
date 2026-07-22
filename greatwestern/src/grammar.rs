@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use templemeads::destination::{Destination, Destinations};
-use templemeads::Error;
-use templemeads::named::NamedType;
-use templemeads::portal_identifier::PortalIdentifier;
 use crate::storage::{QuotaLimit, Volume};
 use crate::usagereport::Usage;
+use templemeads::destination::{Destination, Destinations};
+use templemeads::named::NamedType;
+use templemeads::portal_identifier::PortalIdentifier;
+use templemeads::Error;
 
 use anyhow::Context;
 use chrono::{DateTime, Datelike, Timelike, Utc};

@@ -23,15 +23,14 @@
 //! `tests::job_shape_matches_binding`, which serialises a real `Job<Hpc>`
 //! and checks its JSON keys against this declaration.
 
-use crate::Hpc;
-
 use std::path::Path;
-use templemeads::job::{Job, Status};
+use templemeads::job::Status;
 use ts_rs::{TypeVisitor, TS};
 
 /// Marker type used only to host `impl TS` for the `Job<Hpc>` JSON shape -
 /// see the module docs above for why this can't be `impl TS for Job<Hpc>`
 /// directly. Never constructed.
+#[allow(dead_code)]
 struct JobBinding;
 
 impl TS for JobBinding {
@@ -79,8 +78,10 @@ impl TS for JobBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Hpc;
     use serde_json::Value;
     use std::collections::BTreeSet;
+    use templemeads::job::Job;
 
     #[test]
     fn export_bindings_job() {

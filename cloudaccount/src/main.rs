@@ -35,7 +35,7 @@ type Job = templemeads::job::Job<Hpc>;
 /// whatever cost-report JSON files the cloud operators have dropped into
 /// the accounting directory (see `accounting.rs`).
 ///
-/// See `docs/plans/op-cloudaccount-design.md` for the full design.
+/// See `docs/plans/archive/op-cloudaccount-design.md` for the full design.
 ///
 #[tokio::main]
 async fn main() -> Result<()> {

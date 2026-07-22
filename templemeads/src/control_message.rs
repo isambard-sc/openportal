@@ -27,6 +27,8 @@ pub async fn process_control_message<L: Domain>(
                 agent_type,
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
+                L::name(),
+                L::version(),
             )
             .send_to(&peer)
             .await?;

@@ -763,7 +763,15 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
                 offering.first()
             );
 
-            agent::register_peer(&peer, &agent::Type::Virtual, "virtual", "virtual").await;
+            agent::register_peer(
+                &peer,
+                &agent::Type::Virtual,
+                "virtual",
+                "virtual",
+                None,
+                None,
+            )
+            .await;
         }
 
         synched_offerings.push(offering.clone());

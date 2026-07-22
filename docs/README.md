@@ -164,7 +164,7 @@ The key types of Agent are:
    directory into a usage report. The `op-cloudaccount` executable
    implements this Agent, with source code in the
    [cloudaccount](../cloudaccount) directory. See
-   [docs/plans/op-cloudaccount-design.md](plans/op-cloudaccount-design.md)
+   [docs/plans/archive/op-cloudaccount-design.md](plans/archive/op-cloudaccount-design.md)
    for the full design.
 
 9. `cloudportal` - this is an Agent that acts as a self-contained "cloud"
@@ -178,7 +178,7 @@ The key types of Agent are:
    on whichever `cloudaccount` Agent its `template` field maps to. The
    `op-cloudportal` executable implements this Agent, with source code in
    the [cloudportal](../cloudportal) directory. See
-   [docs/plans/op-cloudportal-design.md](plans/op-cloudportal-design.md)
+   [docs/plans/archive/op-cloudportal-design.md](plans/archive/op-cloudportal-design.md)
    for the full design.
 
 10. `bridge` - OpenPortal is implemented in Rust, while portals are typically

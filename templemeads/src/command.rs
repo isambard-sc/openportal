@@ -39,6 +39,15 @@ pub enum Command<L: Domain> {
         agent: AgentType,
         engine: String,
         version: String,
+        /// The sender's `Domain` name (e.g. `"greatwestern"`), if it sent
+        /// one. Absent (`None`) on messages from a peer running templemeads
+        /// <= 0.32.2, from before this field existed - see
+        /// `Domain::assume_legacy_domain_version`.
+        #[serde(default)]
+        domain: Option<String>,
+        /// The sender's `Domain` version, alongside `domain` above.
+        #[serde(default)]
+        domain_version: Option<String>,
     },
     Sync {
         state: SyncState<L>,
@@ -83,10 +92,16 @@ impl<L: Domain> std::fmt::Display for Command<L> {
                 agent,
                 engine,
                 version,
+                domain,
+                domain_version,
             } => write!(
                 f,
-                "Register: {}, engine={} version={}",
-                agent, engine, version
+                "Register: {}, engine={} version={} domain={} domain_version={}",
+                agent,
+                engine,
+                version,
+                domain.as_deref().unwrap_or("unknown"),
+                domain_version.as_deref().unwrap_or("unknown")
             ),
             Command::Sync { state: _ } => write!(f, "Sync: State"),
             Command::HealthCheck { visited } => {
@@ -131,11 +146,19 @@ impl<L: Domain> Command<L> {
         }
     }
 
-    pub fn register(agent: &AgentType, engine: &str, version: &str) -> Self {
+    pub fn register(
+        agent: &AgentType,
+        engine: &str,
+        version: &str,
+        domain: &str,
+        domain_version: &str,
+    ) -> Self {
         Self::Register {
             agent: agent.clone(),
             engine: engine.to_owned(),
             version: version.to_owned(),
+            domain: Some(domain.to_owned()),
+            domain_version: Some(domain_version.to_owned()),
         }
     }
 
@@ -233,6 +256,8 @@ impl<L: Domain> Command<L> {
                 agent: _,
                 engine: _,
                 version: _,
+                domain: _,
+                domain_version: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -257,6 +282,8 @@ impl<L: Domain> Command<L> {
                 agent: _,
                 engine: _,
                 version: _,
+                domain: _,
+                domain_version: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -281,6 +308,8 @@ impl<L: Domain> Command<L> {
                 agent: _,
                 engine: _,
                 version: _,
+                domain: _,
+                domain_version: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -332,13 +361,38 @@ mod tests {
         let agent = AgentType::Portal;
         let engine = "templemeads";
         let version = "0.0.10";
-        let command = Command::register(&agent, engine, version);
+        let domain = "test-domain";
+        let domain_version = "0.0.0";
+        let command = Command::register(&agent, engine, version, domain, domain_version);
         assert_eq!(
             command,
             Command::Register {
                 agent,
                 engine: engine.to_owned(),
-                version: version.to_owned()
+                version: version.to_owned(),
+                domain: Some(domain.to_owned()),
+                domain_version: Some(domain_version.to_owned()),
+            }
+        );
+    }
+
+    /// A `Register` from a peer running templemeads <= 0.32.2 (before this
+    /// field existed) has no `domain`/`domain_version` keys in its JSON at
+    /// all. `#[serde(default)]` must let this still deserialize, defaulting
+    /// both to `None`, rather than failing to parse.
+    #[test]
+    fn test_command_register_deserialize_without_domain_fields() {
+        let json = r#"{"Register":{"agent":"Portal","engine":"templemeads","version":"0.32.2"}}"#;
+        #[allow(clippy::expect_used)]
+        let command: Command = serde_json::from_str(json).expect("legacy Register should parse");
+        assert_eq!(
+            command,
+            Command::Register {
+                agent: AgentType::Portal,
+                engine: "templemeads".to_owned(),
+                version: "0.32.2".to_owned(),
+                domain: None,
+                domain_version: None,
             }
         );
     }

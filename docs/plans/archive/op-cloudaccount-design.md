@@ -5,9 +5,10 @@ SPDX-License-Identifier: CC0-1.0
 
 # op-cloudaccount: Design & Implementation Plan
 
-Status: **draft prototype design** — not yet implemented. This document
-records the design decided in conversation so it can be picked up, reviewed,
-or handed to someone else without re-deriving it.
+Status: **implemented**. The `op-cloudaccount` agent described below exists
+and runs, in the `cloudaccount/` crate. Archived here as a record of the
+design decisions and rationale - see the code for current behaviour, which
+may have moved on since this was written.
 
 ## 1. Goal
 

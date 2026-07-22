@@ -5,9 +5,13 @@ SPDX-License-Identifier: CC0-1.0
 
 # Splitting the command grammar out of templemeads: Design & Implementation Plan
 
-Status: **draft design** — not yet implemented. This document records the
-design decided in conversation so it can be picked up, reviewed, or handed
-to someone else without re-deriving it. No code has been changed yet.
+Status: **implemented**. The design below was carried out in full:
+templemeads is generic over `templemeads::domain::Domain`, and
+`greatwestern` is the reference `Domain` implementation. Archived here as a
+record of the design decisions and rationale - see the code (and
+[writing-a-domain.md](../../specifications/writing-a-domain.md) for a
+guide aimed at implementors) for current behaviour, which may have moved on
+since this was written.
 
 **Decisions locked in**: the new crate is named **`greatwestern`** (continuing
 the `paddington`/`templemeads` UK-rail-terminus theme — GWR is the historic
@@ -49,8 +53,8 @@ code (not assumed). It's wider than "the `Instruction` enum":
 
 | File | Coupling | Notes |
 |---|---|---|
-| `templemeads/src/job.rs` | `Command { destination, instruction: Instruction }` ([job.rs:96-100](../../templemeads/src/job.rs#L96)) is the private struct backing every `Job`. | This is the core coupling point. |
-| `templemeads/src/job.rs` | `Command::parse`'s `check_portal` block ([job.rs:127-227](../../templemeads/src/job.rs#L127)) pattern-matches ~35 concrete `Instruction` variants to enforce "a job about user/project X can only be issued via X's portal". | This is domain **policy**, not transport logic, sitting inside supposedly-generic job parsing. |
+| `templemeads/src/job.rs` | `Command { destination, instruction: Instruction }` ([job.rs:96-100](../../../templemeads/src/job.rs#L96)) is the private struct backing every `Job`. | This is the core coupling point. |
+| `templemeads/src/job.rs` | `Command::parse`'s `check_portal` block ([job.rs:127-227](../../../templemeads/src/job.rs#L127)) pattern-matches ~35 concrete `Instruction` variants to enforce "a job about user/project X can only be issued via X's portal". | This is domain **policy**, not transport logic, sitting inside supposedly-generic job parsing. |
 | `templemeads/src/command.rs` (control-plane `Command`, distinct from the grammar `Command` above) | `enum Command { Put { job: Job }, Update { job: Job }, ... }` embeds `Job` directly. | Needs the same generic parameter as `Job`. |
 | `templemeads/src/notification.rs` | `NotificationEvent` embeds `UserIdentifier`/`ProjectIdentifier` directly, with its own hand-written `parse()`, structurally identical in spirit to `Instruction`. | A second, independent piece of domain vocabulary alongside `Instruction`. |
 | `templemeads/src/bridge_server.rs` | Imports `PortalIdentifier` directly to resolve `/api/...` HTTP paths to a portal scope. | **Not actually a leak** (revised — see §8): `PortalIdentifier` is decided to live in `templemeads`, not the domain crate, since it names a position in the fixed agent hierarchy (`agent::Type::Portal`), not domain vocabulary. This file was already reaching for the right type. |
@@ -60,12 +64,12 @@ code (not assumed). It's wider than "the `Instruction` enum":
 | `python/src/lib.rs` | Extensively calls `job.result::<grammar::UserIdentifier>()` etc. and re-exports grammar types to Python. | Inherently pinned to one concrete grammar (see §9) — not a framework concern. |
 
 Useful existing precedent found during the audit: `Job::completed<T>()` /
-`Job::result<T>()` ([job.rs:629](../../templemeads/src/job.rs#L629),
-[job.rs:737](../../templemeads/src/job.rs#L737)) already treat a job's
+`Job::result<T>()` ([job.rs:629](../../../templemeads/src/job.rs#L629),
+[job.rs:737](../../../templemeads/src/job.rs#L737)) already treat a job's
 *result* payload generically — stored as `(json string, type-name string)`
 behind a `Serialize + NamedType` / `DeserializeOwned` bound, not a concrete
 enum. And `agent_core::Config<T = ()>` / `Defaults<T = ()>`
-([agent_core.rs:24](../../templemeads/src/agent_core.rs#L24)) already
+([agent_core.rs:24](../../../templemeads/src/agent_core.rs#L24)) already
 thread a generic, per-agent payload type through every `agent::{instance,
 account, scheduler, filesystem, portal, platform}::run()` function. Both
 are exactly the shape of change this design needs to make — this is not an
@@ -137,7 +141,7 @@ Routing/addressing is already domain-agnostic today.
 
 `NamedType` (the trait that gives ts-rs-exported types a string name, used
 by `Job::completed<T>`'s result encoding) is defined in `grammar.rs`
-([grammar.rs:18](../../templemeads/src/grammar.rs#L18)) but is genuinely
+(`grammar.rs:18`, in templemeads's `grammar.rs` prior to this migration - since deleted) but is genuinely
 generic — `storage.rs`, `health.rs`, and `diagnostics.rs` all depend on it
 for types that have nothing to do with the command grammar. **Move it out
 of `grammar.rs` into a neutral home first** (e.g. `templemeads::named`, or
@@ -169,13 +173,13 @@ One small mechanical wrinkle this surfaces: `ProjectIdentifier::portal_identifie
 and `UserIdentifier::portal_identifier()` currently construct a
 `PortalIdentifier` via a direct struct literal (`PortalIdentifier { portal:
 self.portal.clone() }`), relying on same-module field access
-([grammar.rs:187-191](../../templemeads/src/grammar.rs#L187)). Once
+(`grammar.rs:187-191`, prior to this migration - since deleted). Once
 `PortalIdentifier` lives in `templemeads` and `ProjectIdentifier`/
 `UserIdentifier` live in `greatwestern`, that field is no longer visible
 cross-crate — trivial fix, swap the struct literal for the existing public
 `PortalIdentifier::parse(&self.portal)` constructor. Similarly, `impl
 From<ProjectIdentifier> for PortalIdentifier`
-([grammar.rs:200](../../templemeads/src/grammar.rs#L200)) has to be dropped
+(`grammar.rs:200`, prior to this migration - since deleted) has to be dropped
 entirely: implementing a foreign trait (`From`, from `std`) for a foreign
 type (`PortalIdentifier`, now in `templemeads`) from within `greatwestern`
 violates Rust's orphan rules. The handful of call sites using `.into()`

@@ -157,14 +157,37 @@ async fn process_command<L: Domain>(
             agent,
             engine,
             version,
+            domain,
+            domain_version,
         } => {
+            // A peer that didn't send a domain at all (pre-0.33.0) may still
+            // be one this Domain recognises by historical version alone -
+            // see `Domain::assume_legacy_domain_version`.
+            let (domain, domain_version) = match (domain, domain_version) {
+                (Some(d), Some(v)) => (Some(d.clone()), Some(v.clone())),
+                _ => match L::assume_legacy_domain_version(version) {
+                    Some(v) => (Some(L::name().to_string()), Some(v.to_string())),
+                    None => (None, None),
+                },
+            };
+
             tracing::info!(
-                "Registering agent: {}, engine={} version={}",
+                "Registering agent: {}, engine={} version={} domain={} domain_version={}",
                 agent,
                 engine,
-                version
+                version,
+                domain.as_deref().unwrap_or("unknown"),
+                domain_version.as_deref().unwrap_or("unknown")
             );
-            agent::register_peer(&Peer::new(sender, zone), agent, engine, version).await;
+            agent::register_peer(
+                &Peer::new(sender, zone),
+                agent,
+                engine,
+                version,
+                domain.as_deref(),
+                domain_version.as_deref(),
+            )
+            .await;
         }
         Command::Update { job } => {
             if job.is_expired() {

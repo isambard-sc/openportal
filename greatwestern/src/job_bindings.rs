@@ -5,7 +5,7 @@
 //!
 //! `templemeads::job::Job<L>` cannot itself `#[derive(TS)]`: ts-rs's derive
 //! requires every generic parameter to also implement `TS` (see
-//! `docs/plans/grammar-split-design.md`), which would force `Hpc` - and
+//! `docs/plans/archive/grammar-split-design.md`), which would force `Hpc` - and
 //! every other `Domain` - to depend on ts-rs just to be usable as a type
 //! parameter.
 //!

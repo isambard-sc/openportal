@@ -4,7 +4,7 @@
 //! Turns whatever cost-report JSON files the cloud operators have dropped
 //! into the accounting directory into a `ProjectUsageReport`.
 //!
-//! See `docs/plans/op-cloudaccount-design.md` §6 for the full algorithm
+//! See `docs/plans/archive/op-cloudaccount-design.md` §6 for the full algorithm
 //! this implements: parse tolerantly, group by project, sort and dedup by
 //! `generated_at`, compute deltas between consecutive cumulative reports,
 //! and spread each delta evenly across the calendar days it spans.

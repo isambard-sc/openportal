@@ -7,7 +7,7 @@
 //! restart.
 //!
 //! State is persisted as one plain JSON file per project in a configured
-//! `state_dir` (see `docs/plans/op-cloudaccount-design.md` §4.1 for the
+//! `state_dir` (see `docs/plans/archive/op-cloudaccount-design.md` §4.1 for the
 //! reasoning). An in-memory cache mirrors `slurm/src/cache.rs`'s pattern
 //! and is the only thing normal operation reads from; every mutation
 //! updates the cache and then writes the corresponding file straight

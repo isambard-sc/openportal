@@ -77,8 +77,11 @@ the variant structure itself.
 
 **Source file:** `templemeads/src/command.rs`
 
-All variants are serialised with a `"type"` discriminant field (serde
-`tag = "type"`). The JSON schemas for each variant follow.
+Each variant's fields are listed below. On the wire, serde's default
+externally-tagged enum representation wraps them as `{"<Variant>": {
+...fields... }}` (e.g. `{"Put": {"job": {...}}}`) - the `"type": "..."` shown
+in each block below is illustrative of the fields present, not a literal
+top-level key.
 
 #### `Put`
 
@@ -116,16 +119,39 @@ Remove a `Job` from a remote agent's job board.
 #### `Register`
 
 Sent immediately after a connection is established. Announces the agent's
-identity, engine name, and protocol version.
+identity, engine name and version, and (since templemeads 0.33.0) the
+`Domain` it is compiled against and that `Domain`'s version.
 
 ```json
 {
-  "type":    "Register",
-  "agent":   "<agent-name-string>",
-  "engine":  "<engine-name-string>",
-  "version": <integer>
+  "agent":          "<agent-type-string>",
+  "engine":         "<engine-name-string>",
+  "version":        "<engine-semver-string>",
+  "domain":         "<domain-name-string>" | null,
+  "domain_version": "<domain-semver-string>" | null
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent` | string | The sender's `agent::Type` (Portal, Provider, Instance, ...) |
+| `engine` | string | Always `"templemeads"` today - `env!("CARGO_PKG_NAME")` resolved inside templemeads itself |
+| `version` | string | The templemeads crate's own semver, e.g. `"0.33.0"` - **not** the wire protocol version (that's the unrelated integer `2` in `PeerDetails`, see §4.3) |
+| `domain` | string or null | The sender's `Domain::name()`, e.g. `"greatwestern"`. `null` (and absent from the JSON entirely) from a peer running templemeads <= 0.32.2, from before this field existed |
+| `domain_version` | string or null | The sender's `Domain::version()`, alongside `domain` |
+
+**Backwards compatibility.** `domain`/`domain_version` are `#[serde(default)]`,
+so a `Register` from a pre-0.33.0 peer (which simply doesn't have these keys
+in its JSON at all) still deserialises, with both fields `None`. The
+receiving agent then asks its own `Domain` to resolve a legacy assumption via
+`Domain::assume_legacy_domain_version(engine_version)` - `greatwestern`
+resolves any `version <= "0.32.2"` to `domain = "greatwestern"`,
+`domain_version = "0.32.2"`, since templemeads never had a separable domain
+before that release, so any peer at or below it was unambiguously speaking
+today's `greatwestern` vocabulary at that same version. A `Domain` with no
+such historical claim simply returns `None`, leaving the peer's domain
+genuinely unknown. See [writing-a-domain.md](writing-a-domain.md#1-the-domain-trait) for the
+trait methods involved.
 
 #### `Sync`
 
@@ -258,7 +284,9 @@ Paddington `Command`. These are used for connection lifecycle management.
 
 **Source file:** `paddington/src/command.rs`
 
-All variants use a `"type"` discriminant field.
+As with the Templemeads `Command` above, these are serialised with serde's
+default externally-tagged representation (`{"<Variant>": {...fields...}}`),
+not a literal `"type"` key - the blocks below list fields only.
 
 #### `Error`
 
@@ -520,7 +548,8 @@ version mismatch causes the connection to be refused.
 |---------|-------------|
 | `Envelope<L>`, `Job<L>`, `Status` (generic, domain-agnostic) | `templemeads/src/job.rs` |
 | Templemeads `Command<L>` | `templemeads/src/command.rs` |
-| `Domain` trait | `templemeads/src/domain.rs` |
+| `Domain` trait, including `name()`/`version()`/`assume_legacy_domain_version()` | `templemeads/src/domain.rs` |
+| `agent::peer_domain()`, `agent::ensure_domain_matches()` (opt-in disconnect-on-mismatch) | `templemeads/src/agent.rs` |
 | `Notification<L>`, `NotificationEnvelope<L>` (generic) | `templemeads/src/notification.rs` |
 | `NotificationEvent` (`greatwestern`'s concrete vocabulary) | `greatwestern/src/notification.rs` |
 | `Instruction` (`greatwestern`'s concrete vocabulary, i.e. `Job<Hpc>`'s payload) | `greatwestern/src/grammar.rs` |

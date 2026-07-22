@@ -52,9 +52,22 @@ pub trait Domain: Clone + std::fmt::Debug + 'static {
     /// name in a notification string.
     fn parse_notification_event(s: &str) -> Result<Self::NotificationEvent, Error>;
 
+    /// A short, stable name for this `Domain` (e.g. `"greatwestern"`), sent
+    /// in the `Register` handshake (see §1.1 below).
+    fn name() -> &'static str;
+
+    /// This `Domain`'s own version (typically `env!("CARGO_PKG_VERSION")` of
+    /// your domain crate), sent alongside `name()`.
+    fn version() -> &'static str;
+
     /// The portal that "owns" this instruction, if it has one. Default: no
     /// such policy - opt in only if you need it (see §4).
     fn owning_portal(_instruction: &Self::Instruction) -> Option<PortalIdentifier> {
+        None
+    }
+
+    /// Backwards compatibility only - see §1.1. Default: assume nothing.
+    fn assume_legacy_domain_version(_engine_version: &str) -> Option<&'static str> {
         None
     }
 
@@ -64,6 +77,38 @@ pub trait Domain: Clone + std::fmt::Debug + 'static {
         Self: Sized;
 }
 ```
+
+### 1.1 Domain identity on the wire
+
+`name()`/`version()` are sent in every `Register` command (see
+[wire-protocol.md](wire-protocol.md) §1.2) so a connecting peer can log and
+diagnose which vocabulary and version it's actually talking to - this is
+purely informational, not a compatibility gate; templemeads does not refuse
+a connection over a `Domain` mismatch.
+
+`assume_legacy_domain_version` exists for one specific migration, not as a
+general mechanism: before templemeads 0.33.0, `Register` had no
+domain/domain-version fields at all, because at that point templemeads had
+no separable `Domain` concept - the HPC/Waldur vocabulary lived directly
+inside templemeads. So a peer running templemeads <= 0.32.2 was
+*unambiguously* speaking what is now called `greatwestern`, at that same
+version - not a guess, a historical fact about this exact crate split. That
+is why `greatwestern` overrides this method (see `greatwestern/src/lib.rs`)
+and why the default is `None`: a brand-new `Domain` has no pre-split history
+to reason about, so it should never claim one.
+
+Knowing a peer's domain is purely informational by default - templemeads
+never refuses a connection or a Job over a `Domain` mismatch on its own.
+If your agent needs that guarantee, call
+`templemeads::agent::ensure_domain_matches::<YourDomain>(&peer)` (typically
+right after handling `ControlCommand::Connected`): it checks the peer's
+registered domain against `L::name()` and forcibly disconnects it -
+returning `Error::Incompatible` - if the domain differs *or* is unknown
+(fail-closed: an unresolvable domain is treated exactly like a confirmed
+mismatch, not given the benefit of the doubt). This is opt-in per agent, not
+automatic, since a domain mismatch is otherwise harmless to the framework
+itself - it only matters if your agent's own logic can't tolerate talking to
+a differently-vocabularied peer.
 
 A `Domain` implementation is a single, usually zero-sized, marker type (like
 `greatwestern::Hpc`) that never holds a value - it only ever appears as a type
@@ -208,11 +253,20 @@ impl Domain for MyDomain {
         NotificationEvent::parse(s)
     }
 
+    fn name() -> &'static str {
+        "my-domain"
+    }
+
+    fn version() -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn wrap_forward(inner: Notification<Self>) -> Self::NotificationEvent {
         NotificationEvent::Forward(Box::new(inner))
     }
 
-    // owning_portal: use the default (no such policy) unless you need §4.
+    // owning_portal, assume_legacy_domain_version: use the defaults (no
+    // such policy, no legacy history to assume) unless you need §4/§1.1.
 }
 ```
 
@@ -378,10 +432,11 @@ whichever `Domain` you choose:
 | Fire-and-forget `Notification` delivery and routing mechanics | `templemeads::notification`, `templemeads::handler` |
 | `PortalIdentifier` and the Portal/Provider/Platform/Instance/Account agent hierarchy | `templemeads::portal_identifier`, `templemeads::agent` |
 | Bridging a non-Rust portal application over HTTP | `templemeads::bridge`, `templemeads::bridge_server` |
+| Recording/querying which `Domain` a peer speaks, and optionally enforcing it (`agent::peer_domain`, `agent::ensure_domain_matches`) | `templemeads::agent`, `templemeads::handler` |
 
 What you provide is entirely contained in §1-§5 above: two types
-(`Instruction`, `NotificationEvent`), two parse functions, and (usually) one
-`wrap_forward` one-liner.
+(`Instruction`, `NotificationEvent`), two parse functions, `name()`/`version()`,
+and (usually) one `wrap_forward` one-liner.
 
 ---
 
@@ -397,7 +452,7 @@ What you provide is entirely contained in §1-§5 above: two types
   generic framework machinery in templemeads' own test suite. Good for seeing
   the absolute minimum that satisfies the trait; not a template for a real
   agent network, since it doesn't parse anything meaningful.
-- [docs/plans/grammar-split-design.md](../plans/grammar-split-design.md) —
+- [docs/plans/archive/grammar-split-design.md](../plans/archive/grammar-split-design.md) —
   the design document recording *why* the split is shaped this way (the
   coupling audit, the rejected type-erasure alternative, the
   `PortalIdentifier`/`NamedType` boundary decisions). Read this if "why does

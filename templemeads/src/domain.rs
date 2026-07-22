@@ -49,6 +49,31 @@ pub trait Domain: Clone + std::fmt::Debug + 'static {
     /// name in a notification string.
     fn parse_notification_event(s: &str) -> Result<Self::NotificationEvent, Error>;
 
+    /// A short, stable name identifying this `Domain` on the wire (e.g.
+    /// `"greatwestern"`), sent in the `Register` handshake so a connecting
+    /// peer can log/diagnose which vocabulary and version it is talking to.
+    fn name() -> &'static str;
+
+    /// This `Domain`'s own version (e.g. `env!("CARGO_PKG_VERSION")` of the
+    /// domain crate), sent alongside `name()`.
+    fn version() -> &'static str;
+
+    /// Backwards compatibility with peers running a templemeads build from
+    /// before `Register` carried a domain/domain version at all. Given that
+    /// peer's templemeads *engine* version string (not this domain's own
+    /// version), return the domain version this `Domain` should assume that
+    /// peer was speaking, if any - or `None` if no such assumption applies.
+    ///
+    /// Default: assume nothing. A domain overrides this only if it has a
+    /// genuine historical claim to "any templemeads peer below version X,
+    /// with no domain field, was unambiguously speaking me" - see
+    /// `greatwestern`'s override for the one legitimate case: templemeads
+    /// <= 0.32.2 never had a separable domain at all, so it always *was*
+    /// (undifferentiated) `greatwestern` at that same version.
+    fn assume_legacy_domain_version(_engine_version: &str) -> Option<&'static str> {
+        None
+    }
+
     /// The portal that "owns" this instruction, if it has one - i.e. whose
     /// name a job's destination's first hop must match. `PortalIdentifier`
     /// lives in templemeads itself (it names a fixed position in the agent

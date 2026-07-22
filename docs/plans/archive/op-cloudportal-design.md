@@ -5,9 +5,10 @@ SPDX-License-Identifier: CC0-1.0
 
 # op-cloudportal: Design & Implementation Plan
 
-Status: **draft prototype design** — not yet implemented. This document
-records the design decided in conversation so it can be picked up, reviewed,
-or handed to someone else without re-deriving it.
+Status: **implemented**. The `op-cloudportal` agent described below exists
+and runs, in the `cloudportal/` crate. Archived here as a record of the
+design decisions and rationale - see the code for current behaviour, which
+may have moved on since this was written.
 
 ## 1. Goal
 
@@ -17,7 +18,7 @@ portal-to-portal relationship: a central "airr" portal creates Awards on it
 create Awards on a downstream/child portal. There is no real portal
 management software (no Waldur) behind `op-cloudportal` — it is a
 deliberately rough, self-contained prototype, in the same spirit as
-`op-cloudaccount` (see `docs/plans/op-cloudaccount-design.md`).
+`op-cloudaccount` (see `op-cloudaccount-design.md` in this same directory).
 
 Two things `op-cloudportal` must do:
 
@@ -236,7 +237,7 @@ achieved by polling instead of by the CLI call itself being retried.
 
 Independently of §7, `templemeads::account::run()` (and `filesystem`/
 `scheduler`) already support a **one-shot command** mode
-([templemeads/src/account.rs:39-79](../../templemeads/src/account.rs#L39-L79)):
+([templemeads/src/account.rs:39-79](../../../templemeads/src/account.rs#L39-L79)):
 `run --one-shot "instruction args"` synthesizes a local `Envelope`/`Job`,
 runs it through the real instruction handler, pretty-prints the JSON
 result, and exits — no network listener. `templemeads::portal::run()`

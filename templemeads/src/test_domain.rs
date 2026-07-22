@@ -62,6 +62,14 @@ impl Domain for TestDomain {
         Ok(TestNotificationEvent::Echo(s.to_string()))
     }
 
+    fn name() -> &'static str {
+        "test-domain"
+    }
+
+    fn version() -> &'static str {
+        "0.0.0"
+    }
+
     fn wrap_forward(inner: Notification<Self>) -> Self::NotificationEvent {
         TestNotificationEvent::Forward(Box::new(inner))
     }

@@ -8,6 +8,7 @@ use std::fmt::Display;
 use tokio::sync::RwLock;
 use ts_rs::TS;
 
+use crate::domain::Domain;
 use crate::error::Error;
 
 #[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize, TS)]
@@ -150,6 +151,10 @@ impl Display for Peer {
 struct Registrar {
     peers: HashMap<Peer, Type>,
     peers_by_type: HashMap<Type, Vec<Peer>>,
+    /// The `Domain` a peer identified itself as speaking, if known - either
+    /// because it sent one, or because `Domain::assume_legacy_domain_version`
+    /// resolved one on its behalf. Peers with neither are simply absent here.
+    peer_domains: HashMap<Peer, PeerDomain>,
     name: String,
     typ: Type,
     zones: Vec<String>,
@@ -166,6 +171,7 @@ impl Registrar {
         Self {
             peers: HashMap::new(),
             peers_by_type: HashMap::new(),
+            peer_domains: HashMap::new(),
             name: String::new(),
             typ: Type::Portal,
             zones: Vec::new(),
@@ -192,7 +198,15 @@ impl Registrar {
         self.cascade_health = cascade_health;
     }
 
-    fn register_peer(&mut self, peer: &Peer, agent_type: &Type, _engine: &str, _version: &str) {
+    fn register_peer(
+        &mut self,
+        peer: &Peer,
+        agent_type: &Type,
+        _engine: &str,
+        _version: &str,
+        domain: Option<&str>,
+        domain_version: Option<&str>,
+    ) {
         if self.peers.contains_key(peer) {
             // we cannot register a virtual agent that overwrites an existing agent
             if agent_type == &Type::Virtual {
@@ -209,12 +223,29 @@ impl Registrar {
             .or_default()
             .push(peer.clone());
 
+        match (domain, domain_version) {
+            (Some(name), Some(version)) => {
+                self.peer_domains.insert(
+                    peer.clone(),
+                    PeerDomain {
+                        name: name.to_owned(),
+                        version: version.to_owned(),
+                    },
+                );
+            }
+            _ => {
+                self.peer_domains.remove(peer);
+            }
+        }
+
         if !self.zones.contains(&peer.zone) {
             self.zones.push(peer.zone().to_owned());
         }
     }
 
     fn remove(&mut self, peer: &Peer) {
+        self.peer_domains.remove(peer);
+
         if let Some(agent_type) = self.peers.remove(peer) {
             if let Some(v) = self.peers_by_type.get_mut(&agent_type) {
                 v.retain(|p| *p != *peer);
@@ -285,17 +316,90 @@ impl Registrar {
     }
 }
 
+/// The `Domain` a connected peer identified itself as speaking - its name
+/// (e.g. `"greatwestern"`) and version. See `agent::peer_domain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDomain {
+    pub name: String,
+    pub version: String,
+}
+
 static REGISTRAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
 
 ///
 /// Register that the peer agent called 'name' is of type 'agent_type'
-/// and is connecting from zone `zone`
+/// and is connecting from zone `zone`. `domain`/`domain_version` are the
+/// peer's `Domain` identity, already resolved (including any legacy
+/// fallback) by the caller - `None` if genuinely unknown.
 ///
-pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version: &str) {
+pub async fn register_peer(
+    peer: &Peer,
+    agent_type: &Type,
+    engine: &str,
+    version: &str,
+    domain: Option<&str>,
+    domain_version: Option<&str>,
+) {
     REGISTRAR
         .write()
         .await
-        .register_peer(peer, agent_type, engine, version)
+        .register_peer(peer, agent_type, engine, version, domain, domain_version)
+}
+
+///
+/// Return the `Domain` the given peer identified itself as speaking, if
+/// known - either because it told us directly, or because we resolved it
+/// via `Domain::assume_legacy_domain_version` for an older peer.
+///
+pub async fn peer_domain(peer: &Peer) -> Option<PeerDomain> {
+    REGISTRAR.read().await.peer_domains.get(peer).cloned()
+}
+
+///
+/// Check that `peer` is confirmed to be speaking the same `Domain` (`L`)
+/// this agent is compiled against, forcibly disconnecting it otherwise.
+/// This is fail-closed: a peer whose domain is genuinely unknown (no
+/// `Register` fields, and no `Domain::assume_legacy_domain_version`
+/// resolved one) is treated the same as a peer confirmed to be speaking a
+/// *different* domain - both get disconnected, since neither can be
+/// trusted to exchange `Instruction`s/`NotificationEvent`s meaningfully
+/// with this agent.
+///
+/// This is opt-in: call it wherever your agent needs the guarantee (e.g.
+/// after `ControlCommand::Connected`, or from your own `Register` handling)
+/// - templemeads never calls this itself, since a `Domain` mismatch is
+/// otherwise harmless to the framework (it just means the two agents will
+/// never usefully exchange Jobs/Notifications; nothing about the transport,
+/// board sync, or health checks depends on both sides matching).
+///
+pub async fn ensure_domain_matches<L: Domain>(peer: &Peer) -> Result<(), Error> {
+    let expected = L::name();
+    let actual = peer_domain(peer).await;
+
+    if actual.as_ref().is_some_and(|d| d.name == expected) {
+        return Ok(());
+    }
+
+    let message = match actual {
+        Some(d) => format!(
+            "Peer {} speaks domain '{}' (version {}), but this agent speaks '{}' - disconnecting",
+            peer, d.name, d.version, expected
+        ),
+        None => format!(
+            "Peer {} did not report a domain (and none could be assumed for it) - \
+             this agent speaks '{}' - disconnecting",
+            peer, expected
+        ),
+    };
+
+    tracing::warn!("{}", message);
+    if let Err(e) = paddington::disconnect(peer.name(), peer.zone()).await {
+        // Not fatal to reporting the incompatibility - the peer may
+        // already be gone, or never had a live connection to begin with.
+        tracing::warn!("Failed to disconnect incompatible peer {}: {}", peer, e);
+    }
+
+    Err(Error::Incompatible(message))
 }
 
 ///
@@ -677,6 +781,7 @@ mod tests {
 
         registrar.peers.clear();
         registrar.peers_by_type.clear();
+        registrar.peer_domains.clear();
     }
 
     #[tokio::test]
@@ -691,6 +796,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         let agents = get_all(&Type::Portal).await;
@@ -702,6 +809,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         remove(&Peer::new("test", "internal")).await;
@@ -714,13 +823,30 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            Some("test-domain"),
+            Some("0.0.0"),
         )
         .await;
         let agent = portal(0).await;
+        assert_eq!(
+            peer_domain(&Peer::new("test", "internal")).await,
+            Some(PeerDomain {
+                name: "test-domain".to_owned(),
+                version: "0.0.0".to_owned(),
+            })
+        );
         assert_eq!(agent, Some(Peer::new("test", "internal")));
 
         clear().await;
-        register_peer(&Peer::new("test", "local"), &Type::Account, engine, version).await;
+        register_peer(
+            &Peer::new("test", "local"),
+            &Type::Account,
+            engine,
+            version,
+            None,
+            None,
+        )
+        .await;
         let agent = account(0).await;
         assert_eq!(agent, Some(Peer::new("test", "local")));
 
@@ -730,6 +856,8 @@ mod tests {
             &Type::Filesystem,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         let agent = filesystem(0).await;
@@ -741,6 +869,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         register_peer(
@@ -748,6 +878,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         register_peer(
@@ -755,6 +887,8 @@ mod tests {
             &Type::Provider,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         remove(&Peer::new("test1", "internal")).await;
@@ -767,5 +901,42 @@ mod tests {
         assert_eq!(portal(0).await, Some(Peer::new("test2", "default")));
         assert_eq!(account(0).await, None);
         assert_eq!(filesystem(0).await, None);
+
+        // ensure_domain_matches - kept in this same serial test (rather
+        // than its own #[tokio::test]) for the reason noted at the top:
+        // parallel tests would otherwise race on the shared REGISTRAR.
+        use crate::test_domain::TestDomain;
+
+        clear().await;
+        let matching = Peer::new("matching", "domaintest");
+        let mismatched = Peer::new("mismatched", "domaintest");
+        let unknown = Peer::new("unknown", "domaintest");
+
+        register_peer(
+            &matching,
+            &Type::Portal,
+            engine,
+            version,
+            Some("test-domain"),
+            Some("0.0.0"),
+        )
+        .await;
+        assert!(ensure_domain_matches::<TestDomain>(&matching).await.is_ok());
+
+        register_peer(
+            &mismatched,
+            &Type::Portal,
+            engine,
+            version,
+            Some("greatwestern"),
+            Some("0.32.2"),
+        )
+        .await;
+        assert!(ensure_domain_matches::<TestDomain>(&mismatched)
+            .await
+            .is_err());
+
+        // never registered at all - fail closed, same as a known mismatch
+        assert!(ensure_domain_matches::<TestDomain>(&unknown).await.is_err());
     }
 }

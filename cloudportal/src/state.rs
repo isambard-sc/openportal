@@ -8,7 +8,7 @@
 //! invocation while the main `run` server process is running
 //! continuously, so a write-through cache here would go stale the moment
 //! the CLI process edits a file. See
-//! `docs/plans/op-cloudportal-design.md` §5 for the reasoning.
+//! `docs/plans/archive/op-cloudportal-design.md` §5 for the reasoning.
 
 use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};

@@ -760,7 +760,7 @@ single agent that merges the Instance and Scheduler roles: there is no
 cloud-side API yet to record project/user assignment or to query usage, so
 this agent is both the source of truth for assignment and the thing that
 turns whatever cost-report files the cloud operators drop into a
-`ProjectUsageReport`. See `docs/plans/op-cloudaccount-design.md` for the
+`ProjectUsageReport`. See `docs/plans/archive/op-cloudaccount-design.md` for the
 full design and rationale.
 
 | Default | Value |
@@ -804,7 +804,7 @@ The cloud portal agent is a self-contained `Portal` agent representing the
 portal creating Awards on it). There is no real portal management
 software (no Waldur) behind it - like `op-cloudaccount`, it is a
 deliberately rough prototype that stores Award state itself instead of
-relaying to a bridge. See `docs/plans/op-cloudportal-design.md` for the
+relaying to a bridge. See `docs/plans/archive/op-cloudportal-design.md` for the
 full design and rationale.
 
 | Default | Value |

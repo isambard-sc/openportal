@@ -9,6 +9,14 @@ This document specifies the notification system in OpenPortal — a lightweight
 fire-and-forget signalling mechanism that complements the robust, acknowledged
 Job system.
 
+Like `Job`, `Notification` is generic over a `Domain` (see
+[writing-a-domain.md](writing-a-domain.md)): the envelope, routing, and
+delivery mechanics described in §1, §2, §4, §5, and §7 below belong to
+`templemeads` and apply to any `Domain`. The concrete event vocabulary in §3
+(`NotificationEvent`'s variants) belongs to `greatwestern`, the reference
+`Domain` every built-in OpenPortal agent uses - a different `Domain` would
+define its own, unrelated `NotificationEvent` type.
+
 For the full Job and instruction protocol see
 [instruction-protocol.md](instruction-protocol.md) and
 [wire-protocol.md](wire-protocol.md).
@@ -52,16 +60,23 @@ portal.clusters.instance user_added chris.project.portal
 
 The destination follows the same dot-separated agent-path format used by Jobs
 (see [instruction-protocol.md](instruction-protocol.md) §Destinations).
-The event name and argument together form a `NotificationEvent`.
+The event name and argument together form a `NotificationEvent` - the
+domain-supplied event vocabulary (`Domain::NotificationEvent`).
 
-**Source file:** `templemeads/src/notification.rs`
+**Source files:** `templemeads/src/notification.rs` (`Notification`,
+`NotificationEnvelope` — generic, domain-agnostic transport);
+`greatwestern/src/notification.rs` (`NotificationEvent` — the concrete
+`greatwestern` event vocabulary described below)
 
 ---
 
 ## 3. `NotificationEvent` Grammar
 
-A `NotificationEvent` describes something that has already occurred. All event
-names use past-tense, snake_case keywords.
+`NotificationEvent` is `greatwestern`'s concrete implementation of
+`Domain::NotificationEvent` - the vocabulary every built-in OpenPortal agent
+uses, since they are all compiled against the `Hpc` domain. It describes
+something that has already occurred. All event names use past-tense,
+snake_case keywords.
 
 The argument types (`UserIdentifier`, `ProjectIdentifier`) are identical to
 those used in the instruction protocol — see
@@ -295,8 +310,14 @@ notification. To route a notification through the portal from the bridge (or
 vice versa), the bridge wraps the inner notification in a `Forward` event:
 
 ```rust
-NotificationEvent::Forward(Box<Notification>)
+NotificationEvent::Forward(Box<Notification<Hpc>>)
 ```
+
+`templemeads`' bridge infrastructure cannot construct this itself - it has no
+concrete `NotificationEvent` type to build - so every `Domain` must supply
+this wrapping via `Domain::wrap_forward` (see
+[writing-a-domain.md](writing-a-domain.md)); `greatwestern`'s implementation
+is the `Forward` variant shown above.
 
 The `Forward` wrapper is addressed to `<bridge-name>.<portal-name>`. The portal
 receives it, extracts the inner notification, and routes it by finding its own
@@ -345,17 +366,25 @@ Agents that want to react to incoming notifications register an
 a handler receive a no-op default that logs the notification at `DEBUG` level.
 
 **Source files:**
-- `templemeads/src/notification.rs` — types and `default_notify_runner`
+- `templemeads/src/notification.rs` — generic `Notification<L>`,
+  `NotificationEnvelope<L>`, `AsyncNotifyRunnable<L>`, `default_notify_runner`
+- `greatwestern/src/notification.rs` — the concrete `NotificationEvent` type
+  used below (`L = Hpc`)
 - `templemeads/src/handler.rs` — `set_notify_runner`
 
 ### 6.1 Rust API
 
+As with `Job`, agent code fixes the `Domain` via a type alias - here, to
+`greatwestern`'s `Hpc`:
+
 ```rust
+use greatwestern::{Hpc, NotificationEvent};
 use templemeads::async_runnable;
-use templemeads::notification::{AsyncNotifyRunnable, NotificationEnvelope, NotificationEvent};
+use templemeads::notification::AsyncNotifyRunnable;
 use templemeads::set_notify_runner;
 use templemeads::Error;
-use templemeads::job::Job;
+
+type NotificationEnvelope = templemeads::notification::NotificationEnvelope<Hpc>;
 
 async_runnable! {
     pub async fn my_notify_runner(envelope: NotificationEnvelope) -> Result<(), Error> {
@@ -383,10 +412,12 @@ To send a notification from within an agent runner, construct a `Notification`
 and wrap it in `Command::notify`:
 
 ```rust
-use templemeads::command::Command;
-use templemeads::notification::{Notification, NotificationEvent};
-use templemeads::destination::Destination;
+use greatwestern::{Hpc, NotificationEvent};
 use templemeads::agent::Peer;
+use templemeads::command::Command;
+use templemeads::destination::Destination;
+
+type Notification = templemeads::notification::Notification<Hpc>;
 
 let dest = Destination::parse("portal.clusters.shared")?;
 let event = NotificationEvent::UserAdded(user.clone());
@@ -535,8 +566,10 @@ For operations where delivery confirmation matters, use a Job instead.
 
 | Concept | Source file |
 |---------|-------------|
-| `NotificationEvent`, `Notification`, `NotificationEnvelope` | `templemeads/src/notification.rs` |
-| `AsyncNotifyRunnable`, `default_notify_runner` | `templemeads/src/notification.rs` |
+| `Notification<L>`, `NotificationEnvelope<L>` (generic, any `Domain`) | `templemeads/src/notification.rs` |
+| `AsyncNotifyRunnable<L>`, `default_notify_runner` | `templemeads/src/notification.rs` |
+| `NotificationEvent` (`greatwestern`'s concrete vocabulary) | `greatwestern/src/notification.rs` |
+| `Domain::wrap_forward` (the `Forward` wrapping contract every `Domain` implements) | `templemeads/src/domain.rs` |
 | `Command::Notify`, `Command::notify()` | `templemeads/src/command.rs` |
 | `set_notify_runner`, routing in `process_command`, sidecar check | `templemeads/src/handler.rs` |
 | `bridge::notify()`, `Forward` wrapping | `templemeads/src/bridge.rs` |

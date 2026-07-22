@@ -46,7 +46,7 @@ OpenPortal is a collection of Agents, each of which are implemented in their
 own statically compiled executable. Each executable links to a common set
 of OpenPortal crates (libraries).
 
-The two main components of OpenPortal are:
+The three main components of OpenPortal are:
 
 1. `paddington` - this is a crate that implements the secure websocket
    peer-to-peer protocol that lets services communicate with each other.
@@ -62,7 +62,22 @@ The two main components of OpenPortal are:
    the failure of individual Agents. In addition to Jobs, `templemeads`
    provides a lightweight fire-and-forget **Notification** system for
    signalling events between agents without requiring acknowledgement or
-   a result. The source code is in the [templemeads](../templemeads) directory.
+   a result. Deliberately, `templemeads` has no opinion on what a Job
+   actually asks an Agent to do - it is generic over a `Domain` (a Rust
+   trait), which supplies the concrete instruction and notification
+   vocabulary. The source code is in the
+   [templemeads](../templemeads) directory.
+
+3. `greatwestern` - this is the `Domain` that every built-in OpenPortal
+   Agent is compiled against: the HPC/Waldur command vocabulary (`add_user`,
+   `get_usage_report`, `set_project_quota`, and so on), along with the
+   identifier types and usage/storage report types those instructions
+   operate on. It is the *reference implementation* of a Domain, not a
+   privileged part of the protocol - anyone wanting to reuse
+   `paddington`/`templemeads` for a completely different kind of
+   infrastructure can write their own crate in its place. See
+   [Writing your own Domain](specifications/writing-a-domain.md) for how.
+   The source code is in the [greatwestern](../greatwestern) directory.
 
 ### Agents
 
@@ -229,6 +244,11 @@ agent and the `openportal` Python library.
 ## Protocol Specifications
 
 The [specifications](specifications) directory contains formal protocol
-and API reference documentation covering the instruction grammar, notification
-event grammar, JSON result types, wire protocol, security model, bridge HTTP
-API, and agent configuration reference.
+and API reference documentation covering the wire protocol, security model,
+bridge HTTP API, and agent configuration reference - all of which apply to
+any OpenPortal `Domain` - plus the instruction grammar, notification event
+grammar, and JSON result types of `greatwestern`, the reference `Domain`.
+
+If you want to bring your own instruction vocabulary instead of
+`greatwestern`'s, see
+[Writing your own Domain](specifications/writing-a-domain.md).

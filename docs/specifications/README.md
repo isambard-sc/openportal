@@ -13,18 +13,41 @@ encrypted on the wire).
 For a narrative introduction to OpenPortal — its design philosophy, agent
 types, and worked examples — see the [docs overview](../README.md).
 
+`templemeads` (Job/Notification transport, wire protocol, security model,
+bridge API, agent configuration) is generic over a `Domain` — the compile-time
+choice of instruction and notification vocabulary. Every built-in OpenPortal
+agent is compiled against `greatwestern`, the reference `Domain`, which is
+what [instruction-protocol.md](instruction-protocol.md),
+[notification-protocol.md](notification-protocol.md), and
+[json-types.md](json-types.md) document. If you want to bring your own
+vocabulary instead, see
+[writing-a-domain.md](writing-a-domain.md).
+
 ---
 
 ## Documents
 
-### [instruction-protocol.md](instruction-protocol.md)
-**The OpenPortal instruction text protocol**
+### [writing-a-domain.md](writing-a-domain.md)
+**Implementing your own command vocabulary**
 
-Specifies the full grammar for the instruction strings that agents exchange:
-all 53 instructions, their argument formats, and the identifier types
-(`UserIdentifier`, `ProjectIdentifier`, `UserMapping`, `ProjectMapping`,
-`Destination`, etc.). This is the primary reference for anyone implementing
-a portal or agent that needs to construct or parse OpenPortal commands.
+For anyone reusing `paddington`/`templemeads` for infrastructure other than
+HPC/Waldur: how to implement the `templemeads::domain::Domain` trait, define
+your own `Instruction` and `NotificationEvent` types, and wire them up so your
+own agents interoperate over the same secure peer-to-peer transport without
+depending on `greatwestern` at all.
+
+---
+
+### [instruction-protocol.md](instruction-protocol.md)
+**The `greatwestern` instruction text protocol**
+
+Specifies the full grammar for the instruction strings that `greatwestern`
+(the reference `Domain`) agents exchange: all 53 instructions, their argument
+formats, and the identifier types (`UserIdentifier`, `ProjectIdentifier`,
+`UserMapping`, `ProjectMapping`, `Destination`, etc.). This is the primary
+reference for anyone implementing a portal or agent that needs to construct
+or parse `greatwestern` commands. Building a different `Domain`? See
+[writing-a-domain.md](writing-a-domain.md) instead.
 
 ---
 
@@ -33,7 +56,9 @@ a portal or agent that needs to construct or parse OpenPortal commands.
 
 Specifies the fire-and-forget `Notification` system — the lightweight,
 unacknowledged signalling mechanism that complements the robust Job system.
-Covers:
+`Notification` itself is generic over a `Domain`; this document covers both
+the domain-agnostic parts (owned by `templemeads`) and `greatwestern`'s
+concrete `NotificationEvent` vocabulary. Covers:
 
 - The conceptual distinction between Jobs (TCP-like) and Notifications (UDP-like)
 - The full `NotificationEvent` grammar: all 10 user and project events
@@ -52,9 +77,11 @@ Covers:
 **JSON serialisation of result types**
 
 Specifies the JSON format of every value that can appear in a `Job`'s `result`
-field once a job completes: `Job` itself, `AwardDetails` (wire name: `ProjectDetails`), `ProjectUsageReport`,
-`Quota`, `Usage`, and all other return types. Includes the `result_type` name
-reference table mapping Rust type names to their JSON schemas.
+field once a job completes: `Job` itself (domain-agnostic, from `templemeads`)
+and `greatwestern`'s result types - `AwardDetails` (wire name: `ProjectDetails`),
+`ProjectUsageReport`, `Quota`, `Usage`, and all others. Includes the
+`result_type` name reference table mapping Rust type names to their JSON
+schemas.
 
 ---
 
@@ -177,16 +204,18 @@ wire together, and run agents in a real deployment.
 **TypeScript bindings**
 
 Describes the auto-generated TypeScript type definitions produced from the
-`templemeads` Rust types via [ts-rs](https://github.com/Aleph-Alpha/ts-rs).
-Covers:
+`templemeads` and `greatwestern` Rust types via
+[ts-rs](https://github.com/Aleph-Alpha/ts-rs). Covers:
 
 - How to regenerate the bindings with `cargo test`
-- The full table of exported types and which Rust source they derive from
+- The full table of exported types, which crate and Rust source they derive
+  from, and why `Job` needs a hand-written binding rather than a derived one
 - Serialisation notes: timestamp formats, identifier strings, HashMap key
   conventions, and custom-format fields such as storage sizes
-- The hand-written `identifiers.ts` utility — parse/stringify helpers for
-  `UserIdentifier`, `ProjectIdentifier`, `PortalIdentifier`, `UserMapping`,
-  and `ProjectMapping`
+- The hand-written `identifiers.ts` utilities — parse/stringify helpers for
+  `PortalIdentifier` (`templemeads/bindings/`) and `UserIdentifier`,
+  `ProjectIdentifier`, `UserMapping`, `ProjectMapping`
+  (`greatwestern/bindings/`)
 - How to add a new exported type
 
 ---

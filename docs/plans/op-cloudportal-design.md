@@ -191,7 +191,7 @@ nothing is provisioned until a cloud operator explicitly approves it.
 **Why this isn't a wire instruction**: `approve`/`reject` are pure local
 admin actions — `airr` never sends them, only the cloud operator invokes
 them, and they don't need to be understood by any other agent in the
-network. Adding them to the shared `templemeads::grammar::Instruction`
+network. Adding them to the shared `greatwestern::grammar::Instruction`
 enum would grow a protocol every other agent has to at least
 pattern-match against, for a verb that is specific to this one prototype
 agent's admin workflow. Recommend instead: **bespoke CLI subcommands

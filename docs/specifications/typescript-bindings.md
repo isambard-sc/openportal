@@ -13,60 +13,80 @@ accompanies them.
 
 ## Overview
 
-The `templemeads` crate uses [ts-rs](https://github.com/Aleph-Alpha/ts-rs)
-to derive TypeScript type definitions directly from the Rust structs and enums
-that are serialised to JSON. This means the TypeScript types are always in sync
-with the Rust source of truth — any change to a serialised Rust type requires
-a corresponding `cargo test` run to regenerate the bindings, and the compiler
-will catch any inconsistency.
+Both `templemeads` and `greatwestern` use
+[ts-rs](https://github.com/Aleph-Alpha/ts-rs) to derive TypeScript type
+definitions directly from the Rust structs and enums that are serialised to
+JSON. This means the TypeScript types are always in sync with the Rust source
+of truth — any change to a serialised Rust type requires a corresponding
+`cargo test` run to regenerate the bindings, and the compiler will catch any
+inconsistency.
 
-The generated files live in `templemeads/bindings/`. They are standalone
-TypeScript modules (one file per type) with cross-type imports handled
-automatically by ts-rs.
+`templemeads` is generic over a `Domain` (see
+[writing-a-domain.md](writing-a-domain.md)) and holds only the types that
+don't depend on which `Domain` an agent uses - `Job`'s envelope shape,
+`Status`, diagnostics, health, agent type. `greatwestern`, the reference
+`Domain`, holds everything domain-specific: the instruction/notification
+vocabulary, identifiers, and usage/storage report types. The generated files
+therefore live in **two** directories - `templemeads/bindings/` and
+`greatwestern/bindings/` - each a standalone set of TypeScript modules (one
+file per type) with cross-type imports handled automatically by ts-rs. A
+project that swaps in its own `Domain` in place of `greatwestern` would ship
+its own bindings directory instead of `greatwestern/bindings/`, but would
+still consume `templemeads/bindings/` unchanged.
 
 ---
 
 ## Generating the bindings
 
 ```bash
+# templemeads' domain-agnostic types
 cargo test -p templemeads export_ts_bindings
+
+# greatwestern's domain-specific types (Instruction, identifiers, reports, Job)
+cargo test -p greatwestern
 ```
 
-This runs a single test in `templemeads/src/lib.rs` that calls
-`Type::export_all()` on each registered type. The files are written to
-`templemeads/bindings/` relative to the crate root. Re-run whenever a
-serialised Rust type changes.
+The `templemeads` command runs a single test in `templemeads/src/lib.rs` that
+calls `Type::export_all()` on each registered type, writing to
+`templemeads/bindings/`. `greatwestern` instead exports each type via its own
+`#[ts(export)]` attribute (ts-rs generates one test per type automatically),
+so `cargo test -p greatwestern` regenerates every file in
+`greatwestern/bindings/` in one pass, including the hand-written `Job`
+binding (see [Job](#job---a-hand-written-binding) below). Re-run either
+command whenever a serialised Rust type in that crate changes.
 
 The `TS_RS_EXPORT_DIR` environment variable overrides the output directory:
 
 ```bash
 TS_RS_EXPORT_DIR=/path/to/frontend/src/types \
   cargo test -p templemeads export_ts_bindings
+TS_RS_EXPORT_DIR=/path/to/frontend/src/types \
+  cargo test -p greatwestern
 ```
 
 ---
 
 ## Exported types
 
-### Core job types
+### `templemeads/bindings/` — domain-agnostic types
+
+#### Core job types
 
 | File | Rust source | Description |
 |------|-------------|-------------|
-| `Job.ts` | `templemeads::job::Job` | Top-level job container |
 | `Status.ts` | `templemeads::job::Status` | Job lifecycle state |
 
-`Job` timestamps (`created`, `changed`, `expires`) are Unix seconds
-(`number`), not ISO 8601 strings, because the Rust fields use
-`#[serde(with = "ts_seconds")]`. The `command` field is an opaque string
-in the form `"<destination> <instruction>"`.
+`Status` is the only piece of `Job`'s shape templemeads can derive `TS` for
+directly - see [Job](#job--a-hand-written-binding) below for why the rest of
+`Job` isn't here.
 
-### Agent type
+#### Agent type
 
 | File | Rust source | Description |
 |------|-------------|-------------|
 | `Type.ts` | `templemeads::agent::Type` | Agent role enum |
 
-### Diagnostics
+#### Diagnostics
 
 | File | Rust source | Description |
 |------|-------------|-------------|
@@ -78,49 +98,83 @@ in the form `"<destination> <instruction>"`.
 | `RunningJobEntry.ts` | `templemeads::diagnostics::RunningJobEntry` | Currently-running job record |
 | `LogEntry.ts` | `templemeads::diagnostics::LogEntry` | Single captured log message |
 
-### Health
+#### Health
 
 | File | Rust source | Description |
 |------|-------------|-------------|
 | `HealthInfo.ts` | `templemeads::health::HealthInfo` | Real-time health snapshot for one agent |
 
-### Storage
+### `greatwestern/bindings/` — the `Hpc` domain's types
+
+#### `Job` — a hand-written binding
 
 | File | Rust source | Description |
 |------|-------------|-------------|
-| `Volume.ts` | `templemeads::storage::Volume` | Storage volume name (transparent `string`) |
-| `Quota.ts` | `templemeads::storage::Quota` | Storage quota with limit and optional usage |
+| `Job.ts` | `templemeads::job::Job<Hpc>` (binding hand-written in `greatwestern::job_bindings`) | Top-level job container |
+
+`Job<L>` cannot `#[derive(TS)]`: ts-rs's derive requires every generic
+parameter to implement `TS`, which would force `Hpc` (and every other
+`Domain`) to depend on ts-rs just to be usable as a type parameter. A direct
+`impl TS for Job<Hpc>` isn't possible either — both `TS` and `Job` are
+foreign to `greatwestern`, and Rust's orphan rules only grant an exception
+when a local type appears as a parameter of the *trait*, not of the type
+being implemented for. So `greatwestern/src/job_bindings.rs` instead defines
+a zero-sized local marker type that hosts a hand-written `impl TS`, with
+`name()`/`output_path()` overridden to still produce `Job.ts`. A test
+(`job_shape_matches_binding`) serialises a real `Job::<Hpc>::parse(...)` and
+checks its JSON keys against the hand-written shape, so the binding cannot
+silently drift from `Job`'s actual fields.
+
+`Job` timestamps (`created`, `changed`, `expires`) are Unix seconds
+(`number`), not ISO 8601 strings, because the Rust fields use
+`#[serde(with = "ts_seconds")]`. The `command` field is an opaque string
+in the form `"<destination> <instruction>"`. `Job.ts` imports `Status` from
+`templemeads/bindings/` in principle, but since ts-rs writes each type's
+dependencies relative to its own crate's output directory, a copy of
+`Status.ts` is generated inside `greatwestern/bindings/` too - both files are
+identical and either may be imported.
+
+#### Storage
+
+| File | Rust source | Description |
+|------|-------------|-------------|
+| `Volume.ts` | `greatwestern::storage::Volume` | Storage volume name (transparent `string`) |
+| `Quota.ts` | `greatwestern::storage::Quota` | Storage quota with limit and optional usage |
 
 `Quota.limit` and `Quota.usage` are human-readable size strings such as
 `"100GB"` or `"unlimited"` — they come from custom serde implementations
 and are represented as `string` in TypeScript.
 
-### Storage reports
+#### Storage reports
 
 | File | Rust source | Description |
 |------|-------------|-------------|
-| `StorageReport.ts` | `templemeads::storagereport::StorageReport` | Portal-level storage report |
-| `ProjectStorageReport.ts` | `templemeads::storagereport::ProjectStorageReport` | Per-project quotas and per-user quotas |
-| `DailyStorageReport.ts` | `templemeads::storagereport::DailyStorageReport` | Point-in-time storage snapshot (used inside `ProjectStorageReport`) |
+| `StorageReport.ts` | `greatwestern::storagereport::StorageReport` | Portal-level storage report |
+| `ProjectStorageReport.ts` | `greatwestern::storagereport::ProjectStorageReport` | Per-project quotas and per-user quotas |
+| `DailyStorageReport.ts` | `greatwestern::storagereport::DailyStorageReport` | Point-in-time storage snapshot (used inside `ProjectStorageReport`) |
 
-### Usage reports
-
-| File | Rust source | Description |
-|------|-------------|-------------|
-| `UsageReport.ts` | `templemeads::usagereport::UsageReport` | Portal-level CPU usage report |
-| `ProjectUsageReport.ts` | `templemeads::usagereport::ProjectUsageReport` | Per-project usage report |
-| `DailyProjectUsageReport.ts` | `templemeads::usagereport::DailyProjectUsageReport` | Per-day per-user usage |
-| `UserUsageReport.ts` | `templemeads::usagereport::UserUsageReport` | Single user's usage total |
-| `Usage.ts` | `templemeads::usagereport::Usage` | CPU-seconds value |
-
-### Award details
+#### Usage reports
 
 | File | Rust source | Description |
 |------|-------------|-------------|
-| `AwardDetails.ts` | `templemeads::grammar::AwardDetails` | Project / award metadata |
-| `Link.ts` | `templemeads::grammar::Link` | Optional (id, url) reference |
-| `Note.ts` | `templemeads::grammar::Note` | Timestamped message attached to an award |
-| `MembershipControl.ts` | `templemeads::grammar::MembershipControl` | Membership policy enum |
+| `UsageReport.ts` | `greatwestern::usagereport::UsageReport` | Portal-level CPU usage report |
+| `ProjectUsageReport.ts` | `greatwestern::usagereport::ProjectUsageReport` | Per-project usage report |
+| `DailyProjectUsageReport.ts` | `greatwestern::usagereport::DailyProjectUsageReport` | Per-day per-user usage |
+| `UserUsageReport.ts` | `greatwestern::usagereport::UserUsageReport` | Single user's usage total |
+| `Usage.ts` | `greatwestern::usagereport::Usage` | CPU-seconds value |
+
+#### Award details
+
+| File | Rust source | Description |
+|------|-------------|-------------|
+| `AwardDetails.ts` | `greatwestern::grammar::AwardDetails` | Project / award metadata |
+| `Link.ts` | `greatwestern::grammar::Link` | Optional (id, url) reference |
+| `Note.ts` | `greatwestern::grammar::Note` | Timestamped message attached to an award |
+| `MembershipControl.ts` | `greatwestern::grammar::MembershipControl` | Membership policy enum |
+
+A `Domain` other than `greatwestern` would export its own equivalent set of
+instruction/report types from its own crate; `Job.ts` is the only binding
+every `Domain` must hand-write itself, following the same pattern.
 
 ---
 
@@ -167,15 +221,24 @@ objects and are typed as `string` in TypeScript:
 
 ## Hand-written utilities
 
-Two companion files sit alongside the generated bindings. Neither is
-auto-generated and both are safe to edit.
+Companion files sit alongside the generated bindings in both crates. None of
+them are auto-generated and all are safe to edit.
 
 ### `identifiers.ts` — identifier parse / stringify
 
-Provides parse and stringify helpers for the five string-encoded identifier
-types.
+Split across the two crates along the same domain-agnostic /
+domain-specific line as the generated bindings:
 
-### `helpers.ts` — business logic mirrors
+- `templemeads/bindings/identifiers.ts` — `PortalIdentifier` only, since it
+  names a fixed position in templemeads' agent hierarchy (the Portal role)
+  rather than domain vocabulary.
+- `greatwestern/bindings/identifiers.ts` — `ProjectIdentifier`,
+  `UserIdentifier`, `ProjectMapping`, `UserMapping` and their parse/stringify
+  functions, since these are `greatwestern`-specific.
+
+The tables below cover both files together.
+
+### `helpers.ts` (`greatwestern/bindings/`) — business logic mirrors
 
 Mirrors Rust methods that encode non-obvious policy decisions, so React
 components do not have to re-implement them.
@@ -298,15 +361,32 @@ function renderReport(report: UsageReport) {
 
 ## Adding a new exported type
 
+The steps differ slightly depending on which crate the type lives in.
+
+**In `greatwestern`** (or your own `Domain` crate), where each type exports
+independently via its own attribute:
+
 1. Add `TS` to the `#[derive(...)]` list and `#[ts(export)]` to the struct or
-   enum in the appropriate `templemeads/src/*.rs` file.
+   enum in the appropriate `greatwestern/src/*.rs` file.
 2. For fields whose Rust type serialises differently from its Rust structure
    (custom serde, `ts_seconds`, etc.) add the appropriate field attribute:
    - `#[ts(type = "number")]` — override to a raw TypeScript type literal
    - `#[ts(as = "SomeRustType")]` — use another type's TS representation
      (dependency tracking works correctly with this form)
+3. Run `cargo test -p greatwestern` to generate the file — no separate
+   registration step needed, since `#[ts(export)]` generates its own test.
+
+**In `templemeads`**, where a single test registers every exported type:
+
+1. Add `TS` to the `#[derive(...)]` list and `#[ts(export)]` to the struct or
+   enum in the appropriate `templemeads/src/*.rs` file.
+2. Add field attributes as above if needed.
 3. Add the type to the export test in `templemeads/src/lib.rs`:
    ```rust
    MyNewType::export_all().expect("Could not export MyNewType");
    ```
 4. Run `cargo test -p templemeads export_ts_bindings` to generate the file.
+
+A type that is generic over `L: Domain` (like `Job<L>`) can't use either
+route directly - see [Job](#job--a-hand-written-binding) above for the
+hand-written-marker-type pattern to follow instead.

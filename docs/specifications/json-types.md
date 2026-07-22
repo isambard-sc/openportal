@@ -9,6 +9,14 @@ This document specifies the JSON serialisation format for the key object types
 used in OpenPortal. All results returned by agents are carried inside a `Job`
 object; this document covers `Job` itself and every result type it can contain.
 
+`Job`'s envelope fields (`id`, `created`, `state`, ...) are domain-agnostic and
+defined in `templemeads`. Its `result`/`result_type` payloads, however, are
+supplied by whichever `Domain` an agent is compiled against - every type
+documented below `Job` on this page (`AwardDetails`, `ProjectUsageReport`,
+`Quota`, ...) belongs to `greatwestern`, the reference `Domain`. A different
+`Domain` (see [writing-a-domain.md](writing-a-domain.md)) would return
+entirely different result types instead.
+
 Types from the instruction protocol that serialise as plain strings (e.g.
 `UserIdentifier`, `ProjectIdentifier`, `UserMapping`, `ProjectMapping`,
 `Destination`) are documented in [instruction-protocol.md](instruction-protocol.md).
@@ -776,9 +784,9 @@ structure:
   `UserMapping`, `ProjectMapping`, and `Destination` all serialise as plain strings
   (via custom `Serialize`/`Deserialize` impls that delegate to `to_string()` and
   `parse()`).
-- Source files: `templemeads/src/job.rs` (`Job`, `Status`),
-  `templemeads/src/usagereport.rs` (`Usage`, `UserUsageReport`,
+- Source files: `templemeads/src/job.rs` (`Job`, `Status` — domain-agnostic),
+  `greatwestern/src/usagereport.rs` (`Usage`, `UserUsageReport`,
   `DailyProjectUsageReport`, `ProjectUsageReport`, `UsageReport`),
-  `templemeads/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`),
-  `templemeads/src/storage.rs` (`StorageSize`, `QuotaLimit`, `Quota`, `Volume`),
-  `templemeads/src/grammar.rs` (`AwardDetails` / `ProjectDetails`, `Link`, `Note`, identifiers and mappings).
+  `greatwestern/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`),
+  `greatwestern/src/storage.rs` (`StorageSize`, `QuotaLimit`, `Quota`, `Volume`),
+  `greatwestern/src/grammar.rs` (`AwardDetails` / `ProjectDetails`, `Link`, `Note`, identifiers and mappings).

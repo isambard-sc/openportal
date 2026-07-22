@@ -10,6 +10,14 @@ OpenPortal. It describes the full protocol stack from the application-level
 `Envelope` and `Command` objects through to the encrypted bytes sent over the
 network.
 
+Everything at the Templemeads layer - `Envelope<L>`, `Command<L>`,
+`Notification<L>` - is generic over a `Domain` (see
+[writing-a-domain.md](writing-a-domain.md)) and applies unchanged to any
+`Domain`; only the `job` payload the `Envelope` carries and the `notification`
+payload of a `Notify` command vary by `Domain`. This document uses `L`
+freely and calls out `greatwestern` (`L = Hpc`, the reference `Domain` every
+built-in OpenPortal agent uses) only where the wire format itself differs.
+
 The stack has four layers:
 
 ```
@@ -30,9 +38,11 @@ The stack has four layers:
 
 ### 1.1 `Envelope`
 
-The `Envelope` is the top-level application object. It wraps a `Job` (defined in
-[json-types.md](json-types.md)) with routing metadata and is the value that
-agents hand to the Paddington layer for delivery.
+`Envelope<L>` is the top-level application object. It wraps a `Job<L>` (defined
+in [json-types.md](json-types.md)) with routing metadata and is the value that
+agents hand to the Paddington layer for delivery. `L` is the agent's `Domain`
+- `Hpc` (`greatwestern`) for every built-in OpenPortal agent - and only
+affects the shape of the nested `job` object below, not this wrapper.
 
 **Source file:** `templemeads/src/job.rs`
 
@@ -59,9 +69,11 @@ The `Envelope` is serialised to JSON and placed in a Templemeads `Command`
 
 ### 1.2 Templemeads `Command`
 
-The Templemeads `Command` enum is the JSON payload carried in every regular
+The Templemeads `Command<L>` enum is the JSON payload carried in every regular
 Paddington message. It encodes agent-level operations on the distributed job
-board.
+board. As with `Envelope`, `L` is the agent's `Domain` and only affects the
+nested `Envelope<L>`/`Notification<L>` payloads carried by some variants, not
+the variant structure itself.
 
 **Source file:** `templemeads/src/command.rs`
 
@@ -506,9 +518,12 @@ version mismatch causes the connection to be refused.
 
 | Concept | Source file |
 |---------|-------------|
-| `Envelope`, `Job`, `Status` | `templemeads/src/job.rs` |
-| Templemeads `Command` | `templemeads/src/command.rs` |
-| `Notification`, `NotificationEvent`, `NotificationEnvelope` | `templemeads/src/notification.rs` |
+| `Envelope<L>`, `Job<L>`, `Status` (generic, domain-agnostic) | `templemeads/src/job.rs` |
+| Templemeads `Command<L>` | `templemeads/src/command.rs` |
+| `Domain` trait | `templemeads/src/domain.rs` |
+| `Notification<L>`, `NotificationEnvelope<L>` (generic) | `templemeads/src/notification.rs` |
+| `NotificationEvent` (`greatwestern`'s concrete vocabulary) | `greatwestern/src/notification.rs` |
+| `Instruction` (`greatwestern`'s concrete vocabulary, i.e. `Job<Hpc>`'s payload) | `greatwestern/src/grammar.rs` |
 | Paddington `Message` | `paddington/src/message.rs` |
 | Paddington `Command` | `paddington/src/command.rs` |
 | `Key`, `Salt`, encryption | `paddington/src/crypto.rs` |

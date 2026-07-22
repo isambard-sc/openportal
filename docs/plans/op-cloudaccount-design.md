@@ -225,7 +225,7 @@ arrive.
 
 ## 7. Resolved: cost vs. `Usage`'s "seconds" unit
 
-`templemeads::usagereport::Usage` is a `u64` count of **seconds**
+`greatwestern::usagereport::Usage` is a `u64` count of **seconds**
 (`Usage { seconds: u64 }`), and its `Display` impl auto-formats it as a
 duration ("3.000 days", "5 seconds", ...). It was designed for compute time
 (`op-slurm` uses it as node-seconds), but the upstream portals already

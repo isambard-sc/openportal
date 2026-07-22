@@ -13,6 +13,7 @@
 //! wants to bring for a different kind of infrastructure entirely.
 
 pub mod grammar;
+mod job_bindings;
 pub mod notification;
 pub mod storage;
 pub mod storagereport;

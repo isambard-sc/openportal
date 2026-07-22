@@ -16,6 +16,7 @@ built = { version = "0.8", default-features = false, features = ["git2"] }
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }
 clap = { version = "4.5.51", default-features = false, features = ["derive", "color", "help", "usage", "error-context","suggestions", "env", "std", "string"] }
+greatwestern = { path = "../../greatwestern" }
 paddington = { path = "../../paddington" }
 templemeads = { path = "../../templemeads" }
 tokio = { version = "1.48", features = ["full"] }

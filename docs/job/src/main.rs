@@ -6,13 +6,16 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
+use greatwestern::grammar::Instruction::{AddUser, RemoveUser};
+use greatwestern::Hpc;
 use paddington::config::ServiceConfig;
 use paddington::invite::Invite;
 use templemeads::agent;
 use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{AddUser, RemoveUser};
-use templemeads::job::{Envelope, Job};
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));

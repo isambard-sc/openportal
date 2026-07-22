@@ -18,14 +18,14 @@ use std::path;
 use std::sync::RwLock;
 use templemeads::destination;
 use templemeads::diagnostics as mod_diagnostics;
-use templemeads::grammar;
+use greatwestern::grammar;
 use templemeads::health as mod_health;
 use templemeads::job;
 use templemeads::notification as mod_notification;
 use templemeads::portal_identifier;
 use templemeads::server::sign_api_call;
-use templemeads::storagereport;
-use templemeads::usagereport;
+use greatwestern::storagereport;
+use greatwestern::usagereport;
 use templemeads::Error;
 use url::Url;
 
@@ -1265,10 +1265,10 @@ fn restart(restart_type: &str, destination: &str) -> PyResult<RestartResponse> {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Job(job::Job);
+struct Job(job::Job<greatwestern::Hpc>);
 
-impl From<job::Job> for Job {
-    fn from(job: job::Job) -> Self {
+impl From<job::Job<greatwestern::Hpc>> for Job {
+    fn from(job: job::Job<greatwestern::Hpc>) -> Self {
         Job(job)
     }
 }
@@ -1308,7 +1308,7 @@ impl Job {
 
     #[staticmethod]
     fn from_json(json: &str) -> PyResult<Self> {
-        match job::Job::from_json(json) {
+        match job::Job::<greatwestern::Hpc>::from_json(json) {
             Ok(job) => Ok(job.into()),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -1514,8 +1514,8 @@ impl Job {
         // HashMap types - need to extract from PyDict and manually convert
         if let Ok(dict) = result.bind(py).cast::<pyo3::types::PyDict>() {
             let mut map: std::collections::HashMap<
-                templemeads::storage::Volume,
-                templemeads::storage::Quota,
+                greatwestern::storage::Volume,
+                greatwestern::storage::Quota,
             > = std::collections::HashMap::new();
             let mut is_volume_quota_dict = true;
 
@@ -1841,7 +1841,7 @@ impl Job {
                 }
             }
             "StorageSize" => {
-                let result = match self.0.result::<templemeads::storage::StorageSize>() {
+                let result = match self.0.result::<greatwestern::storage::StorageSize>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1852,7 +1852,7 @@ impl Job {
                 }
             }
             "StorageUsage" => {
-                let result = match self.0.result::<templemeads::storage::StorageUsage>() {
+                let result = match self.0.result::<greatwestern::storage::StorageUsage>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1863,7 +1863,7 @@ impl Job {
                 }
             }
             "QuotaLimit" => {
-                let result = match self.0.result::<templemeads::storage::QuotaLimit>() {
+                let result = match self.0.result::<greatwestern::storage::QuotaLimit>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1874,7 +1874,7 @@ impl Job {
                 }
             }
             "Quota" => {
-                let result = match self.0.result::<templemeads::storage::Quota>() {
+                let result = match self.0.result::<greatwestern::storage::Quota>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1885,7 +1885,7 @@ impl Job {
                 }
             }
             "Volume" => {
-                let result = match self.0.result::<templemeads::storage::Volume>() {
+                let result = match self.0.result::<greatwestern::storage::Volume>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1896,7 +1896,7 @@ impl Job {
                 }
             }
             "Vec<StorageSize>" => {
-                let result = match self.0.result::<Vec<templemeads::storage::StorageSize>>() {
+                let result = match self.0.result::<Vec<greatwestern::storage::StorageSize>>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1913,7 +1913,7 @@ impl Job {
                 }
             }
             "Vec<StorageUsage>" => {
-                let result = match self.0.result::<Vec<templemeads::storage::StorageUsage>>() {
+                let result = match self.0.result::<Vec<greatwestern::storage::StorageUsage>>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1930,7 +1930,7 @@ impl Job {
                 }
             }
             "Vec<QuotaLimit>" => {
-                let result = match self.0.result::<Vec<templemeads::storage::QuotaLimit>>() {
+                let result = match self.0.result::<Vec<greatwestern::storage::QuotaLimit>>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1947,7 +1947,7 @@ impl Job {
                 }
             }
             "Vec<Quota>" => {
-                let result = match self.0.result::<Vec<templemeads::storage::Quota>>() {
+                let result = match self.0.result::<Vec<greatwestern::storage::Quota>>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1964,7 +1964,7 @@ impl Job {
                 }
             }
             "Vec<Volume>" => {
-                let result = match self.0.result::<Vec<templemeads::storage::Volume>>() {
+                let result = match self.0.result::<Vec<greatwestern::storage::Volume>>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1982,8 +1982,8 @@ impl Job {
             }
             "HashMap<Volume, Quota>" => {
                 let result = match self.0.result::<std::collections::HashMap<
-                    templemeads::storage::Volume,
-                    templemeads::storage::Quota,
+                    greatwestern::storage::Volume,
+                    greatwestern::storage::Quota,
                 >>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
@@ -5199,7 +5199,7 @@ impl From<grammar::ProjectDetails> for AwardDetails {
 #[pyfunction]
 #[pyo3(signature = (command, max_ms=0))]
 fn run(command: String, max_ms: i64) -> PyResult<Job> {
-    let mut job: Job = match call_post::<job::Job>("run", serde_json::json!({"command": command})) {
+    let mut job: Job = match call_post::<job::Job<greatwestern::Hpc>>("run", serde_json::json!({"command": command})) {
         Ok(response) => response.into(),
         Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     };
@@ -5226,14 +5226,14 @@ fn run(command: String, max_ms: i64) -> PyResult<Job> {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Notification(mod_notification::Notification);
+pub struct Notification(mod_notification::Notification<greatwestern::Hpc>);
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl Notification {
     #[new]
     fn new(command: &str) -> PyResult<Self> {
-        match mod_notification::Notification::parse(command) {
+        match mod_notification::Notification::<greatwestern::Hpc>::parse(command) {
             Ok(n) => Ok(Self(n)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -5242,7 +5242,7 @@ impl Notification {
     /// Parse from a `"<destination> <event> [<args>]"` string.
     #[staticmethod]
     fn parse(command: &str) -> PyResult<Self> {
-        match mod_notification::Notification::parse(command) {
+        match mod_notification::Notification::<greatwestern::Hpc>::parse(command) {
             Ok(n) => Ok(Self(n)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -5251,7 +5251,7 @@ impl Notification {
     /// Deserialise from the JSON body posted to `notification_url`.
     #[staticmethod]
     fn from_json(json: &str) -> PyResult<Self> {
-        match serde_json::from_str::<mod_notification::Notification>(json) {
+        match serde_json::from_str::<mod_notification::Notification<greatwestern::Hpc>>(json) {
             Ok(n) => Ok(Self(n)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -5321,8 +5321,8 @@ impl Notification {
     }
 }
 
-impl From<mod_notification::Notification> for Notification {
-    fn from(n: mod_notification::Notification) -> Self {
+impl From<mod_notification::Notification<greatwestern::Hpc>> for Notification {
+    fn from(n: mod_notification::Notification<greatwestern::Hpc>) -> Self {
         Notification(n)
     }
 }
@@ -5353,7 +5353,7 @@ fn notify(command: String) -> PyResult<()> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn status(job: Job) -> PyResult<Job> {
-    match call_post::<job::Job>("status", serde_json::json!({"job": job.0.id().to_string()})) {
+    match call_post::<job::Job<greatwestern::Hpc>>("status", serde_json::json!({"job": job.0.id().to_string()})) {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -5378,7 +5378,7 @@ fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
         },
     };
 
-    match call_post::<job::Job>("status", serde_json::json!({"job": job_id})) {
+    match call_post::<job::Job<greatwestern::Hpc>>("status", serde_json::json!({"job": job_id})) {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -5391,7 +5391,7 @@ fn get(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn fetch_jobs() -> PyResult<Vec<Job>> {
-    match call_get::<Vec<job::Job>>("fetch_jobs") {
+    match call_get::<Vec<job::Job<greatwestern::Hpc>>>("fetch_jobs") {
         Ok(response) => Ok(response.into_iter().map(|j| j.into()).collect()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -5416,7 +5416,7 @@ fn fetch_job(py: Python<'_>, job_id: Py<PyAny>) -> PyResult<Job> {
         },
     };
 
-    match call_post::<job::Job>("fetch_job", serde_json::json!(uid)) {
+    match call_post::<job::Job<greatwestern::Hpc>>("fetch_job", serde_json::json!(uid)) {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }
@@ -5452,7 +5452,7 @@ fn fetch_notification(py: Python<'_>, notification_id: Py<PyAny>) -> PyResult<No
         },
     };
 
-    match call_post::<mod_notification::Notification>("fetch_notification", serde_json::json!(uid))
+    match call_post::<mod_notification::Notification<greatwestern::Hpc>>("fetch_notification", serde_json::json!(uid))
     {
         Ok(response) => Ok(response.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
@@ -5517,49 +5517,49 @@ fn sync_offerings(offerings: Vec<Destination>) -> PyResult<Vec<Destination>> {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StorageSize(templemeads::storage::StorageSize);
+struct StorageSize(greatwestern::storage::StorageSize);
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl StorageSize {
     #[new]
     fn new(bytes: u64) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageSize::from_bytes(bytes)))
+        Ok(Self(greatwestern::storage::StorageSize::from_bytes(bytes)))
     }
 
     #[staticmethod]
     fn from_bytes(bytes: u64) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageSize::from_bytes(bytes)))
+        Ok(Self(greatwestern::storage::StorageSize::from_bytes(bytes)))
     }
 
     #[staticmethod]
     fn from_kilobytes(kb: f64) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageSize::from_kilobytes(kb)))
+        Ok(Self(greatwestern::storage::StorageSize::from_kilobytes(kb)))
     }
 
     #[staticmethod]
     fn from_megabytes(mb: f64) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageSize::from_megabytes(mb)))
+        Ok(Self(greatwestern::storage::StorageSize::from_megabytes(mb)))
     }
 
     #[staticmethod]
     fn from_gigabytes(gb: f64) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageSize::from_gigabytes(gb)))
+        Ok(Self(greatwestern::storage::StorageSize::from_gigabytes(gb)))
     }
 
     #[staticmethod]
     fn from_terabytes(tb: f64) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageSize::from_terabytes(tb)))
+        Ok(Self(greatwestern::storage::StorageSize::from_terabytes(tb)))
     }
 
     #[staticmethod]
     fn from_petabytes(pb: f64) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageSize::from_petabytes(pb)))
+        Ok(Self(greatwestern::storage::StorageSize::from_petabytes(pb)))
     }
 
     #[staticmethod]
     fn parse(s: &str) -> PyResult<Self> {
-        match templemeads::storage::StorageSize::parse(s) {
+        match greatwestern::storage::StorageSize::parse(s) {
             Ok(size) => Ok(Self(size)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -5591,7 +5591,7 @@ impl StorageSize {
 
     #[setter]
     fn set_bytes(&mut self, bytes: u64) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageSize::from_bytes(bytes);
+        self.0 = greatwestern::storage::StorageSize::from_bytes(bytes);
         Ok(())
     }
 
@@ -5602,7 +5602,7 @@ impl StorageSize {
 
     #[setter]
     fn set_kilobytes(&mut self, kb: f64) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageSize::from_kilobytes(kb);
+        self.0 = greatwestern::storage::StorageSize::from_kilobytes(kb);
         Ok(())
     }
 
@@ -5613,7 +5613,7 @@ impl StorageSize {
 
     #[setter]
     fn set_megabytes(&mut self, mb: f64) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageSize::from_megabytes(mb);
+        self.0 = greatwestern::storage::StorageSize::from_megabytes(mb);
         Ok(())
     }
 
@@ -5624,7 +5624,7 @@ impl StorageSize {
 
     #[setter]
     fn set_gigabytes(&mut self, gb: f64) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageSize::from_gigabytes(gb);
+        self.0 = greatwestern::storage::StorageSize::from_gigabytes(gb);
         Ok(())
     }
 
@@ -5635,7 +5635,7 @@ impl StorageSize {
 
     #[setter]
     fn set_terabytes(&mut self, tb: f64) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageSize::from_terabytes(tb);
+        self.0 = greatwestern::storage::StorageSize::from_terabytes(tb);
         Ok(())
     }
 
@@ -5646,7 +5646,7 @@ impl StorageSize {
 
     #[setter]
     fn set_petabytes(&mut self, pb: f64) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageSize::from_petabytes(pb);
+        self.0 = greatwestern::storage::StorageSize::from_petabytes(pb);
         Ok(())
     }
 
@@ -5659,8 +5659,8 @@ impl StorageSize {
     }
 }
 
-impl From<templemeads::storage::StorageSize> for StorageSize {
-    fn from(size: templemeads::storage::StorageSize) -> Self {
+impl From<greatwestern::storage::StorageSize> for StorageSize {
+    fn from(size: greatwestern::storage::StorageSize) -> Self {
         StorageSize(size)
     }
 }
@@ -5668,14 +5668,14 @@ impl From<templemeads::storage::StorageSize> for StorageSize {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StorageUsage(templemeads::storage::StorageUsage);
+struct StorageUsage(greatwestern::storage::StorageUsage);
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl StorageUsage {
     #[new]
     fn new(size: &StorageSize) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::StorageUsage::new(size.0)))
+        Ok(Self(greatwestern::storage::StorageUsage::new(size.0)))
     }
 
     fn __copy__(&self) -> PyResult<StorageUsage> {
@@ -5704,7 +5704,7 @@ impl StorageUsage {
 
     #[setter]
     fn set_size(&mut self, size: &StorageSize) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageUsage::new(size.0);
+        self.0 = greatwestern::storage::StorageUsage::new(size.0);
         Ok(())
     }
 
@@ -5715,8 +5715,8 @@ impl StorageUsage {
 
     #[setter]
     fn set_bytes(&mut self, bytes: u64) -> PyResult<()> {
-        self.0 = templemeads::storage::StorageUsage::new(
-            templemeads::storage::StorageSize::from_bytes(bytes),
+        self.0 = greatwestern::storage::StorageUsage::new(
+            greatwestern::storage::StorageSize::from_bytes(bytes),
         );
         Ok(())
     }
@@ -5730,8 +5730,8 @@ impl StorageUsage {
     }
 }
 
-impl From<templemeads::storage::StorageUsage> for StorageUsage {
-    fn from(usage: templemeads::storage::StorageUsage) -> Self {
+impl From<greatwestern::storage::StorageUsage> for StorageUsage {
+    fn from(usage: greatwestern::storage::StorageUsage) -> Self {
         StorageUsage(usage)
     }
 }
@@ -5739,24 +5739,24 @@ impl From<templemeads::storage::StorageUsage> for StorageUsage {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct QuotaLimit(templemeads::storage::QuotaLimit);
+struct QuotaLimit(greatwestern::storage::QuotaLimit);
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl QuotaLimit {
     #[staticmethod]
     fn limited(size: &StorageSize) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::QuotaLimit::Limited(size.0)))
+        Ok(Self(greatwestern::storage::QuotaLimit::Limited(size.0)))
     }
 
     #[staticmethod]
     fn unlimited() -> PyResult<Self> {
-        Ok(Self(templemeads::storage::QuotaLimit::Unlimited))
+        Ok(Self(greatwestern::storage::QuotaLimit::Unlimited))
     }
 
     #[staticmethod]
     fn parse(s: &str) -> PyResult<Self> {
-        match templemeads::storage::QuotaLimit::parse(s) {
+        match greatwestern::storage::QuotaLimit::parse(s) {
             Ok(limit) => Ok(Self(limit)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -5809,8 +5809,8 @@ impl QuotaLimit {
     }
 }
 
-impl From<templemeads::storage::QuotaLimit> for QuotaLimit {
-    fn from(limit: templemeads::storage::QuotaLimit) -> Self {
+impl From<greatwestern::storage::QuotaLimit> for QuotaLimit {
+    fn from(limit: greatwestern::storage::QuotaLimit) -> Self {
         QuotaLimit(limit)
     }
 }
@@ -5818,24 +5818,24 @@ impl From<templemeads::storage::QuotaLimit> for QuotaLimit {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Quota(templemeads::storage::Quota);
+struct Quota(greatwestern::storage::Quota);
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl Quota {
     #[staticmethod]
     fn limited(limit: &StorageSize) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::Quota::limited(limit.0)))
+        Ok(Self(greatwestern::storage::Quota::limited(limit.0)))
     }
 
     #[staticmethod]
     fn unlimited() -> PyResult<Self> {
-        Ok(Self(templemeads::storage::Quota::unlimited()))
+        Ok(Self(greatwestern::storage::Quota::unlimited()))
     }
 
     #[staticmethod]
     fn with_usage(limit: &QuotaLimit, usage: &StorageUsage) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::Quota::with_usage(
+        Ok(Self(greatwestern::storage::Quota::with_usage(
             limit.0.clone(),
             usage.0,
         )))
@@ -5843,7 +5843,7 @@ impl Quota {
 
     #[staticmethod]
     fn parse(s: &str) -> PyResult<Self> {
-        match templemeads::storage::Quota::parse(s) {
+        match greatwestern::storage::Quota::parse(s) {
             Ok(quota) => Ok(Self(quota)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -5908,8 +5908,8 @@ impl Quota {
     }
 }
 
-impl From<templemeads::storage::Quota> for Quota {
-    fn from(quota: templemeads::storage::Quota) -> Self {
+impl From<greatwestern::storage::Quota> for Quota {
+    fn from(quota: greatwestern::storage::Quota) -> Self {
         Quota(quota)
     }
 }
@@ -5917,19 +5917,19 @@ impl From<templemeads::storage::Quota> for Quota {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Volume(templemeads::storage::Volume);
+struct Volume(greatwestern::storage::Volume);
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl Volume {
     #[new]
     fn new(name: &str) -> PyResult<Self> {
-        Ok(Self(templemeads::storage::Volume::new(name)))
+        Ok(Self(greatwestern::storage::Volume::new(name)))
     }
 
     #[staticmethod]
     fn parse(s: &str) -> PyResult<Self> {
-        match templemeads::storage::Volume::parse(s) {
+        match greatwestern::storage::Volume::parse(s) {
             Ok(volume) => Ok(Self(volume)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -5982,8 +5982,8 @@ impl Volume {
     }
 }
 
-impl From<templemeads::storage::Volume> for Volume {
-    fn from(volume: templemeads::storage::Volume) -> Self {
+impl From<greatwestern::storage::Volume> for Volume {
+    fn from(volume: greatwestern::storage::Volume) -> Self {
         Volume(volume)
     }
 }

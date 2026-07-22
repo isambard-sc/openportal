@@ -21,36 +21,39 @@ need to understand *one* vocabulary, their own.
 
 It's an unnecessary restriction for **routing-only** agents - `provider`,
 `clusters` (the `platform` role), and similar hops that exist purely to
-forward a `Job`/`Notification` one step closer to its destination and never
-inspect, execute, or construct an `Instruction` themselves. The goal is to
-let a single router process sit between agents speaking *different*
-`Domain`s - or even multiple, simultaneously, in one deployment - without
-being recompiled per domain and without forking templemeads.
+forward a `Job` or `Notification` one step closer to its destination and
+never inspect, execute, or construct an `Instruction`/`NotificationEvent`
+themselves. The goal is to let a single router process sit between agents
+speaking *different* `Domain`s - or even multiple, simultaneously, in one
+deployment - without being recompiled per domain and without forking
+templemeads.
 
 Concretely: `type Job = templemeads::job::Job<Erased>;` in a router's
 `main.rs`, instead of `Job<SomeConcreteDomain>`, and that router transparently
-relays Jobs/Notifications belonging to *any* `Domain`, unchanged - **and** a
-leaf agent that finally executes a Job can independently verify which
-`Domain` actually produced it, regardless of how many domain-oblivious hops
-it passed through to get there (§7).
+relays both Jobs and Notifications belonging to *any* `Domain`, unchanged -
+**and** a leaf agent that finally executes a Job, or handles a Notification,
+can independently verify which `Domain` actually produced it, regardless of
+how many domain-oblivious hops it passed through to get there (§7).
 
 ## 2. Non-goals
 
 - **Making leaf agents domain-oblivious.** An agent that actually executes
-  business logic (`match job.instruction() { ... }`) must stay compiled
-  against one concrete `Domain`, exactly as today. This design only touches
-  agents that never do that match at all.
+  business logic (`match job.instruction() { ... }` or
+  `match notification.event() { ... }`) must stay compiled against one
+  concrete `Domain`, exactly as today. This design only touches agents that
+  never do that match at all.
 - **Cross-domain translation.** A router relays opaque bytes; it never
-  converts a `greatwestern` instruction into some other domain's equivalent.
-  Two leaf agents on either side of an `Erased` router still need to
-  natively understand whatever lands in their own inbox - the router doesn't
-  make incompatible domains compatible, it just stops being the reason two
-  *compatible-with-each-other-if-they-could-only-connect* topologies can't
-  share a routing tier.
+  converts a `greatwestern` instruction/event into some other domain's
+  equivalent. Two leaf agents on either side of an `Erased` router still
+  need to natively understand whatever lands in their own inbox - the
+  router doesn't make incompatible domains compatible, it just stops being
+  the reason two *compatible-with-each-other-if-they-could-only-connect*
+  topologies can't share a routing tier.
 - **A new wire format.** No change to how `Job`/`Command`/`Notification`
-  serialise, beyond the two new optional fields in §7. The whole design
-  leans on the fact that the wire format is already domain-oblivious (§4) -
-  if that stopped being true, this design would need rethinking.
+  serialise, beyond the four new optional fields in §7 (two on `Job`, two on
+  `Notification`). The whole design leans on the fact that the wire format
+  is already domain-oblivious for *routing* (§4) - if that stopped being
+  true, this design would need rethinking.
 - **Auto-detecting whether an agent is "routing-only."** That's a per-agent
   judgement call the operator/implementor makes when choosing `Erased` vs. a
   concrete `Domain` for a given binary - see §8 for what breaks if you choose
@@ -58,7 +61,11 @@ it passed through to get there (§7).
 
 ## 3. Current state: why a router can't be domain-oblivious today
 
-Traced through the actual code, not assumed:
+Traced through the actual code, not assumed - Jobs and Notifications turn
+out to have the *same* routing story but a *different* wire-format story, so
+both are covered here.
+
+### 3.1 Jobs
 
 - `Job<L>`'s `command` field is a private `Command<L>` struct holding
   `{ destination: Destination, instruction: L::Instruction }`
@@ -86,29 +93,73 @@ Traced through the actual code, not assumed:
   already untyped (`Option<String>`) - a router never calls
   `job.completed()`/`job.result::<T>()` since it never executes anything.
 
-So the entire gap is: **one required trait method, `Domain::parse_instruction`,
-must always succeed for a router to be able to relay arbitrary domains'
-Jobs.** Nothing else about `Board`, `handler.rs`'s routing logic, or the wire
-format needs to change.
+So the gap for Jobs is: **`Domain::parse_instruction` must always succeed**
+for a router to be able to relay arbitrary domains' Jobs.
 
-## 4. Key insight: the wire format is already domain-oblivious
+### 3.2 Notifications
 
-`Command<L>` serialises via `Display`
-([job.rs:165-169](../../templemeads/src/job.rs#L165)) to a single string:
-`"<destination> <instruction-display>"` - this is the `"command"` field
-documented in [json-types.md](../specifications/json-types.md) §Job. It is
-**not** a structured `{destination: ..., instruction: {...}}` object. This
-means: if a `Domain`'s `Instruction` type is defined so that
-`parse_instruction` always succeeds (rather than validating a grammar) and
-`Display` reproduces exactly what it was given, then a `Job<ThatDomain>`
-round-trips **byte-for-byte identically** to whatever `Job<RealDomain>` the
-originating leaf agent serialised - the router never needs to understand the
-bytes to pass them through unchanged.
+- `notification::send()` ([notification.rs:113-171](../../templemeads/src/notification.rs#L113))
+  and the `Position::Downstream` arm of `handler.rs`'s notification dispatch
+  ([handler.rs:555-566](../../templemeads/src/handler.rs#L555)) route purely
+  on `notification.destination()` - `event` is never inspected to decide
+  where a Notification goes next, exactly like Jobs.
+- The blocker is again *deserialisation* - but the mechanism is different
+  from Jobs, not the same one. `Notification<L>` derives `Serialize`/
+  `Deserialize` directly on the struct
+  ([notification.rs:19-25](../../templemeads/src/notification.rs#L19)):
+  `event: L::NotificationEvent` is deserialised by `L::NotificationEvent`'s
+  own (plain, derived) `Deserialize` impl - **not** via
+  `Domain::parse_notification_event`, which is only ever called from
+  `Notification::parse(s: &str)`
+  ([notification.rs:40-51](../../templemeads/src/notification.rs#L40)), the
+  text-command entry point (e.g. a bridge's `POST /notify`). A router only
+  ever receives already-serialised `Notification<L>` values over the wire
+  and relays them via ordinary struct deserialisation - it never calls
+  `Notification::parse` on anything, so `parse_notification_event` being
+  permissive doesn't, by itself, help a router at all.
+
+So the gap for Notifications is different: **`L::NotificationEvent`'s
+`Deserialize` impl must succeed on any valid JSON**, regardless of what
+`Domain` produced it. §4 explains why that's a materially different
+requirement than "any string parses"; §5 designs `RawNotificationEvent`
+to actually satisfy it.
+
+## 4. Key insight: the wire format is domain-oblivious for routing - but Jobs and Notifications get there differently
+
+`Command<L>` (the private struct behind `Job.command`) serialises via
+`Display` ([job.rs:165-169](../../templemeads/src/job.rs#L165)) to a single
+string: `"<destination> <instruction-display>"` - this is the `"command"`
+field documented in [json-types.md](../specifications/json-types.md) §Job.
+It is **not** a structured `{destination: ..., instruction: {...}}` object.
+So if a `Domain`'s `Instruction` type is defined so that `parse_instruction`
+always succeeds and `Display` reproduces exactly what it was given, a
+`Job<ThatDomain>` round-trips **byte-for-byte identically** to whatever
+`Job<RealDomain>` the originating leaf agent serialised.
+
+**`NotificationEvent` has no equivalent custom string serialisation.**
+Verified empirically (there is no test for this in the repo - it was checked
+by serialising a real `Notification<TestDomain>` and reading the JSON): the
+wire form is
+
+```json
+{"id": "...", "destination": "a.b", "event": {"UserAdded": "chris.project.brics"}}
+```
+
+- a **structured JSON object**, one key per enum variant, produced by
+`NotificationEvent`'s ordinary `#[derive(Serialize, Deserialize)]`. (This
+also means the existing
+[notification-protocol.md](../specifications/notification-protocol.md) §4
+documentation of `"event": "<event-string>"` was wrong - fixed alongside
+this design.) Consequently, `Erased::NotificationEvent` can't just be a
+`String` wrapper the way `Erased::Instruction` can - it needs to preserve
+**arbitrary JSON shape**, since it has no idea what shape a given `Domain`'s
+events take. §5 uses `serde_json::Value` for exactly this reason.
 
 ## 5. Chosen approach: an `Erased` Domain in templemeads
 
 Add a new, small module - `templemeads::erased` - defining a `Domain`
-implementation that is a total, non-validating passthrough:
+implementation that is a total, non-validating passthrough for both
+Instructions and NotificationEvents:
 
 ```rust
 // in templemeads::erased (NEW module)
@@ -124,16 +175,25 @@ impl Display for RawInstruction {
     }
 }
 
-/// The raw text of a notification event this agent doesn't understand,
-/// plus the one structured case every `Domain` must support (see
-/// `Domain::wrap_forward`).
+/// The raw JSON shape of a notification event this agent doesn't
+/// understand, plus the one structured case every `Domain` must support
+/// (see `Domain::wrap_forward`). Untagged: serde tries `Forward` first
+/// (matches only if the JSON has exactly a Notification's shape - `id`,
+/// `destination`, `event` keys), falling through to `Raw` - a
+/// `serde_json::Value` - for everything else, which **always** succeeds,
+/// preserving whatever JSON shape the real `Domain`'s event serialised as
+/// (see §4). `Value`'s own `Serialize` reproduces that JSON byte-for-byte
+/// on the way back out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum RawNotificationEvent {
-    Raw(String),
     Forward(Box<Notification<Erased>>),
+    Raw(serde_json::Value),
 }
-// Display: Raw(s) => s; Forward(n) => "forward [{}]", matching the
-// convention every other Domain's Forward variant already follows.
+// Display: Forward(n) => "forward [{}]" (matching every other Domain's
+// Forward variant); Raw(v) => v's compact JSON text - `parse` never
+// produces this from a plain string (see below), so Display here is only
+// ever exercised for logging an already-deserialised wire value.
 
 /// A `Domain` that understands nothing and forwards everything - for
 /// routing-only agents that sit between leaf agents speaking real,
@@ -150,7 +210,12 @@ impl Domain for Erased {
     }
 
     fn parse_notification_event(s: &str) -> Result<Self::NotificationEvent, Error> {
-        Ok(RawNotificationEvent::Raw(s.to_string())) // never fails
+        // Only reachable via Notification::parse (a text command, e.g. a
+        // bridge's POST /notify) - never via ordinary wire deserialisation
+        // (§3.2). Wraps the text as a JSON string value; never produces
+        // `Forward`, matching every other Domain's convention that Forward
+        // is infrastructure-only and not parseable from text.
+        Ok(RawNotificationEvent::Raw(serde_json::Value::String(s.to_string())))
     }
 
     fn name() -> &'static str {
@@ -188,9 +253,9 @@ change to `agent_core`, `board.rs`, `handler.rs`, or the wire format at all
 
 | | |
 |---|---|
-| **New code** | One new module, `templemeads::erased` (§5) - roughly the size of `templemeads::test_domain` - plus the two new `Job<L>` fields in §7. |
+| **New code** | One new module, `templemeads::erased` (§5) - roughly the size of `templemeads::test_domain` - plus the four new fields in §7 (two on `Job`, two on `Notification`). |
 | **Changed code** | Only the specific router-role agents an operator chooses to switch from `Job<SomeDomain>` to `Job<Erased>` - a type-alias change, nothing structural. |
-| **Unchanged** | `board.rs`, `command.rs`, `notification.rs`, the wire format's overall shape, every leaf agent, every existing `Domain` implementation (including `greatwestern`). |
+| **Unchanged** | `board.rs`, `command.rs`, the wire format's overall shape, every leaf agent, every existing `Domain` implementation (including `greatwestern`). |
 
 This is deliberately the cheapest possible design for the capability: it
 adds one implementation of an existing trait, rather than a parallel
@@ -198,7 +263,7 @@ type-erasure mechanism (`Box<dyn Any>`, a second generic parameter, etc.) -
 see §11 for why that heavier alternative was rejected once already, in a
 closely related context.
 
-## 7. Per-job domain provenance: verifying at the destination, not just the connection
+## 7. Per-message domain provenance: verifying at the destination, not just the connection
 
 ### 7.1 Why connection-level checking isn't enough once `Erased` exists
 
@@ -210,39 +275,44 @@ right for a leaf agent talking directly to another leaf agent. It stops
 being useful the moment an `Erased` router sits in between: the peer a
 destination leaf agent is directly connected to is the *router*, whose
 `Domain::name()` is `"erased"` - not the `Domain` of whoever actually
-authored the Job several hops upstream. Connection-level checking literally
-cannot see through a domain-oblivious hop.
+authored the Job or Notification several hops upstream. Connection-level
+checking literally cannot see through a domain-oblivious hop.
 
 What's needed is a way for the **true originating `Domain`** to travel with
-the Job itself, hop-for-hop, surviving any number of `Erased` relays, so the
-agent that finally executes it can check - independent of who its immediate
-neighbour is. This is good practice even in deployments with no `Erased`
-router at all: it catches an instruction string that happens to parse
-successfully under the *wrong* domain's grammar (two domains can coincidentally
-share syntax for different meanings) before it's ever executed, not just
-after the fact.
+the message itself, hop-for-hop, surviving any number of `Erased` relays, so
+the agent that finally acts on it can check - independent of who its
+immediate neighbour is. This is good practice even in deployments with no
+`Erased` router at all: it catches an instruction/event that happens to
+parse successfully under the *wrong* domain's grammar (two domains can
+coincidentally share syntax, or JSON shape, for different meanings) before
+it's ever acted on, not just after the fact.
 
-### 7.2 Correction: this belongs on `Job`, not `Envelope`
+### 7.2 Correction: this belongs on `Job`/`Notification`, not `Envelope`
 
-The natural place to reach for this is `Envelope<L>` - but `Envelope` is
-**never serialised over the wire**. It's a purely local, in-process wrapper:
-every call site that constructs one builds it fresh, right before handing a
-Job to the registered runner -
+The natural place to reach for this is `Envelope<L>`/`NotificationEnvelope<L>`
+- but neither is **ever serialised over the wire**. Both are purely local,
+in-process wrappers: every call site that constructs one builds it fresh,
+right before handing the message to the registered runner - for Jobs,
 [handler.rs:316](../../templemeads/src/handler.rs#L316) (the generic
-dispatch path used by `instance`/`custom`/etc.), and the same pattern
-independently in the `account`, `filesystem`, `portal`, and `scheduler` role
-modules
+dispatch path) and the same pattern independently in the `account`,
+`filesystem`, `portal`, and `scheduler` role modules
 ([account.rs:57](../../templemeads/src/account.rs#L57),
 [filesystem.rs:57](../../templemeads/src/filesystem.rs#L57),
 [portal.rs:53](../../templemeads/src/portal.rs#L53),
-[scheduler.rs:56](../../templemeads/src/scheduler.rs#L56)). What actually
-travels hop-to-hop over the wire is `Job<L>` itself, via
-`Command::Put/Update/Delete { job: Job<L> }`
-([command.rs:29-37](../../templemeads/src/command.rs#L29)).
+[scheduler.rs:56](../../templemeads/src/scheduler.rs#L56)); for
+Notifications,
+[handler.rs:574](../../templemeads/src/handler.rs#L574) (destination) and
+[handler.rs:605](../../templemeads/src/handler.rs#L605) (bridge sidecar),
+plus [notification.rs:120](../../templemeads/src/notification.rs#L120)
+(self-addressed). What actually travels hop-to-hop over the wire is
+`Job<L>`/`Notification<L>` themselves, via
+`Command::Put/Update/Delete { job: Job<L> }` /
+`Command::Notify { notification: Notification<L> }`
+([command.rs:29-42](../../templemeads/src/command.rs#L29)).
 
-So the provenance tag has to live on `Job<L>`, not `Envelope<L>`, to survive
-being relayed. Concretely, two new fields on the `Job<L>` struct
-([job.rs:198](../../templemeads/src/job.rs#L198)):
+So the provenance tag has to live on `Job<L>` and `Notification<L>`, not
+their respective Envelopes, to survive being relayed. Two new fields on
+each:
 
 ```rust
 pub struct Job<L: Domain> {
@@ -261,50 +331,84 @@ pub struct Job<L: Domain> {
     #[serde(default)]
     domain_version: Option<String>,
 }
+
+pub struct Notification<L: Domain> {
+    // ...existing fields...
+
+    /// Same idea as `Job::domain` - set once at `Notification::new()`/
+    /// `Notification::parse()`, surviving any number of `Erased` relays
+    /// unmodified (relayed as an opaque JSON string field, exactly like
+    /// the rest of `Notification`'s shape passes through `RawNotificationEvent`
+    /// unmodified - see §5).
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    domain_version: Option<String>,
+}
 ```
 
 Populated in `Job::parse()`
-([job.rs:238](../../templemeads/src/job.rs#L238)) with
+([job.rs:238](../../templemeads/src/job.rs#L238)) and in both
+`Notification::new()`/`Notification::parse()`
+([notification.rs:28-51](../../templemeads/src/notification.rs#L28)) with
 `Some(L::name().to_string())` / `Some(L::version().to_string())` -
 mirroring exactly how `Register` picked up `domain`/`domain_version` for the
-connection-level check, just captured once per-Job instead of once
-per-connection. An `Erased` router constructs no new `Job` of its own (it
-only ever relays one it received), so it never overwrites this field with
-its own `"erased"` identity - the tag genuinely reflects the true origin,
-end to end.
+connection-level check, just captured once per-message instead of once
+per-connection. An `Erased` router constructs no new `Job`/`Notification` of
+its own (it only ever relays ones it received), so it never overwrites these
+fields with its own `"erased"` identity - the tag genuinely reflects the
+true origin, end to end.
 
-### 7.3 The destination-side check
+### 7.3 The destination-side checks
 
-A new function, `agent::ensure_job_domain_matches::<L>(job: &Job<L>, sender: &Peer) -> Result<(), Error>`,
-called immediately before a runner is invoked (i.e. alongside each of the
-`Envelope::new(...)` call sites in §7.2):
+Two new functions, mirroring each other:
 
-1. If `job.domain()` is `Some(d)`: compare `d` to `L::name()`. Match → `Ok`.
-   Mismatch → `Err(Error::Incompatible(...))`.
-2. If `job.domain()` is `None` (a Job from before this field existed):
-   fall back to the *connection-level* signal already built for `Register` -
+- `agent::ensure_job_domain_matches::<L>(job: &Job<L>, sender: &Peer) -> Result<(), Error>`,
+  called immediately before a runner is invoked (alongside each
+  `Envelope::new(...)` call site in §7.2).
+- `agent::ensure_notification_domain_matches::<L>(notification: &Notification<L>, sender: &Peer) -> Result<(), Error>`,
+  called immediately before a notify runner is invoked (alongside each
+  `NotificationEnvelope::new(...)` call site in §7.2).
+
+Both follow the same logic:
+
+1. If the message's `domain` is `Some(d)`: compare `d` to `L::name()`. Match
+   → `Ok`. Mismatch → `Err(Error::Incompatible(...))`.
+2. If `domain` is `None` (a message from before this field existed): fall
+   back to the *connection-level* signal already built for `Register` -
    `agent::peer_domain(sender)` - which already folds in
    `Domain::assume_legacy_domain_version` for exactly this situation. This
    is weaker (single-hop only) but is the best available signal for an old
-   Job, and matches today's behaviour exactly for a deployment with no
+   message, and matches today's behaviour exactly for a deployment with no
    `Erased` router in it.
 3. Otherwise (still unknown after both checks): fail-closed, same
    philosophy as `ensure_domain_matches` - `Err(Error::Incompatible(...))`.
 
-**Deliberately not the same failure mode as `ensure_domain_matches`.** That
-function disconnects the *peer*, because a connection-level mismatch means
-every future Job from that peer is suspect. A single misrouted Job doesn't
-mean the connection is bad - most other Jobs relayed over it may well be
-correctly addressed. So this function only errors the *Job*
-(`job.errored("...")`, same as any other execution failure), and leaves the
-connection alone.
+**Deliberately not the same failure mode as `ensure_domain_matches`** for
+either. That function disconnects the *peer*, because a connection-level
+mismatch means every future message from that peer is suspect. A single
+misrouted Job or Notification doesn't mean the connection is bad - most
+other traffic relayed over it may well be correctly addressed. So:
 
-Like `ensure_domain_matches`, this is opt-in - templemeads doesn't call it
-automatically, since not every agent needs the guarantee (e.g. an `Erased`
-router itself never executes anything, so it has no use for this check).
-Agents that do want it call it as the very first thing in their runner, or
-templemeads could wire it in as a default pre-check for any agent that opts
-in via `set_my_service_details` - left as an implementation choice for §9.
+- `ensure_job_domain_matches` errors the *Job* (`job.errored("...")`, same
+  as any other execution failure) and leaves the connection alone.
+- `ensure_notification_domain_matches` simply causes the notification to be
+  dropped (logged, not delivered to the notify runner) - Notifications
+  already have no return channel and no delivery guarantee
+  ([notification-protocol.md](../specifications/notification-protocol.md)
+  §8), so "drop and log" is the existing failure mode for every other kind
+  of notification delivery problem too; this is one more reason added to
+  that same bucket, not a new kind of failure a caller needs to newly
+  handle.
+
+Like `ensure_domain_matches`, both are opt-in - templemeads doesn't call
+them automatically, since not every agent needs the guarantee (e.g. an
+`Erased` router itself never executes/handles anything, so it has no use
+for either check). Agents that do want it call the appropriate one as the
+very first thing in their runner/notify runner, or templemeads could wire
+them in as a default pre-check for any agent that opts in via
+`set_my_service_details`/`set_notify_runner` - left as an implementation
+choice for §9.
 
 ## 8. Gotchas / interactions with existing features
 
@@ -317,16 +421,17 @@ router's `name()` is `"erased"`, which will never equal a leaf agent's real
 domain name.** A leaf agent that calls `ensure_domain_matches::<Hpc>(&router_peer)`
 against a directly-connected `Erased` router would disconnect it - exactly
 backwards from what's wanted. (This is precisely why §7 exists as a
-separate, per-Job check rather than trying to stretch the connection-level
-one to cover it.)
+separate, per-message check rather than trying to stretch the
+connection-level one to cover it.)
 
 This is not a bug to fix in `ensure_domain_matches` - that function does
 precisely what it says for the case it's meant for (two agents that must
 share a vocabulary to interoperate). It's a usage rule to document clearly
 once `Erased` exists: **only call `ensure_domain_matches` between agents
-that are expected to actually understand each other's `Instruction`s** (e.g.
-two leaf agents directly exchanging domain-specific Jobs). Don't call it
-against a peer whose role is routing-only - use `ensure_job_domain_matches`
+that are expected to actually understand each other's `Instruction`s/
+`NotificationEvent`s** (e.g. two leaf agents directly exchanging
+domain-specific Jobs). Don't call it against a peer whose role is
+routing-only - use `ensure_job_domain_matches`/`ensure_notification_domain_matches`
 (§7.3) instead, at the point of execution. This needs to be prominent in
 `writing-a-domain.md` once `Erased` lands, so it isn't rediscovered the hard
 way in production.
@@ -339,76 +444,133 @@ human or bridge, and a portal is a leaf role. A router only ever receives
 already-parsed `Command<L>` values over the wire, which always deserialise
 with `check_portal = false`.
 
-### 8.3 Diagnostics/health/logging
+### 8.3 `RawNotificationEvent`'s `Forward` vs. `Raw` ambiguity
+
+`#[serde(untagged)]` tries `Forward` before falling back to `Raw` (§5).
+`Forward` only matches JSON that happens to look exactly like a
+`Notification` object (`id`/`destination`/`event` keys). It is
+vanishingly unlikely but not impossible for some other `Domain`'s genuine
+event variant to accidentally have that exact shape (e.g. a hypothetical
+`SomeEvent { id: Uuid, destination: String, event: String }` tuple/struct
+variant) and be mis-parsed as a `Forward` instead of passed through as
+`Raw`. Worth a property test (§10) precisely because it's the one place
+`Erased`'s passthrough isn't *unconditionally* transparent. If this ever
+bites in practice, the fix is to make `Forward`'s wire shape distinguishable
+(e.g. wrap it in a single-key object like `{"__erased_forward": {...}}`)
+rather than relying on structural shape-sniffing - deferred unless/until
+it's shown to matter.
+
+### 8.4 Diagnostics/health/logging
 
 Already domain-agnostic (§3) - nothing to change. `RawInstruction`'s
-`Display` reproduces the original instruction text, so log lines through an
-`Erased` router look identical to what a same-domain router would have
-logged.
+`Display` reproduces the original instruction text, and `RawNotificationEvent`'s
+`Raw(Value)` variant reproduces the original event JSON, so log lines
+through an `Erased` router look identical to what a same-domain router
+would have logged.
 
-### 8.4 A router still needs *a* runner
+### 8.5 A router still needs *a* runner and notify runner
 
-Every agent registers an `AsyncRunnable<L>`, called if the agent is ever
-the final destination of a Job. A pure router should never legitimately be
-a destination; `templemeads::erased` should ship a small default runner
-that errors clearly (e.g. `Error::UnknownInstruction("this agent only
+Every agent registers an `AsyncRunnable<L>` and an `AsyncNotifyRunnable<L>`,
+called if the agent is ever the final destination of a Job/Notification. A
+pure router should never legitimately be a destination for either;
+`templemeads::erased` should ship small default implementations of both
+that error/log clearly (e.g. `Error::UnknownInstruction("this agent only
 routes Jobs, it does not execute them")`) rather than reusing
 `default_runner` (which calls `envelope.job().execute()` - not meaningful
-for a `RawInstruction`).
+for a `RawInstruction`) or the generic `default_notify_runner` (which is
+harmless to reuse as-is, since it only logs - but doing so for a message
+genuinely addressed to the router itself is still worth flagging as
+suspicious in that log line).
 
 ## 9. Phased implementation plan
 
 1. Add `templemeads::erased` (§5): `RawInstruction`, `RawNotificationEvent`,
-   `Erased`, a router-appropriate default runner. Unit tests: round-trip
-   parse/Display for `RawInstruction`/`RawNotificationEvent`, and a
-   two-domain proof analogous to the one used for the original `Domain`
-   split (`grammar-split-design.md` §12) - serialise a `Job<Hpc>`, deserialise
-   it as `Job<Erased>`, re-serialise, and assert byte-identical output.
-2. Add the `domain`/`domain_version` fields to `Job<L>` and populate them
-   in `Job::parse()` (§7.2). This is useful independently of `Erased` and
-   can land first/separately - it's pure backward-compatible addition
+   `Erased`, router-appropriate default runner and notify runner. Unit
+   tests: round-trip parse/Display for `RawInstruction`; round-trip
+   serialise/deserialise for `RawNotificationEvent` against real
+   `greatwestern::NotificationEvent` JSON (not just synthetic values); the
+   `Forward`/`Raw` disambiguation (§8.3); and a two-domain proof analogous
+   to the one used for the original `Domain` split
+   (`grammar-split-design.md` §12) - serialise a `Job<Hpc>`/`Notification<Hpc>`,
+   deserialise as `Job<Erased>`/`Notification<Erased>`, re-serialise, and
+   assert byte-identical output.
+2. Add the `domain`/`domain_version` fields to both `Job<L>` and
+   `Notification<L>`, populated in `Job::parse()` and
+   `Notification::new()`/`parse()` (§7.2). Useful independently of `Erased`
+   and can land first/separately - pure backward-compatible addition
    (`#[serde(default)]`), same shape as the `Register` fields.
-3. Add `agent::ensure_job_domain_matches` (§7.3) and decide the
-   automatic-vs-opt-in question for how agents wire it into their runner
-   dispatch.
-4. Pick one existing routing-role agent (`provider` is the simplest - it
-   only forwards, per `docs/README.md`'s description of the role) and
-   switch its type alias to `Job<Erased>`/`Envelope<Erased>` as a proof of
-   concept. Confirm its existing tests (if any) and a manual multi-hop
-   routing scenario still pass unchanged, including a leaf agent on the far
-   side successfully calling `ensure_job_domain_matches` and seeing the
-   *original* domain, not `"erased"`.
-5. Document the `ensure_domain_matches` vs. `ensure_job_domain_matches`
-   usage rule (§8.1) prominently in `writing-a-domain.md`.
+3. Add `agent::ensure_job_domain_matches` and
+   `agent::ensure_notification_domain_matches` (§7.3), and decide the
+   automatic-vs-opt-in question for how agents wire them into their
+   runner/notify-runner dispatch.
+4. Pick `provider` as the proof of concept -
+   [templemeads::provider::run](../../templemeads/src/provider.rs#L15)
+   doesn't even take a runner argument (it hardcodes `None` to
+   `set_my_service_details`, so it can only ever run the generic
+   `default_runner`), and `provider/src/main.rs` has zero references to
+   `Instruction`/`.instruction()` - it is structurally incapable of
+   containing domain-specific business logic today, making it the
+   lowest-risk candidate by construction, not just by convention. Switch its
+   type alias to `Job<Erased>`/`Envelope<Erased>`, drop its `greatwestern`
+   dependency entirely, and confirm a manual multi-hop routing scenario -
+   for both Jobs and Notifications - still passes unchanged, including a
+   leaf agent on the far side successfully calling
+   `ensure_job_domain_matches`/`ensure_notification_domain_matches` and
+   seeing the *original* domain, not `"erased"`.
+   - **Motivating topology**: a single `provider` fronting *multiple*
+     portals, each potentially speaking a different `Domain`, each routed
+     to its own downstream cluster backend speaking the matching `Domain` -
+     supported for free, since `paddington`'s peer model is already N-to-N
+     (`agent::get_all(&Type::Portal)` already returns a `Vec`, not a single
+     peer) and routing is `Destination`-only for both Jobs and Notifications
+     (§3). One `Erased` provider replaces what would otherwise need to be
+     one recompiled provider binary per `Domain` in play.
+5. Document the `ensure_domain_matches` vs.
+   `ensure_job_domain_matches`/`ensure_notification_domain_matches` usage
+   rule (§8.1) prominently in `writing-a-domain.md`.
 6. Leave `clusters`/other routing-role agents on their current concrete
    `Domain` unless/until there's an actual multi-domain deployment need -
    this design makes the switch available, it doesn't mandate it.
 
 ## 10. Testing strategy
 
-- **Round-trip fidelity**: for a representative sample of real
+- **Round-trip fidelity (Jobs)**: for a representative sample of real
   `greatwestern::Instruction` variants, serialise as `Job<Hpc>`, deserialise
   as `Job<Erased>`, re-serialise, and diff against the original bytes -
   must be identical, including the new `domain`/`domain_version` fields.
+- **Round-trip fidelity (Notifications)**: same, for a representative
+  sample of real `greatwestern::NotificationEvent` variants (including at
+  least one with no inner data, one with a single identifier argument, and
+  the `Forward` variant itself) - `Notification<Hpc>` → `Notification<Erased>`
+  → re-serialise, byte-identical.
 - **Rejects nothing**: `Erased::parse_instruction`/`parse_notification_event`
-  must never return `Err` for any input string (property-test with
-  arbitrary strings, including empty and malformed ones) - the whole point
-  is that a router can't reject what it doesn't understand.
+  must never return `Err` for any input string, and `RawNotificationEvent`'s
+  `Deserialize` must never fail for any syntactically valid JSON value
+  (property-test both, including empty/malformed strings and arbitrary JSON
+  shapes) - the whole point is that a router can't reject what it doesn't
+  understand.
+- **`Forward`/`Raw` disambiguation** (§8.3): confirm a genuine `Forward`
+  notification round-trips as `Forward`, and a battery of real
+  `greatwestern::NotificationEvent` JSON shapes all round-trip as `Raw`
+  rather than being mis-parsed as `Forward`.
 - **Multi-domain proof**: two different toy `Domain`s (e.g.
   `templemeads::test_domain::TestDomain` and a second toy domain) both
-  routed successfully through one `Erased` agent in the same test process,
-  each arriving at its respective (correctly-typed) leaf agent intact, *and*
-  each leaf agent's `ensure_job_domain_matches` call confirming the correct
-  origin domain despite the intermediate `Erased` hop.
-- **Provenance survives multiple `Erased` hops**: a Job relayed through two
-  or more chained `Erased` routers still carries its original `domain`/
-  `domain_version` unchanged at the far end.
-- **Legacy fallback**: a `Job` JSON blob with no `domain`/`domain_version`
-  keys at all still deserialises (`#[serde(default)]`), and
-  `ensure_job_domain_matches` correctly falls back to the sender's
-  connection-level `peer_domain`.
-- **Runner safety**: confirm the default `Erased` runner errors rather than
-  panicking if a Job is ever actually addressed to the router itself.
+  routing successfully - Jobs *and* Notifications - through one `Erased`
+  agent in the same test process, each arriving at its respective
+  (correctly-typed) leaf agent intact, *and* each leaf agent's
+  `ensure_job_domain_matches`/`ensure_notification_domain_matches` call
+  confirming the correct origin domain despite the intermediate `Erased`
+  hop.
+- **Provenance survives multiple `Erased` hops**: a Job/Notification relayed
+  through two or more chained `Erased` routers still carries its original
+  `domain`/`domain_version` unchanged at the far end.
+- **Legacy fallback**: a `Job`/`Notification` JSON blob with no
+  `domain`/`domain_version` keys at all still deserialises
+  (`#[serde(default)]`), and the respective `ensure_*_domain_matches`
+  correctly falls back to the sender's connection-level `peer_domain`.
+- **Runner/notify-runner safety**: confirm the default `Erased`
+  implementations of both error/log rather than panic if a message is ever
+  actually addressed to the router itself.
 
 ## 11. Rejected/deferred alternative: a second, heavier type-erasure layer
 
@@ -420,8 +582,9 @@ because it costs every leaf agent a fallible downcast for a property
 (compile-time exhaustive matching) they'd otherwise get for free.
 
 That rejection doesn't apply here: `Erased` isn't a general replacement for
-`Job<L>`, it's one more implementation of the *existing* `Domain` trait,
-opted into only by agents that were never going to pattern-match on
-`Instruction` anyway. Leaf agents keep exactly the ergonomics they have
-today; only the subset of agents that already don't need typed instructions
-gain the ability to stop pretending they do.
+`Job<L>`/`Notification<L>`, it's one more implementation of the *existing*
+`Domain` trait, opted into only by agents that were never going to
+pattern-match on `Instruction`/`NotificationEvent` anyway. Leaf agents keep
+exactly the ergonomics they have today; only the subset of agents that
+already don't need typed instructions/events gain the ability to stop
+pretending they do.

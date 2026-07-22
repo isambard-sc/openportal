@@ -252,16 +252,33 @@ award_rejected <ProjectIdentifier>
 ## 4. Wire Representation
 
 A `Notification` is carried in the `Notify` variant of the Templemeads
-`Command` enum (see [wire-protocol.md](wire-protocol.md) §1.2). Its JSON
-structure is:
+`Command` enum (see [wire-protocol.md](wire-protocol.md) §1.2 - including
+that note's correction that this is serde's externally-tagged
+representation, `{"Notify": {...}}`, not a literal `"type"` key). Unlike
+`Instruction` (which serialises as a single opaque string via `Command`'s
+custom `Display`/`parse` - see [instruction-protocol.md](instruction-protocol.md)),
+`NotificationEvent` has no such custom serialisation - it serialises via
+serde's ordinary derive, so `event` is a **structured JSON object**, one key
+per enum variant:
 
 ```json
 {
-  "type": "Notify",
-  "notification": {
+  "Notify": {
     "id":          "<uuid-string>",
     "destination": "<dot-separated-agent-path>",
-    "event":       "<event-string>"
+    "event":       { "<EventVariant>": <variant-data-or-omitted> }
+  }
+}
+```
+
+**Example** (`user_added chris.project.brics`, addressed to `portal.clusters.shared`):
+
+```json
+{
+  "Notify": {
+    "id": "b2e...{uuid}",
+    "destination": "portal.clusters.shared",
+    "event": { "UserAdded": "chris.project.brics" }
   }
 }
 ```
@@ -270,7 +287,7 @@ structure is:
 |-------|------|-------------|
 | `id` | UUID string | Generated at creation; used only for logging and tracing. Not stored anywhere. |
 | `destination` | string | Dot-separated agent path, e.g. `portal.clusters.shared` |
-| `event` | string | `NotificationEvent` serialised as its display string, e.g. `user_added chris.project.portal` |
+| `event` | object | `NotificationEvent` serialised structurally (ordinary serde derive), one key per variant, e.g. `{"UserAdded": "chris.project.portal"}`. `event.to_string()` (via `Display`) gives the space-separated text form (`user_added chris.project.portal`) used in notification *strings* (§2) - the two are different representations of the same value, not interchangeable on the wire. |
 
 ---
 

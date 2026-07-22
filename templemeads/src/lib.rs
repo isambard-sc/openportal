@@ -35,7 +35,6 @@ pub mod diagnostics;
 pub mod domain;
 mod domain_static;
 pub use error::Error;
-pub mod grammar;
 pub mod health;
 pub mod job;
 pub mod named;
@@ -45,9 +44,6 @@ pub mod runnable;
 pub mod state;
 #[cfg(test)]
 mod test_domain;
-pub mod storage;
-pub mod storagereport;
-pub mod usagereport;
 
 pub mod server {
     pub use crate::bridge_server::sign_api_call;
@@ -73,21 +69,18 @@ mod tests {
         DiagnosticsReport, ExpiredJobEntry, FailedJobEntry, JobStatistics, LogEntry,
         RunningJobEntry, SlowJobEntry,
     };
-    use crate::grammar::{AwardDetails, Link, MembershipControl, Note};
     use crate::health::HealthInfo;
     use crate::job::Status;
-    use crate::storage::{Quota, Volume};
-    use crate::storagereport::{ProjectStorageReport, StorageReport};
-    use crate::usagereport::{
-        DailyProjectUsageReport, ProjectUsageReport, Usage, UsageReport, UserUsageReport,
-    };
     use ts_rs::TS;
 
+    // Domain-vocabulary types (Instruction/identifiers, usage/storage
+    // reports, Link/Note/MembershipControl/AwardDetails, ...) export their
+    // own TS bindings from the domain crate (e.g. greatwestern) that owns
+    // them - templemeads only exports the framework-level types below,
+    // which exist regardless of which Domain an agent is built against.
     #[allow(clippy::expect_used)]
     #[test]
     fn export_ts_bindings() {
-        // Job<L>'s TS export is inherently tied to one concrete Domain, so
-        // it is exported from the domain crate, not here.
         AgentType::export_all().expect("Could not export AgentType");
         Status::export_all().expect("Could not export Status");
         JobStatistics::export_all().expect("Could not export JobStatistics");
@@ -98,18 +91,5 @@ mod tests {
         RunningJobEntry::export_all().expect("Could not export RunningJobEntry");
         LogEntry::export_all().expect("Could not export LogEntry");
         HealthInfo::export_all().expect("Could not export HealthInfo");
-        Volume::export_all().expect("Could not export Volume");
-        Quota::export_all().expect("Could not export Quota");
-        Usage::export_all().expect("Could not export Usage");
-        UserUsageReport::export_all().expect("Could not export UserUsageReport");
-        DailyProjectUsageReport::export_all().expect("Could not export DailyProjectUsageReport");
-        ProjectUsageReport::export_all().expect("Could not export ProjectUsageReport");
-        UsageReport::export_all().expect("Could not export UsageReport");
-        ProjectStorageReport::export_all().expect("Could not export ProjectStorageReport");
-        StorageReport::export_all().expect("Could not export StorageReport");
-        Link::export_all().expect("Could not export Link");
-        Note::export_all().expect("Could not export Note");
-        MembershipControl::export_all().expect("Could not export MembershipControl");
-        AwardDetails::export_all().expect("Could not export AwardDetails");
     }
 }

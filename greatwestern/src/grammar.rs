@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-use crate::destination::{Destination, Destinations};
-use crate::error::Error;
-use crate::named::NamedType;
-use crate::portal_identifier::PortalIdentifier;
+use templemeads::destination::{Destination, Destinations};
+use templemeads::Error;
+use templemeads::named::NamedType;
+use templemeads::portal_identifier::PortalIdentifier;
 use crate::storage::{QuotaLimit, Volume};
 use crate::usagereport::Usage;
 
@@ -27,14 +27,8 @@ pub struct ProjectIdentifier {
 }
 
 impl NamedType for ProjectIdentifier {
-    fn type_name() -> &'static str {
-        "ProjectIdentifier"
-    }
-}
-
-impl NamedType for Vec<ProjectIdentifier> {
-    fn type_name() -> &'static str {
-        "Vec<ProjectIdentifier>"
+    fn type_name() -> String {
+        "ProjectIdentifier".to_string()
     }
 }
 
@@ -130,14 +124,8 @@ pub struct UserIdentifier {
 }
 
 impl NamedType for UserIdentifier {
-    fn type_name() -> &'static str {
-        "UserIdentifier"
-    }
-}
-
-impl NamedType for Vec<UserIdentifier> {
-    fn type_name() -> &'static str {
-        "Vec<UserIdentifier>"
+    fn type_name() -> String {
+        "UserIdentifier".to_string()
     }
 }
 
@@ -246,14 +234,8 @@ pub struct ProjectMapping {
 }
 
 impl NamedType for ProjectMapping {
-    fn type_name() -> &'static str {
-        "ProjectMapping"
-    }
-}
-
-impl NamedType for Vec<ProjectMapping> {
-    fn type_name() -> &'static str {
-        "Vec<ProjectMapping>"
+    fn type_name() -> String {
+        "ProjectMapping".to_string()
     }
 }
 
@@ -356,14 +338,8 @@ pub struct UserMapping {
 }
 
 impl NamedType for UserMapping {
-    fn type_name() -> &'static str {
-        "UserMapping"
-    }
-}
-
-impl NamedType for Vec<UserMapping> {
-    fn type_name() -> &'static str {
-        "Vec<UserMapping>"
+    fn type_name() -> String {
+        "UserMapping".to_string()
     }
 }
 
@@ -527,14 +503,8 @@ pub struct Hour {
 }
 
 impl NamedType for Hour {
-    fn type_name() -> &'static str {
-        "Hour"
-    }
-}
-
-impl NamedType for Vec<Hour> {
-    fn type_name() -> &'static str {
-        "Vec<Hour>"
+    fn type_name() -> String {
+        "Hour".to_string()
     }
 }
 
@@ -696,14 +666,8 @@ pub struct Date {
 }
 
 impl NamedType for Date {
-    fn type_name() -> &'static str {
-        "Date"
-    }
-}
-
-impl NamedType for Vec<Date> {
-    fn type_name() -> &'static str {
-        "Vec<Date>"
+    fn type_name() -> String {
+        "Date".to_string()
     }
 }
 
@@ -1037,14 +1001,8 @@ pub struct DateRange {
 }
 
 impl NamedType for DateRange {
-    fn type_name() -> &'static str {
-        "DateRange"
-    }
-}
-
-impl NamedType for Vec<DateRange> {
-    fn type_name() -> &'static str {
-        "Vec<DateRange>"
+    fn type_name() -> String {
+        "DateRange".to_string()
     }
 }
 
@@ -1340,8 +1298,8 @@ impl ProjectTemplate {
 }
 
 impl NamedType for ProjectTemplate {
-    fn type_name() -> &'static str {
-        "ProjectTemplate"
+    fn type_name() -> String {
+        "ProjectTemplate".to_string()
     }
 }
 
@@ -1482,8 +1440,8 @@ impl Node {
 }
 
 impl NamedType for Node {
-    fn type_name() -> &'static str {
-        "Node"
+    fn type_name() -> String {
+        "Node".to_string()
     }
 }
 
@@ -1677,14 +1635,8 @@ impl Allocation {
 }
 
 impl NamedType for Allocation {
-    fn type_name() -> &'static str {
-        "Allocation"
-    }
-}
-
-impl NamedType for Vec<Allocation> {
-    fn type_name() -> &'static str {
-        "Vec<Allocation>"
+    fn type_name() -> String {
+        "Allocation".to_string()
     }
 }
 
@@ -1763,8 +1715,8 @@ pub struct DomainPattern {
 }
 
 impl NamedType for DomainPattern {
-    fn type_name() -> &'static str {
-        "DomainPattern"
+    fn type_name() -> String {
+        "DomainPattern".to_string()
     }
 }
 
@@ -2198,14 +2150,8 @@ pub struct AwardDetails {
 }
 
 impl NamedType for AwardDetails {
-    fn type_name() -> &'static str {
-        "ProjectDetails"
-    }
-}
-
-impl NamedType for Vec<AwardDetails> {
-    fn type_name() -> &'static str {
-        "Vec<ProjectDetails>"
+    fn type_name() -> String {
+        "ProjectDetails".to_string()
     }
 }
 
@@ -4830,6 +4776,84 @@ impl<'de> Deserialize<'de> for Instruction {
             Ok(instruction) => Ok(instruction),
             Err(e) => Err(serde::de::Error::custom(e.to_string())),
         }
+    }
+}
+
+///
+/// The portal that "owns" this instruction, i.e. whose name a job's
+/// destination's first hop must match - ported verbatim from the
+/// `check_portal` logic that used to live directly inside
+/// `templemeads::job::Command::parse` before the command grammar was split
+/// out into this crate. Wired up via `Domain::owning_portal` for `Hpc`.
+///
+pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
+    let user = match instruction.clone() {
+        Instruction::AddUser(user) => Some(user),
+        Instruction::RemoveUser(user) => Some(user),
+        Instruction::AddLocalUser(user) => Some(user.user().clone()),
+        Instruction::RemoveLocalUser(user) => Some(user.user().clone()),
+        Instruction::UpdateHomeDir(user, _) => Some(user),
+        Instruction::GetUserMapping(user) => Some(user),
+        Instruction::IsProtectedUser(user) => Some(user),
+        Instruction::IsExistingUser(user) => Some(user),
+        Instruction::GetHomeDir(user) => Some(user),
+        Instruction::GetLocalHomeDir(user) => Some(user.user().clone()),
+        Instruction::GetUserQuota(user, _) => Some(user),
+        Instruction::SetUserQuota(user, _, _) => Some(user),
+        Instruction::ClearUserQuota(user, _) => Some(user),
+        Instruction::GetUserQuotas(user) => Some(user),
+        Instruction::GetLocalUserQuota(user, _) => Some(user.user().clone()),
+        Instruction::SetLocalUserQuota(user, _, _) => Some(user.user().clone()),
+        Instruction::ClearLocalUserQuota(user, _) => Some(user.user().clone()),
+        Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
+        Instruction::GetUserDirs(user) => Some(user),
+        Instruction::GetLocalUserDirs(user) => Some(user.user().clone()),
+        _ => None,
+    };
+
+    if let Some(user) = user {
+        return Some(user.portal_identifier());
+    }
+
+    let project = match instruction.clone() {
+        Instruction::CreateProject(project, _) => Some(project),
+        Instruction::UpdateProject(project, _) => Some(project),
+        Instruction::GetProject(project) => Some(project),
+        Instruction::GetAward(project) => Some(project),
+        Instruction::AddProject(project) => Some(project),
+        Instruction::AddLocalProject(project) => Some(project.project().clone()),
+        Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
+        Instruction::IsExistingProject(project) => Some(project),
+        Instruction::GetUsers(project) => Some(project),
+        Instruction::RemoveProject(project) => Some(project),
+        Instruction::GetUsageReport(project, _) => Some(project),
+        Instruction::GetLocalUsageReport(project, _) => Some(project.project().clone()),
+        Instruction::GetProjectMapping(project) => Some(project),
+        Instruction::GetLocalLimit(project) => Some(project.project().clone()),
+        Instruction::SetLocalLimit(project, _) => Some(project.project().clone()),
+        Instruction::GetLimit(project) => Some(project),
+        Instruction::SetLimit(project, _) => Some(project),
+        Instruction::GetProjectDirs(project) => Some(project),
+        Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
+        Instruction::GetProjectQuota(project, _) => Some(project),
+        Instruction::SetProjectQuota(project, _, _) => Some(project),
+        Instruction::ClearProjectQuota(project, _) => Some(project),
+        Instruction::GetProjectQuotas(project) => Some(project),
+        Instruction::GetLocalProjectQuota(project, _) => Some(project.project().clone()),
+        Instruction::SetLocalProjectQuota(project, _, _) => Some(project.project().clone()),
+        Instruction::ClearLocalProjectQuota(project, _) => Some(project.project().clone()),
+        Instruction::GetLocalProjectQuotas(project) => Some(project.project().clone()),
+        _ => None,
+    };
+
+    if let Some(project) = project {
+        return Some(project.portal_identifier());
+    }
+
+    match instruction.clone() {
+        Instruction::GetProjects(portal) => Some(portal),
+        Instruction::GetUsageReports(portal, _) => Some(portal),
+        _ => None,
     }
 }
 

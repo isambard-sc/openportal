@@ -3,29 +3,34 @@
 
 use anyhow::Result;
 
+use greatwestern::grammar::Instruction::{
+    AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
+    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers,
+    RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
+};
+use greatwestern::grammar::{
+    DateRange, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
+};
+use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
+use greatwestern::usagereport::{ProjectUsageReport, UsageReport};
+use greatwestern::{Hpc, NotificationEvent};
 use templemeads::agent;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::command::Command;
-use templemeads::notification::{self, NotificationEnvelope, NotificationEvent};
+use templemeads::notification::{self};
 use templemeads::set_notify_runner;
 
 use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
-use templemeads::grammar::Instruction::{
-    AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
-    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers,
-    RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
-};
-use templemeads::grammar::{
-    DateRange, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
-};
-use templemeads::job::{send_queued, Envelope, Job};
+use templemeads::job::send_queued;
 use templemeads::portal_identifier::PortalIdentifier;
-use templemeads::storagereport::{ProjectStorageReport, StorageReport};
-use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
+type NotificationEnvelope = templemeads::notification::NotificationEnvelope<Hpc>;
 
 ///
 /// Main function for the portal instance agent
@@ -42,7 +47,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -89,21 +94,21 @@ async fn main() -> Result<()> {
                     tracing::debug!("Creating project {} with details {}", project, details);
 
                     let result = create_project(&me, &resource, &project, &details, &job.destination()).await?;
-                    notification::send(&job.destination().reverse(), NotificationEvent::AwardAdded(project.clone())).await;
+                    notification::send::<Hpc>(&job.destination().reverse(), NotificationEvent::AwardAdded(project.clone())).await;
                     job.completed(result)
                 }
                 RemoveProject(project) => {
                     tracing::debug!("Removing project {}", project);
 
                     let result = remove_project(&me, &resource, &project, &job.destination()).await?;
-                    notification::send(&job.destination().reverse(), NotificationEvent::AwardRemoved(project.clone())).await;
+                    notification::send::<Hpc>(&job.destination().reverse(), NotificationEvent::AwardRemoved(project.clone())).await;
                     job.completed(result)
                 }
                 UpdateProject(project, details) => {
                     tracing::debug!("Updating project {} with details {}", project, details);
 
                     let result = update_project(&me, &resource, &project, &details, &job.destination()).await?;
-                    notification::send(&job.destination().reverse(), NotificationEvent::AwardChanged(project.clone())).await;
+                    notification::send::<Hpc>(&job.destination().reverse(), NotificationEvent::AwardChanged(project.clone())).await;
                     job.completed(result)
                 }
                 GetProject(project) => {
@@ -476,7 +481,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    set_notify_runner(portal_notify_runner).await?;
+    set_notify_runner::<Hpc>(portal_notify_runner).await?;
 
     // run the portal agent
     run(config, portal_runner).await?;
@@ -642,7 +647,7 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
                 let peer = agent::Peer::new(&resource, &zone);
 
                 tracing::debug!("Sending queued jobs to virtual agent {}", peer);
-                if let Err(e) = send_queued(&peer).await {
+                if let Err(e) = send_queued::<Hpc>(&peer).await {
                     tracing::warn!("Error sending queued jobs to virtual agent {}: {}", peer, e);
                 }
             }

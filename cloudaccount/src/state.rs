@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
-use templemeads::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
+use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
 use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 

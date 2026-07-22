@@ -13,23 +13,26 @@ use clap::{Parser, Subcommand};
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 
-use templemeads::agent;
-use templemeads::agent::portal::{process_args, run, Config, Defaults};
-use templemeads::agent::Type as AgentType;
-use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{
+use greatwestern::grammar::Instruction::{
     CreateProject, GetAward, GetAwards, GetProject, GetProjectMapping, GetProjects,
     GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
     UpdateProject,
 };
-use templemeads::grammar::{DateRange, ProjectIdentifier};
-use templemeads::portal_identifier::PortalIdentifier;
-use templemeads::job::{Envelope, Job};
+use greatwestern::grammar::{DateRange, ProjectIdentifier};
+use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
+use greatwestern::usagereport::{ProjectUsageReport, UsageReport};
+use greatwestern::Hpc;
+use templemeads::agent;
+use templemeads::agent::portal::{process_args, run, Config, Defaults};
+use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
 use templemeads::notification::default_notify_runner;
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::set_notify_runner;
-use templemeads::storagereport::{ProjectStorageReport, StorageReport};
-use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 const CLOUDACCOUNT_WAIT_TIME: u64 = 5;
 const POLL_INTERVAL_SECS: u64 = 30;
@@ -78,7 +81,7 @@ async fn main() -> Result<()> {
     }
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -190,7 +193,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    set_notify_runner(default_notify_runner).await?;
+    set_notify_runner::<Hpc>(default_notify_runner).await?;
 
     // background provisioning poller - see design doc §7. Started before
     // `run()` so it runs alongside the normal job-handling event loop.
@@ -239,7 +242,7 @@ fn parse_offerings(s: &str) -> HashMap<String, String> {
 /// only thing that disambiguates which `op-cloudaccount` a create_project
 /// should map to (design doc §4). Fails loudly if `template` is missing or
 /// unrecognised - there's no sensible default cloud provider to fall back to.
-async fn resolve_offering(details: &templemeads::grammar::AwardDetails) -> Result<String, Error> {
+async fn resolve_offering(details: &greatwestern::grammar::AwardDetails) -> Result<String, Error> {
     let template = details.template().ok_or_else(|| {
         Error::InvalidInstruction(
             "AwardDetails.template is required to select a cloud offering".to_string(),
@@ -375,7 +378,7 @@ async fn provision_award(record: &state::AwardRecord) -> Result<(), Error> {
     let me = agent::name().await;
     let project = record.project();
 
-    let _: Option<templemeads::grammar::ProjectMapping> = Job::parse(
+    let _: Option<greatwestern::grammar::ProjectMapping> = Job::parse(
         &format!("{}.{} add_project {}", me, peer.name(), project),
         false,
     )?
@@ -388,7 +391,7 @@ async fn provision_award(record: &state::AwardRecord) -> Result<(), Error> {
     for email in record.unprovisioned_members() {
         let user = identity::user_identifier_for_email(project, &email)?;
 
-        let _: Option<templemeads::grammar::UserMapping> =
+        let _: Option<greatwestern::grammar::UserMapping> =
             Job::parse(&format!("{}.{} add_user {}", me, peer.name(), user), false)?
                 .put(&peer)
                 .await?
@@ -465,7 +468,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use templemeads::grammar::ProjectTemplate;
+    use greatwestern::grammar::ProjectTemplate;
 
     #[test]
     fn test_parse_offerings() {
@@ -489,15 +492,15 @@ mod tests {
     async fn test_resolve_offering() {
         *OFFERINGS.write().await = parse_offerings("aws:cloudaccount-aws");
 
-        let mut with_template = templemeads::grammar::AwardDetails::new();
+        let mut with_template = greatwestern::grammar::AwardDetails::new();
         with_template.set_template(ProjectTemplate::parse("aws").unwrap());
         assert_eq!(resolve_offering(&with_template).await.unwrap(), "aws");
 
-        let mut unknown_template = templemeads::grammar::AwardDetails::new();
+        let mut unknown_template = greatwestern::grammar::AwardDetails::new();
         unknown_template.set_template(ProjectTemplate::parse("azure").unwrap());
         assert!(resolve_offering(&unknown_template).await.is_err());
 
-        let no_template = templemeads::grammar::AwardDetails::new();
+        let no_template = greatwestern::grammar::AwardDetails::new();
         assert!(resolve_offering(&no_template).await.is_err());
     }
 }

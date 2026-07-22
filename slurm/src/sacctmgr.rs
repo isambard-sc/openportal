@@ -8,9 +8,9 @@ use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::sync::Arc;
-use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::job::assert_not_expired;
-use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
 use tokio::sync::Mutex;
 
@@ -1018,7 +1018,7 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
 async fn get_hourly_report(
     expires: &chrono::DateTime<Utc>,
     project: &ProjectMapping,
-    day: &templemeads::grammar::Date,
+    day: &greatwestern::grammar::Date,
     account: &SlurmAccount,
     slurm_nodes: &SlurmNodes,
     cluster: &str,
@@ -1216,7 +1216,7 @@ async fn get_hourly_report(
 async fn get_daily_report(
     expires: &chrono::DateTime<Utc>,
     project: &ProjectMapping,
-    day: &templemeads::grammar::Date,
+    day: &greatwestern::grammar::Date,
     account: &SlurmAccount,
     slurm_nodes: &SlurmNodes,
     cluster: &str,

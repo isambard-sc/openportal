@@ -6,7 +6,7 @@ use chrono::Utc;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use templemeads::agent::Peer;
-use templemeads::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
+use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
 use templemeads::job::assert_not_expired;
 use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;

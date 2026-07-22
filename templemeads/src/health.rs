@@ -401,8 +401,8 @@ impl HealthInfo {
 }
 
 impl NamedType for HealthInfo {
-    fn type_name() -> &'static str {
-        "HealthInfo"
+    fn type_name() -> String {
+        "HealthInfo".to_string()
     }
 }
 

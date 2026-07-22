@@ -7,21 +7,26 @@ use std::time::Duration;
 use tokio::time::sleep;
 use url::Url;
 
+use greatwestern::grammar::Instruction::{
+    CreateProject, GetAward, GetAwards, GetProject, GetProjectMapping, GetProjects,
+    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
+    SyncOfferings, UpdateProject,
+};
+use greatwestern::Hpc;
 use templemeads::agent;
 use templemeads::agent::bridge::{process_args, run, Defaults};
 use templemeads::async_runnable;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::diagnostics;
-use templemeads::grammar::Instruction::{
-    CreateProject, GetAward, GetAwards, GetProject, GetProjectMapping, GetProjects,
-    GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
-    SyncOfferings, UpdateProject,
-};
-use templemeads::job::{send_queued, Envelope, Job};
-use templemeads::notification::{Notification, NotificationEnvelope};
+use templemeads::job::send_queued;
 use templemeads::server;
 use templemeads::set_notify_runner;
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
+type Notification = templemeads::notification::Notification<Hpc>;
+type NotificationEnvelope = templemeads::notification::NotificationEnvelope<Hpc>;
 
 ///
 /// Main function for the bridge application
@@ -42,7 +47,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -77,7 +82,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let board = server::get_board().await?;
+    let board = server::get_board::<Hpc>().await?;
 
     if let Some(signal_url) = &config.bridge.signal_url {
         board.write().await.set_signal_url(signal_url.clone());
@@ -133,7 +138,7 @@ async fn main() -> Result<()> {
                     // create a new project in the cluster
                     tracing::debug!("Creating project {} with details {:?}", project, details);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -167,7 +172,7 @@ async fn main() -> Result<()> {
                     // remove the project from the cluster
                     tracing::debug!("Removing project {}", project);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -201,7 +206,7 @@ async fn main() -> Result<()> {
                     // update the project in the cluster
                     tracing::debug!("Updating project {} with details {:?}", project, details);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -235,7 +240,7 @@ async fn main() -> Result<()> {
                     // get the project from the cluster
                     tracing::debug!("Getting project {}", project);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -267,7 +272,7 @@ async fn main() -> Result<()> {
                 GetProjects(portal) => {
                     tracing::debug!("Getting projects for portal {}", portal);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -299,7 +304,7 @@ async fn main() -> Result<()> {
                 GetAward(project) => {
                     tracing::debug!("Getting award for project {}", project);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -331,7 +336,7 @@ async fn main() -> Result<()> {
                 GetAwards(portal) => {
                     tracing::debug!("Getting all awards for portal {}", portal);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -364,7 +369,7 @@ async fn main() -> Result<()> {
                     // get the project mapping from the cluster
                     tracing::debug!("Getting project mapping for {}", project);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -397,7 +402,7 @@ async fn main() -> Result<()> {
                     // get the users (UserIdentifier → email) for the project
                     tracing::debug!("Getting users for project {}", project);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -430,7 +435,7 @@ async fn main() -> Result<()> {
                     // get the usage report for the project from the cluster
                     tracing::debug!("Getting usage report for {} for dates {}", project, dates);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -463,7 +468,7 @@ async fn main() -> Result<()> {
                     // get the usage reports for the portal from the cluster
                     tracing::debug!("Getting usage reports for {} for dates {}", portal, dates);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -496,7 +501,7 @@ async fn main() -> Result<()> {
                     // get the storage report for the project from the cluster
                     tracing::debug!("Getting storage report for {}", project);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -529,7 +534,7 @@ async fn main() -> Result<()> {
                     // get the storage reports for the portal from the cluster
                     tracing::debug!("Getting storage reports for {}", portal);
 
-                    let board = server::get_board().await?;
+                    let board = server::get_board::<Hpc>().await?;
 
                     let waiter = board.write().await.add(&job)?;
 
@@ -577,7 +582,7 @@ async fn main() -> Result<()> {
     }
 
     // run the Bridge agent
-    set_notify_runner(bridge_notify_runner).await?;
+    set_notify_runner::<Hpc>(bridge_notify_runner).await?;
     spawn_notification_delivery_task();
     run(config, bridge_runner).await?;
 
@@ -589,8 +594,15 @@ async fn main() -> Result<()> {
 fn spawn_notification_delivery_task() {
     tokio::spawn(async move {
         loop {
-            let notification = server::pop_queued_notification().await;
-            let board = match server::get_board().await {
+            let notification = match server::pop_queued_notification::<Hpc>().await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!("Notification delivery: could not pop queue: {}", e);
+                    sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+            };
+            let board = match server::get_board::<Hpc>().await {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::error!("Notification delivery: could not get board: {}", e);
@@ -632,7 +644,7 @@ async fn deliver_notification(notification_url: &Option<Url>, notification: &Not
         Ok(c) => c,
         Err(e) => {
             tracing::error!("Failed to build HTTP client for notification: {}", e);
-            server::remove_pending_notification(notification.id()).await;
+            server::remove_pending_notification::<Hpc>(notification.id()).await;
             diagnostics::increment_notification_failed().await;
             return;
         }
@@ -652,7 +664,7 @@ async fn deliver_notification(notification_url: &Option<Url>, notification: &Not
                     notification.id(),
                     notification.event()
                 );
-                server::remove_pending_notification(notification.id()).await;
+                server::remove_pending_notification::<Hpc>(notification.id()).await;
                 diagnostics::increment_notification_sent().await;
                 return;
             }
@@ -685,7 +697,7 @@ async fn deliver_notification(notification_url: &Option<Url>, notification: &Not
         notification.id(),
         notification.event()
     );
-    server::remove_pending_notification(notification.id()).await;
+    server::remove_pending_notification::<Hpc>(notification.id()).await;
     diagnostics::increment_notification_failed().await;
 }
 
@@ -784,7 +796,7 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
         let peer = agent::Peer::new(&resource, portal.zone());
 
         tracing::debug!("Sending queued jobs to virtual agent {}", peer);
-        if let Err(e) = send_queued(&peer).await {
+        if let Err(e) = send_queued::<Hpc>(&peer).await {
             tracing::warn!("Error sending queued jobs to virtual agent {}: {}", peer, e);
         }
     }

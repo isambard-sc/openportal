@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct TestInstruction(pub String);
 
 impl NamedType for TestInstruction {
-    fn type_name() -> &'static str {
-        "TestInstruction"
+    fn type_name() -> String {
+        "TestInstruction".to_string()
     }
 }
 

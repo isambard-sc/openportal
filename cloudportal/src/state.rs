@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
-use templemeads::grammar::{AwardDetails, Note, ProjectIdentifier, ProjectMapping, UserMapping};
+use greatwestern::grammar::{AwardDetails, Note, ProjectIdentifier, ProjectMapping, UserMapping};
 use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 
@@ -381,7 +381,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use templemeads::grammar::ProjectTemplate;
+    use greatwestern::grammar::ProjectTemplate;
 
     fn test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("op-cloudportal-test-state-{}", name))

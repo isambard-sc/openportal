@@ -8,20 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::cmp::{Ord, Ordering};
 
 impl NamedType for Destination {
-    fn type_name() -> &'static str {
-        "Destination"
+    fn type_name() -> String {
+        "Destination".to_string()
     }
 }
 
 impl NamedType for Destinations {
-    fn type_name() -> &'static str {
-        "Destinations"
-    }
-}
-
-impl NamedType for Vec<Destination> {
-    fn type_name() -> &'static str {
-        "Vec<Destination>"
+    fn type_name() -> String {
+        "Destinations".to_string()
     }
 }
 

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 use crate::error::Error;
-use crate::named::NamedType;
 use crate::notification::Notification;
 use crate::portal_identifier::PortalIdentifier;
 
@@ -27,7 +26,6 @@ pub trait Domain: Clone + std::fmt::Debug + 'static {
         + std::fmt::Display
         + Serialize
         + for<'de> Deserialize<'de>
-        + NamedType
         + Send
         + Sync
         + 'static;

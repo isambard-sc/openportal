@@ -21,8 +21,8 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 
 use serde::Deserialize;
-use templemeads::grammar::{Date, DateRange, ProjectIdentifier};
-use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
+use greatwestern::grammar::{Date, DateRange, ProjectIdentifier};
+use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
 
 /// 1 `Usage` second = 1 / CURRENCY_SCALE of the configured currency.

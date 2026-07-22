@@ -549,7 +549,7 @@ impl<L: Domain> Job<L> {
                 command: self.command.clone(),
                 state: Status::Complete,
                 result: Some(serde_json::to_string(&result)?),
-                result_type: Some(T::type_name().to_string()),
+                result_type: Some(T::type_name()),
                 forwarded_for: self.forwarded_for.clone(),
                 board: self.board.clone(),
             }),

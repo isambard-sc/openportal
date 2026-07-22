@@ -5,8 +5,8 @@ use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
-use templemeads::grammar::{Date, Hour, ProjectIdentifier, UserIdentifier};
-use templemeads::usagereport::DailyProjectUsageReport;
+use greatwestern::grammar::{Date, Hour, ProjectIdentifier, UserIdentifier};
+use greatwestern::usagereport::DailyProjectUsageReport;
 use templemeads::Error;
 use tokio::sync::{Mutex, RwLock};
 

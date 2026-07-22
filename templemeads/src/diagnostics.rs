@@ -162,38 +162,38 @@ pub struct LogEntry {
 }
 
 impl NamedType for DiagnosticsReport {
-    fn type_name() -> &'static str {
-        "DiagnosticsReport"
+    fn type_name() -> String {
+        "DiagnosticsReport".to_string()
     }
 }
 
 impl NamedType for FailedJobEntry {
-    fn type_name() -> &'static str {
-        "FailedJobEntry"
+    fn type_name() -> String {
+        "FailedJobEntry".to_string()
     }
 }
 
 impl NamedType for SlowJobEntry {
-    fn type_name() -> &'static str {
-        "SlowJobEntry"
+    fn type_name() -> String {
+        "SlowJobEntry".to_string()
     }
 }
 
 impl NamedType for ExpiredJobEntry {
-    fn type_name() -> &'static str {
-        "ExpiredJobEntry"
+    fn type_name() -> String {
+        "ExpiredJobEntry".to_string()
     }
 }
 
 impl NamedType for RunningJobEntry {
-    fn type_name() -> &'static str {
-        "RunningJobEntry"
+    fn type_name() -> String {
+        "RunningJobEntry".to_string()
     }
 }
 
 impl NamedType for LogEntry {
-    fn type_name() -> &'static str {
-        "LogEntry"
+    fn type_name() -> String {
+        "LogEntry".to_string()
     }
 }
 

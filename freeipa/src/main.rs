@@ -11,19 +11,23 @@ use freeipa::IPAGroup;
 
 mod cache;
 
-use templemeads::agent::account::{process_args, run, Defaults};
-use templemeads::agent::{Peer, Type as AgentType};
-use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{
+use greatwestern::grammar::Instruction::{
     AddProject, AddUser, BlockUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
     IsBlockedUser, IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser,
     UnblockUser, UpdateHomeDir,
 };
-use templemeads::grammar::UserMapping;
-use templemeads::job::{assert_not_expired, Envelope, Job};
+use greatwestern::grammar::UserMapping;
+use greatwestern::Hpc;
+use templemeads::agent::account::{process_args, run, Defaults};
+use templemeads::agent::{Peer, Type as AgentType};
+use templemeads::async_runnable;
+use templemeads::job::assert_not_expired;
 use templemeads::notification::default_notify_runner;
 use templemeads::set_notify_runner;
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 ///
 /// Main function for the freeipa-account application
@@ -38,7 +42,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults: Defaults = Defaults::parse(
@@ -197,7 +201,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    set_notify_runner(default_notify_runner).await?;
+    set_notify_runner::<Hpc>(default_notify_runner).await?;
     run(config, freeipa_runner).await?;
 
     Ok(())

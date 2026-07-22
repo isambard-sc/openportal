@@ -13,7 +13,7 @@
 //! to the same string (e.g. `a.b@x.com` and `a_b@x.com`) would collide.
 //! Acceptable for a rough prototype; worth revisiting if this hardens.
 
-use templemeads::grammar::{ProjectIdentifier, UserIdentifier, UserMapping};
+use greatwestern::grammar::{ProjectIdentifier, UserIdentifier, UserMapping};
 use templemeads::Error;
 
 fn sanitise_email(email: &str) -> String {

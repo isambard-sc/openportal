@@ -4,23 +4,26 @@
 use anyhow::Result;
 use chrono::Utc;
 
-use templemeads::agent;
-use templemeads::agent::filesystem::{process_args, run, Defaults};
-use templemeads::agent::Type as AgentType;
-use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{
+use greatwestern::grammar::Instruction::{
     AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
     GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalStorageReport,
     GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
     SetLocalProjectQuota, SetLocalUserQuota,
 };
-use templemeads::grammar::{Date, ProjectMapping, UserMapping};
-use templemeads::job::{Envelope, Job};
+use greatwestern::grammar::{Date, ProjectMapping, UserMapping};
+use greatwestern::storage::Quota;
+use greatwestern::storagereport::ProjectStorageReport;
+use greatwestern::Hpc;
+use templemeads::agent;
+use templemeads::agent::filesystem::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
 use templemeads::notification::default_notify_runner;
 use templemeads::set_notify_runner;
-use templemeads::storage::Quota;
-use templemeads::storagereport::ProjectStorageReport;
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 mod cache;
 mod fakequotaengine;
@@ -46,7 +49,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults: Defaults<FilesystemConfig> = Defaults::parse(
@@ -232,7 +235,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    set_notify_runner(default_notify_runner).await?;
+    set_notify_runner::<Hpc>(default_notify_runner).await?;
     run(config, filesystem_runner).await?;
 
     Ok(())
@@ -488,8 +491,8 @@ async fn remove_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
 /// Clear the storage quota for a project on a specific volume
 ///
 pub async fn clear_project_quota(
-    mapping: &templemeads::grammar::ProjectMapping,
-    volume: &templemeads::storage::Volume,
+    mapping: &greatwestern::grammar::ProjectMapping,
+    volume: &greatwestern::storage::Volume,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
     let config = cache::get_filesystem_config().await?;
@@ -519,11 +522,11 @@ pub async fn clear_project_quota(
 /// Set a storage quota for a project on a specific volume
 ///
 pub async fn set_project_quota(
-    mapping: &templemeads::grammar::ProjectMapping,
-    volume: &templemeads::storage::Volume,
-    limit: &templemeads::storage::QuotaLimit,
+    mapping: &greatwestern::grammar::ProjectMapping,
+    volume: &greatwestern::storage::Volume,
+    limit: &greatwestern::storage::QuotaLimit,
     expires: &chrono::DateTime<Utc>,
-) -> Result<templemeads::storage::Quota, Error> {
+) -> Result<greatwestern::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
     let volume_config = config.get_project_volume(volume)?;
@@ -551,10 +554,10 @@ pub async fn set_project_quota(
 /// Get the storage quota for a project on a specific volume
 ///
 pub async fn get_project_quota(
-    mapping: &templemeads::grammar::ProjectMapping,
-    volume: &templemeads::storage::Volume,
+    mapping: &greatwestern::grammar::ProjectMapping,
+    volume: &greatwestern::storage::Volume,
     expires: &chrono::DateTime<Utc>,
-) -> Result<templemeads::storage::Quota, Error> {
+) -> Result<greatwestern::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
     let volume_config = config.get_project_volume(volume)?;
@@ -582,10 +585,10 @@ pub async fn get_project_quota(
 /// Get all storage quotas for a project across all volumes
 ///
 pub async fn get_project_quotas(
-    mapping: &templemeads::grammar::ProjectMapping,
+    mapping: &greatwestern::grammar::ProjectMapping,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<
-    std::collections::HashMap<templemeads::storage::Volume, templemeads::storage::Quota>,
+    std::collections::HashMap<greatwestern::storage::Volume, greatwestern::storage::Quota>,
     Error,
 > {
     let config = cache::get_filesystem_config().await?;
@@ -640,8 +643,8 @@ pub async fn get_project_quotas(
 /// Clear a user quota for a user on a specific volume
 ///
 pub async fn clear_user_quota(
-    mapping: &templemeads::grammar::UserMapping,
-    volume: &templemeads::storage::Volume,
+    mapping: &greatwestern::grammar::UserMapping,
+    volume: &greatwestern::storage::Volume,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
     let config = cache::get_filesystem_config().await?;
@@ -671,11 +674,11 @@ pub async fn clear_user_quota(
 /// Set a storage quota for a user on a specific volume
 ///
 pub async fn set_user_quota(
-    mapping: &templemeads::grammar::UserMapping,
-    volume: &templemeads::storage::Volume,
-    limit: &templemeads::storage::QuotaLimit,
+    mapping: &greatwestern::grammar::UserMapping,
+    volume: &greatwestern::storage::Volume,
+    limit: &greatwestern::storage::QuotaLimit,
     expires: &chrono::DateTime<Utc>,
-) -> Result<templemeads::storage::Quota, Error> {
+) -> Result<greatwestern::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
     let volume_config = config.get_user_volume(volume)?;
@@ -703,10 +706,10 @@ pub async fn set_user_quota(
 /// Get the storage quota for a user on a specific volume
 ///
 pub async fn get_user_quota(
-    mapping: &templemeads::grammar::UserMapping,
-    volume: &templemeads::storage::Volume,
+    mapping: &greatwestern::grammar::UserMapping,
+    volume: &greatwestern::storage::Volume,
     expires: &chrono::DateTime<Utc>,
-) -> Result<templemeads::storage::Quota, Error> {
+) -> Result<greatwestern::storage::Quota, Error> {
     let config = cache::get_filesystem_config().await?;
 
     let volume_config = config.get_user_volume(volume)?;
@@ -734,10 +737,10 @@ pub async fn get_user_quota(
 /// Get all storage quotas for a user across all volumes
 ///
 pub async fn get_user_quotas(
-    mapping: &templemeads::grammar::UserMapping,
+    mapping: &greatwestern::grammar::UserMapping,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<
-    std::collections::HashMap<templemeads::storage::Volume, templemeads::storage::Quota>,
+    std::collections::HashMap<greatwestern::storage::Volume, greatwestern::storage::Quota>,
     Error,
 > {
     let config = cache::get_filesystem_config().await?;

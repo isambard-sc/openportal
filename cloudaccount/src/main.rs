@@ -7,19 +7,22 @@ use std::path::PathBuf;
 mod accounting;
 mod state;
 
-use templemeads::agent::instance::{process_args, run, Defaults};
-use templemeads::agent::Type as AgentType;
-use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{
+use greatwestern::grammar::Instruction::{
     AddProject, AddUser, BlockProject, BlockUser, GetLimit, GetProjectMapping, GetProjects,
     GetUsageReport, GetUsageReports, GetUserMapping, GetUsers, IsBlockedProject, IsBlockedUser,
     IsProtectedUser, RemoveProject, RemoveUser, SetLimit, UnblockProject, UnblockUser,
 };
-use templemeads::job::{Envelope, Job};
-use templemeads::notification::{self, default_notify_runner, NotificationEvent};
+use greatwestern::usagereport::UsageReport;
+use greatwestern::{Hpc, NotificationEvent};
+use templemeads::agent::instance::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
+use templemeads::notification::{self, default_notify_runner};
 use templemeads::set_notify_runner;
-use templemeads::usagereport::UsageReport;
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 ///
 /// Main function for the cloud account agent.
@@ -40,7 +43,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -124,32 +127,32 @@ async fn main() -> Result<()> {
                 },
                 AddProject(project) => {
                     let mapping = state::add_project(&project).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectAdded(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectAdded(project.clone())).await;
                     job.completed(mapping)
                 },
                 RemoveProject(project) => {
                     let mapping = state::remove_project(&project).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectRemoved(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectRemoved(project.clone())).await;
                     job.completed(mapping)
                 },
                 AddUser(user) => {
                     let mapping = state::add_user(&user).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserAdded(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserAdded(user.clone())).await;
                     job.completed(mapping)
                 },
                 RemoveUser(user) => {
                     let mapping = state::remove_user(&user).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserRemoved(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserRemoved(user.clone())).await;
                     job.completed(mapping)
                 },
                 BlockUser(user) => {
                     let mapping = state::block_user(&user).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserBlocked(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserBlocked(user.clone())).await;
                     job.completed(mapping)
                 },
                 UnblockUser(user) => {
                     let mapping = state::unblock_user(&user).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserUnblocked(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserUnblocked(user.clone())).await;
                     job.completed(mapping)
                 },
                 IsBlockedUser(user) => {
@@ -158,12 +161,12 @@ async fn main() -> Result<()> {
                 },
                 BlockProject(project) => {
                     let mapping = state::block_project(&project).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectBlocked(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectBlocked(project.clone())).await;
                     job.completed(mapping)
                 },
                 UnblockProject(project) => {
                     let mapping = state::unblock_project(&project).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectUnblocked(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectUnblocked(project.clone())).await;
                     job.completed(mapping)
                 },
                 IsBlockedProject(project) => {
@@ -216,7 +219,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    set_notify_runner(default_notify_runner).await?;
+    set_notify_runner::<Hpc>(default_notify_runner).await?;
     run(config, cloudaccount_runner).await?;
 
     Ok(())

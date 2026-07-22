@@ -15,9 +15,9 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
-use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::usagereport::{ProjectUsageReport, Usage};
 use templemeads::job::assert_not_expired;
-use templemeads::usagereport::{ProjectUsageReport, Usage};
 use templemeads::Error;
 use tokio::sync::Mutex;
 

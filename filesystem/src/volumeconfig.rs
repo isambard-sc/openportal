@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use templemeads::grammar::{ProjectMapping, UserMapping, UserOrProjectMapping};
-use templemeads::storage::{QuotaLimit, Volume};
+use greatwestern::grammar::{ProjectMapping, UserMapping, UserOrProjectMapping};
+use greatwestern::storage::{QuotaLimit, Volume};
 use templemeads::Error;
 
 use crate::quotaengine::QuotaEngineConfig;

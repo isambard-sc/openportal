@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
-use templemeads::storage::QuotaLimit;
+use greatwestern::storage::QuotaLimit;
 use templemeads::Error;
 use tokio::sync::RwLock;
 

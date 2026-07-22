@@ -5,7 +5,7 @@ use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use templemeads::agent::Peer;
-use templemeads::grammar::{ProjectIdentifier, UserIdentifier};
+use greatwestern::grammar::{ProjectIdentifier, UserIdentifier};
 use templemeads::Error;
 use tokio::sync::{Mutex, RwLock};
 

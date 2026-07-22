@@ -6,71 +6,41 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
 
-use crate::error::Error;
+use templemeads::Error;
 
 use crate::grammar::{
     Allocation, Date, DateRange, Node, ProjectIdentifier, UserIdentifier, UserMapping,
 };
-use crate::named::NamedType;
-use crate::portal_identifier::PortalIdentifier;
+use templemeads::named::NamedType;
+use templemeads::portal_identifier::PortalIdentifier;
 
 impl NamedType for Usage {
-    fn type_name() -> &'static str {
-        "Usage"
-    }
-}
-
-impl NamedType for Vec<Usage> {
-    fn type_name() -> &'static str {
-        "Vec<Usage>"
+    fn type_name() -> String {
+        "Usage".to_string()
     }
 }
 
 impl NamedType for UserUsageReport {
-    fn type_name() -> &'static str {
-        "UserUsageReport"
-    }
-}
-
-impl NamedType for Vec<UserUsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<UserUsageReport>"
+    fn type_name() -> String {
+        "UserUsageReport".to_string()
     }
 }
 
 impl NamedType for DailyProjectUsageReport {
-    fn type_name() -> &'static str {
-        "DailyProjectUsageReport"
-    }
-}
-
-impl NamedType for Vec<DailyProjectUsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<DailyProjectUsageReport>"
+    fn type_name() -> String {
+        "DailyProjectUsageReport".to_string()
     }
 }
 
 impl NamedType for ProjectUsageReport {
-    fn type_name() -> &'static str {
-        "ProjectUsageReport"
-    }
-}
-
-impl NamedType for Vec<ProjectUsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<ProjectUsageReport>"
+    fn type_name() -> String {
+        "ProjectUsageReport".to_string()
     }
 }
 
 impl NamedType for UsageReport {
-    fn type_name() -> &'static str {
-        "UsageReport"
-    }
-}
-
-impl NamedType for Vec<UsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<UsageReport>"
+    fn type_name() -> String {
+        "UsageReport".to_string()
     }
 }
 

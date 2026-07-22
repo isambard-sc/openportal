@@ -13,7 +13,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use templemeads::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
+use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
 use templemeads::job::assert_not_expired;
 use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;

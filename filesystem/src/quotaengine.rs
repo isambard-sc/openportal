@@ -10,8 +10,8 @@
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use templemeads::grammar::{ProjectMapping, UserMapping};
-use templemeads::storage::{Quota, QuotaLimit, Volume};
+use greatwestern::grammar::{ProjectMapping, UserMapping};
+use greatwestern::storage::{Quota, QuotaLimit, Volume};
 use templemeads::Error;
 
 use crate::fakequotaengine::{FakeEngine, FakeQuotaEngineConfig};

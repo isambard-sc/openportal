@@ -7,34 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
 
-use crate::error::Error;
+use templemeads::Error;
 
 use crate::grammar::{Date, DateRange, ProjectIdentifier, UserIdentifier, UserMapping};
-use crate::named::NamedType;
-use crate::portal_identifier::PortalIdentifier;
+use templemeads::named::NamedType;
+use templemeads::portal_identifier::PortalIdentifier;
 use crate::storage::{Quota, Volume};
 
 impl NamedType for StorageReport {
-    fn type_name() -> &'static str {
-        "StorageReport"
-    }
-}
-
-impl NamedType for Vec<StorageReport> {
-    fn type_name() -> &'static str {
-        "Vec<StorageReport>"
+    fn type_name() -> String {
+        "StorageReport".to_string()
     }
 }
 
 impl NamedType for ProjectStorageReport {
-    fn type_name() -> &'static str {
-        "ProjectStorageReport"
-    }
-}
-
-impl NamedType for Vec<ProjectStorageReport> {
-    fn type_name() -> &'static str {
-        "Vec<ProjectStorageReport>"
+    fn type_name() -> String {
+        "ProjectStorageReport".to_string()
     }
 }
 
@@ -68,7 +56,7 @@ impl DailyStorageReport {
     pub(crate) fn remap_project(
         &mut self,
         new_project: &ProjectIdentifier,
-    ) -> Result<(), crate::error::Error> {
+    ) -> Result<(), templemeads::Error> {
         self.project = new_project.clone();
 
         let old_quotas = std::mem::take(&mut self.user_quotas);

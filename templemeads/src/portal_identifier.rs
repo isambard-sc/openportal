@@ -22,14 +22,8 @@ pub struct PortalIdentifier {
 }
 
 impl NamedType for PortalIdentifier {
-    fn type_name() -> &'static str {
-        "PortalIdentifier"
-    }
-}
-
-impl NamedType for Vec<PortalIdentifier> {
-    fn type_name() -> &'static str {
-        "Vec<PortalIdentifier>"
+    fn type_name() -> String {
+        "PortalIdentifier".to_string()
     }
 }
 

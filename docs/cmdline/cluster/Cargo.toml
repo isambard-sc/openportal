@@ -15,6 +15,7 @@ built = { version = "0.8", default-features = false, features = ["git2"] }
 
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }
+greatwestern = { path = "../../../greatwestern" }
 templemeads = { path = "../../../templemeads" }
 tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1.41"

@@ -3,76 +3,39 @@
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use ts_rs::TS;
 
-use crate::error::Error;
+use templemeads::Error;
 
-use crate::named::NamedType;
+use templemeads::named::NamedType;
 
 impl NamedType for StorageSize {
-    fn type_name() -> &'static str {
-        "StorageSize"
-    }
-}
-
-impl NamedType for Vec<StorageSize> {
-    fn type_name() -> &'static str {
-        "Vec<StorageSize>"
+    fn type_name() -> String {
+        "StorageSize".to_string()
     }
 }
 
 impl NamedType for StorageUsage {
-    fn type_name() -> &'static str {
-        "StorageUsage"
-    }
-}
-
-impl NamedType for Vec<StorageUsage> {
-    fn type_name() -> &'static str {
-        "Vec<StorageUsage>"
+    fn type_name() -> String {
+        "StorageUsage".to_string()
     }
 }
 
 impl NamedType for QuotaLimit {
-    fn type_name() -> &'static str {
-        "QuotaLimit"
-    }
-}
-
-impl NamedType for Vec<QuotaLimit> {
-    fn type_name() -> &'static str {
-        "Vec<QuotaLimit>"
+    fn type_name() -> String {
+        "QuotaLimit".to_string()
     }
 }
 
 impl NamedType for Quota {
-    fn type_name() -> &'static str {
-        "Quota"
-    }
-}
-
-impl NamedType for Vec<Quota> {
-    fn type_name() -> &'static str {
-        "Vec<Quota>"
+    fn type_name() -> String {
+        "Quota".to_string()
     }
 }
 
 impl NamedType for Volume {
-    fn type_name() -> &'static str {
-        "Volume"
-    }
-}
-
-impl NamedType for Vec<Volume> {
-    fn type_name() -> &'static str {
-        "Vec<Volume>"
-    }
-}
-
-impl NamedType for HashMap<Volume, Quota> {
-    fn type_name() -> &'static str {
-        "HashMap<Volume, Quota>"
+    fn type_name() -> String {
+        "Volume".to_string()
     }
 }
 

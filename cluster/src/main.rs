@@ -17,10 +17,11 @@ use templemeads::grammar::Instruction::{
     RemoveUser, SetLimit, SetProjectQuota, SetUserQuota, UnblockProject, UnblockUser,
 };
 use templemeads::grammar::{
-    DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
+    DateRange, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
 use templemeads::job::{Envelope, Job};
 use templemeads::notification::{self, default_notify_runner, NotificationEvent};
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::set_notify_runner;
 use templemeads::storage::{Quota, Volume};
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};

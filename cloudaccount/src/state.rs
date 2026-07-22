@@ -19,9 +19,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
-use templemeads::grammar::{
-    PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
-};
+use templemeads::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,7 +374,6 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use templemeads::grammar::PortalIdentifier;
 
     // Exercises the whole assignment-state lifecycle against a real
     // temp directory, including a simulated agent restart (re-running

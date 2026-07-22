@@ -9,9 +9,10 @@ use ts_rs::TS;
 use crate::error::Error;
 
 use crate::grammar::{
-    Allocation, Date, DateRange, NamedType, Node, PortalIdentifier, ProjectIdentifier,
-    UserIdentifier, UserMapping,
+    Allocation, Date, DateRange, Node, ProjectIdentifier, UserIdentifier, UserMapping,
 };
+use crate::named::NamedType;
+use crate::portal_identifier::PortalIdentifier;
 
 impl NamedType for Usage {
     fn type_name() -> &'static str {

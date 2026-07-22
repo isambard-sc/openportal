@@ -3,6 +3,8 @@
 
 use crate::destination::{Destination, Destinations};
 use crate::error::Error;
+use crate::named::NamedType;
+use crate::portal_identifier::PortalIdentifier;
 use crate::storage::{QuotaLimit, Volume};
 use crate::usagereport::Usage;
 
@@ -14,114 +16,6 @@ use std::{hash::Hash, sync::Arc};
 use ts_rs::TS;
 use url::Url;
 use wildmatch::WildMatch;
-
-pub trait NamedType {
-    fn type_name() -> &'static str;
-}
-
-impl NamedType for String {
-    fn type_name() -> &'static str {
-        "String"
-    }
-}
-
-impl NamedType for bool {
-    fn type_name() -> &'static str {
-        "bool"
-    }
-}
-
-impl NamedType for Vec<String> {
-    fn type_name() -> &'static str {
-        "Vec<String>"
-    }
-}
-
-///
-/// A portal identifier - this is just a string with no spaces or periods
-///
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PortalIdentifier {
-    portal: String,
-}
-
-impl NamedType for PortalIdentifier {
-    fn type_name() -> &'static str {
-        "PortalIdentifier"
-    }
-}
-
-impl NamedType for Vec<PortalIdentifier> {
-    fn type_name() -> &'static str {
-        "Vec<PortalIdentifier>"
-    }
-}
-
-impl PortalIdentifier {
-    pub fn parse(identifier: &str) -> Result<Self, Error> {
-        let portal = identifier.trim();
-
-        if portal.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid PortalIdentifier - portal cannot be empty '{}'",
-                identifier
-            )));
-        };
-
-        if portal.contains(' ') || portal.contains('.') {
-            return Err(Error::Parse(format!(
-                "Invalid PortalIdentifier - portal cannot contain spaces or periods '{}'",
-                identifier
-            )));
-        };
-
-        Ok(Self {
-            portal: portal.to_string(),
-        })
-    }
-
-    pub fn portal(&self) -> String {
-        self.portal.clone()
-    }
-}
-
-impl std::fmt::Display for PortalIdentifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.portal)
-    }
-}
-
-/// Serialize and Deserialize via the string representation
-impl Serialize for PortalIdentifier {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.to_string().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for PortalIdentifier {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::parse(&s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl From<ProjectIdentifier> for PortalIdentifier {
-    fn from(project: ProjectIdentifier) -> Self {
-        project.portal_identifier()
-    }
-}
-
-impl From<UserIdentifier> for PortalIdentifier {
-    fn from(user: UserIdentifier) -> Self {
-        user.portal_identifier()
-    }
-}
 
 ///
 /// A project identifier - this is a double of project.portal
@@ -187,9 +81,7 @@ impl ProjectIdentifier {
     }
 
     pub fn portal_identifier(&self) -> PortalIdentifier {
-        PortalIdentifier {
-            portal: self.portal.clone(),
-        }
+        PortalIdentifier::from_validated(self.portal.clone())
     }
 }
 
@@ -312,9 +204,7 @@ impl UserIdentifier {
     }
 
     pub fn portal_identifier(&self) -> PortalIdentifier {
-        PortalIdentifier {
-            portal: self.portal.clone(),
-        }
+        PortalIdentifier::from_validated(self.portal.clone())
     }
 }
 

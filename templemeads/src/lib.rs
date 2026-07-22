@@ -32,13 +32,19 @@ pub mod command;
 pub mod config;
 pub mod destination;
 pub mod diagnostics;
+pub mod domain;
+mod domain_static;
 pub use error::Error;
 pub mod grammar;
 pub mod health;
 pub mod job;
+pub mod named;
 pub mod notification;
+pub mod portal_identifier;
 pub mod runnable;
 pub mod state;
+#[cfg(test)]
+mod test_domain;
 pub mod storage;
 pub mod storagereport;
 pub mod usagereport;
@@ -69,7 +75,7 @@ mod tests {
     };
     use crate::grammar::{AwardDetails, Link, MembershipControl, Note};
     use crate::health::HealthInfo;
-    use crate::job::{Job, Status};
+    use crate::job::Status;
     use crate::storage::{Quota, Volume};
     use crate::storagereport::{ProjectStorageReport, StorageReport};
     use crate::usagereport::{
@@ -80,9 +86,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     #[test]
     fn export_ts_bindings() {
+        // Job<L>'s TS export is inherently tied to one concrete Domain, so
+        // it is exported from the domain crate, not here.
         AgentType::export_all().expect("Could not export AgentType");
         Status::export_all().expect("Could not export Status");
-        Job::export_all().expect("Could not export Job");
         JobStatistics::export_all().expect("Could not export JobStatistics");
         DiagnosticsReport::export_all().expect("Could not export DiagnosticsReport");
         FailedJobEntry::export_all().expect("Could not export FailedJobEntry");

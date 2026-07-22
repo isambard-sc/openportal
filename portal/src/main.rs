@@ -19,9 +19,10 @@ use templemeads::grammar::Instruction::{
     RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
 };
 use templemeads::grammar::{
-    DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
+    DateRange, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
 };
 use templemeads::job::{send_queued, Envelope, Job};
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::storagereport::{ProjectStorageReport, StorageReport};
 use templemeads::usagereport::{ProjectUsageReport, UsageReport};
 use templemeads::Error;

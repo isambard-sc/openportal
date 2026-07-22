@@ -7,12 +7,13 @@ use crate::bridgestate::get as get_board;
 use crate::command::Command;
 use crate::destination::Destinations;
 use crate::diagnostics::collect_diagnostics;
+use crate::domain::Domain;
 use crate::error::Error;
-use crate::grammar::PortalIdentifier;
 use crate::health::collect_health;
 use crate::job::Job;
 use crate::notification::Notification;
 use crate::notificationstate;
+use crate::portal_identifier::PortalIdentifier;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -530,7 +531,7 @@ struct AppState {
 // Health check endpoint for the web API
 //
 #[tracing::instrument(skip_all)]
-async fn health(
+async fn health<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -539,7 +540,7 @@ async fn health(
 
     let self_peer = agent::get_self(None).await;
 
-    let health = match collect_health(self_peer.name(), vec![]).await {
+    let health = match collect_health::<L>(self_peer.name(), vec![]).await {
         Ok(health) => health,
         Err(e) => {
             tracing::error!("Error collecting health: {:?}", e);
@@ -567,7 +568,7 @@ struct RestartRequest {
 }
 
 #[tracing::instrument(skip_all)]
-async fn restart(
+async fn restart<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
@@ -584,7 +585,7 @@ async fn restart(
 
     // Send the restart command to self with the full destination
     // This reuses the routing logic in the handler, including zone disambiguation
-    let restart_cmd = Command::restart(&payload.restart_type, &payload.destination);
+    let restart_cmd = Command::<L>::restart(&payload.restart_type, &payload.destination);
     let self_peer = agent::get_self(None).await;
 
     match restart_cmd.send_to(&self_peer).await {
@@ -626,7 +627,7 @@ struct DiagnosticsRequest {
 }
 
 #[tracing::instrument(skip_all)]
-async fn diagnostics(
+async fn diagnostics<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
@@ -638,7 +639,7 @@ async fn diagnostics(
     tracing::info!("Diagnostics request - destination: {}", payload.destination);
 
     // Collect diagnostics from the specified agent
-    let report = match collect_diagnostics(&payload.destination).await {
+    let report = match collect_diagnostics::<L>(&payload.destination).await {
         Ok(report) => report,
         Err(e) => {
             tracing::error!(
@@ -673,18 +674,18 @@ struct RunRequest {
 // a JSON object that represents the Job that has been created.
 //
 #[tracing::instrument(skip_all)]
-async fn run(
+async fn run<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
-) -> Result<Json<Job>, AppError> {
+) -> Result<Json<Job<L>>, AppError> {
     verify_headers(&state, &headers, "post", "run", &body).await?;
 
     let payload: RunRequest = serde_json::from_slice(&body)?;
 
     tracing::debug!("Running command: {}", payload.command);
 
-    match bridge_run(&payload.command).await {
+    match bridge_run::<L>(&payload.command).await {
         Ok(job) => Ok(Json(job)),
         Err(e) => {
             tracing::error!("Error running command: {:?}", e);
@@ -699,7 +700,7 @@ async fn run(
 // has been handed off — no result or acknowledgement is ever received back.
 //
 #[tracing::instrument(skip_all)]
-async fn notify(
+async fn notify<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
@@ -710,7 +711,7 @@ async fn notify(
 
     tracing::debug!("Sending notification: {}", payload.command);
 
-    match bridge_notify(&payload.command).await {
+    match bridge_notify::<L>(&payload.command).await {
         Ok(()) => Ok(Json(json!({"status": "ok"}))),
         Err(e) => {
             tracing::error!("Error sending notification: {:?}", e);
@@ -732,18 +733,18 @@ struct StatusRequest {
 /// of the requested Job in the OpenPortal system
 ///
 #[tracing::instrument(skip_all)]
-async fn status(
+async fn status<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
-) -> Result<Json<Job>, AppError> {
+) -> Result<Json<Job<L>>, AppError> {
     verify_headers(&state, &headers, "post", "status", &body).await?;
 
     let payload: StatusRequest = serde_json::from_slice(&body)?;
 
     tracing::debug!("Status request for job: {:?}", payload);
 
-    match bridge_status(&payload.job).await {
+    match bridge_status::<L>(&payload.job).await {
         Ok(job) => Ok(Json(job)),
         Err(e) => {
             tracing::error!("Error getting status: {:?}", e);
@@ -758,16 +759,16 @@ async fn status(
 /// to process
 ///
 #[tracing::instrument(skip_all)]
-async fn fetch_jobs(
+async fn fetch_jobs<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
-) -> Result<Json<Vec<Job>>, AppError> {
+) -> Result<Json<Vec<Job<L>>>, AppError> {
     verify_headers(&state, &headers, "get", "fetch_jobs", &[]).await?;
 
     tracing::debug!("Fetching jobs");
 
     // get the BridgeBoard
-    let board = get_board().await;
+    let board = get_board::<L>().await;
     match board {
         Ok(board) => {
             let jobs = board.read().await.unfinished_jobs();
@@ -785,11 +786,11 @@ async fn fetch_jobs(
 /// job that OpenPortal has sent to us that we need to process.
 ///
 #[tracing::instrument(skip_all)]
-async fn fetch_job(
+async fn fetch_job<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
-) -> Result<Json<Job>, AppError> {
+) -> Result<Json<Job<L>>, AppError> {
     verify_headers(&state, &headers, "post", "fetch_job", &body).await?;
 
     let uid: Uuid = serde_json::from_slice(&body)?;
@@ -797,7 +798,7 @@ async fn fetch_job(
     tracing::debug!("fetch_job: {:?}", uid);
 
     // get the BridgeBoard
-    let board = get_board().await;
+    let board = get_board::<L>().await;
     match board {
         Ok(board) => {
             let job = board
@@ -828,18 +829,18 @@ async fn fetch_job(
 /// from the bridge, then returns 200 OK to confirm receipt.
 ///
 #[tracing::instrument(skip_all)]
-async fn fetch_notification(
+async fn fetch_notification<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
-) -> Result<Json<Notification>, AppError> {
+) -> Result<Json<Notification<L>>, AppError> {
     verify_headers(&state, &headers, "post", "fetch_notification", &body).await?;
 
     let uid: Uuid = serde_json::from_slice(&body)?;
 
     tracing::debug!("fetch_notification: {:?}", uid);
 
-    match notificationstate::get(uid).await {
+    match notificationstate::get::<L>(uid).await? {
         Some(notification) => Ok(Json(notification)),
         None => Err(AppError(
             anyhow::anyhow!("Notification not found: {}", uid),
@@ -853,19 +854,19 @@ async fn fetch_notification(
 /// result of a job that we need to process back to the OpenPortal system.
 ///
 #[tracing::instrument(skip_all)]
-async fn send_result(
+async fn send_result<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
     verify_headers(&state, &headers, "post", "send_result", &body).await?;
 
-    let job: Job = serde_json::from_slice(&body)?;
+    let job: Job<L> = serde_json::from_slice(&body)?;
 
     tracing::debug!("Sending result: {:?}", job);
 
     // get the BridgeBoard
-    let board = get_board().await;
+    let board = get_board::<L>().await;
 
     match board {
         Ok(board) => {
@@ -910,7 +911,7 @@ async fn get_portal(
 }
 
 #[tracing::instrument(skip_all)]
-async fn sync_offerings(
+async fn sync_offerings<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
@@ -924,7 +925,7 @@ async fn sync_offerings(
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
-            let job = Job::parse(
+            let job = Job::<L>::parse(
                 &format!(
                     "{}.{} sync_offerings {}",
                     agent::name().await,
@@ -967,7 +968,7 @@ async fn sync_offerings(
 }
 
 #[tracing::instrument(skip_all)]
-async fn add_offerings(
+async fn add_offerings<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
@@ -981,7 +982,7 @@ async fn add_offerings(
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
-            let job = Job::parse(
+            let job = Job::<L>::parse(
                 &format!(
                     "{}.{} add_offerings {}",
                     agent::name().await,
@@ -1027,7 +1028,7 @@ async fn add_offerings(
 /// Function to list offerings in the portal
 ///
 #[tracing::instrument(skip_all)]
-async fn get_offerings(
+async fn get_offerings<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<Destinations>, AppError> {
@@ -1037,7 +1038,7 @@ async fn get_offerings(
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
-            let job = Job::parse(
+            let job = Job::<L>::parse(
                 &format!("{}.{} get_offerings", agent::name().await, portal.name(),),
                 false,
             )?
@@ -1078,7 +1079,7 @@ async fn get_offerings(
 /// Remove offerings from the portal
 ///
 #[tracing::instrument(skip_all)]
-async fn remove_offerings(
+async fn remove_offerings<L: Domain>(
     headers: HeaderMap,
     State(state): State<AppState>,
     body: Bytes,
@@ -1092,7 +1093,7 @@ async fn remove_offerings(
     match agent::portal(PORTAL_WAIT_TIME).await {
         Some(portal) => {
             // send the create_project job to the bridge agent
-            let job = Job::parse(
+            let job = Job::<L>::parse(
                 &format!(
                     "{}.{} remove_offerings {}",
                     agent::name().await,
@@ -1150,7 +1151,7 @@ async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
     Ok(())
 }
 
-pub async fn spawn(config: Config) -> Result<(), Error> {
+pub async fn spawn<L: Domain>(config: Config) -> Result<(), Error> {
     // create a global state object for the web API
     let state = AppState {
         config: config.clone(),
@@ -1162,21 +1163,21 @@ pub async fn spawn(config: Config) -> Result<(), Error> {
     // create the web API
     let app = Router::new()
         .route("/", get(|| async { Json(serde_json::Value::Null) }))
-        .route("/health", get(health))
-        .route("/restart", post(restart))
-        .route("/diagnostics", post(diagnostics))
-        .route("/run", post(run))
-        .route("/notify", post(notify))
-        .route("/status", post(status))
-        .route("/fetch_job", post(fetch_job))
-        .route("/fetch_jobs", get(fetch_jobs))
-        .route("/fetch_notification", post(fetch_notification))
+        .route("/health", get(health::<L>))
+        .route("/restart", post(restart::<L>))
+        .route("/diagnostics", post(diagnostics::<L>))
+        .route("/run", post(run::<L>))
+        .route("/notify", post(notify::<L>))
+        .route("/status", post(status::<L>))
+        .route("/fetch_job", post(fetch_job::<L>))
+        .route("/fetch_jobs", get(fetch_jobs::<L>))
+        .route("/fetch_notification", post(fetch_notification::<L>))
         .route("/get_portal", get(get_portal))
-        .route("/send_result", post(send_result))
-        .route("/sync_offerings", post(sync_offerings))
-        .route("/add_offerings", post(add_offerings))
-        .route("/get_offerings", get(get_offerings))
-        .route("/remove_offerings", post(remove_offerings))
+        .route("/send_result", post(send_result::<L>))
+        .route("/sync_offerings", post(sync_offerings::<L>))
+        .route("/add_offerings", post(add_offerings::<L>))
+        .route("/get_offerings", get(get_offerings::<L>))
+        .route("/remove_offerings", post(remove_offerings::<L>))
         .with_state(state);
 
     // create a TCP listener on the specified port

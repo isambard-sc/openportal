@@ -5,8 +5,9 @@ use crate::agent::Peer;
 use crate::board::{JobAddState, SyncState, Waiter};
 use crate::command::Command as ControlCommand;
 use crate::destination::{Destination, Position};
+use crate::domain::Domain;
 use crate::error::Error;
-use crate::grammar::{Instruction, NamedType};
+use crate::named::NamedType;
 use crate::state;
 
 use anyhow::Result;
@@ -18,15 +19,16 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Envelope {
+#[serde(bound = "")]
+pub struct Envelope<L: Domain> {
     recipient: String,
     sender: String,
     zone: String,
-    job: Job,
+    job: Job<L>,
 }
 
-impl Envelope {
-    pub fn new(recipient: &str, sender: &str, zone: &str, job: &Job) -> Self {
+impl<L: Domain> Envelope<L> {
+    pub fn new(recipient: &str, sender: &str, zone: &str, job: &Job<L>) -> Self {
         Self {
             recipient: recipient.to_owned(),
             sender: sender.to_owned(),
@@ -43,7 +45,7 @@ impl Envelope {
         Peer::new(&self.sender, &self.zone)
     }
 
-    pub fn job(&self) -> Job {
+    pub fn job(&self) -> Job<L> {
         self.job.clone()
     }
 }
@@ -94,12 +96,12 @@ impl std::str::FromStr for Status {
 /// many "command" types.
 ///
 #[derive(Clone, PartialEq)]
-struct Command {
+struct Command<L: Domain> {
     destination: Destination,
-    instruction: Instruction,
+    instruction: L::Instruction,
 }
 
-impl Command {
+impl<L: Domain> Command<L> {
     pub fn parse(command: &str, check_portal: bool) -> Result<Self, Error> {
         // the format of commands is "destination command arguments..."
         let mut parts = command.split_whitespace();
@@ -114,7 +116,7 @@ impl Command {
             }
         };
 
-        let instruction = match Instruction::parse(&parts.collect::<Vec<&str>>().join(" ")) {
+        let instruction = match L::parse_instruction(&parts.collect::<Vec<&str>>().join(" ")) {
             Ok(i) => i,
             Err(e) => {
                 return Err(Error::Parse(format!(
@@ -125,94 +127,7 @@ impl Command {
         };
 
         if check_portal {
-            let user = match instruction.clone() {
-                Instruction::AddUser(user) => Some(user),
-                Instruction::RemoveUser(user) => Some(user),
-                Instruction::AddLocalUser(user) => Some(user.user().clone()),
-                Instruction::RemoveLocalUser(user) => Some(user.user().clone()),
-                Instruction::UpdateHomeDir(user, _) => Some(user),
-                Instruction::GetUserMapping(user) => Some(user),
-                Instruction::IsProtectedUser(user) => Some(user),
-                Instruction::IsExistingUser(user) => Some(user),
-                Instruction::GetHomeDir(user) => Some(user),
-                Instruction::GetLocalHomeDir(user) => Some(user.user().clone()),
-                Instruction::GetUserQuota(user, _) => Some(user),
-                Instruction::SetUserQuota(user, _, _) => Some(user),
-                Instruction::ClearUserQuota(user, _) => Some(user),
-                Instruction::GetUserQuotas(user) => Some(user),
-                Instruction::GetLocalUserQuota(user, _) => Some(user.user().clone()),
-                Instruction::SetLocalUserQuota(user, _, _) => Some(user.user().clone()),
-                Instruction::ClearLocalUserQuota(user, _) => Some(user.user().clone()),
-                Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
-                Instruction::GetUserDirs(user) => Some(user),
-                Instruction::GetLocalUserDirs(user) => Some(user.user().clone()),
-                _ => None,
-            };
-
-            if let Some(user) = user {
-                if user.portal() != destination.first() {
-                    tracing::error!(
-                    "Invalid command '{}'. Commands involving user '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, user, user.portal(), destination.first()
-                );
-                    return Err(Error::Parse(format!(
-                    "Invalid command '{}'. Commands involving user '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, user, user.portal(), destination.first()
-                )));
-                }
-            }
-
-            let project = match instruction.clone() {
-                Instruction::CreateProject(project, _) => Some(project),
-                Instruction::UpdateProject(project, _) => Some(project),
-                Instruction::GetProject(project) => Some(project),
-                Instruction::GetAward(project) => Some(project),
-                Instruction::AddProject(project) => Some(project),
-                Instruction::AddLocalProject(project) => Some(project.project().clone()),
-                Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
-                Instruction::IsExistingProject(project) => Some(project),
-                Instruction::GetUsers(project) => Some(project),
-                Instruction::RemoveProject(project) => Some(project),
-                Instruction::GetUsageReport(project, _) => Some(project),
-                Instruction::GetLocalUsageReport(project, _) => Some(project.project().clone()),
-                Instruction::GetProjectMapping(project) => Some(project),
-                Instruction::GetLocalLimit(project) => Some(project.project().clone()),
-                Instruction::SetLocalLimit(project, _) => Some(project.project().clone()),
-                Instruction::GetLimit(project) => Some(project),
-                Instruction::SetLimit(project, _) => Some(project),
-                Instruction::GetProjectDirs(project) => Some(project),
-                Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
-                Instruction::GetProjectQuota(project, _) => Some(project),
-                Instruction::SetProjectQuota(project, _, _) => Some(project),
-                Instruction::ClearProjectQuota(project, _) => Some(project),
-                Instruction::GetProjectQuotas(project) => Some(project),
-                Instruction::GetLocalProjectQuota(project, _) => Some(project.project().clone()),
-                Instruction::SetLocalProjectQuota(project, _, _) => Some(project.project().clone()),
-                Instruction::ClearLocalProjectQuota(project, _) => Some(project.project().clone()),
-                Instruction::GetLocalProjectQuotas(project) => Some(project.project().clone()),
-                _ => None,
-            };
-
-            if let Some(project) = project {
-                if project.portal() != destination.first() {
-                    tracing::error!(
-                    "Invalid command '{}'. Commands involving project '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, project, project.portal(), destination.first()
-                );
-                    return Err(Error::Parse(format!(
-                    "Invalid command '{}'. Commands involving project '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, project, project.portal(), destination.first()
-                )));
-                }
-            }
-
-            let portal = match instruction.clone() {
-                Instruction::GetProjects(portal) => Some(portal),
-                Instruction::GetUsageReports(portal, _) => Some(portal),
-                _ => None,
-            };
-
-            if let Some(portal) = portal {
+            if let Some(portal) = L::owning_portal(&instruction) {
                 if portal.portal() != destination.first() {
                     tracing::error!(
                     "Invalid command '{}'. Commands involving portal '{}' can only be issued via the portal '{}', not '{}'.",
@@ -236,25 +151,25 @@ impl Command {
         self.destination.clone()
     }
 
-    pub fn instruction(&self) -> Instruction {
+    pub fn instruction(&self) -> L::Instruction {
         self.instruction.clone()
     }
 }
 
-impl std::fmt::Debug for Command {
+impl<L: Domain> std::fmt::Debug for Command<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{} {}", self.destination, self.instruction)
     }
 }
 
-impl std::fmt::Display for Command {
+impl<L: Domain> std::fmt::Display for Command<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{} {}", self.destination, self.instruction,)
     }
 }
 
 // serialise via the string representation - this looks better
-impl Serialize for Command {
+impl<L: Domain> Serialize for Command<L> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
@@ -265,7 +180,7 @@ impl Serialize for Command {
 
 // deserialise via the string representation - this looks better
 
-impl<'de> Deserialize<'de> for Command {
+impl<'de, L: Domain> Deserialize<'de> for Command<L> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -278,36 +193,29 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct Job {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Job<L: Domain> {
     id: Uuid,
     #[serde(with = "ts_seconds")]
-    #[ts(type = "number")]
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    #[ts(type = "number")]
     changed: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    #[ts(type = "number")]
     expires: chrono::DateTime<Utc>,
-    #[ts(type = "number")]
     version: u64,
-    #[ts(as = "String")]
-    command: Command,
+    command: Command<L>,
     state: Status,
     result: Option<String>,
     result_type: Option<String>,
     #[serde(default)]
-    #[ts(as = "Option<String>")]
     forwarded_for: Option<Destination>,
     #[serde(skip)]
-    #[ts(skip)]
     board: Option<Peer>,
 }
 
 // implement display for Job
-impl std::fmt::Display for Job {
+impl<L: Domain> std::fmt::Display for Job<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.state {
             Status::Created => write!(f, "{{{}: Created}}", self.command),
@@ -326,7 +234,7 @@ impl std::fmt::Display for Job {
     }
 }
 
-impl Job {
+impl<L: Domain> Job<L> {
     pub fn parse(command: &str, check_portal: bool) -> Result<Self, Error> {
         tracing::debug!("Parsing command: {:?}", command);
 
@@ -367,7 +275,7 @@ impl Job {
         self.command.destination()
     }
 
-    pub fn instruction(&self) -> Instruction {
+    pub fn instruction(&self) -> L::Instruction {
         self.command.instruction()
     }
 
@@ -492,7 +400,7 @@ impl Job {
         }
     }
 
-    pub fn pending(&self) -> Result<Job, Error> {
+    pub fn pending(&self) -> Result<Job<L>, Error> {
         match self.state {
             Status::Created => Ok(Job {
                 id: self.id,
@@ -514,7 +422,7 @@ impl Job {
         }
     }
 
-    pub fn is_duplicate_of(&self, job: &Job) -> bool {
+    pub fn is_duplicate_of(&self, job: &Job<L>) -> bool {
         self.command.destination().last() == job.command.destination().last()
             && self.command.instruction() == job.command.instruction()
             && job.is_pending()
@@ -522,7 +430,7 @@ impl Job {
             && self.is_pending()
     }
 
-    pub fn duplicate(&self, job: &Job) -> Result<Job, Error> {
+    pub fn duplicate(&self, job: &Job<L>) -> Result<Job<L>, Error> {
         if !self.is_duplicate_of(job) {
             return Err(Error::InvalidState(
                 format!("Job {} is not a duplicate of job {}", self, job).to_owned(),
@@ -556,7 +464,7 @@ impl Job {
         }
     }
 
-    pub fn running(&self, progress: Option<String>) -> Result<Job, Error> {
+    pub fn running(&self, progress: Option<String>) -> Result<Job<L>, Error> {
         match self.state {
             Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
@@ -577,7 +485,7 @@ impl Job {
         }
     }
 
-    pub fn copy_result_from(&self, other: &Job) -> Result<Job, Error> {
+    pub fn copy_result_from(&self, other: &Job<L>) -> Result<Job<L>, Error> {
         // check other has finished and is error or completed
         if !other.is_finished() {
             return Err(Error::InvalidState(
@@ -605,7 +513,7 @@ impl Job {
         }
     }
 
-    pub fn completed_none(&self) -> Result<Job, Error> {
+    pub fn completed_none(&self) -> Result<Job<L>, Error> {
         match self.state {
             Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
@@ -626,7 +534,7 @@ impl Job {
         }
     }
 
-    pub fn completed<T>(&self, result: T) -> Result<Job, Error>
+    pub fn completed<T>(&self, result: T) -> Result<Job<L>, Error>
     where
         T: serde::Serialize,
         T: NamedType,
@@ -651,7 +559,7 @@ impl Job {
         }
     }
 
-    pub fn errored(&self, message: &str) -> Result<Job, Error> {
+    pub fn errored(&self, message: &str) -> Result<Job<L>, Error> {
         match self.state {
             Status::Duplicate | Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
@@ -779,7 +687,7 @@ impl Job {
         }
     }
 
-    pub async fn execute(&self) -> Result<Job, Error> {
+    pub async fn execute(&self) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         match self.state() {
@@ -793,7 +701,7 @@ impl Job {
         }
     }
 
-    pub async fn received(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn received(&self, peer: &Peer) -> Result<Job<L>, Error> {
         if self.state == Status::Created {
             return Err(Error::InvalidState(
                 format!("A created job should not have been received? {:?}", self).to_owned(),
@@ -805,7 +713,7 @@ impl Job {
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -832,7 +740,7 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn put(&self, peer: &Peer) -> Result<Job<L>, Error> {
         tracing::debug!("Put {} : {}", self.destination(), self.instruction());
 
         self.assert_is_not_expired()?;
@@ -841,7 +749,7 @@ impl Job {
         let mut job = self.pending()?;
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -894,7 +802,7 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn updated(&self) -> Result<Job, Error> {
+    pub async fn updated(&self) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let agent = match self.board {
@@ -907,7 +815,7 @@ impl Job {
         };
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get::<L>(agent).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -939,13 +847,13 @@ impl Job {
         Ok(self.clone())
     }
 
-    pub async fn update(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn update(&self, peer: &Peer) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1007,13 +915,13 @@ impl Job {
         &self,
         virtual_peer: &Peer,
         hosting_peer: &Peer,
-    ) -> Result<Job, Error> {
+    ) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // First, update the hosting agent's board directly (since it "processed" the job)
-        let board = match state::get(hosting_peer).await {
+        let board = match state::get::<L>(hosting_peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1041,7 +949,7 @@ impl Job {
         }
 
         // Now update the virtual agent's board
-        let board = match state::get(virtual_peer).await {
+        let board = match state::get::<L>(virtual_peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1081,7 +989,7 @@ impl Job {
             );
 
             // now update the upstream agent's board with the updated job
-            let board = match state::get(&upstream_peer).await {
+            let board = match state::get::<L>(&upstream_peer).await {
                 Ok(b) => b.board().await,
                 Err(e) => {
                     tracing::error!(
@@ -1132,13 +1040,13 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn deleted(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn deleted(&self, peer: &Peer) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1171,13 +1079,13 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn delete(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn delete(&self, peer: &Peer) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1222,7 +1130,7 @@ impl Job {
         Ok(job)
     }
 
-    async fn _wait(&self) -> Result<Job, Error> {
+    async fn _wait(&self) -> Result<Job<L>, Error> {
         if self.is_finished() || self.is_expired() {
             return Ok(self.clone());
         }
@@ -1237,7 +1145,7 @@ impl Job {
         };
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get::<L>(agent).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1248,7 +1156,7 @@ impl Job {
             }
         };
 
-        let waiter: Waiter;
+        let waiter: Waiter<L>;
 
         // in a scope so we drop the lock asap
         {
@@ -1266,7 +1174,7 @@ impl Job {
         Ok(result)
     }
 
-    pub async fn wait(&self) -> Result<Job, Error> {
+    pub async fn wait(&self) -> Result<Job<L>, Error> {
         let mut job = self._wait().await?;
 
         // if the job is still running, then we need to wait for it to finish
@@ -1290,7 +1198,7 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job>, Error> {
+    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job<L>>, Error> {
         if self.is_finished() || self.is_expired() {
             return Ok(Some(self.clone()));
         } else if timeout_ms == 0 {
@@ -1307,7 +1215,7 @@ impl Job {
         };
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get::<L>(agent).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1318,7 +1226,7 @@ impl Job {
             }
         };
 
-        let waiter: Waiter;
+        let waiter: Waiter<L>;
 
         // in a scope so we drop the lock asap
         {
@@ -1341,9 +1249,9 @@ impl Job {
 /// board. From the two exchanges we should recover our true
 /// shared state
 ///
-pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
+pub async fn sync_board<L: Domain>(peer: &Peer) -> Result<(), Error> {
     // get a RwLock to the board from the shared state
-    let board = match state::get(peer).await {
+    let board = match state::get::<L>(peer).await {
         Ok(b) => b.board().await,
         Err(e) => {
             tracing::error!(
@@ -1373,7 +1281,11 @@ pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
 /// Function used to process the sync message received from the specified
 /// peer
 ///
-pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> Result<(), Error> {
+pub async fn sync_from_peer<L: Domain>(
+    recipient: &str,
+    peer: &Peer,
+    sync: &SyncState<L>,
+) -> Result<(), Error> {
     tracing::debug!("Syncing state from peer {}", peer);
 
     let jobs = sync.jobs();
@@ -1391,7 +1303,7 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
     // loop over all of the jobs in the sync state and process them
     {
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1485,9 +1397,9 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
 ///
 /// Function used to send all jobs that were queued for the specified peer
 ///
-pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
+pub async fn send_queued<L: Domain>(peer: &Peer) -> Result<(), Error> {
     // get a RwLock to the board from the shared state
-    let board = match state::get(peer).await {
+    let board = match state::get::<L>(peer).await {
         Ok(b) => b.board().await,
         Err(e) => {
             tracing::error!(
@@ -1499,7 +1411,7 @@ pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
     };
 
     // get all of the queued jobs
-    let queued: Vec<ControlCommand>;
+    let queued: Vec<ControlCommand<L>>;
 
     // in a scope so we drop the lock asap
     {
@@ -1548,6 +1460,10 @@ pub fn assert_not_expired(expiry: &chrono::DateTime<Utc>) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_domain::TestDomain;
+
+    type Command = super::Command<TestDomain>;
+    type Job = super::Job<TestDomain>;
 
     #[test]
     fn test_command_new() {

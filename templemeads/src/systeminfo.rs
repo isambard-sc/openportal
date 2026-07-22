@@ -5,6 +5,8 @@
 //!
 //! This module provides functions for collecting system metrics like memory and CPU usage.
 
+use crate::domain::Domain;
+
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -127,7 +129,7 @@ pub fn initialize() {
 /// - Initializes system info on first run
 ///
 /// Call this once at startup. The task runs indefinitely in the background.
-pub fn spawn_monitor() {
+pub fn spawn_monitor<L: Domain>() {
     tokio::spawn(async {
         // Initialize on first run
         initialize();
@@ -144,7 +146,7 @@ pub fn spawn_monitor() {
                 tracing::warn!("High CPU usage: {:.1}%", info.cpu_percent);
 
                 // Fetch health info (without cascading) for troubleshooting
-                match crate::health::collect_health("", vec![]).await {
+                match crate::health::collect_health::<L>("", vec![]).await {
                     Ok(health) => {
                         tracing::warn!("Health info at high CPU: {}", health);
                     }
@@ -168,7 +170,7 @@ pub fn spawn_monitor() {
                     );
 
                     // Fetch health info (without cascading) for troubleshooting
-                    match crate::health::collect_health("", vec![]).await {
+                    match crate::health::collect_health::<L>("", vec![]).await {
                         Ok(health) => {
                             tracing::warn!("Health info at high memory: {}", health);
                         }

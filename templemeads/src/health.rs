@@ -9,8 +9,9 @@
 use crate::agent::{self, Peer, Type as AgentType};
 use crate::command::Command;
 use crate::diagnostics;
-use crate::grammar::NamedType;
+use crate::domain::Domain;
 use crate::jobtiming;
+use crate::named::NamedType;
 use crate::state;
 use crate::systeminfo;
 
@@ -529,7 +530,7 @@ pub async fn get_cached_health() -> HashMap<String, HealthInfo> {
 /// - `requester`: The agent that requested this health check
 /// - `visited`: Chain of agents already visited in this health check (to prevent circular loops)
 ///
-pub async fn collect_health(
+pub async fn collect_health<L: Domain>(
     requester: &str,
     visited: Vec<String>,
 ) -> Result<HealthInfo, anyhow::Error> {
@@ -555,7 +556,7 @@ pub async fn collect_health(
     );
 
     // Get aggregated job stats from all boards
-    let stats = state::aggregate_job_stats().await;
+    let stats = state::aggregate_job_stats::<L>().await?;
 
     health.active_jobs = stats.active;
     health.pending_jobs = stats.pending;
@@ -631,7 +632,7 @@ pub async fn collect_health(
             let mut new_visited = visited.clone();
             new_visited.push(agent_name.clone());
 
-            cascade_health_checks(&mut health, &downstream_peers, new_visited).await;
+            cascade_health_checks::<L>(&mut health, &downstream_peers, new_visited).await;
         }
     } else {
         tracing::debug!("Health cascade disabled for this agent (leaf node)");
@@ -646,7 +647,7 @@ pub async fn collect_health(
 /// Parameters:
 /// - `visited`: Chain of agents already visited (will be passed to downstream peers)
 ///
-async fn cascade_health_checks(
+async fn cascade_health_checks<L: Domain>(
     health: &mut HealthInfo,
     downstream_peers: &[Peer],
     visited: Vec<String>,
@@ -665,7 +666,7 @@ async fn cascade_health_checks(
     let mut disconnected_peers = Vec::new();
 
     for peer in downstream_peers.iter() {
-        let health_check = Command::health_check_with_visited(visited.clone());
+        let health_check = Command::<L>::health_check_with_visited(visited.clone());
         match health_check.send_to(peer).await {
             Ok(_) => {
                 successfully_contacted.push(peer.name().to_owned());

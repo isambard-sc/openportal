@@ -3,6 +3,7 @@
 
 use crate::agent::Type as AgentType;
 use crate::agent_core::Config;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::handler::{process_message, set_my_service_details};
 use crate::job::{Envelope, Job};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Run the scheduler service
 ///
-pub async fn run<T>(config: Config<T>, runner: AsyncRunnable) -> Result<(), Error>
+pub async fn run<T, L: Domain>(config: Config<T>, runner: AsyncRunnable<L>) -> Result<(), Error>
 where
     T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
 {
@@ -83,7 +84,7 @@ where
     }
 
     // run the OpenPortal agent
-    paddington::set_handler(process_message).await?;
+    paddington::set_handler(process_message::<L>).await?;
     paddington::run(config.service()).await?;
 
     Ok(())

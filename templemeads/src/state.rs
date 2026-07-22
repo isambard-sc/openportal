@@ -5,24 +5,31 @@ use crate::agent;
 use crate::board;
 use crate::command::Command as ControlCommand;
 use crate::destination;
+use crate::domain::Domain;
+use crate::domain_static;
 use crate::error::Error;
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
+use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
-struct States {
-    states: HashMap<agent::Peer, Arc<State>>,
+struct States<L: Domain> {
+    states: HashMap<agent::Peer, Arc<State<L>>>,
 }
 
-static STATES: Lazy<RwLock<States>> = Lazy::new(|| RwLock::new(States::new()));
+static STATES: OnceLock<Box<dyn Any + Send + Sync>> = OnceLock::new();
 
-impl States {
+fn states<L: Domain>() -> Result<&'static RwLock<States<L>>, Error> {
+    domain_static::get_or_init(&STATES, || {
+        start_cleaner::<L>();
+        RwLock::new(States::<L>::new())
+    })
+}
+
+impl<L: Domain> States<L> {
     fn new() -> Self {
-        start_cleaner();
-
         Self {
             states: HashMap::new(),
         }
@@ -32,11 +39,11 @@ impl States {
 ///
 /// Function called in a tokio task to clean up the boards
 ///
-fn start_cleaner() {
+fn start_cleaner<L: Domain>() {
     tokio::spawn(async {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            clean_boards().await;
+            clean_boards::<L>().await;
         }
     });
 }
@@ -44,21 +51,27 @@ fn start_cleaner() {
 ///
 /// Call this function to clean up the expired jobs from the boards
 ///
-async fn clean_boards() {
+async fn clean_boards<L: Domain>() {
     // Get our own peer identity
     let my_peer = agent::get_self(None).await;
     let my_name = my_peer.name();
 
-    let peers = STATES
-        .read()
-        .await
-        .states
-        .keys()
-        .cloned()
-        .collect::<Vec<agent::Peer>>();
+    let peers = match states::<L>() {
+        Ok(states) => states
+            .read()
+            .await
+            .states
+            .keys()
+            .cloned()
+            .collect::<Vec<agent::Peer>>(),
+        Err(e) => {
+            tracing::error!("Error getting states: {}", e);
+            return;
+        }
+    };
 
     for peer in peers.iter() {
-        let state = match get(peer).await {
+        let state = match get::<L>(peer).await {
             Ok(state) => state,
             Err(e) => {
                 tracing::error!("Error getting state for {}: {}", peer, e);
@@ -127,8 +140,8 @@ async fn clean_boards() {
     }
 }
 
-async fn _force_get(peer: agent::Peer) -> Result<Arc<State>, Error> {
-    Ok(STATES
+async fn _force_get<L: Domain>(peer: agent::Peer) -> Result<Arc<State<L>>, Error> {
+    Ok(states::<L>()?
         .write()
         .await
         .states
@@ -137,24 +150,24 @@ async fn _force_get(peer: agent::Peer) -> Result<Arc<State>, Error> {
         .clone())
 }
 
-async fn _get(peer: &agent::Peer) -> Result<Option<Arc<State>>, Error> {
-    Ok(STATES.read().await.states.get(peer).cloned())
+async fn _get<L: Domain>(peer: &agent::Peer) -> Result<Option<Arc<State<L>>>, Error> {
+    Ok(states::<L>()?.read().await.states.get(peer).cloned())
 }
 
-pub async fn get(peer: &agent::Peer) -> Result<Arc<State>, Error> {
-    if let Some(state) = _get(peer).await? {
+pub async fn get<L: Domain>(peer: &agent::Peer) -> Result<Arc<State<L>>, Error> {
+    if let Some(state) = _get::<L>(peer).await? {
         Ok(state)
     } else {
-        Ok(_force_get(peer.clone()).await?)
+        Ok(_force_get::<L>(peer.clone()).await?)
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct State {
-    board: Arc<RwLock<board::Board>>,
+#[derive(Debug, Clone)]
+pub struct State<L: Domain> {
+    board: Arc<RwLock<board::Board<L>>>,
 }
 
-impl State {
+impl<L: Domain> State<L> {
     pub fn new(peer: agent::Peer) -> Self {
         tracing::debug!("Creating new board for agent {}", peer);
 
@@ -163,7 +176,7 @@ impl State {
         }
     }
 
-    pub async fn board(&self) -> Arc<RwLock<board::Board>> {
+    pub async fn board(&self) -> Arc<RwLock<board::Board<L>>> {
         self.board.clone()
     }
 }
@@ -171,9 +184,9 @@ impl State {
 ///
 /// Collect aggregate job statistics from all boards
 ///
-pub async fn aggregate_job_stats() -> board::BoardJobStats {
+pub async fn aggregate_job_stats<L: Domain>() -> Result<board::BoardJobStats, Error> {
     let my_name = agent::name().await;
-    let states = STATES.read().await;
+    let states = states::<L>()?.read().await;
     let mut totals = board::BoardJobStats::default();
 
     for state in states.states.values() {
@@ -192,5 +205,5 @@ pub async fn aggregate_job_stats() -> board::BoardJobStats {
         totals.queued += stats.queued;
     }
 
-    totals
+    Ok(totals)
 }

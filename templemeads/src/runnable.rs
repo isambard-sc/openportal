@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::job::{Envelope, Job};
 
@@ -13,7 +14,7 @@ macro_rules! async_runnable {(
     $( #[$attr:meta] )* // includes doc strings
     $pub:vis
     async
-    fn $fname:ident ( $($args:tt)* ) $(-> $Ret:ty)?
+    fn $fname:ident $(<$gen:ident : $bound:path>)? ( $($args:tt)* ) $(-> $Ret:ty)?
     {
         $($body:tt)*
     }
@@ -21,7 +22,7 @@ macro_rules! async_runnable {(
     $( #[$attr] )*
     #[allow(unused_parens)]
     $pub
-    fn $fname ( $($args)* ) -> ::std::pin::Pin<::std::boxed::Box<
+    fn $fname $(<$gen: $bound>)? ( $($args)* ) -> ::std::pin::Pin<::std::boxed::Box<
         dyn Send + ::std::future::Future<Output = ($($Ret)?)>
     >>
     {
@@ -29,17 +30,17 @@ macro_rules! async_runnable {(
     }
 )}
 
-pub type AsyncRunnable = fn(
-    Envelope,
+pub type AsyncRunnable<L> = fn(
+    Envelope<L>,
 ) -> Pin<
     Box<
-        dyn Future<Output = Result<Job, Error>> // future API / pollable
+        dyn Future<Output = Result<Job<L>, Error>> // future API / pollable
             + Send, // required by non-single-threaded executors
     >,
 >;
 
 async_runnable! {
-    pub async fn default_runner(envelope: Envelope) -> Result<Job, Error>
+    pub async fn default_runner<L: Domain>(envelope: Envelope<L>) -> Result<Job<L>, Error>
     {
         tracing::debug!("Using the default runner for job from {} to {}", envelope.sender(), envelope.recipient());
         let result = envelope.job().execute().await?;

@@ -7,6 +7,8 @@ use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
 use crate::diagnostics;
+use crate::domain::Domain;
+use crate::domain_static;
 use crate::error::Error;
 use crate::health;
 use crate::job::{sync_from_peer, Envelope, Status};
@@ -16,24 +18,25 @@ use crate::restart;
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
-use paddington::async_message_handler;
 use paddington::message::{Message, MessageType};
+use std::any::Any;
 use std::boxed::Box;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
-struct ServiceDetails {
+struct ServiceDetails<L: Domain> {
     service: String,
     agent_type: AgentType,
-    runner: AsyncRunnable,
-    notify_runner: AsyncNotifyRunnable,
+    runner: AsyncRunnable<L>,
+    notify_runner: AsyncNotifyRunnable<L>,
     keepalives: Arc<Mutex<HashSet<String>>>,
 }
 
-impl Default for ServiceDetails {
+impl<L: Domain> Default for ServiceDetails<L> {
     fn default() -> Self {
         ServiceDetails {
             service: String::new(),
@@ -45,13 +48,18 @@ impl Default for ServiceDetails {
     }
 }
 
-static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
-    Lazy::new(|| RwLock::new(ServiceDetails::default()));
+static SERVICE_DETAILS: OnceLock<Box<dyn Any + Send + Sync>> = OnceLock::new();
 
-pub async fn set_my_service_details(
+fn service_details<L: Domain>() -> Result<&'static RwLock<ServiceDetails<L>>, Error> {
+    domain_static::get_or_init(&SERVICE_DETAILS, || {
+        RwLock::new(ServiceDetails::<L>::default())
+    })
+}
+
+pub async fn set_my_service_details<L: Domain>(
     service: &str,
     agent_type: &agent::Type,
-    runner: Option<AsyncRunnable>,
+    runner: Option<AsyncRunnable<L>>,
     cascade_health: bool,
 ) -> Result<()> {
     let engine = env!("CARGO_PKG_NAME");
@@ -60,7 +68,7 @@ pub async fn set_my_service_details(
     tracing::info!("Agent layer: {} version {}", engine, version);
 
     agent::register_self(service, agent_type, engine, version, cascade_health).await;
-    let mut service_details = SERVICE_DETAILS.write().await;
+    let mut service_details = service_details::<L>()?.write().await;
     service_details.service = service.to_string();
     service_details.agent_type = agent_type.clone();
 
@@ -72,16 +80,16 @@ pub async fn set_my_service_details(
     Ok(())
 }
 
-pub async fn set_notify_runner(runner: AsyncNotifyRunnable) -> Result<()> {
-    let mut service_details = SERVICE_DETAILS.write().await;
+pub async fn set_notify_runner<L: Domain>(runner: AsyncNotifyRunnable<L>) -> Result<()> {
+    let mut service_details = service_details::<L>()?.write().await;
     service_details.notify_runner = runner;
     Ok(())
 }
 
 /// Deliver a notification directly to this agent's registered notify runner.
 /// Used when the current agent is the final destination in the notification path.
-pub async fn invoke_notify_runner(envelope: NotificationEnvelope) -> Result<()> {
-    let runner = SERVICE_DETAILS.read().await.notify_runner;
+pub async fn invoke_notify_runner<L: Domain>(envelope: NotificationEnvelope<L>) -> Result<()> {
+    let runner = service_details::<L>()?.read().await.notify_runner;
     if let Err(e) = runner(envelope).await {
         tracing::warn!("Local notify runner returned error: {}", e);
     }
@@ -93,13 +101,13 @@ pub async fn invoke_notify_runner(envelope: NotificationEnvelope) -> Result<()> 
 /// This will either route the command to the right place, or if the command has reached
 /// its destination it will take action
 ///
-async fn process_command(
+async fn process_command<L: Domain>(
     recipient: &str,
     sender: &str,
     zone: &str,
-    command: &Command,
-    runner: &AsyncRunnable,
-    notify_runner: &AsyncNotifyRunnable,
+    command: &Command<L>,
+    runner: &AsyncRunnable<L>,
+    notify_runner: &AsyncNotifyRunnable<L>,
 ) -> Result<(), Error> {
     // Block new jobs during soft restart
     // Allow Register, HealthCheck, and Restart commands to pass through
@@ -451,12 +459,12 @@ async fn process_command(
             }
 
             // Collect health information (including cascaded peer health)
-            let health = health::collect_health(sender, visited.clone()).await?;
+            let health = health::collect_health::<L>(sender, visited.clone()).await?;
 
             tracing::debug!("Health check: {}", health);
 
             // Send health response back to sender
-            let response = Command::health_response(health);
+            let response = Command::<L>::health_response(health);
             response.send_to(&sender_peer).await?;
         }
         Command::HealthResponse { health } => {
@@ -468,7 +476,7 @@ async fn process_command(
             restart_type,
             destination,
         } => {
-            restart::handle_restart_request(sender, restart_type, destination).await?;
+            restart::handle_restart_request::<L>(sender, restart_type, destination).await?;
         }
         Command::DiagnosticsRequest { destination } => {
             tracing::debug!(
@@ -495,12 +503,12 @@ async fn process_command(
             }
 
             // Collect diagnostics information (including cascaded peer diagnostics)
-            let diagnostics_report = diagnostics::collect_diagnostics(destination).await?;
+            let diagnostics_report = diagnostics::collect_diagnostics::<L>(destination).await?;
 
             tracing::debug!("Diagnostics report: {}", diagnostics_report);
 
             // Send diagnostics response back to sender
-            let response = Command::diagnostics_response(diagnostics_report);
+            let response = Command::<L>::diagnostics_response(diagnostics_report);
             response.send_to(&sender_peer).await?;
         }
         Command::DiagnosticsResponse { report } => {
@@ -553,7 +561,10 @@ async fn process_command(
                     // agent in the path (penultimate covers virtual-agent suffixes).
                     let mut handled = false;
 
-                    let my_agent_type = SERVICE_DETAILS.read().await.agent_type.clone();
+                    let my_agent_type = match service_details::<L>() {
+                        Ok(service_details) => service_details.read().await.agent_type.clone(),
+                        Err(e) => return Err(e),
+                    };
                     if my_agent_type == AgentType::Bridge {
                         if let Some(portal) = agent::portal(0).await {
                             let agents = notification.destination().agents();
@@ -611,16 +622,25 @@ async fn process_command(
     Ok(())
 }
 
-async_message_handler! {
-    ///
-    /// Message handler for most templemeads agents
-    ///
-    pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
-        let service_info: ServiceDetails = SERVICE_DETAILS.read().await.to_owned();
+///
+/// Message handler for most templemeads agents
+///
+/// This is hand-expanded from paddington's `async_message_handler!` macro
+/// (rather than using it directly) because that macro's pattern has no slot
+/// for a generic parameter, and this function needs to be generic over the
+/// chosen `Domain` - paddington itself stays untouched and domain-agnostic.
+pub fn process_message<L: Domain>(
+    message: Message,
+) -> Pin<Box<dyn Future<Output = Result<(), paddington::Error>> + Send>> {
+    Box::pin(async move {
+        let service_info: ServiceDetails<L> = match service_details::<L>() {
+            Ok(service_details) => service_details.read().await.to_owned(),
+            Err(e) => return Err(paddington::Error::Any(e.into())),
+        };
 
         match message.typ() {
             MessageType::Control => {
-                process_control_message(&service_info.agent_type, message.into()).await?;
+                process_control_message::<L>(&service_info.agent_type, message.into()).await?;
                 Ok(())
             }
             MessageType::KeepAlive => {
@@ -683,7 +703,7 @@ async_message_handler! {
                 let sender: String = message.sender().to_owned();
                 let recipient: String = message.recipient().to_owned();
                 let zone: String = message.zone().to_owned();
-                let command: Command = message.into();
+                let command: Command<L> = message.into();
 
                 if (recipient != service_info.service) {
                     // check to see if this is a virtual agent
@@ -705,5 +725,5 @@ async_message_handler! {
                 Ok(())
             }
         }
-    }
+    })
 }

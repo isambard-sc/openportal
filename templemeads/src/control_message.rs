@@ -3,13 +3,14 @@
 
 use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::job;
 
 use anyhow::Result;
 use paddington::command::Command as ControlCommand;
 
-pub async fn process_control_message(
+pub async fn process_control_message<L: Domain>(
     agent_type: &AgentType,
     command: ControlCommand,
 ) -> Result<(), Error> {
@@ -22,7 +23,7 @@ pub async fn process_control_message(
         } => {
             let peer = Peer::new(&agent, &zone);
             tracing::info!("Connected to agent: {}", peer);
-            Command::register(
+            Command::<L>::register(
                 agent_type,
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
@@ -32,11 +33,11 @@ pub async fn process_control_message(
 
             // now send the current board to the peer, so that they
             // can restore their state
-            job::sync_board(&peer).await?;
+            job::sync_board::<L>(&peer).await?;
 
             // now they have their new state, we need to send all of the
             // queued jobs for this peer
-            job::send_queued(&peer).await?;
+            job::send_queued::<L>(&peer).await?;
         }
         ControlCommand::Disconnect { agent, zone } => {
             let peer = Peer::new(&agent, &zone);

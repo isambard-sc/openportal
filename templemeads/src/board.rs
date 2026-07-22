@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::agent::Peer;
 use crate::command::Command as ControlCommand;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::job::Job;
 
@@ -23,13 +24,20 @@ pub enum JobAddState {
     Unchanged,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct SyncState {
-    jobs: Vec<Job>,
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(bound = "")]
+pub struct SyncState<L: Domain> {
+    jobs: Vec<Job<L>>,
 }
 
-impl SyncState {
-    pub fn jobs(&self) -> &Vec<Job> {
+impl<L: Domain> Default for SyncState<L> {
+    fn default() -> Self {
+        Self { jobs: Vec::new() }
+    }
+}
+
+impl<L: Domain> SyncState<L> {
+    pub fn jobs(&self) -> &Vec<Job<L>> {
         &self.jobs
     }
 }
@@ -59,25 +67,38 @@ pub struct BoardJobStats {
     pub queued: usize,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Board {
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Board<L: Domain> {
     peer: Peer,
-    jobs: HashMap<Uuid, Job>,
+    jobs: HashMap<Uuid, Job<L>>,
 
     // all of the queued commands that are waiting for the connection
     // to re-open, so that they can be sent
-    queued_commands: Vec<ControlCommand>,
+    queued_commands: Vec<ControlCommand<L>>,
 
     // do not serialise or clone the waiters
     #[serde(skip)]
-    waiters: HashMap<Uuid, Vec<Listener>>,
+    waiters: HashMap<Uuid, Vec<Listener<L>>>,
 
     // do not serialise the duplicates
     #[serde(skip)]
     duplicates: HashMap<Uuid, Vec<Uuid>>,
 }
 
-impl Clone for Board {
+impl<L: Domain> Default for Board<L> {
+    fn default() -> Self {
+        Self {
+            peer: Peer::default(),
+            jobs: HashMap::new(),
+            queued_commands: Vec::new(),
+            waiters: HashMap::new(),
+            duplicates: HashMap::new(),
+        }
+    }
+}
+
+impl<L: Domain> Clone for Board<L> {
     /// Clone the board, but do not clone the waiters
     fn clone(&self) -> Self {
         Self {
@@ -90,7 +111,7 @@ impl Clone for Board {
     }
 }
 
-impl Board {
+impl<L: Domain> Board<L> {
     pub fn new(peer: &Peer) -> Self {
         Self {
             peer: peer.clone(),
@@ -105,7 +126,7 @@ impl Board {
     /// Return the sync state that can be used to synchronise this board
     /// with its copy on the peer
     ///
-    pub fn sync_state(&self) -> SyncState {
+    pub fn sync_state(&self) -> SyncState<L> {
         SyncState {
             jobs: self.jobs.values().cloned().collect(),
         }
@@ -164,7 +185,7 @@ impl Board {
     /// the passed job transitions into one of those states,
     /// and it will return the new version of the job
     ///
-    pub fn get_waiter(&mut self, job: &Job) -> Result<Waiter, Error> {
+    pub fn get_waiter(&mut self, job: &Job<L>) -> Result<Waiter<L>, Error> {
         // check that we have this job on the board
         match self.jobs.get(&job.id()) {
             Some(j) => {
@@ -221,7 +242,7 @@ impl Board {
     /// This returns the state change for the board, i.e.
     /// if the job was added, updated, duplicated, or unchanged.
     ///
-    pub fn add(&mut self, job: &Job) -> Result<(Job, JobAddState), Error> {
+    pub fn add(&mut self, job: &Job<L>) -> Result<(Job<L>, JobAddState), Error> {
         tracing::debug!("Adding job {} to board of agent {}", job, self.peer);
 
         job.assert_is_for_board(&self.peer)?;
@@ -411,7 +432,7 @@ impl Board {
     /// This returns whether or not the board has changed
     /// (i.e. whether the job was on the board)
     ///
-    pub fn remove(&mut self, job: &Job) -> Result<bool, Error> {
+    pub fn remove(&mut self, job: &Job<L>) -> Result<bool, Error> {
         job.assert_is_for_board(&self.peer)?;
 
         // if we have any waiters for this job then notify them with an error
@@ -482,7 +503,7 @@ impl Board {
     /// Get the job with the passed id
     /// If the job doesn't exist then we return an error
     ///
-    pub fn get(&self, id: &Uuid) -> Result<Job, Error> {
+    pub fn get(&self, id: &Uuid) -> Result<Job<L>, Error> {
         match self.jobs.get(id) {
             Some(j) => Ok(j.clone()),
             None => {
@@ -504,7 +525,7 @@ impl Board {
     /// Add a job to the board that should be sent later, e.g.
     /// because the connection to the agent is currently unavailable
     ///
-    pub fn queue(&mut self, command: ControlCommand) {
+    pub fn queue(&mut self, command: ControlCommand<L>) {
         tracing::info!("Queuing command: {:?}", command);
 
         // remove the job from the main board as it never made it
@@ -521,7 +542,7 @@ impl Board {
     /// Take all of the queued commands - this removes the commands from this
     /// board and returns them as a list
     ///
-    pub fn take_queued(&mut self) -> Vec<ControlCommand> {
+    pub fn take_queued(&mut self) -> Vec<ControlCommand<L>> {
         let mut queued_commands = Vec::new();
         std::mem::swap(&mut queued_commands, &mut self.queued_commands);
         queued_commands
@@ -531,7 +552,7 @@ impl Board {
     /// Return whether or not this board would be changed by the
     /// passed job
     ///
-    pub fn would_be_changed_by(&self, job: &Job) -> bool {
+    pub fn would_be_changed_by(&self, job: &Job<L>) -> bool {
         if job.is_expired() {
             return false;
         }
@@ -551,8 +572,8 @@ impl Board {
     ///
     /// Returns a vector of jobs that were expired and removed
     ///
-    pub fn remove_expired_jobs(&mut self) -> Vec<Job> {
-        let mut expired_jobs: Vec<Job> = self
+    pub fn remove_expired_jobs(&mut self) -> Vec<Job<L>> {
+        let mut expired_jobs: Vec<Job<L>> = self
             .jobs
             .values()
             .filter_map(|job| {
@@ -656,21 +677,21 @@ impl Board {
 /// when it does
 ///
 #[derive(Debug)]
-pub enum Waiter {
-    Pending(oneshot::Receiver<Job>),
-    Finished(Box<Job>),
+pub enum Waiter<L: Domain> {
+    Pending(oneshot::Receiver<Job<L>>),
+    Finished(Box<Job<L>>),
 }
 
-impl Waiter {
-    pub fn pending(rx: oneshot::Receiver<Job>) -> Self {
+impl<L: Domain> Waiter<L> {
+    pub fn pending(rx: oneshot::Receiver<Job<L>>) -> Self {
         Waiter::Pending(rx)
     }
 
-    pub fn finished(job: Job) -> Self {
+    pub fn finished(job: Job<L>) -> Self {
         Waiter::Finished(Box::new(job))
     }
 
-    pub async fn try_result(self, timeout_ms: u64) -> Result<Option<Job>, Error> {
+    pub async fn try_result(self, timeout_ms: u64) -> Result<Option<Job<L>>, Error> {
         let now = chrono::Utc::now();
 
         match self {
@@ -694,7 +715,7 @@ impl Waiter {
         }
     }
 
-    pub async fn result(self) -> Result<Job, Error> {
+    pub async fn result(self) -> Result<Job<L>, Error> {
         match self {
             Waiter::Pending(rx) => match rx.await {
                 Ok(job) => Ok(job),
@@ -710,16 +731,16 @@ impl Waiter {
 /// is finished, or errored
 ///
 #[derive(Debug)]
-pub struct Listener {
-    tx: oneshot::Sender<Job>,
+pub struct Listener<L: Domain> {
+    tx: oneshot::Sender<Job<L>>,
 }
 
-impl Listener {
-    pub fn new(tx: oneshot::Sender<Job>) -> Self {
+impl<L: Domain> Listener<L> {
+    pub fn new(tx: oneshot::Sender<Job<L>>) -> Self {
         Self { tx }
     }
 
-    pub fn notify(self, job: Job) {
+    pub fn notify(self, job: Job<L>) {
         let _ = self.tx.send(job);
     }
 }

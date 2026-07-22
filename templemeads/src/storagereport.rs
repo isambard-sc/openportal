@@ -9,9 +9,9 @@ use ts_rs::TS;
 
 use crate::error::Error;
 
-use crate::grammar::{
-    Date, DateRange, NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping,
-};
+use crate::grammar::{Date, DateRange, ProjectIdentifier, UserIdentifier, UserMapping};
+use crate::named::NamedType;
+use crate::portal_identifier::PortalIdentifier;
 use crate::storage::{Quota, Volume};
 
 impl NamedType for StorageReport {

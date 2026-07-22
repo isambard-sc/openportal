@@ -8,6 +8,7 @@
 use crate::agent;
 use crate::command::Command;
 use crate::diagnostics;
+use crate::domain::Domain;
 
 ///
 /// Perform a soft restart by disconnecting all peers and clearing boards
@@ -17,7 +18,7 @@ use crate::diagnostics;
 /// - Disconnects from each peer
 /// - Clears all job boards (cancels in-flight jobs)
 ///
-async fn perform_soft_restart() -> Result<(), anyhow::Error> {
+async fn perform_soft_restart<L: Domain>() -> Result<(), anyhow::Error> {
     // Acquire the RAII guard to block new connections
     // The guard will automatically clear the flag when this function exits (even on panic)
     let _guard = paddington::SoftRestartGuard::new();
@@ -35,7 +36,7 @@ async fn perform_soft_restart() -> Result<(), anyhow::Error> {
     tracing::info!("Soft restart: clearing all job boards and cancelling in-flight jobs");
 
     for peer in all_peers.iter() {
-        match crate::state::get(peer).await {
+        match crate::state::get::<L>(peer).await {
             Ok(state) => {
                 let board = state.board().await;
 
@@ -168,7 +169,7 @@ async fn perform_soft_restart() -> Result<(), anyhow::Error> {
 /// - `restart_type`: Type of restart ("soft", "hard", etc.)
 /// - `destination`: Dot-separated path (e.g., "brics.aip2.clusters"), empty means restart self
 ///
-pub async fn handle_restart_request(
+pub async fn handle_restart_request<L: Domain>(
     sender: &str,
     restart_type: &str,
     destination: &str,
@@ -231,7 +232,7 @@ pub async fn handle_restart_request(
                 tracing::warn!(
                     "Performing soft restart - disconnecting all peers and clearing boards"
                 );
-                match perform_soft_restart().await {
+                match perform_soft_restart::<L>().await {
                     Ok(_) => {
                         tracing::info!("Soft restart completed successfully");
                         Ok(())
@@ -326,7 +327,7 @@ pub async fn handle_restart_request(
             }
 
             // Forward the restart command with the updated destination
-            let restart_cmd = Command::restart(restart_type, &remaining_path);
+            let restart_cmd = Command::<L>::restart(restart_type, &remaining_path);
             restart_cmd.send_to(next_peer).await?;
 
             tracing::debug!(

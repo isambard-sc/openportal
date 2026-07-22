@@ -22,7 +22,8 @@ use templemeads::grammar::Instruction::{
     GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers, RemoveProject,
     UpdateProject,
 };
-use templemeads::grammar::{DateRange, PortalIdentifier, ProjectIdentifier};
+use templemeads::grammar::{DateRange, ProjectIdentifier};
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::job::{Envelope, Job};
 use templemeads::notification::default_notify_runner;
 use templemeads::set_notify_runner;

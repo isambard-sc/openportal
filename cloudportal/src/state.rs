@@ -15,9 +15,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
-use templemeads::grammar::{
-    AwardDetails, Note, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserMapping,
-};
+use templemeads::grammar::{AwardDetails, Note, ProjectIdentifier, ProjectMapping, UserMapping};
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

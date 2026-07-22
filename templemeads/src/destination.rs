@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::error::Error;
-use crate::grammar::NamedType;
+use crate::named::NamedType;
 
 use serde::{Deserialize, Serialize};
 use std::cmp::{Ord, Ordering};

@@ -8,7 +8,7 @@ use ts_rs::TS;
 
 use crate::error::Error;
 
-use crate::grammar::NamedType;
+use crate::named::NamedType;
 
 impl NamedType for StorageSize {
     fn type_name() -> &'static str {

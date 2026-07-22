@@ -8,8 +8,9 @@
 
 use crate::agent;
 use crate::command::Command;
-use crate::grammar::NamedType;
+use crate::domain::Domain;
 use crate::job::Job;
+use crate::named::NamedType;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -204,7 +205,7 @@ struct JobKey {
 }
 
 impl JobKey {
-    fn from_job(job: &Job) -> Self {
+    fn from_job<L: Domain>(job: &Job<L>) -> Self {
         Self {
             destination: job.destination().to_string(),
             instruction: job.instruction().to_string(),
@@ -277,7 +278,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_failed_job(&mut self, job: &Job, error_message: String) {
+    fn record_failed_job<L: Domain>(&mut self, job: &Job<L>, error_message: String) {
         let key = JobKey::from_job(job);
         let now = Utc::now();
 
@@ -311,7 +312,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_slow_job(&mut self, job: &Job, duration_ms: f64) {
+    fn record_slow_job<L: Domain>(&mut self, job: &Job<L>, duration_ms: f64) {
         if duration_ms < SLOW_JOB_THRESHOLD_MS {
             return;
         }
@@ -340,7 +341,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_expired_job(&mut self, job: &Job) {
+    fn record_expired_job<L: Domain>(&mut self, job: &Job<L>) {
         let key = JobKey::from_job(job);
 
         // Increment total expired jobs counter
@@ -371,7 +372,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_job_started(&mut self, job: &Job) {
+    fn record_job_started<L: Domain>(&mut self, job: &Job<L>) {
         let key = JobKey::from_job(job);
 
         if let Some(data) = self.running_jobs.get_mut(&key) {
@@ -387,7 +388,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_job_finished(&mut self, job: &Job) {
+    fn record_job_finished<L: Domain>(&mut self, job: &Job<L>) {
         let key = JobKey::from_job(job);
 
         if let Some(data) = self.running_jobs.get_mut(&key) {
@@ -608,19 +609,19 @@ pub fn get_recent_logs(max: usize) -> Vec<LogEntry> {
 static SLOW_JOB_THRESHOLD_MS: f64 = 10000.0; // 10 seconds
 
 /// Record a failed job
-pub async fn record_failed_job(job: &Job, error_message: String) {
+pub async fn record_failed_job<L: Domain>(job: &Job<L>, error_message: String) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_failed_job(job, error_message);
 }
 
 /// Record a completed (successful) job
-pub async fn record_completed_job(_job: &Job) {
+pub async fn record_completed_job<L: Domain>(_job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.total_jobs_completed += 1;
 }
 
 /// Record a slow job completion
-pub async fn record_slow_job(job: &Job, duration_ms: f64) {
+pub async fn record_slow_job<L: Domain>(job: &Job<L>, duration_ms: f64) {
     if duration_ms > SLOW_JOB_THRESHOLD_MS {
         let mut tracker = DIAGNOSTICS.write().await;
         tracker.record_slow_job(job, duration_ms);
@@ -628,19 +629,19 @@ pub async fn record_slow_job(job: &Job, duration_ms: f64) {
 }
 
 /// Record an expired job
-pub async fn record_expired_job(job: &Job) {
+pub async fn record_expired_job<L: Domain>(job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_expired_job(job);
 }
 
 /// Record when a job starts running
-pub async fn record_job_started(job: &Job) {
+pub async fn record_job_started<L: Domain>(job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_job_started(job);
 }
 
 /// Record when a job finishes (successful or failed)
-pub async fn record_job_finished(job: &Job) {
+pub async fn record_job_finished<L: Domain>(job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_job_finished(job);
 }
@@ -778,7 +779,9 @@ async fn wait_for_diagnostics_response(
 ///
 /// Returns the diagnostics report or an error if the request fails or times out.
 ///
-pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport, anyhow::Error> {
+pub async fn collect_diagnostics<L: Domain>(
+    destination: &str,
+) -> Result<DiagnosticsReport, anyhow::Error> {
     let my_name = agent::get_self(None).await.name().to_owned();
 
     // Parse the destination path
@@ -884,7 +887,7 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
             let baseline_time = Utc::now();
 
             // Forward the diagnostics command with the updated destination
-            let diagnostics_cmd = Command::diagnostics_request(&remaining_path);
+            let diagnostics_cmd = Command::<L>::diagnostics_request(&remaining_path);
             diagnostics_cmd.send_to(next_peer).await?;
 
             tracing::debug!(

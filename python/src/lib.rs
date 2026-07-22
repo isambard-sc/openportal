@@ -22,6 +22,7 @@ use templemeads::grammar;
 use templemeads::health as mod_health;
 use templemeads::job;
 use templemeads::notification as mod_notification;
+use templemeads::portal_identifier;
 use templemeads::server::sign_api_call;
 use templemeads::storagereport;
 use templemeads::usagereport;
@@ -1611,7 +1612,7 @@ impl Job {
                 }
             }
             "PortalIdentifier" => {
-                let result = match self.0.result::<grammar::PortalIdentifier>() {
+                let result = match self.0.result::<portal_identifier::PortalIdentifier>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -1823,7 +1824,7 @@ impl Job {
                 }
             }
             "Vec<PortalIdentifier>" => {
-                let result = match self.0.result::<Vec<grammar::PortalIdentifier>>() {
+                let result = match self.0.result::<Vec<portal_identifier::PortalIdentifier>>() {
                     Ok(result) => result,
                     Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
                 };
@@ -4122,14 +4123,14 @@ impl From<grammar::ProjectIdentifier> for ProjectIdentifier {
 #[gen_stub_pyclass]
 #[pyclass(module = "openportal")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PortalIdentifier(grammar::PortalIdentifier);
+struct PortalIdentifier(portal_identifier::PortalIdentifier);
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PortalIdentifier {
     #[new]
     fn new(identifier: &str) -> PyResult<Self> {
-        match grammar::PortalIdentifier::parse(identifier) {
+        match portal_identifier::PortalIdentifier::parse(identifier) {
             Ok(portal_identifier) => Ok(Self(portal_identifier)),
             Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         }
@@ -4182,8 +4183,8 @@ impl PortalIdentifier {
     }
 }
 
-impl From<grammar::PortalIdentifier> for PortalIdentifier {
-    fn from(portal_identifier: grammar::PortalIdentifier) -> Self {
+impl From<portal_identifier::PortalIdentifier> for PortalIdentifier {
+    fn from(portal_identifier: portal_identifier::PortalIdentifier) -> Self {
         PortalIdentifier(portal_identifier)
     }
 }
@@ -5990,7 +5991,7 @@ impl From<templemeads::storage::Volume> for Volume {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn get_portal() -> PyResult<PortalIdentifier> {
-    match call_get::<grammar::PortalIdentifier>("get_portal") {
+    match call_get::<portal_identifier::PortalIdentifier>("get_portal") {
         Ok(portal) => Ok(portal.into()),
         Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
     }

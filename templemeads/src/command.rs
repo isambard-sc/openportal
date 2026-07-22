@@ -6,6 +6,7 @@ use crate::agent::{self, Peer};
 use crate::board::SyncState;
 use crate::destination::Destination;
 use crate::diagnostics::DiagnosticsReport;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::health::HealthInfo;
 use crate::job::Job;
@@ -20,18 +21,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Command {
+#[serde(bound = "")]
+pub enum Command<L: Domain> {
     Error {
         error: String,
     },
     Put {
-        job: Job,
+        job: Job<L>,
     },
     Update {
-        job: Job,
+        job: Job<L>,
     },
     Delete {
-        job: Job,
+        job: Job<L>,
     },
     Register {
         agent: AgentType,
@@ -39,7 +41,7 @@ pub enum Command {
         version: String,
     },
     Sync {
-        state: SyncState,
+        state: SyncState<L>,
     },
     HealthCheck {
         /// Chain of agents that have already been visited in this health check cascade
@@ -66,11 +68,11 @@ pub enum Command {
         report: Box<DiagnosticsReport>,
     },
     Notify {
-        notification: Notification,
+        notification: Notification<L>,
     },
 }
 
-impl std::fmt::Display for Command {
+impl<L: Domain> std::fmt::Display for Command<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Command::Error { error } => write!(f, "Error: {}", error),
@@ -110,16 +112,16 @@ impl std::fmt::Display for Command {
     }
 }
 
-impl Command {
-    pub fn put(job: &Job) -> Self {
+impl<L: Domain> Command<L> {
+    pub fn put(job: &Job<L>) -> Self {
         Self::Put { job: job.clone() }
     }
 
-    pub fn update(job: &Job) -> Self {
+    pub fn update(job: &Job<L>) -> Self {
         Self::Update { job: job.clone() }
     }
 
-    pub fn delete(job: &Job) -> Self {
+    pub fn delete(job: &Job<L>) -> Self {
         Self::Delete { job: job.clone() }
     }
 
@@ -137,7 +139,7 @@ impl Command {
         }
     }
 
-    pub fn sync(state: &SyncState) -> Self {
+    pub fn sync(state: &SyncState<L>) -> Self {
         Self::Sync {
             state: state.clone(),
         }
@@ -178,7 +180,7 @@ impl Command {
         }
     }
 
-    pub fn notify(notification: &Notification) -> Self {
+    pub fn notify(notification: &Notification<L>) -> Self {
         Self::Notify {
             notification: notification.clone(),
         }
@@ -195,7 +197,7 @@ impl Command {
 
         if agent::is_virtual(peer).await {
             tracing::debug!("Sending command to virtual peer {} locally", peer);
-            Ok(send_to_virtual(
+            Ok(send_to_virtual::<L>(
                 &self.destination(),
                 Message::send_to(peer.name(), peer.zone(), &serde_json::to_string(self)?),
             )
@@ -221,7 +223,7 @@ impl Command {
         }
     }
 
-    pub fn job(&self) -> Option<Job> {
+    pub fn job(&self) -> Option<Job<L>> {
         match self {
             Command::Put { job } => Some(job.clone()),
             Command::Update { job } => Some(job.clone()),
@@ -294,7 +296,7 @@ impl Command {
     }
 }
 
-impl From<Message> for Command {
+impl<L: Domain> From<Message> for Command<L> {
     fn from(m: Message) -> Self {
         serde_json::from_str(m.payload())
             .unwrap_or(Command::error(&format!("Could not parse command: {:?}", m)))
@@ -304,38 +306,14 @@ impl From<Message> for Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_domain::TestDomain;
 
-    #[test]
-    fn test_command_display() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::put(&job);
-        assert_eq!(format!("{}", command), format!("Put: {}", job));
-    }
+    type Command = super::Command<TestDomain>;
 
-    #[test]
-    fn test_command_put() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::put(&job);
-        assert_eq!(command, Command::Put { job });
-    }
-
-    #[test]
-    fn test_command_update() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::update(&job);
-        assert_eq!(command, Command::Update { job });
-    }
-
-    #[test]
-    fn test_command_delete() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::delete(&job);
-        assert_eq!(command, Command::Delete { job });
-    }
+    // Tests that exercise put/update/delete/display against a real parsed
+    // Job (e.g. "a.b add_user person.group.a") need a concrete Domain, so
+    // they live alongside the domain crate's own grammar tests instead of
+    // here - templemeads itself has no concrete Instruction to parse.
 
     #[test]
     fn test_command_error() {

@@ -35,6 +35,7 @@ pub mod diagnostics;
 pub mod domain;
 mod domain_static;
 pub use error::Error;
+pub mod erased;
 pub mod health;
 pub mod job;
 pub mod named;

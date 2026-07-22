@@ -105,10 +105,48 @@ right after handling `ControlCommand::Connected`): it checks the peer's
 registered domain against `L::name()` and forcibly disconnects it -
 returning `Error::Incompatible` - if the domain differs *or* is unknown
 (fail-closed: an unresolvable domain is treated exactly like a confirmed
-mismatch, not given the benefit of the doubt). This is opt-in per agent, not
-automatic, since a domain mismatch is otherwise harmless to the framework
-itself - it only matters if your agent's own logic can't tolerate talking to
-a differently-vocabularied peer.
+mismatch, not given the benefit of the doubt) - **with one built-in
+exception**: a peer that identifies itself as `templemeads::erased::Erased`
+(a domain-oblivious routing agent - see
+[docs/plans/multi-domain-routing-design.md](../plans/multi-domain-routing-design.md))
+is always accepted, regardless of `L`. That's not a foreign vocabulary that
+happens to share a name - it's templemeads' own built-in "I forward
+everything, I execute nothing" implementation, so it poses none of the risk
+this check exists to catch: it will never misinterpret your instructions,
+because it never looks at them. This is opt-in per agent, not automatic,
+since a domain mismatch is otherwise harmless to the framework itself - it
+only matters if your agent's own logic can't tolerate talking to a
+differently-vocabularied peer.
+
+#### Per-message checks, and why they're not the same function
+
+`Job<L>` and `Notification<L>` also carry their *own* `domain`/
+`domain_version`, set once at creation (`Job::parse()`, `Notification::new()`/
+`parse()`) and never touched again. Two more opt-in functions check these
+directly: `agent::ensure_job_domain_matches::<L>(&job, &sender)` and
+`agent::ensure_notification_domain_matches::<L>(&notification, &sender)`,
+called at the point of execution (the first thing your runner/notify runner
+does). Same fail-closed logic as `ensure_domain_matches` (falling back to
+`peer_domain(sender)` for a message with no domain of its own) - **except
+the `Erased` exception does not apply here**. A message that genuinely
+claims `domain: "erased"` as its own provenance means no real `Domain` ever
+validated it, which is exactly the case these checks exist to catch -
+accepting it would defeat the point. In practice this shouldn't happen: an
+`Erased` router never constructs a new Job/Notification of its own, it only
+ever relays ones it received, so a message's `domain` always reflects its
+true origin, never the router(s) it passed through. The failure mode also
+differs from `ensure_domain_matches`: these don't disconnect anything, they
+just refuse the individual Job/Notification - errored, or dropped,
+respectively.
+
+**Use `ensure_domain_matches` for "can I trust this connection to relay my
+traffic faithfully"** - true both for a peer that shares your vocabulary and
+for a known `Erased` router. **Use
+`ensure_job_domain_matches`/`ensure_notification_domain_matches` for "was
+this specific message actually produced by my vocabulary"** - the check
+that still matters even when the connection itself is fine, because the
+peer on the other end of it might be a router relaying traffic for domains
+other than yours.
 
 A `Domain` implementation is a single, usually zero-sized, marker type (like
 `greatwestern::Hpc`) that never holds a value - it only ever appears as a type

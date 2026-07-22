@@ -376,7 +376,24 @@ pub async fn ensure_domain_matches<L: Domain>(peer: &Peer) -> Result<(), Error> 
     let expected = L::name();
     let actual = peer_domain(peer).await;
 
-    if actual.as_ref().is_some_and(|d| d.name == expected) {
+    // A peer that has explicitly identified itself as `templemeads::erased::Erased`
+    // is always accepted here, regardless of `L` - it's templemeads' own
+    // built-in, domain-oblivious router implementation (not a foreign
+    // vocabulary that happens to have a matching name), and by construction
+    // it never inspects or executes Instruction/NotificationEvent content -
+    // only relays it - so it poses none of the risk this connection-level
+    // check exists to catch. The content-level risk (a message that reached
+    // this agent via such a router but doesn't actually belong to `L`) is
+    // what `ensure_job_domain_matches`/`ensure_notification_domain_matches`
+    // guard against instead, at the point of execution - deliberately NOT
+    // given the same exception, since accepting "erased" as a message's own
+    // provenance there would defeat the reason those checks exist. See
+    // `docs/plans/multi-domain-routing-design.md` §8.1.
+    let peer_is_known_router = actual
+        .as_ref()
+        .is_some_and(|d| d.name == crate::erased::Erased::name());
+
+    if peer_is_known_router || actual.as_ref().is_some_and(|d| d.name == expected) {
         return Ok(());
     }
 
@@ -400,6 +417,80 @@ pub async fn ensure_domain_matches<L: Domain>(peer: &Peer) -> Result<(), Error> 
     }
 
     Err(Error::Incompatible(message))
+}
+
+///
+/// Verify that `job`'s own recorded `Domain` (see `Job::domain`) matches
+/// this agent's `L`, before executing it. Falls back to `sender`'s
+/// connection-level domain (`peer_domain`, which already folds in
+/// `Domain::assume_legacy_domain_version`) for a Job with no domain of its
+/// own - e.g. one from a peer running templemeads from before this field
+/// existed. Fail-closed: if neither signal resolves a match, returns
+/// `Err(Error::Incompatible(...))`.
+///
+/// Unlike `ensure_domain_matches`, this never disconnects `sender` - a
+/// single misrouted Job (e.g. one that passed through a domain-oblivious
+/// router, see `docs/plans/multi-domain-routing-design.md`) doesn't mean
+/// the connection itself is bad. Opt-in: call this as the first thing your
+/// runner does, if your agent needs the guarantee.
+///
+pub async fn ensure_job_domain_matches<L: Domain>(
+    job: &crate::job::Job<L>,
+    sender: &Peer,
+) -> Result<(), Error> {
+    let expected = L::name();
+
+    let actual_domain = match job.domain() {
+        Some(d) => Some(d.to_string()),
+        None => peer_domain(sender).await.map(|d| d.name),
+    };
+
+    if actual_domain.as_deref() == Some(expected) {
+        return Ok(());
+    }
+
+    Err(Error::Incompatible(format!(
+        "Job {} has domain '{}', but this agent speaks '{}'",
+        job.id(),
+        actual_domain.as_deref().unwrap_or("unknown"),
+        expected
+    )))
+}
+
+///
+/// Verify that `notification`'s own recorded `Domain` (see
+/// `Notification::domain`) matches this agent's `L`, before handing it to a
+/// notify runner. Same fallback/fail-closed logic as
+/// `ensure_job_domain_matches`.
+///
+/// Notifications already have no delivery guarantee and no return channel
+/// ([notification-protocol.md](../../docs/specifications/notification-protocol.md)
+/// §8), so a mismatch here simply means the notification should be dropped
+/// (logged, not delivered) - one more entry in the same "best-effort"
+/// bucket every other notification delivery failure already falls into, not
+/// a new kind of error a caller needs to handle specially.
+///
+pub async fn ensure_notification_domain_matches<L: Domain>(
+    notification: &crate::notification::Notification<L>,
+    sender: &Peer,
+) -> Result<(), Error> {
+    let expected = L::name();
+
+    let actual_domain = match notification.domain() {
+        Some(d) => Some(d.to_string()),
+        None => peer_domain(sender).await.map(|d| d.name),
+    };
+
+    if actual_domain.as_deref() == Some(expected) {
+        return Ok(());
+    }
+
+    Err(Error::Incompatible(format!(
+        "Notification {} has domain '{}', but this agent speaks '{}'",
+        notification.id(),
+        actual_domain.as_deref().unwrap_or("unknown"),
+        expected
+    )))
 }
 
 ///
@@ -938,5 +1029,89 @@ mod tests {
 
         // never registered at all - fail closed, same as a known mismatch
         assert!(ensure_domain_matches::<TestDomain>(&unknown).await.is_err());
+
+        // a peer that identifies as the built-in Erased router is always
+        // accepted here, regardless of L - see the doc comment above.
+        let router = Peer::new("router", "domaintest");
+        register_peer(
+            &router,
+            &Type::Provider,
+            engine,
+            version,
+            Some(crate::erased::Erased::name()),
+            Some(crate::erased::Erased::version()),
+        )
+        .await;
+        assert!(ensure_domain_matches::<TestDomain>(&router).await.is_ok());
+
+        // ensure_job_domain_matches / ensure_notification_domain_matches -
+        // same reasoning for staying in this serial test as above.
+        use crate::job::Job;
+        use crate::notification::Notification;
+        use crate::test_domain::TestNotificationEvent;
+
+        #[allow(clippy::expect_used)]
+        let job = Job::<TestDomain>::parse("a.b something", false).expect("valid instruction");
+        // Job::parse always stamps the agent's own domain - matches by construction.
+        assert_eq!(job.domain(), Some("test-domain"));
+        assert!(ensure_job_domain_matches::<TestDomain>(&job, &unknown)
+            .await
+            .is_ok());
+
+        // Simulate a Job relayed from a different domain: same shape, but
+        // its own recorded `domain` doesn't match this agent's.
+        #[allow(clippy::expect_used)]
+        let mut job_json: serde_json::Value =
+            serde_json::from_str(&job.to_json().expect("serialises")).expect("valid json");
+        job_json["domain"] = serde_json::Value::String("greatwestern".to_string());
+        #[allow(clippy::expect_used)]
+        let foreign_job: Job<TestDomain> =
+            serde_json::from_value(job_json).expect("still deserialises");
+        assert_eq!(foreign_job.domain(), Some("greatwestern"));
+        assert!(
+            ensure_job_domain_matches::<TestDomain>(&foreign_job, &unknown)
+                .await
+                .is_err()
+        );
+
+        // Simulate a legacy Job with no `domain` field at all: falls back
+        // to the sender peer's connection-level domain.
+        #[allow(clippy::expect_used)]
+        let mut legacy_json: serde_json::Value =
+            serde_json::from_str(&job.to_json().expect("serialises")).expect("valid json");
+        #[allow(clippy::expect_used)]
+        legacy_json
+            .as_object_mut()
+            .expect("job serialises as an object")
+            .remove("domain");
+        #[allow(clippy::expect_used)]
+        let legacy_job: Job<TestDomain> =
+            serde_json::from_value(legacy_json).expect("still deserialises, domain defaults");
+        assert_eq!(legacy_job.domain(), None);
+        // `matching` was registered above with domain "test-domain".
+        assert!(
+            ensure_job_domain_matches::<TestDomain>(&legacy_job, &matching)
+                .await
+                .is_ok()
+        );
+        // `unknown` was never registered - fails closed.
+        assert!(
+            ensure_job_domain_matches::<TestDomain>(&legacy_job, &unknown)
+                .await
+                .is_err()
+        );
+
+        #[allow(clippy::expect_used)]
+        let destination = crate::destination::Destination::parse("a.b").expect("valid destination");
+        let notification = Notification::<TestDomain>::new(
+            destination,
+            TestNotificationEvent::Echo("hello".to_string()),
+        );
+        assert_eq!(notification.domain(), Some("test-domain"));
+        assert!(
+            ensure_notification_domain_matches::<TestDomain>(&notification, &unknown)
+                .await
+                .is_ok()
+        );
     }
 }

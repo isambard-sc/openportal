@@ -3,9 +3,9 @@
 
 use anyhow::Result;
 
-use greatwestern::Hpc;
 use templemeads::agent::provider::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
+use templemeads::erased::Erased;
 use templemeads::notification::default_notify_runner;
 use templemeads::set_notify_runner;
 
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor::<Hpc>();
+    templemeads::spawn_system_monitor::<Erased>();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -60,8 +60,8 @@ async fn main() -> Result<()> {
     };
 
     // run the portal agent
-    set_notify_runner::<Hpc>(default_notify_runner).await?;
-    run::<Hpc>(config).await?;
+    set_notify_runner::<Erased>(default_notify_runner).await?;
+    run::<Erased>(config).await?;
 
     Ok(())
 }

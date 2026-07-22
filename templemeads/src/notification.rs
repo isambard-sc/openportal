@@ -23,6 +23,14 @@ pub struct Notification<L: Domain> {
     id: Uuid,
     destination: Destination,
     event: L::NotificationEvent,
+    /// The `Domain::name()` that authored this event, set once at
+    /// construction and never touched again - see `Job::domain` for the
+    /// equivalent field and why it exists (`docs/plans/multi-domain-routing-design.md`).
+    #[serde(default)]
+    domain: Option<String>,
+    /// The domain's version, alongside `domain`.
+    #[serde(default)]
+    domain_version: Option<String>,
 }
 
 impl<L: Domain> Notification<L> {
@@ -31,6 +39,8 @@ impl<L: Domain> Notification<L> {
             id: Uuid::new_v4(),
             destination,
             event,
+            domain: Some(L::name().to_string()),
+            domain_version: Some(L::version().to_string()),
         }
     }
 
@@ -47,6 +57,8 @@ impl<L: Domain> Notification<L> {
             id: Uuid::new_v4(),
             destination,
             event,
+            domain: Some(L::name().to_string()),
+            domain_version: Some(L::version().to_string()),
         })
     }
 
@@ -60,6 +72,16 @@ impl<L: Domain> Notification<L> {
 
     pub fn event(&self) -> &L::NotificationEvent {
         &self.event
+    }
+
+    /// The `Domain::name()` that authored this event, if known.
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
+    }
+
+    /// The domain's version, alongside `domain()`.
+    pub fn domain_version(&self) -> Option<&str> {
+        self.domain_version.as_deref()
     }
 }
 

@@ -549,7 +549,9 @@ version mismatch causes the connection to be refused.
 | `Envelope<L>`, `Job<L>`, `Status` (generic, domain-agnostic) | `templemeads/src/job.rs` |
 | Templemeads `Command<L>` | `templemeads/src/command.rs` |
 | `Domain` trait, including `name()`/`version()`/`assume_legacy_domain_version()` | `templemeads/src/domain.rs` |
-| `agent::peer_domain()`, `agent::ensure_domain_matches()` (opt-in disconnect-on-mismatch) | `templemeads/src/agent.rs` |
+| `agent::peer_domain()`, `agent::ensure_domain_matches()` (connection-level, opt-in disconnect-on-mismatch; always accepts a known `Erased` peer) | `templemeads/src/agent.rs` |
+| `agent::ensure_job_domain_matches()`, `agent::ensure_notification_domain_matches()` (per-message, opt-in - see [writing-a-domain.md](writing-a-domain.md#1-the-domain-trait)) | `templemeads/src/agent.rs` |
+| `templemeads::erased::Erased` (domain-oblivious `Domain` for routing-only agents) | `templemeads/src/erased.rs` |
 | `Notification<L>`, `NotificationEnvelope<L>` (generic) | `templemeads/src/notification.rs` |
 | `NotificationEvent` (`greatwestern`'s concrete vocabulary) | `greatwestern/src/notification.rs` |
 | `Instruction` (`greatwestern`'s concrete vocabulary, i.e. `Job<Hpc>`'s payload) | `greatwestern/src/grammar.rs` |

@@ -55,7 +55,7 @@ impl TS for JobBinding {
     fn inline() -> String {
         "{ id: string, created: number, changed: number, expires: number, version: number, \
          command: string, state: Status, result: string | null, result_type: string | null, \
-         forwarded_for: string | null, }"
+         forwarded_for: string | null, domain: string | null, domain_version: string | null, }"
             .to_string()
     }
 
@@ -117,6 +117,8 @@ mod tests {
             "result",
             "result_type",
             "forwarded_for",
+            "domain",
+            "domain_version",
         ]
         .into_iter()
         .collect();

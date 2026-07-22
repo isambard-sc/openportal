@@ -264,9 +264,11 @@ per enum variant:
 ```json
 {
   "Notify": {
-    "id":          "<uuid-string>",
-    "destination": "<dot-separated-agent-path>",
-    "event":       { "<EventVariant>": <variant-data-or-omitted> }
+    "id":              "<uuid-string>",
+    "destination":     "<dot-separated-agent-path>",
+    "event":           { "<EventVariant>": <variant-data-or-omitted> },
+    "domain":          "<domain-name>" | null,
+    "domain_version":  "<domain-version>" | null
   }
 }
 ```
@@ -278,7 +280,9 @@ per enum variant:
   "Notify": {
     "id": "b2e...{uuid}",
     "destination": "portal.clusters.shared",
-    "event": { "UserAdded": "chris.project.brics" }
+    "event": { "UserAdded": "chris.project.brics" },
+    "domain": "greatwestern",
+    "domain_version": "0.33.0"
   }
 }
 ```
@@ -288,6 +292,8 @@ per enum variant:
 | `id` | UUID string | Generated at creation; used only for logging and tracing. Not stored anywhere. |
 | `destination` | string | Dot-separated agent path, e.g. `portal.clusters.shared` |
 | `event` | object | `NotificationEvent` serialised structurally (ordinary serde derive), one key per variant, e.g. `{"UserAdded": "chris.project.portal"}`. `event.to_string()` (via `Display`) gives the space-separated text form (`user_added chris.project.portal`) used in notification *strings* (§2) - the two are different representations of the same value, not interchangeable on the wire. |
+| `domain` | string or null | The `Domain::name()` that authored this event, set once at construction and unchanged thereafter - including by any domain-oblivious routing hop it passes through. `null` only for a Notification from a peer running templemeads from before this field existed. See [writing-a-domain.md](writing-a-domain.md#1-the-domain-trait). |
+| `domain_version` | string or null | The domain's version, alongside `domain`. |
 
 ---
 
@@ -587,6 +593,8 @@ For operations where delivery confirmation matters, use a Job instead.
 | `AsyncNotifyRunnable<L>`, `default_notify_runner` | `templemeads/src/notification.rs` |
 | `NotificationEvent` (`greatwestern`'s concrete vocabulary) | `greatwestern/src/notification.rs` |
 | `Domain::wrap_forward` (the `Forward` wrapping contract every `Domain` implements) | `templemeads/src/domain.rs` |
+| `agent::ensure_notification_domain_matches` (per-notification, opt-in domain check) | `templemeads/src/agent.rs` |
+| `templemeads::erased::Erased`, `RawNotificationEvent` (domain-oblivious relaying) | `templemeads/src/erased.rs` |
 | `Command::Notify`, `Command::notify()` | `templemeads/src/command.rs` |
 | `set_notify_runner`, routing in `process_command`, sidecar check | `templemeads/src/handler.rs` |
 | `bridge::notify()`, `Forward` wrapping | `templemeads/src/bridge.rs` |

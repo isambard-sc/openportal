@@ -5,9 +5,20 @@ SPDX-License-Identifier: CC0-1.0
 
 # Multi-domain routing: a domain-oblivious `Erased` Domain
 
-Status: **draft design** — not yet implemented. This document records a
-design sketched in conversation so it can be picked up, reviewed, or handed
-to someone else without re-deriving it. No code has been changed yet.
+Status: **implemented** (§9 steps 1-5). `templemeads::erased::Erased`,
+the `domain`/`domain_version` fields on `Job`/`Notification`,
+`agent::ensure_job_domain_matches`/`ensure_notification_domain_matches`, and
+the `provider` agent's switch to `Job<Erased>` (dropping its `greatwestern`
+dependency entirely) are all in place and covered by unit/integration tests,
+including the cross-domain round-trip proofs in §10 (real `Job<Hpc>`/
+`Notification<Hpc>` relayed through `Job<Erased>`/`Notification<Erased>` and
+re-serialised byte-identical, including through multiple chained hops).
+**Not yet done**: a live, running multi-process smoke test (actual
+`op-provider`/leaf-agent binaries exchanging traffic over real connections,
+as opposed to in-process serialisation round-trips) - step 9.6 (leaving
+other routing-role agents on their current `Domain`) was a deliberate
+non-action, not skipped work. This document is kept as the design record;
+see the code (and `writing-a-domain.md` §1.1) for current behaviour.
 
 ## 1. Goal
 
@@ -412,29 +423,39 @@ choice for §9.
 
 ## 8. Gotchas / interactions with existing features
 
-### 8.1 `ensure_domain_matches` and routers must not be mixed carelessly
+### 8.1 `ensure_domain_matches` and routers
 
 `agent::ensure_domain_matches::<L>(peer)` checks that a connected peer's
 `Register` domain equals `L::name()`, disconnecting otherwise - including
 when the peer's domain is unknown (fail-closed, by design). **An `Erased`
 router's `name()` is `"erased"`, which will never equal a leaf agent's real
-domain name.** A leaf agent that calls `ensure_domain_matches::<Hpc>(&router_peer)`
-against a directly-connected `Erased` router would disconnect it - exactly
-backwards from what's wanted. (This is precisely why §7 exists as a
-separate, per-message check rather than trying to stretch the
-connection-level one to cover it.)
+domain name.** Without an exception, a leaf agent that calls
+`ensure_domain_matches::<Hpc>(&router_peer)` against a directly-connected
+`Erased` router would disconnect it - exactly backwards from what's wanted,
+and bad enough in practice (it would mean `ensure_domain_matches` and
+multi-domain routing are simply incompatible with each other) that it's
+worth fixing in `ensure_domain_matches` itself rather than only in
+documentation: **it special-cases a peer whose registered domain is exactly
+`templemeads::erased::Erased::name()`, accepting it regardless of `L`.**
+This isn't templemeads reaching for knowledge of a foreign vocabulary - the
+`Erased` domain is templemeads' own, defined alongside this check in the
+same crate - and it's safe precisely because `Erased` never inspects or
+executes `Instruction`/`NotificationEvent` content, only relays it, so it
+can't misinterpret anything belonging to `L`.
 
-This is not a bug to fix in `ensure_domain_matches` - that function does
-precisely what it says for the case it's meant for (two agents that must
-share a vocabulary to interoperate). It's a usage rule to document clearly
-once `Erased` exists: **only call `ensure_domain_matches` between agents
-that are expected to actually understand each other's `Instruction`s/
-`NotificationEvent`s** (e.g. two leaf agents directly exchanging
-domain-specific Jobs). Don't call it against a peer whose role is
-routing-only - use `ensure_job_domain_matches`/`ensure_notification_domain_matches`
-(§7.3) instead, at the point of execution. This needs to be prominent in
-`writing-a-domain.md` once `Erased` lands, so it isn't rediscovered the hard
-way in production.
+**The per-message checks (§7.3) do not get the same exception, and must
+not.** A `Job`/`Notification` that genuinely claims `domain: "erased"` as
+its *own* provenance means no real `Domain` ever validated it - exactly the
+case those checks exist to catch. In practice this can't arise from normal
+operation (an `Erased` router never constructs a new Job/Notification, only
+relays ones it received), so the distinction is about what the checks
+*would* do if it somehow did: `ensure_domain_matches` answers "can I trust
+this connection to relay my traffic faithfully" (yes, even via a router);
+`ensure_job_domain_matches`/`ensure_notification_domain_matches` answer "was
+this specific message actually produced by my vocabulary" (no, if it
+self-reports as `"erased"`) - two different questions that happen to look
+similar. This needs to be prominent in `writing-a-domain.md`, so the
+distinction isn't rediscovered the hard way in production.
 
 ### 8.2 `owning_portal` / `check_portal`
 

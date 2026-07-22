@@ -119,3 +119,92 @@ mod tests {
         assert!(!Hpc::version().is_empty());
     }
 }
+
+/// Proves the `Erased` domain-oblivious router design
+/// (`docs/plans/multi-domain-routing-design.md`) actually round-trips real
+/// `greatwestern` Jobs/Notifications unchanged. Lives here (not in
+/// `templemeads`) because it needs a real, concrete `Domain` to relay -
+/// `templemeads` itself must never depend on `greatwestern`.
+#[cfg(test)]
+mod erased_routing_tests {
+    use crate::Hpc;
+    use templemeads::erased::Erased;
+    use templemeads::job::Job;
+    use templemeads::notification::Notification;
+
+    #[test]
+    fn test_job_roundtrips_through_erased_router() {
+        #[allow(clippy::expect_used)]
+        let job = Job::<Hpc>::parse("portal.cluster add_user alice.myproject.myportal", false)
+            .expect("valid instruction");
+        #[allow(clippy::expect_used)]
+        let original_json = serde_json::to_string(&job).expect("serialises");
+
+        // A domain-oblivious router receives this over the wire...
+        #[allow(clippy::expect_used)]
+        let relayed: Job<Erased> =
+            serde_json::from_str(&original_json).expect("Erased must accept any Hpc job");
+        #[allow(clippy::expect_used)]
+        let relayed_json = serde_json::to_string(&relayed).expect("serialises");
+
+        assert_eq!(relayed_json, original_json);
+    }
+
+    #[test]
+    fn test_job_domain_provenance_survives_erased_hop() {
+        #[allow(clippy::expect_used)]
+        let job = Job::<Hpc>::parse("portal.cluster add_user alice.myproject.myportal", false)
+            .expect("valid instruction");
+        assert_eq!(job.domain(), Some("greatwestern"));
+
+        #[allow(clippy::expect_used)]
+        let json = serde_json::to_string(&job).expect("serialises");
+        #[allow(clippy::expect_used)]
+        let relayed: Job<Erased> = serde_json::from_str(&json).expect("deserialises");
+
+        // The router's own domain is "erased", but the job's own tag - set
+        // once at the true origin - is untouched by relaying through it.
+        assert_eq!(relayed.domain(), Some("greatwestern"));
+        assert_eq!(relayed.domain_version(), job.domain_version());
+    }
+
+    #[test]
+    fn test_job_survives_multiple_erased_hops() {
+        #[allow(clippy::expect_used)]
+        let job =
+            Job::<Hpc>::parse("portal.cluster get_offerings", false).expect("valid instruction");
+        #[allow(clippy::expect_used)]
+        let json = serde_json::to_string(&job).expect("serialises");
+
+        #[allow(clippy::expect_used)]
+        let hop1: Job<Erased> = serde_json::from_str(&json).expect("hop 1 deserialises");
+        #[allow(clippy::expect_used)]
+        let hop1_json = serde_json::to_string(&hop1).expect("hop 1 re-serialises");
+        #[allow(clippy::expect_used)]
+        let hop2: Job<Erased> = serde_json::from_str(&hop1_json).expect("hop 2 deserialises");
+        #[allow(clippy::expect_used)]
+        let hop2_json = serde_json::to_string(&hop2).expect("hop 2 re-serialises");
+
+        assert_eq!(hop2_json, json);
+        assert_eq!(hop2.domain(), Some("greatwestern"));
+    }
+
+    #[test]
+    fn test_notification_roundtrips_through_erased_router() {
+        #[allow(clippy::expect_used)]
+        let notification =
+            Notification::<Hpc>::parse("portal.clusters.shared user_added chris.project.brics")
+                .expect("valid notification");
+        #[allow(clippy::expect_used)]
+        let original_json = serde_json::to_string(&notification).expect("serialises");
+
+        #[allow(clippy::expect_used)]
+        let relayed: Notification<Erased> =
+            serde_json::from_str(&original_json).expect("Erased must accept any Hpc notification");
+        #[allow(clippy::expect_used)]
+        let relayed_json = serde_json::to_string(&relayed).expect("serialises");
+
+        assert_eq!(relayed_json, original_json);
+        assert_eq!(relayed.domain(), Some("greatwestern"));
+    }
+}

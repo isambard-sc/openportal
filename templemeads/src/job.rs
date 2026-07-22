@@ -210,6 +210,17 @@ pub struct Job<L: Domain> {
     result_type: Option<String>,
     #[serde(default)]
     forwarded_for: Option<Destination>,
+    /// The `Domain::name()` that authored this Job's instruction, set once
+    /// at `Job::parse()` and never touched again - including by any
+    /// domain-oblivious router hop it passes through, which relays it as
+    /// just another opaque field it doesn't need to understand. `None`
+    /// only for a Job from a peer running templemeads from before this
+    /// field existed.
+    #[serde(default)]
+    domain: Option<String>,
+    /// The domain's version, alongside `domain`.
+    #[serde(default)]
+    domain_version: Option<String>,
     #[serde(skip)]
     board: Option<Peer>,
 }
@@ -255,8 +266,21 @@ impl<L: Domain> Job<L> {
             result: None,
             result_type: None,
             forwarded_for: None,
+            domain: Some(L::name().to_string()),
+            domain_version: Some(L::version().to_string()),
             board: None,
         })
+    }
+
+    /// The `Domain::name()` that authored this Job's instruction, if known -
+    /// see the field doc comment on `Job` for what `None` means.
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
+    }
+
+    /// The domain's version, alongside `domain()`.
+    pub fn domain_version(&self) -> Option<&str> {
+        self.domain_version.as_deref()
     }
 
     pub fn to_json(&self) -> Result<String, Error> {
@@ -295,6 +319,8 @@ impl<L: Domain> Job<L> {
             result: self.result.clone(),
             result_type: self.result_type.clone(),
             forwarded_for: self.forwarded_for.clone(),
+            domain: self.domain.clone(),
+            domain_version: self.domain_version.clone(),
             board: self.board.clone(),
         }
     }
@@ -358,6 +384,8 @@ impl<L: Domain> Job<L> {
             result: self.result.clone(),
             result_type: self.result_type.clone(),
             forwarded_for: self.forwarded_for.clone(),
+            domain: self.domain.clone(),
+            domain_version: self.domain_version.clone(),
             board: self.board.clone(),
         }
     }
@@ -413,6 +441,8 @@ impl<L: Domain> Job<L> {
                 result: self.result.clone(),
                 result_type: self.result_type.clone(),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             Status::Pending => Ok(self.clone()),
@@ -456,6 +486,8 @@ impl<L: Domain> Job<L> {
                 result: job.id.to_string().into(),
                 result_type: None,
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -477,6 +509,8 @@ impl<L: Domain> Job<L> {
                 result: progress,
                 result_type: None,
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -505,6 +539,8 @@ impl<L: Domain> Job<L> {
                 result: other.result.clone(),
                 result_type: other.result_type.clone(),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -526,6 +562,8 @@ impl<L: Domain> Job<L> {
                 result: None,
                 result_type: Some("None".to_string()),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -551,6 +589,8 @@ impl<L: Domain> Job<L> {
                 result: Some(serde_json::to_string(&result)?),
                 result_type: Some(T::type_name()),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -572,6 +612,8 @@ impl<L: Domain> Job<L> {
                 result: Some(message.to_owned()),
                 result_type: Some("Error".to_string()),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(

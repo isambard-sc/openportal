@@ -189,6 +189,33 @@ The current schema is:
 
 **Source:** `templemeads/src/diagnostics.rs`
 
+### 1.3 Blind relay proxy: no real agent can use it yet
+
+The blind relay proxy protocol (`paddington::relay` - see
+[wire-protocol.md](wire-protocol.md) §7 and
+[security-model.md](security-model.md) §7.1) and the `op-proxy` binary are
+implemented and unit-tested as standalone primitives, but **no agent
+binary in this repository can currently act as one of the two relayed
+peers**:
+
+- `templemeads/src/agent_core.rs`'s common `client`/`server` subcommands
+  (shared by every `templemeads`-based agent) have no flag to call
+  `add_relayed_client`/`add_relayed_server` instead of the direct
+  `add_client`/`add_server` - there is no CLI path to configure a relayed
+  peer on a real agent.
+- No agent's `run()` path calls `paddington::relay::configure()`,
+  registers `paddington::relay::relay_dispatch_handler` in place of its
+  normal handler, or calls `bootstrap_all_as_client()` at startup, so even
+  a hand-edited config with a relayed peer entry would not engage the
+  relay protocol at runtime.
+
+`op-proxy` itself is fully usable today - it only ever needs the
+proxy-side handler, which is wired up correctly. Wiring `paddington::relay`
+into `agent_core.rs`'s CLI and run loop is necessary follow-up work before
+any two real agents can talk to each other through a proxy. See
+[agent-configuration.md](agent-configuration.md) §3.11 for the current
+detailed status.
+
 ---
 
 ## 2. Duplicate Job Handling

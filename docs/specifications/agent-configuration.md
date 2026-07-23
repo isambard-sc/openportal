@@ -60,6 +60,7 @@ ip        = "<ip-or-cidr>"
 zone      = "<zone>"
 inner_key = "<hex>"
 outer_key = "<hex>"
+proxy     = "<relay-agent-name>"    # optional
 
 [[servers]]
 name      = "<peer-name>"
@@ -67,11 +68,23 @@ url       = "<wss://...>"
 zone      = "<zone>"
 inner_key = "<hex>"
 outer_key = "<hex>"
+proxy     = "<relay-agent-name>"    # optional
 ```
 
 Clients are **inbound** connections (agents that connect to this agent). Servers
 are **outbound** connections (agents that this agent connects to). These lists
 are managed via CLI commands — do not edit them by hand.
+
+`proxy` is set only when this peer can only be reached through a blind
+relay proxy (an `op-proxy` agent) rather than directly — see
+[§3.11](#311-blind-relay-proxy-op-proxy) and
+[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md). A
+relayed `[[clients]]` entry has no `ip` (authentication comes from
+completing the relayed handshake, not an IP allowlist); a relayed
+`[[servers]]` entry has no meaningful `url` (it is reached via the named
+proxy instead). A service can only ever be reachable via **one** proxy at
+a time — every relayed peer entry must name the same `proxy` value, even
+though the service can still mix relayed and directly-connected peers.
 
 ### 1.3 Extras (agent-specific key-value options)
 
@@ -855,6 +868,95 @@ partially fails.
 
 ---
 
+### 3.11 Blind Relay Proxy (`op-proxy`)
+
+Unlike every other agent in this document, `op-proxy` is **not** built on
+`templemeads::agent_core` - it depends only on `paddington`, has no
+`Domain`, no Jobs, and its own bespoke CLI (not the common CLI in §2). It
+exists purely to relay encrypted traffic between a pair of agents that can
+each only make outbound connections (neither can open a port the other can
+reach); it never decrypts what it forwards. See
+[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md) for the
+full design.
+
+| Default | Value |
+|---------|-------|
+| Name | `proxy` |
+| Config file | `proxy.toml` (current directory, not `~/.config/openportal/`) |
+| Policy file | `policy.toml` (current directory) |
+| WebSocket port | `8060` |
+
+**CLI commands:**
+
+```bash
+# Initialise the proxy service
+op-proxy init [--url <url>] [--ip <ip>] [--port <port>] [--config-file <path>]
+
+# Introduce an agent that will connect to this proxy directly - one of the
+# two real hops in a relayed pair. This is NOT the relay policy itself.
+op-proxy client --add <name> [--ip <ip-or-cidr>] [--zone <zone>]
+                [--invitation <path>] [--config-file <path>]
+
+# Allow two introduced agents to be relayed between each other.
+# Default-deny: no pair is relayed unless explicitly allowed here.
+op-proxy allow <a> <b> [--policy-file <path>]
+
+# Run the proxy
+op-proxy run [--config-file <path>] [--policy-file <path>]
+```
+
+`client --add` writes an invite file the same way any other agent's
+`client --add` does - give it to the introduced agent's operator so they
+can import it with their own agent's `server --add`. Introducing an agent
+to the proxy is a separate step from allowing it to be relayed to another
+agent: `client --add` only lets that agent connect to the proxy itself;
+`allow` is what actually lets traffic flow between two introduced agents.
+
+**Relay policy file (`policy.toml`):**
+
+```toml
+pairs = [["airr", "brics"]]
+```
+
+A flat list of allowed `(from, to)` pairs, checked in both directions -
+allowing `("airr", "brics")` also allows traffic the other way. There is no
+CLI to remove a pair; edit `policy.toml` by hand and restart (or re-run
+`init`-equivalent tooling) to revoke one.
+
+**Current integration status - important caveat:** the pieces above (the
+proxy binary, the `proxy` config field, and the `add_relayed_client`/
+`add_relayed_server`/`ClientConfig::new_relayed`/
+`ServerConfig::from_relayed_invite` functions in `paddington::config`) are
+implemented and unit-tested as standalone primitives (§6). **No real agent
+binary can use them yet.** Specifically:
+
+- The common `client`/`server` subcommands shared by every `templemeads`-based
+  agent (`op-portal`, `op-cluster`, `op-freeipa`, etc. - defined in
+  `templemeads/src/agent_core.rs`) have no `--relay` flag or equivalent to
+  call `add_relayed_client`/`add_relayed_server` instead of the direct
+  `add_client`/`add_server` - there is currently no CLI-level way for an
+  operator of a real agent to configure a relayed peer.
+- No agent's `run()` path (e.g. `templemeads::portal::run()`) calls
+  `paddington::relay::configure()`, registers
+  `paddington::relay::relay_dispatch_handler` in place of its normal
+  handler, or calls `paddington::relay::bootstrap_all_as_client()` at
+  startup - so even a hand-populated relayed config entry would not
+  actually engage the relay protocol at runtime.
+
+In other words: `op-proxy` itself is fully usable today (it only ever
+needs the proxy-side handler, which *is* wired up), but there is no agent
+in this repository that can currently act as one of the two relayed
+peers. Wiring `paddington::relay` into `agent_core.rs`'s CLI and run loop
+is necessary follow-up work before any two real agents can actually talk
+through a proxy.
+
+**Typical peer relationships:**
+- **Client:** every agent it relays for (both the relayed "server" and
+  relayed "client" role connect to the proxy the same way - as an ordinary
+  paddington client)
+
+---
+
 ## 4. Default Port Reference
 
 | Agent | Binary | Default port |
@@ -870,6 +972,7 @@ partially fails.
 | Slurm | `op-slurm` | 8048 |
 | Cloud Account | `op-cloudaccount` | 8049 |
 | Cloud Portal | `op-cloudportal` | 8050 |
+| Blind Relay Proxy | `op-proxy` | 8060 |
 
 Note: `op-cluster` and `op-freeipa` share the same default port (8046) because
 they are typically deployed on different machines. Adjust with `--port` if
@@ -935,3 +1038,6 @@ op-freeipa  run
 | Cloud portal Award state | `cloudportal/src/state.rs` |
 | Cloud portal email/UserIdentifier mapping | `cloudportal/src/identity.rs` |
 | Portal one-shot CLI mode | `templemeads/src/portal.rs` |
+| Blind relay proxy main (CLI subcommands) | `proxy/src/main.rs` |
+| Blind relay protocol, `RelayPolicy` | `paddington/src/relay.rs` |
+| `proxy` config field, `add_relayed_client`/`add_relayed_server` | `paddington/src/config.rs` |

@@ -542,7 +542,109 @@ version mismatch causes the connection to be refused.
 
 ---
 
-## 7. Source File Reference
+## 7. Blind Relay Protocol (`op-proxy`)
+
+Two agents that can each only make outbound connections (neither can open a
+port the other can reach) can still talk to each other via an `op-proxy`
+agent that both connect to as ordinary paddington clients. See
+[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md) for the
+full design and rationale; this section covers only the wire format.
+
+The proxy relays a single, opaque payload type - `RelayEnvelope` - between
+the two real hops without ever needing to understand what is inside it:
+
+```json
+{
+  "from":       "<relayed-peer-name>",
+  "to":         "<relayed-peer-name>",
+  "zone":       "<zone-string>",
+  "ciphertext": "<opaque-string>"
+}
+```
+
+`RelayEnvelope` is sent as the `payload` of an ordinary `Message` (§2.1) on
+each agent's real, direct connection to the proxy - it is not a new
+paddington `Command` variant. `from`/`to` name the two relayed peers, never
+the proxy itself; the proxy's `proxy_handler` reads only `from`/`to`/`zone`
+to enforce its `RelayPolicy` (see [security-model.md](security-model.md)
+§7.1) and forwards `ciphertext` unmodified.
+
+### 7.1 Bootstrap: `StartRelayedConnection` / `RelayedConnectionAccepted`
+
+Before any real traffic flows, the relayed *client* (the side holding a
+`servers` entry with a `proxy` set) initiates a bootstrap with the relayed
+*server* (the side holding a `clients` entry with a `proxy` set), mirroring
+§4.2's mutual session-key contribution but carried inside `ciphertext`
+rather than at the transport level:
+
+```json
+// client → server, via proxy (ciphertext, once decrypted)
+{
+  "type": "Start",
+  "session_outer_key": "<hex-encoded-32-byte-key>",
+  "inner_key_salt":     "<hex-encoded-32-byte-salt>",
+  "outer_key_salt":     "<hex-encoded-32-byte-salt>",
+  "magic":              "<hex-encoded-32-byte-random-string>",
+  "engine":             "<engine-name-string>",
+  "version":            "<engine-version-string>"
+}
+```
+
+```json
+// server → client, via proxy (ciphertext, once decrypted)
+{
+  "type": "Accepted",
+  "session_inner_key": "<hex-encoded-32-byte-key>",
+  "magic":             "<same-magic-as-Start>",
+  "engine":             "<engine-name-string>",
+  "version":            "<engine-version-string>"
+}
+```
+
+Both messages are internally tagged (`type: "Start"` / `"Accepted"`) so
+that a successful decryption can be identified as one specific bootstrap
+message unambiguously. Both are encrypted with the **permanent pre-shared
+key pair** the two relayed peers exchanged out-of-band (never seen by the
+proxy) - the same double-envelope scheme as §3.4, but using a fixed,
+non-secret salt (there is no live connection to derive a per-connection
+salt from; safety comes from the random per-message `info` value §3.3
+always mixed in regardless of salt, not from the salt itself).
+
+The client contributes `session_outer_key` and both salts; the server
+contributes `session_inner_key`. Neither side alone determines the
+resulting session key pair - this is what gives each relayed session
+forward secrecy, exactly as the real handshake's `Handshake` message does
+in §4.2. `magic` correlates the `Accepted` response with its `Start`; a
+response with unrecognised `magic` is dropped (stale or forged, not a
+protocol error).
+
+Once bootstrapped, both sides hold an identical
+`{inner_key: session_inner_key, outer_key: session_outer_key,
+inner_key_salt, outer_key_salt}` tuple - the relayed equivalent of a
+direct connection's negotiated session state - and each independently
+synthesises the same `Connected` control event (§4.3) that a direct
+connection would produce, so the higher `templemeads` layers cannot
+distinguish a relayed connection from a direct one.
+
+### 7.2 Ongoing Traffic
+
+Once a session exists, every subsequent message between the pair is a
+`RelayEnvelope` whose `ciphertext` is the real payload string encrypted
+with the negotiated **session** key pair (§8.1) and per-connection-style
+salts, using the same `envelope_message`/`deenvelope_message` procedure as
+§3.4. The receiving side first attempts to decrypt an incoming
+`RelayEnvelope`'s `ciphertext` with the permanent pre-shared key (to
+recognise a `BootstrapMessage`); if that fails, it falls through to the
+established session keys for `envelope.from`. Neither attempt ever
+succeeds with the other key pair, so a proxy - or anyone else without
+either key pair - cannot distinguish bootstrap traffic from ongoing
+traffic, let alone read either.
+
+**Source file:** `paddington/src/relay.rs`
+
+---
+
+## 8. Source File Reference
 
 | Concept | Source file |
 |---------|-------------|
@@ -562,3 +664,4 @@ version mismatch causes the connection to be refused.
 | Post-connect control flow | `templemeads/src/control_message.rs` |
 | Message dispatch | `templemeads/src/handler.rs` |
 | Agent type definitions | `templemeads/src/agent.rs` |
+| Blind relay protocol (`RelayEnvelope`, bootstrap, `RelayPolicy`) | `paddington/src/relay.rs` |

@@ -99,6 +99,9 @@ network layer:
   key derivation, and XChaCha20-Poly1305 AEAD
 - **Handshake**: HTTP header salt exchange, session key negotiation, and
   `PeerDetails` identity exchange
+- **Blind relay protocol**: the `RelayEnvelope` wire format and the
+  `StartRelayedConnection`/`RelayedConnectionAccepted` bootstrap used by
+  `op-proxy` to relay two outbound-only agents' traffic without decrypting it
 
 ---
 
@@ -114,6 +117,8 @@ provisioned using the invite file mechanism. Also covers:
 - Config file encryption at rest (Environment and Simple schemes)
 - Zone isolation
 - The per-agent trust topology
+- The blind relay proxy's trust model - why `op-proxy` never sees either
+  relayed agent's traffic or pre-shared keys
 - Memory safety guarantees (`SecretBox`, `Zeroize`)
 
 ---
@@ -151,22 +156,26 @@ the OpenPortal network. Covers:
 ### [agent-configuration.md](agent-configuration.md)
 **Agent configuration reference**
 
-The complete configuration reference for all ten agent types. Covers:
+The complete configuration reference for every agent type. Covers:
 
 - Common TOML config fields shared by all agents (`name`, `url`, `ip`,
-  `port`, peer lists, encryption)
+  `port`, peer lists including the relayed-peer `proxy` field, encryption)
 - The common CLI subcommands (`init`, `client`, `server`, `encryption`,
   `extra`, `secret`, `run`)
 - Per-agent sections with default ports, config file paths, and all
   agent-specific options:
   - **Portal**, **Provider**, **Bridge**, **Clusters**, **Cluster**
-  - **FreeIPA** (server hostnames, credentials, group mappings)
+  - **FreeIPA** and **Local Account** (server hostnames, credentials, group
+    mappings)
   - **Filesystem** (volume config, quota engines, Lustre ID strategies)
   - **Slurm** (sacctmgr mode and REST API mode)
   - **Cloud Account** (assignment state directory, accounting directory,
     currency)
   - **Cloud Portal** (Award state directory, offerings table, approval
     CLI subcommands)
+  - **Blind Relay Proxy** (`op-proxy` - its own bespoke CLI, relay policy
+    file, and the current integration gap for real agents - see
+    [notes.md](notes.md) §1.3)
 - Default port reference table and a typical deployment walkthrough
 
 ---

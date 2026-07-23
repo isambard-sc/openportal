@@ -59,7 +59,7 @@ cargo run --bin provider-svc
 cargo run --bin <binary-name>
 # Available binaries: portal-svc, provider-svc, op-bridge, op-cluster,
 # op-clusters, op-filesystem, op-freeipa, op-slurm, op-cloudaccount,
-# op-cloudportal, and example binaries in docs/
+# op-cloudportal, op-proxy, and example binaries in docs/
 ```
 
 ## Workspace Structure
@@ -97,6 +97,8 @@ Each agent type is its own binary crate that implements specific infrastructure 
 - **cloudportal** (`op-cloudportal`): A self-contained `Portal` agent representing the "cloud" side of a portal-to-portal relationship (e.g. a central portal creating Awards on it). Also a deliberately rough prototype (see `docs/plans/archive/op-cloudportal-design.md`): there's no real portal management software (no Waldur) behind it, so it stores Award state itself as plain JSON files, addresses/is addressed directly by the upstream portal (no virtual-resource/offering indirection - that mechanism turned out to be same-process-only, see the design doc §4), and requires a human operator to `approve`/`reject` a pending Award via CLI subcommands before a background poller provisions it on whichever `cloudaccount` its `AwardDetails.template` maps to. Also added one-shot CLI support (`run --one-shot`) to `templemeads::portal::run()`, previously only available to Account/Filesystem/Scheduler agents.
 
 - **bridge** (`op-bridge`): Bridges non-Rust portal implementations to the OpenPortal network. Runs a local HTTP server to translate API calls into OpenPortal Jobs.
+
+- **proxy** (`op-proxy`): A blind relay for two agents that can each only make outbound connections (neither can open a port the other can reach). Depends only on `paddington`, never `templemeads` - it has no `Domain`, no Jobs, and never decrypts the traffic it forwards; see `docs/plans/blind-relay-proxy-design.md`. Agents opt in explicitly via a `proxy` field in their paddington config, and the proxy operator must separately `allow` each `(agent, agent)` pair before it will relay between them (default-deny).
 
 - **python**: Python library (via pyo3) for calling into OpenPortal via the bridge agent.
 

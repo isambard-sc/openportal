@@ -300,6 +300,46 @@ Portal ←—key-pair-A—→ Provider ←—key-pair-B—→ Platform ←—key
 
 ---
 
+## 7.1 Blind Relay Proxy Trust Model
+
+An `op-proxy` agent (see
+[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md)) lets a
+pair of agents that can each only make *outbound* connections communicate,
+without either becoming a listening server the other can reach. It does
+**not** add itself as a trusted intermediary in the sense every other agent
+in §7's topology is - it is deliberately kept blind:
+
+- The relayed pair (say `airr` and `brics`) share their own pre-shared key
+  pair, generated and exchanged exactly as in §3, transferred out-of-band
+  exactly as any other invite file is. **The proxy never sees this key
+  pair.** It is a separate trust relationship from either agent's key pair
+  with the proxy itself.
+- Each relayed peer additionally holds an ordinary key pair with the proxy
+  (again, provisioned exactly as in §3) - this secures only the
+  agent↔proxy hop, and authenticates each agent to the proxy as itself. It
+  grants no ability to read agent↔agent traffic.
+- On top of the permanent pre-shared key, every relayed session negotiates
+  a **fresh** session key pair via a mutual-contribution bootstrap (one
+  side contributes `session_outer_key`, the other `session_inner_key`) -
+  see [wire-protocol.md](wire-protocol.md) §7.1. Compromise of one past
+  session's keys does not expose any other session between the same pair.
+- The proxy enforces an explicit, default-deny `RelayPolicy`: it forwards
+  a `(from, to)` pair only if an operator has explicitly `allow`ed it.
+  Every other pair is dropped and logged, never silently forwarded.
+- The proxy's role is reduced to: verify the agent↔proxy hop (§4, applied
+  twice, independently, once per hop), check `RelayPolicy`, and forward
+  opaque ciphertext. It never attempts to decrypt agent↔agent traffic, and
+  the ciphertext it forwards is, by construction, indistinguishable from
+  random bytes without the relayed pair's own keys.
+
+This means a compromised proxy can, at worst, deny service (drop or refuse
+to relay) or observe *metadata* (which pairs communicate, message
+timing/size) - it cannot read message content, and it cannot impersonate
+either relayed agent to the other without their pre-shared key pair, which
+it never possesses.
+
+---
+
 ## 8. Memory Safety
 
 All key material is managed with the `secrecy` crate:
@@ -326,3 +366,4 @@ memory safety and error-handling bugs.
 | Connection authentication sequence | `paddington/src/connection.rs` |
 | Wire encryption format | `paddington/src/connection.rs` (`envelope_message`) |
 | Zone enforcement | `paddington/src/connection.rs` (§726, §1255) |
+| Blind relay bootstrap, session keys, `RelayPolicy` | `paddington/src/relay.rs` |

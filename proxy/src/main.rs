@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
 use paddington::config::{self, ServiceConfig};
 use paddington::invite::Invite;
@@ -30,11 +31,24 @@ fn version() -> &'static str {
 }
 
 fn default_config_file() -> PathBuf {
-    PathBuf::from("proxy.toml")
+    dirs::config_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("openportal")
+        .join("proxy-config.toml")
 }
 
-fn default_policy_file() -> PathBuf {
-    PathBuf::from("policy.toml")
+/// The proxy's config file - the `ServiceConfig` (name, url, servers,
+/// clients, ...) flattened at the top level exactly as any other agent's
+/// config, plus a `[policy]` table holding the `RelayPolicy` (the
+/// `(from, to)` allow-list `allow` manages) - one file, like every other
+/// agent, rather than a separate policy file to keep track of.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ProxyConfig {
+    #[serde(flatten)]
+    service: ServiceConfig,
+
+    #[serde(default)]
+    policy: RelayPolicy,
 }
 
 #[derive(Parser)]
@@ -77,7 +91,7 @@ enum Commands {
         #[arg(
             long,
             short = 'i',
-            help = "IP address or range the agent will connect from"
+            help = "IP address or CIDR range the agent will connect from (required)"
         )]
         ip: Option<String>,
 
@@ -104,17 +118,14 @@ enum Commands {
         #[arg(help = "Second agent name")]
         b: String,
 
-        #[arg(long, short = 'p', help = "Path to the relay policy file")]
-        policy_file: Option<PathBuf>,
+        #[arg(long, short = 'c', help = "Path to the config file")]
+        config_file: Option<PathBuf>,
     },
 
     /// Run the proxy
     Run {
         #[arg(long, short = 'c', help = "Path to the config file")]
         config_file: Option<PathBuf>,
-
-        #[arg(long, short = 'p', help = "Path to the relay policy file")]
-        policy_file: Option<PathBuf>,
     },
 }
 
@@ -145,9 +156,13 @@ async fn main() -> Result<()> {
             invitation,
             config_file,
         }) => {
+            let ip = ip.clone().ok_or_else(|| {
+                anyhow::anyhow!("No IP address or IP range provided for client '{}'.", add)
+            })?;
+
             add_client(
                 add,
-                ip.clone().unwrap_or("0.0.0.0/0.0.0.0".to_string()),
+                ip,
                 zone.clone(),
                 invitation
                     .clone()
@@ -155,22 +170,15 @@ async fn main() -> Result<()> {
                 config_file.clone().unwrap_or_else(default_config_file),
             )?;
         }
-        Some(Commands::Allow { a, b, policy_file }) => {
+        Some(Commands::Allow { a, b, config_file }) => {
             allow(
                 a,
                 b,
-                policy_file.clone().unwrap_or_else(default_policy_file),
+                config_file.clone().unwrap_or_else(default_config_file),
             )?;
         }
-        Some(Commands::Run {
-            config_file,
-            policy_file,
-        }) => {
-            run(
-                config_file.clone().unwrap_or_else(default_config_file),
-                policy_file.clone().unwrap_or_else(default_policy_file),
-            )
-            .await?;
+        Some(Commands::Run { config_file }) => {
+            run(config_file.clone().unwrap_or_else(default_config_file)).await?;
         }
         _ => {
             let _ = Args::command().print_help();
@@ -197,22 +205,29 @@ fn initialise_tracing() {
 }
 
 fn init(url: String, ip: String, port: u16, config_file: PathBuf) -> Result<()> {
-    let config = ServiceConfig::create(
-        &config_file,
-        "proxy".to_string(),
-        url,
-        ip.parse()?,
-        port,
-        &None,
-        &None,
-    )
-    .with_context(|| format!("Could not create proxy config at {:?}", config_file))?;
+    if config_file.try_exists()? {
+        return Err(anyhow::anyhow!(
+            "Config file already exists: {:?}",
+            config_file
+        ));
+    }
+
+    let service = ServiceConfig::new("proxy", &url, &ip, &port, &None, &None)
+        .with_context(|| "Could not create proxy service config")?;
+
+    let config = ProxyConfig {
+        service,
+        policy: RelayPolicy::new(),
+    };
+
+    config::save(&config, &config_file)
+        .with_context(|| format!("Could not save proxy config to {:?}", config_file))?;
 
     println!(
         "Proxy initialised. Config file written to {:?}",
         config_file
     );
-    println!("Service name: {}", config.name());
+    println!("Service name: {}", config.service.name());
 
     Ok(())
 }
@@ -224,14 +239,15 @@ fn add_client(
     invitation: PathBuf,
     config_file: PathBuf,
 ) -> Result<()> {
-    let mut service: ServiceConfig = config::load(&config_file)
+    let mut config: ProxyConfig = config::load(&config_file)
         .with_context(|| format!("Could not load proxy config from {:?}", config_file))?;
 
-    let invite: Invite = service
+    let invite: Invite = config
+        .service
         .add_client(name, &ip, &zone)
         .with_context(|| format!("Could not add client '{}'", name))?;
 
-    config::save(&service, &config_file)
+    config::save(&config, &config_file)
         .with_context(|| format!("Could not save proxy config to {:?}", config_file))?;
 
     invite
@@ -247,18 +263,19 @@ fn add_client(
     Ok(())
 }
 
-fn allow(a: &str, b: &str, policy_file: PathBuf) -> Result<()> {
-    let mut policy: RelayPolicy = config::load(&policy_file).unwrap_or_default();
+fn allow(a: &str, b: &str, config_file: PathBuf) -> Result<()> {
+    let mut config: ProxyConfig = config::load(&config_file)
+        .with_context(|| format!("Could not load proxy config from {:?}", config_file))?;
 
-    if policy.permits(a, b) {
+    if config.policy.permits(a, b) {
         println!("'{}' and '{}' are already allowed to be relayed.", a, b);
         return Ok(());
     }
 
-    policy.allow(a, b);
+    config.policy.allow(a, b);
 
-    config::save(&policy, &policy_file)
-        .with_context(|| format!("Could not save relay policy to {:?}", policy_file))?;
+    config::save(&config, &config_file)
+        .with_context(|| format!("Could not save proxy config to {:?}", config_file))?;
 
     println!(
         "'{}' and '{}' may now be relayed between each other via this proxy.",
@@ -268,25 +285,17 @@ fn allow(a: &str, b: &str, policy_file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run(config_file: PathBuf, policy_file: PathBuf) -> Result<()> {
-    let config: ServiceConfig = config::load(&config_file)
+async fn run(config_file: PathBuf) -> Result<()> {
+    let config: ProxyConfig = config::load(&config_file)
         .with_context(|| format!("Could not load proxy config from {:?}", config_file))?;
 
-    let policy: RelayPolicy = config::load(&policy_file).unwrap_or_else(|_| {
-        tracing::warn!(
-            "No relay policy found at {:?} - starting with an empty (deny-all) policy.",
-            policy_file
-        );
-        RelayPolicy::new()
-    });
-
-    relay::set_proxy_policy(policy).await;
+    relay::set_proxy_policy(config.policy).await;
 
     paddington::set_handler(relay::proxy_handler).await?;
 
-    tracing::info!("Starting op-proxy '{}'", config.name());
+    tracing::info!("Starting op-proxy '{}'", config.service.name());
 
-    paddington::run(config).await?;
+    paddington::run(config.service).await?;
 
     Ok(())
 }

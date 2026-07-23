@@ -5,9 +5,23 @@ SPDX-License-Identifier: CC0-1.0
 
 # A blind relay proxy for outbound-only agents
 
-Status: **draft design** — not yet implemented. This document records a
-design sketched in conversation so it can be picked up, reviewed, or handed
-to someone else without re-deriving it. No code has been changed yet.
+Status: **implemented (§7 steps 1-4, 6-7)**. `paddington::relay` (bootstrap,
+envelope forwarding, `RelayPolicy`), the `proxy` config field on
+`ServerConfig`/`ClientConfig`/`ServiceConfig`, and the `op-proxy` binary
+crate all exist and are covered by unit tests (mutual key contribution,
+blindness of the raw bytes, wrong-key rejection, default-deny policy in
+both directions, config round-tripping). Step 5's live three-process
+end-to-end test was **not** done as an automated test: paddington's
+connection registry and this design's own relay state are process-global
+singletons, so a genuine three-agent handshake needs three separate OS
+processes, not tokio tasks in one `#[tokio::test]` - the same constraint
+already noted for the `Erased` design's live smoke test
+([multi-domain-routing-design.md](multi-domain-routing-design.md)). Instead,
+the protocol was validated at the unit level without a live connection, and
+the `op-proxy` binary's CLI/runtime wiring (`init`, `client --add`, `allow`,
+`run`) was validated manually against the real compiled binary. A genuine
+multi-process `airr`/`proxy`/`brics` smoke test remains open for whoever
+picks this up next.
 
 ## 1. Goal
 

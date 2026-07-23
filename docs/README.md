@@ -198,6 +198,19 @@ The key types of Agent are:
    used for portals, to be used with the asynchronous, real-time communication
    that is the basis of OpenPortal.
 
+One further crate sits outside the numbered list above. `proxy` is not a
+`templemeads` Agent at all - it has no `Domain`
+and never handles Jobs. It is a blind relay at the `paddington` layer for
+pairs of agents that can each only make outbound connections (neither can
+open a port the other can reach): each agent connects outbound to the
+`op-proxy` executable instead of directly to its peer, and the proxy
+forwards the encrypted traffic between them without ever being able to
+decrypt it. Both agents still authenticate each other directly with a
+pre-shared key pair the proxy never sees. The source code is in the
+[proxy](../proxy) directory. See
+[docs/plans/blind-relay-proxy-design.md](plans/blind-relay-proxy-design.md)
+for the full design.
+
 Finally, the `python` crate provides a Python library written in rust
 (via the [pyo3](https://pyo3.rs/v0.22.5/) crate) that provides a simple Python
 API to call into the OpenPortal network via the `bridge` Agent. The source

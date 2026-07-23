@@ -323,10 +323,60 @@ impl ServerConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum IpOrRange {
     IP(IpAddr),
     Range(String),
+}
+
+/// Whether `range` is CIDR notation for "every IPv4 address" (prefix `/0`,
+/// e.g. `"0.0.0.0/0"` - the network bits are irrelevant when the prefix
+/// length is zero, so any address before the `/0` means the same thing).
+/// Handled entirely without constructing an `iptools::iprange::IpRange`:
+/// that type's `IPv4::new` computes `len = end - start + 1` as a `u32`,
+/// which overflows (and panics in debug builds) for the full
+/// 2^32-address range, since `4294967295 - 0 + 1` doesn't fit in a `u32`.
+/// `iptools::ipv4::validate_ip` is safe to call here - it's a plain regex
+/// + octet-range check with no arithmetic on the full address span.
+fn is_full_ipv4_range(range: &str) -> bool {
+    match range.split_once('/') {
+        Some((ip, prefix)) => prefix.parse::<u32>() == Ok(0) && iptools::ipv4::validate_ip(ip),
+        None => false,
+    }
+}
+
+impl<'de> Deserialize<'de> for IpOrRange {
+    /// Validates a `Range` variant's CIDR syntax at load time, rather than
+    /// only discovering it is unparseable later, silently, at connection
+    /// time (`matches()` below just logs a warning and treats an
+    /// unparseable range as "does not match" - by the time that happens,
+    /// there is no config-loading error to surface to the operator, only
+    /// a confusing "no matching peer found" in the connection log).
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum Raw {
+            IP(IpAddr),
+            Range(String),
+        }
+
+        match Raw::deserialize(deserializer)? {
+            Raw::IP(ip) => Ok(IpOrRange::IP(ip)),
+            Raw::Range(range) => {
+                if !is_full_ipv4_range(&range) {
+                    IpRange::<iptools::iprange::IPv4>::new(&range, "").map_err(|err| {
+                        serde::de::Error::custom(format!(
+                            "Could not parse IP range: {}, error {}",
+                            range, err
+                        ))
+                    })?;
+                }
+                Ok(IpOrRange::Range(range))
+            }
+        }
+    }
 }
 
 impl Display for IpOrRange {
@@ -342,6 +392,7 @@ impl IpOrRange {
     pub fn new(ip: &str) -> Result<Self, Error> {
         match ip.parse() {
             Ok(ip) => Ok(IpOrRange::IP(ip)),
+            Err(_) if is_full_ipv4_range(ip) => Ok(IpOrRange::Range(ip.to_string())),
             Err(_) => match IpRange::<iptools::iprange::IPv4>::new(ip, "") {
                 Ok(_) => Ok(IpOrRange::Range(ip.to_string())),
                 Err(err) => Err(Error::Parse(format!(
@@ -355,6 +406,7 @@ impl IpOrRange {
     pub fn matches(&self, addr: &IpAddr) -> bool {
         match self {
             IpOrRange::IP(ip) => ip == addr,
+            IpOrRange::Range(range) if is_full_ipv4_range(range) => addr.is_ipv4(),
             IpOrRange::Range(range) => match IpRange::<iptools::iprange::IPv4>::new(range, "") {
                 Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
                 Err(_) => {
@@ -1074,6 +1126,50 @@ mod tests {
         assert!(ip.matches(&IpAddr::from([127, 0, 0, 1])));
         assert!(ip.matches(&IpAddr::from([127, 0, 0, 2])));
         assert!(!ip.matches(&IpAddr::from([129, 0, 0, 1])));
+    }
+
+    #[test]
+    fn test_ip_or_range_rejects_invalid_range_on_deserialize() {
+        // A hand-edited config file with an unparseable range (e.g.
+        // "0.0.0.0/0.0.0.0" - not valid CIDR) must be rejected when the
+        // config is loaded, not silently accepted and only discovered
+        // later, as a connection-time "no matching peer" warning.
+        let bad_toml = r#"Range = "0.0.0.0/0.0.0.0""#;
+        let result: Result<IpOrRange, _> = toml::from_str(bad_toml);
+        assert!(result.is_err());
+
+        let good_toml = r#"Range = "10.0.0.0/24""#;
+        let result: Result<IpOrRange, _> = toml::from_str(good_toml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ip_or_range_full_range_does_not_panic() {
+        // "0.0.0.0/0" is the canonical CIDR "match everything" range, but
+        // constructing it via `iptools::iprange::IpRange` panics (v0.3.0
+        // overflows computing `len` for the full 2^32-address span) - it
+        // must be special-cased entirely without ever calling into
+        // `iptools::iprange`.
+        let ip = IpOrRange::new("0.0.0.0/0").unwrap_or_else(|e| {
+            unreachable!("Could not create full-range IpOrRange: {:?}", e);
+        });
+
+        assert!(ip.matches(&IpAddr::from([1, 2, 3, 4])));
+        assert!(ip.matches(&IpAddr::from([255, 255, 255, 255])));
+        assert!(!ip.matches(
+            &"::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+
+        // any prefix before /0 means the same thing
+        let ip = IpOrRange::new("10.1.2.3/0").unwrap_or_else(|e| {
+            unreachable!("Could not create full-range IpOrRange: {:?}", e);
+        });
+        assert!(ip.matches(&IpAddr::from([8, 8, 8, 8])));
+
+        let result: Result<IpOrRange, _> = toml::from_str(r#"Range = "0.0.0.0/0""#);
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -78,7 +78,7 @@ are managed via CLI commands — do not edit them by hand.
 `proxy` is set only when this peer can only be reached through a blind
 relay proxy (an `op-proxy` agent) rather than directly — see
 [§3.11](#311-blind-relay-proxy-op-proxy) and
-[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md). A
+[blind-relay-proxy-design.md](../plans/archive/blind-relay-proxy-design.md). A
 relayed `[[clients]]` entry has no `ip` (authentication comes from
 completing the relayed handshake, not an IP allowlist); a relayed
 `[[servers]]` entry has no meaningful `url` (it is reached via the named
@@ -890,14 +890,13 @@ Unlike every other agent in this document, `op-proxy` is **not** built on
 exists purely to relay encrypted traffic between a pair of agents that can
 each only make outbound connections (neither can open a port the other can
 reach); it never decrypts what it forwards. See
-[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md) for the
+[blind-relay-proxy-design.md](../plans/archive/blind-relay-proxy-design.md) for the
 full design.
 
 | Default | Value |
 |---------|-------|
 | Name | `proxy` |
-| Config file | `proxy.toml` (current directory, not `~/.config/openportal/`) |
-| Policy file | `policy.toml` (current directory) |
+| Config file | `~/.config/openportal/proxy-config.toml` |
 | WebSocket port | `8060` |
 
 **CLI commands:**
@@ -908,15 +907,16 @@ op-proxy init [--url <url>] [--ip <ip>] [--port <port>] [--config-file <path>]
 
 # Introduce an agent that will connect to this proxy directly - one of the
 # two real hops in a relayed pair. This is NOT the relay policy itself.
-op-proxy client --add <name> [--ip <ip-or-cidr>] [--zone <zone>]
+# --ip is required (there is no "match everyone" default).
+op-proxy client --add <name> --ip <ip-or-cidr> [--zone <zone>]
                 [--invitation <path>] [--config-file <path>]
 
 # Allow two introduced agents to be relayed between each other.
 # Default-deny: no pair is relayed unless explicitly allowed here.
-op-proxy allow <a> <b> [--policy-file <path>]
+op-proxy allow <a> <b> [--config-file <path>]
 
 # Run the proxy
-op-proxy run [--config-file <path>] [--policy-file <path>]
+op-proxy run [--config-file <path>]
 ```
 
 `client --add` writes an invite file the same way any other agent's
@@ -926,16 +926,11 @@ to the proxy is a separate step from allowing it to be relayed to another
 agent: `client --add` only lets that agent connect to the proxy itself;
 `allow` is what actually lets traffic flow between two introduced agents.
 
-**Relay policy file (`policy.toml`):**
-
-```toml
-pairs = [["airr", "brics"]]
-```
-
-A flat list of allowed `(from, to)` pairs, checked in both directions -
-allowing `("airr", "brics")` also allows traffic the other way. There is no
-CLI to remove a pair; edit `policy.toml` by hand and restart (or re-run
-`init`-equivalent tooling) to revoke one.
+**Relay policy:** stored as a `[policy]` table in the same config file
+(`pairs = [["airr", "brics"]]`) - a flat list of allowed `(from, to)`
+pairs, checked in both directions, managed via the `allow` subcommand
+above. There is no CLI to remove a pair; edit the config file's `[policy]`
+table by hand and restart to revoke one.
 
 **Typical peer relationships:**
 - **Client:** every agent it relays for (both the relayed "server" and
@@ -988,6 +983,21 @@ Validated end-to-end with real compiled `op-proxy`/`op-portal`/
 `op-cloudportal` processes: the bootstrap completes, both sides log their
 synthesised `Connected` event, and `Register` (part of every agent's
 normal post-handshake sequence) is relayed and processed correctly.
+
+**Resilience:** bootstrap retries indefinitely (the same cadence a direct
+connection retries at) if the other side isn't connected to the proxy
+yet, so agents can be started in any order. If `airr` (the relayed
+*server*, which only ever waits) restarts and loses its session state,
+`brics` finds out automatically the next time it sends anything - `airr`
+tells it to redo the handshake rather than silently dropping the message
+- so no operator action is needed either way; see
+[security-model.md](security-model.md) §7.1 and
+[wire-protocol.md](wire-protocol.md) §7.3.
+
+**Multiple proxies:** an agent isn't limited to one proxy - `airr` could
+just as easily relay to `brics` via `proxy1` and to a third peer via
+`proxy2`, alongside any number of ordinary direct connections, all at the
+same time. Each relayed peer entry names its own proxy independently.
 
 ---
 

@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   the connection level, since routers are meant to carry any domain.
   `op-provider` now uses `Erased` as its domain, making it a genuine
   multi-domain router rather than being hardcoded to `greatwestern`. See
-  `docs/plans/multi-domain-routing-design.md`.
+  `docs/plans/archive/multi-domain-routing-design.md`.
 - **`greatwestern` — `Domain::name()`/`version()`/`assume_legacy_domain_version()`**
   — `Hpc` now reports itself as `"greatwestern"` plus its crate version
   (used by the connection-level check above), and treats any peer whose
@@ -43,7 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   importing side's ordinary `server --add` picks up the relay
   automatically with no extra flag. Validated end-to-end with real
   `op-proxy`/`op-portal`/`op-cloudportal` processes. See
-  `docs/plans/blind-relay-proxy-design.md`.
+  `docs/plans/archive/blind-relay-proxy-design.md`.
 
 ### Changed
 
@@ -53,6 +53,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `allow`-listed agent pairs) now lives in the same config file as
   everything else instead of a separate `policy.toml`, so operators only
   have one file to manage.
+- **An agent can now use different proxies for different relayed peers**
+  — earlier, once a service relayed any peer through a proxy, every other
+  relayed peer had to go through that same proxy (mixing relayed and
+  directly-connected peers was already fine; only using *two different*
+  proxies at once was rejected). That restriction was a config-time
+  simplification that nothing in the actual relay protocol ever required
+  - each relayed peer already named its own proxy independently under the
+  hood - so it's been removed with no other changes needed.
 
 ### Fixed
 

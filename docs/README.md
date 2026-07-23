@@ -208,7 +208,7 @@ forwards the encrypted traffic between them without ever being able to
 decrypt it. Both agents still authenticate each other directly with a
 pre-shared key pair the proxy never sees. The source code is in the
 [proxy](../proxy) directory. See
-[docs/plans/blind-relay-proxy-design.md](plans/blind-relay-proxy-design.md)
+[docs/plans/blind-relay-proxy-design.md](plans/archive/blind-relay-proxy-design.md)
 for the full design.
 
 Finally, the `python` crate provides a Python library written in rust

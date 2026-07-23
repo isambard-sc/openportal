@@ -98,7 +98,7 @@ Each agent type is its own binary crate that implements specific infrastructure 
 
 - **bridge** (`op-bridge`): Bridges non-Rust portal implementations to the OpenPortal network. Runs a local HTTP server to translate API calls into OpenPortal Jobs.
 
-- **proxy** (`op-proxy`): A blind relay for two agents that can each only make outbound connections (neither can open a port the other can reach). Depends only on `paddington`, never `templemeads` - it has no `Domain`, no Jobs, and never decrypts the traffic it forwards; see `docs/plans/blind-relay-proxy-design.md`. Agents opt in explicitly via a `proxy` field in their paddington config, and the proxy operator must separately `allow` each `(agent, agent)` pair before it will relay between them (default-deny).
+- **proxy** (`op-proxy`): A blind relay for two agents that can each only make outbound connections (neither can open a port the other can reach). Depends only on `paddington`, never `templemeads` - it has no `Domain`, no Jobs, and never decrypts the traffic it forwards; see `docs/plans/archive/blind-relay-proxy-design.md`. Agents opt in explicitly via a `proxy` field in their paddington config, and the proxy operator must separately `allow` each `(agent, agent)` pair before it will relay between them (default-deny).
 
 - **python**: Python library (via pyo3) for calling into OpenPortal via the bridge agent.
 

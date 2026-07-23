@@ -25,7 +25,7 @@ pub struct Notification<L: Domain> {
     event: L::NotificationEvent,
     /// The `Domain::name()` that authored this event, set once at
     /// construction and never touched again - see `Job::domain` for the
-    /// equivalent field and why it exists (`docs/plans/multi-domain-routing-design.md`).
+    /// equivalent field and why it exists (`docs/plans/archive/multi-domain-routing-design.md`).
     #[serde(default)]
     domain: Option<String>,
     /// The domain's version, alongside `domain`.

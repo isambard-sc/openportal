@@ -36,8 +36,33 @@ event, and a real templemeads `Register` command sent immediately
 afterwards was relayed and processed correctly on the other side - proof
 that ordinary templemeads traffic, not just the bootstrap handshake
 itself, works transparently through the proxy. See
-[agent-configuration.md](../specifications/agent-configuration.md)
+[agent-configuration.md](../../specifications/agent-configuration.md)
 §3.11.1 for the exact command sequence used.
+
+**Post-implementation refinements**, found through real multi-process
+testing rather than anticipated in the design below (the code and its own
+doc comments are the authoritative record; this is a pointer, not a
+duplicate):
+
+- Bootstrap retries indefinitely (matching `client::run`'s cadence for
+  direct connections) instead of giving up after one attempt, so
+  startup-ordering races (the other side not connected to the proxy yet)
+  resolve themselves.
+- A relayed session's zone (meaningful to the two relayed peers) and the
+  real connection's zone to the relay itself (what paddington's own
+  connection registry is keyed on) are tracked and used separately, on
+  both the relayed peers' side and the proxy's own side - they are very
+  often, but not necessarily, the same zone.
+- A `SessionUnknown` bootstrap message (encrypted with the permanent
+  pre-shared key, so the proxy can't forge it) lets a relayed *server*
+  that restarted and lost its session state tell its relayed *client*
+  peer to redo the handshake immediately, rather than silently dropping
+  every message until something else notices.
+- The "one proxy per service" restriction floated in §4.3 below turned
+  out to be an unnecessary simplification - nothing in the protocol
+  itself required it (each relayed peer already named its own relay
+  independently), so it was removed: a service can freely use different
+  proxies for different relayed peers.
 
 ## 1. Goal
 
@@ -60,7 +85,7 @@ the actual `airr`↔`brics` payload. It legitimately learns *metadata* (that
 *content*. This is a hard requirement, not a nice-to-have - a relay that
 could read everyone's traffic would itself become exactly the kind of
 centralised, privileged position OpenPortal's whole peer-to-peer design
-otherwise avoids (see [security-model.md](../specifications/security-model.md)).
+otherwise avoids (see [security-model.md](../../specifications/security-model.md)).
 
 ## 2. Non-goals
 
@@ -86,37 +111,37 @@ otherwise avoids (see [security-model.md](../specifications/security-model.md)).
 
 Traced through the actual code, not assumed:
 
-- `Message` ([message.rs:10-15](../../paddington/src/message.rs#L10)) is a flat
+- `Message` ([message.rs:10-15](../../../paddington/src/message.rs#L10)) is a flat
   `{sender, recipient, zone, payload}` struct. There is no "final
   destination distinct from the peer I'm actually connected to" concept
   anywhere in it.
-- `Exchange::send()` ([exchange.rs:685-703](../../paddington/src/exchange.rs#L685))
+- `Exchange::send()` ([exchange.rs:685-703](../../../paddington/src/exchange.rs#L685))
   resolves the target purely by looking up `connections: HashMap<String,
-  Connection>` ([exchange.rs:108](../../paddington/src/exchange.rs#L108))
+  Connection>` ([exchange.rs:108](../../../paddington/src/exchange.rs#L108))
   keyed by `get_recipient(&message)` - i.e. `message.recipient` must name a
   peer this process has an actual, live, handshake-completed `Connection`
   to. There is no forwarding table, no indirection.
 - On receipt, the event loop unconditionally overwrites the incoming
   message's recipient with this agent's own name -
   `message.set_recipient(&name)`
-  ([exchange.rs:256](../../paddington/src/exchange.rs#L256)) - immediately
+  ([exchange.rs:256](../../../paddington/src/exchange.rs#L256)) - immediately
   before dispatch. Whatever the wire actually carried in that field is
   discarded; every message is currently assumed to be addressed to whoever
   answers the connection it arrived on.
-- The handshake ([connection.rs](../../paddington/src/connection.rs), see
-  [wire-protocol.md](../specifications/wire-protocol.md) §4) is strictly
+- The handshake ([connection.rs](../../../paddington/src/connection.rs), see
+  [wire-protocol.md](../../specifications/wire-protocol.md) §4) is strictly
   two-party over one physical WebSocket - salt exchange via HTTP headers,
   session key negotiation, `PeerDetails` exchange. Nothing about it
   supports (or needs to support) a third party.
 - Two things work in this design's favour, though:
   - `paddington::crypto::Key`/`SecretKey`
-    ([crypto.rs:111,128](../../paddington/src/crypto.rs#L111)) - `encrypt<T>`/
-    `decrypt<T>` ([crypto.rs:259,300](../../paddington/src/crypto.rs#L259)) -
+    ([crypto.rs:111,128](../../../paddington/src/crypto.rs#L111)) - `encrypt<T>`/
+    `decrypt<T>` ([crypto.rs:259,300](../../../paddington/src/crypto.rs#L259)) -
     have no dependency on a live `Connection` at all. Any application code
     can encrypt/decrypt an arbitrary value with an arbitrary key.
   - The `Invite` mechanism
-    ([invite.rs:13](../../paddington/src/invite.rs#L13),
-    `save`/`load` at [invite.rs:118,106](../../paddington/src/invite.rs#L118))
+    ([invite.rs:13](../../../paddington/src/invite.rs#L13),
+    `save`/`load` at [invite.rs:118,106](../../../paddington/src/invite.rs#L118))
     that bootstraps trust between any two peers today is **already
     out-of-band** - an admin generates a file on one side and manually
     copies it to the other. It requires no live connection between the two
@@ -164,16 +189,16 @@ paddington's machinery unchanged (§4.2.2).
 
 #### 4.2.1 Bootstrap: a relayed handshake that mirrors the real one
 
-The real handshake ([connection.rs](../../paddington/src/connection.rs),
-[wire-protocol.md](../specifications/wire-protocol.md) §4) gets its session
+The real handshake ([connection.rs](../../../paddington/src/connection.rs),
+[wire-protocol.md](../../specifications/wire-protocol.md) §4) gets its session
 keys from **both** sides, not one: the client generates a fresh outer key
 and sends it (`session_key` in `Handshake`,
-[connection.rs:562-565](../../paddington/src/connection.rs#L562)); the
+[connection.rs:562-565](../../../paddington/src/connection.rs#L562)); the
 server generates its own fresh inner key and sends *that* back
-([connection.rs:1191-1194](../../paddington/src/connection.rs#L1191)). Both
+([connection.rs:1191-1194](../../../paddington/src/connection.rs#L1191)). Both
 ends up with the same pair - `inner_key` from the server, `outer_key` from
-the client ([connection.rs:830-831](../../paddington/src/connection.rs#L830),
-[1408-1409](../../paddington/src/connection.rs#L1408)). Neither side alone
+the client ([connection.rs:830-831](../../../paddington/src/connection.rs#L830),
+[1408-1409](../../../paddington/src/connection.rs#L1408)). Neither side alone
 controls the final keys. The relayed bootstrap mirrors this exactly, just
 carried as two `RelayEnvelope`-wrapped messages instead of two raw WebSocket
 frames:
@@ -222,7 +247,7 @@ a fresh pair, exactly as reconnecting a direct connection does today.
 Once the session keys exist, all further traffic between `airr` and `brics`
 uses paddington's *existing* per-message double-envelope scheme -
 `envelope_message`/`deenvelope_message`
-([connection.rs:216,247](../../paddington/src/connection.rs#L216)), which
+([connection.rs:216,247](../../../paddington/src/connection.rs#L216)), which
 already derives a fresh per-message sub-key from a fresh random salt on
 every single message (wire-protocol.md §3.4) - just fed the *relayed*
 session keys/salts instead of a live connection's. These two functions are
@@ -253,7 +278,7 @@ first via §4.2.1 if no session exists yet), wraps the result in a
 
 **Relaying** (at the proxy): the handler recognises a `RelayEnvelope`
 payload (a fourth category alongside the Control/Keepalive/Regular
-[wire-protocol.md](../specifications/wire-protocol.md) §2 already
+[wire-protocol.md](../../specifications/wire-protocol.md) §2 already
 documents), checks its policy (§4.3) for `(from, to)`, and - if allowed -
 sends the **same, untouched** envelope on to `to`. The proxy never
 distinguishes a bootstrap message from an ordinary one, and never needs to -
@@ -280,7 +305,7 @@ now live" event - not just "here's another decryptable message" - each side
 can synthesise its own local `ControlCommand::Connected { agent, zone,
 engine, version }` the moment it completes, and feed it into the *existing*
 `templemeads::control_message::process_control_message` unchanged
-([control_message.rs](../../templemeads/src/control_message.rs)). That
+([control_message.rs](../../../templemeads/src/control_message.rs)). That
 already triggers `Register`/`Sync`/queued-job delivery for a normal
 connection - it does exactly the same thing here, for free, because as far
 as that code is concerned a connection *did* just get established. This is
@@ -297,7 +322,7 @@ is the "transparent" property the goal in §1 asks for.
 
 Rather than a parallel `relayed_peers` list, a relayed peer is an ordinary
 entry in the *existing* `servers`/`clients` lists
-([config.rs:503-504](../../paddington/src/config.rs#L503)) - just with a new
+([config.rs:503-504](../../../paddington/src/config.rs#L503)) - just with a new
 `proxy` field standing in for the field that doesn't apply when there's no
 direct address:
 
@@ -344,7 +369,7 @@ restriction was dropped once that became clear, with no changes needed
 anywhere else in the protocol.
 
 Operator-facing UX is unchanged: the existing `client --add`/`server --add`
-commands ([docs/cmdline](../cmdline/README.md)) generate and consume
+commands ([docs/cmdline](../../cmdline/README.md)) generate and consume
 `Invite` files exactly as today; only the resulting config entry carries
 `proxy` instead of `ip`/`url` when the operator says the peer is reached via
 a relay.
@@ -367,7 +392,7 @@ a decision the proxy operator makes explicitly, not something `airr` or
 
 A new, minimal binary crate. It needs **no `templemeads` dependency at
 all** - no Jobs, no Boards, no `Domain` - it's a pure `paddington` service,
-closer in spirit to [docs/echo](../echo/README.md) than to any `op-*`
+closer in spirit to [docs/echo](../../echo/README.md) than to any `op-*`
 templemeads agent: `ServiceConfig` with `clients` for every agent it relays
 for, a `RelayPolicy`, and a message handler that does exactly the "relay"
 step in §4.2 and nothing else. It never constructs a `Job`, never touches
@@ -518,7 +543,7 @@ follow-ups:
   as a fresh connection would be) is a small addition on top of §4.2.1, not
   a new protocol - worth doing once the base mechanism is proven, not
   essential to ship it.
-- **High-availability standby status** ([wire-protocol.md](../specifications/wire-protocol.md)
+- **High-availability standby status** ([wire-protocol.md](../../specifications/wire-protocol.md)
   §4.4) for relayed pairs - out of scope for v1; `StartRelayedConnection`/
   `RelayedConnectionAccepted` don't carry a `standby_status` equivalent.
 - **Stronger replay protection** than the per-message HKDF salting already

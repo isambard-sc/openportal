@@ -714,7 +714,7 @@ pub async fn send(message: Message) -> Result<(), Error> {
 
     // no real paddington connection - transparently fall back to the
     // blind relay if this recipient is only reachable via a proxy (see
-    // `paddington::relay` and `docs/plans/blind-relay-proxy-design.md`),
+    // `paddington::relay` and `docs/plans/archive/blind-relay-proxy-design.md`),
     // so callers above this layer (templemeads' `Command::send_to`,
     // keepalive replies, ...) never need to know the difference.
     if crate::relay::is_configured(message.recipient()).await {

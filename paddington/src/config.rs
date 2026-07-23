@@ -144,7 +144,7 @@ pub struct ServerConfig {
     /// Name of a `servers` entry (on this same `ServiceConfig`) to reach
     /// this peer via, instead of dialling `url` directly - set when this
     /// peer can only be reached through a blind relay proxy (see
-    /// `docs/plans/blind-relay-proxy-design.md`). `url` is ignored when
+    /// `docs/plans/archive/blind-relay-proxy-design.md`). `url` is ignored when
     /// this is set.
     #[serde(default)]
     proxy: Option<String>,
@@ -227,7 +227,7 @@ impl ServerConfig {
 
     ///
     /// Create a `ServerConfig` for a peer reached only via a blind relay
-    /// proxy (see `docs/plans/blind-relay-proxy-design.md`) - `relay` names
+    /// proxy (see `docs/plans/archive/blind-relay-proxy-design.md`) - `relay` names
     /// an existing entry in this same service's `servers` list. The
     /// invite's `url` is ignored - this peer is never dialled directly.
     ///
@@ -428,7 +428,7 @@ pub struct ClientConfig {
     /// Name of a `servers` entry (on this same `ServiceConfig`) this
     /// client is expected to arrive via, instead of being IP-allowlisted -
     /// set when this peer can only reach us through a blind relay proxy
-    /// (see `docs/plans/blind-relay-proxy-design.md`). Authentication then
+    /// (see `docs/plans/archive/blind-relay-proxy-design.md`). Authentication then
     /// comes from completing the relayed handshake, not from `ip`.
     #[serde(default)]
     proxy: Option<String>,
@@ -474,7 +474,7 @@ impl ClientConfig {
 
     ///
     /// Create a `ClientConfig` for a peer that can only reach us via a
-    /// blind relay proxy (see `docs/plans/blind-relay-proxy-design.md`) -
+    /// blind relay proxy (see `docs/plans/archive/blind-relay-proxy-design.md`) -
     /// `relay` names an existing entry in this same service's `servers`
     /// list.
     ///
@@ -773,7 +773,7 @@ impl ServiceConfig {
     ///
     /// Checks that `relay` names an existing `servers` entry - every
     /// relayed peer names, independently, which of this service's
-    /// `servers` entries relays it (see `docs/plans/blind-relay-proxy-design.md`
+    /// `servers` entries relays it (see `docs/plans/archive/blind-relay-proxy-design.md`
     /// §4.3), so a service can freely use different proxies for different
     /// peers (as well as mix relayed and directly-connected peers) - there
     /// is no requirement to pick just one.
@@ -860,7 +860,7 @@ impl ServiceConfig {
     /// Add a client that can only reach us via the blind relay proxy
     /// named `relay` (an existing `servers` entry), rather than a direct,
     /// IP-allowlisted connection - see
-    /// `docs/plans/blind-relay-proxy-design.md`. Returns an `Invite` to
+    /// `docs/plans/archive/blind-relay-proxy-design.md`. Returns an `Invite` to
     /// pass to the client exactly as `add_client` does.
     ///
     pub fn add_relayed_client(
@@ -955,7 +955,7 @@ impl ServiceConfig {
 
     ///
     /// Add a server from an invite. If the invite names a blind relay
-    /// proxy (see `docs/plans/blind-relay-proxy-design.md`) - i.e. it was
+    /// proxy (see `docs/plans/archive/blind-relay-proxy-design.md`) - i.e. it was
     /// created by `add_relayed_client` on the issuing side - this peer is
     /// automatically added as relayed, reached via that proxy, rather than
     /// dialling `invite.url()` directly. Nothing extra needs to be passed

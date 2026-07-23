@@ -5,7 +5,7 @@
 //! routing-only agents (e.g. `provider`) that sit between leaf agents
 //! speaking real, possibly-different `Domain`s.
 //!
-//! See `docs/plans/multi-domain-routing-design.md` for the full design and
+//! See `docs/plans/archive/multi-domain-routing-design.md` for the full design and
 //! rationale.
 
 use crate::domain::Domain;

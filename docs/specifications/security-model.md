@@ -303,7 +303,7 @@ Portal ←—key-pair-A—→ Provider ←—key-pair-B—→ Platform ←—key
 ## 7.1 Blind Relay Proxy Trust Model
 
 An `op-proxy` agent (see
-[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md)) lets a
+[blind-relay-proxy-design.md](../plans/archive/blind-relay-proxy-design.md)) lets a
 pair of agents that can each only make *outbound* connections communicate,
 without either becoming a listening server the other can reach. It does
 **not** add itself as a trusted intermediary in the sense every other agent
@@ -331,12 +331,23 @@ in §7's topology is - it is deliberately kept blind:
   opaque ciphertext. It never attempts to decrypt agent↔agent traffic, and
   the ciphertext it forwards is, by construction, indistinguishable from
   random bytes without the relayed pair's own keys.
+- The recovery signal a restarted relayed peer's counterpart sends
+  ([wire-protocol.md](wire-protocol.md) §7.3, `SessionUnknown`) is
+  encrypted with the same permanent pre-shared key as the bootstrap
+  itself, so the proxy cannot forge one to force a peer into spurious
+  re-bootstraps.
 
 This means a compromised proxy can, at worst, deny service (drop or refuse
 to relay) or observe *metadata* (which pairs communicate, message
 timing/size) - it cannot read message content, and it cannot impersonate
 either relayed agent to the other without their pre-shared key pair, which
 it never possesses.
+
+An agent is free to use a *different* proxy for each relayed peer (there
+is no requirement to route everything through one proxy) - each relayed
+pair's trust properties above stand entirely on that pair's own
+out-of-band key exchange and are unaffected by how many different proxies
+are involved elsewhere in the agent's own connection graph.
 
 ---
 

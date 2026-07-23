@@ -108,7 +108,7 @@ returning `Error::Incompatible` - if the domain differs *or* is unknown
 mismatch, not given the benefit of the doubt) - **with one built-in
 exception**: a peer that identifies itself as `templemeads::erased::Erased`
 (a domain-oblivious routing agent - see
-[docs/plans/multi-domain-routing-design.md](../plans/multi-domain-routing-design.md))
+[docs/plans/multi-domain-routing-design.md](../plans/archive/multi-domain-routing-design.md))
 is always accepted, regardless of `L`. That's not a foreign vocabulary that
 happens to share a name - it's templemeads' own built-in "I forward
 everything, I execute nothing" implementation, so it poses none of the risk

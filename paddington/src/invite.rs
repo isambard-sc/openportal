@@ -17,7 +17,7 @@ pub struct Invite {
     inner_key: SecretKey,
     outer_key: SecretKey,
     /// Name of the blind relay proxy the issuer reaches this peer through,
-    /// if any (see `docs/plans/blind-relay-proxy-design.md`) - carried in
+    /// if any (see `docs/plans/archive/blind-relay-proxy-design.md`) - carried in
     /// the invite so the importing side doesn't need to be told separately
     /// which relay to use: it reads everything it needs from this file.
     #[serde(default)]

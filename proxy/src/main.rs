@@ -4,7 +4,7 @@
 //! `op-proxy` - a blind relay proxy for OpenPortal agents that can only
 //! make outbound connections (e.g. neither side of a pair can open a
 //! listening port reachable by the other). See
-//! `docs/plans/blind-relay-proxy-design.md` for the full design.
+//! `docs/plans/archive/blind-relay-proxy-design.md` for the full design.
 //!
 //! Unlike every other `op-*` agent, this binary depends only on
 //! `paddington`, not `templemeads` - it has no Jobs, no Boards, no

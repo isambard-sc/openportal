@@ -769,7 +769,7 @@ pub fn process_message<L: Domain>(
 /// `run()` in this crate calls this instead of calling
 /// `paddington::set_handler`/`paddington::run` directly, so that any
 /// `servers`/`clients` peer configured with a `proxy` (see
-/// `paddington::relay` and `docs/plans/blind-relay-proxy-design.md`) works
+/// `paddington::relay` and `docs/plans/archive/blind-relay-proxy-design.md`) works
 /// the same way for every agent kind without each one needing its own
 /// wiring.
 ///

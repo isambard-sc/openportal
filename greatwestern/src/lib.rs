@@ -121,7 +121,7 @@ mod tests {
 }
 
 /// Proves the `Erased` domain-oblivious router design
-/// (`docs/plans/multi-domain-routing-design.md`) actually round-trips real
+/// (`docs/plans/archive/multi-domain-routing-design.md`) actually round-trips real
 /// `greatwestern` Jobs/Notifications unchanged. Lives here (not in
 /// `templemeads`) because it needs a real, concrete `Domain` to relay -
 /// `templemeads` itself must never depend on `greatwestern`.

@@ -547,7 +547,7 @@ version mismatch causes the connection to be refused.
 Two agents that can each only make outbound connections (neither can open a
 port the other can reach) can still talk to each other via an `op-proxy`
 agent that both connect to as ordinary paddington clients. See
-[blind-relay-proxy-design.md](../plans/blind-relay-proxy-design.md) for the
+[blind-relay-proxy-design.md](../plans/archive/blind-relay-proxy-design.md) for the
 full design and rationale; this section covers only the wire format.
 
 The proxy relays a single, opaque payload type - `RelayEnvelope` - between
@@ -568,6 +568,17 @@ paddington `Command` variant. `from`/`to` name the two relayed peers, never
 the proxy itself; the proxy's `proxy_handler` reads only `from`/`to`/`zone`
 to enforce its `RelayPolicy` (see [security-model.md](security-model.md)
 §7.1) and forwards `ciphertext` unmodified.
+
+`zone` here is the zone of the *relayed relationship itself* (e.g. the
+zone `brics` was introduced to `airr` under), carried end-to-end and used
+for the synthesised `Message` on arrival (§7.2) - it is **not** the same
+thing as the zone of the real, direct `Message` this `RelayEnvelope` is
+wrapped in when sent to the proxy, which is whichever zone each side's own
+`servers`/`clients` entry for the proxy itself uses (very often, but not
+necessarily, the same zone). Getting this distinction wrong means
+addressing a real paddington `Message` with a zone the recipient's
+connection registry has no entry for - see
+`paddington::relay::RelayedPeer`'s `zone` vs `relay_zone` fields.
 
 ### 7.1 Bootstrap: `StartRelayedConnection` / `RelayedConnectionAccepted`
 
@@ -630,7 +641,7 @@ distinguish a relayed connection from a direct one.
 
 Once a session exists, every subsequent message between the pair is a
 `RelayEnvelope` whose `ciphertext` is the real payload string encrypted
-with the negotiated **session** key pair (§8.1) and per-connection-style
+with the negotiated **session** key pair (§7.1) and per-connection-style
 salts, using the same `envelope_message`/`deenvelope_message` procedure as
 §3.4. The receiving side first attempts to decrypt an incoming
 `RelayEnvelope`'s `ciphertext` with the permanent pre-shared key (to
@@ -639,6 +650,33 @@ established session keys for `envelope.from`. Neither attempt ever
 succeeds with the other key pair, so a proxy - or anyone else without
 either key pair - cannot distinguish bootstrap traffic from ongoing
 traffic, let alone read either.
+
+### 7.3 Recovery: `SessionUnknown`
+
+If a relayed peer's process restarts, it loses its in-memory session
+state (there is nothing else to lose it from - sessions are never
+persisted to disk). A restarted relayed *client* self-heals: its own
+startup path re-bootstraps every relayed peer it initiates towards,
+unprompted. A restarted relayed *server* has no equivalent - it only ever
+waits - so without something else, its peer's still-cached session would
+silently fail to decrypt on every send, forever, with neither side finding
+out why.
+
+```json
+// either direction, via proxy (ciphertext, once decrypted)
+{
+  "type": "SessionUnknown"
+}
+```
+
+Whichever side receives ongoing traffic (§7.2) it cannot match to a
+session sends this back to `envelope.from`, encrypted with the same
+**permanent pre-shared key** as `Start`/`Accepted` above (so the proxy
+cannot forge it any more than it can forge a genuine bootstrap). On
+receipt, the recipient clears its own cached session for that peer and,
+if it holds the relayed *client* role for it (the only role that can
+initiate), immediately re-bootstraps rather than waiting for its next
+scheduled retry.
 
 **Source file:** `paddington/src/relay.rs`
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! A blind relay for agents that can only make outbound connections - see
-//! `docs/plans/blind-relay-proxy-design.md` for the full design and
+//! `docs/plans/archive/blind-relay-proxy-design.md` for the full design and
 //! rationale.
 //!
 //! Two peers that can each only connect outwards to a shared proxy agent
@@ -94,7 +94,7 @@ enum BootstrapMessage {
 
 /// Which side of the *virtual* relayed connection we are - independent of
 /// the fact both sides are physically only ever clients of the proxy (see
-/// `docs/plans/blind-relay-proxy-design.md` §4.2).
+/// `docs/plans/archive/blind-relay-proxy-design.md` §4.2).
 #[derive(Debug, Clone)]
 enum RelayedRole {
     /// We initiate the bootstrap - this peer is one of our `servers`
@@ -384,7 +384,7 @@ fn call_inner_handler(message: Message) -> Pin<Box<dyn Future<Output = Result<()
 /// relayed *client* for it. Blocks (with a timeout) until the bootstrap
 /// completes. Produces fresh, mutually-contributed session keys every
 /// time it's called - this is where forward secrecy for relayed sessions
-/// comes from (see `docs/plans/blind-relay-proxy-design.md` §4.2.1, §5).
+/// comes from (see `docs/plans/archive/blind-relay-proxy-design.md` §4.2.1, §5).
 ///
 pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
     let peer = get_peer(peer_name).await?;
@@ -929,7 +929,7 @@ pub async fn send(to: &str, payload: &str) -> Result<(), Error> {
 
 ///
 /// Explicit, default-deny allow-list of `(from, to)` pairs a proxy agent
-/// will relay between - see `docs/plans/blind-relay-proxy-design.md` §4.3.
+/// will relay between - see `docs/plans/archive/blind-relay-proxy-design.md` §4.3.
 /// Checked in both directions: allowing `(a, b)` also allows `(b, a)`.
 ///
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

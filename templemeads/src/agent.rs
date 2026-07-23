@@ -388,7 +388,7 @@ pub async fn ensure_domain_matches<L: Domain>(peer: &Peer) -> Result<(), Error> 
     // guard against instead, at the point of execution - deliberately NOT
     // given the same exception, since accepting "erased" as a message's own
     // provenance there would defeat the reason those checks exist. See
-    // `docs/plans/multi-domain-routing-design.md` §8.1.
+    // `docs/plans/archive/multi-domain-routing-design.md` §8.1.
     let peer_is_known_router = actual
         .as_ref()
         .is_some_and(|d| d.name == crate::erased::Erased::name());
@@ -430,7 +430,7 @@ pub async fn ensure_domain_matches<L: Domain>(peer: &Peer) -> Result<(), Error> 
 ///
 /// Unlike `ensure_domain_matches`, this never disconnects `sender` - a
 /// single misrouted Job (e.g. one that passed through a domain-oblivious
-/// router, see `docs/plans/multi-domain-routing-design.md`) doesn't mean
+/// router, see `docs/plans/archive/multi-domain-routing-design.md`) doesn't mean
 /// the connection itself is bad. Opt-in: call this as the first thing your
 /// runner does, if your agent needs the guarantee.
 ///

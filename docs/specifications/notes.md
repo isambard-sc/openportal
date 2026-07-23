@@ -208,9 +208,12 @@ Every `templemeads`-based agent can now act as a relayed peer, not just
   `bootstrap_all_as_client()` concurrently with `paddington::run()` (since
   that's what actually dials the real connection to the proxy in the first
   place).
-- `paddington::relay::bootstrap()` retries its initial send for up to 30s
-  if the underlying connection to the relay isn't up yet - a real race at
-  startup, since `exchange::send` fails immediately rather than queuing.
+- `paddington::relay::bootstrap()`'s initial send retries indefinitely (a
+  short retry loop within the call for the underlying connection to the
+  relay not being up yet, and `maintain_relayed_client` retrying the whole
+  bootstrap forever, at the same cadence a direct connection retries at)
+  rather than giving up - `exchange::send` fails immediately instead of
+  queuing, and agents can start in any order or restart independently.
 - `paddington::exchange::send()` transparently falls back to
   `paddington::relay::send()` for a recipient with no real connection but
   a configured relay entry - this is what makes relayed peers invisible to
@@ -219,12 +222,29 @@ Every `templemeads`-based agent can now act as a relayed peer, not just
 - `paddington::eventloop::run()` skips dialling `servers` entries that
   have `proxy` set (they have no real URL - they're bootstrapped
   separately, over the real connection to the proxy itself).
+- A relayed peer's own zone (the relationship between the two relayed
+  agents) and the zone of the real, direct connection to the relay itself
+  are tracked and used separately throughout (`RelayedPeer::relay_zone`,
+  `configure_proxy` on the proxy's own side) - they are very often, but
+  not necessarily, the same zone.
+- A restarted relayed *server* (the side that only ever waits) has no way
+  to notice on its own that it lost its session state, so its relayed
+  *client* peer's still-cached session would otherwise fail silently
+  forever. A `SessionUnknown` bootstrap message (permanent-key encrypted,
+  so the proxy can't forge it) lets either side tell the other to redo the
+  handshake the moment it receives traffic it can't decrypt - see
+  [wire-protocol.md](wire-protocol.md) §7.3.
+- An agent can use a *different* proxy for each relayed peer - there is no
+  requirement to route everything through one proxy (an earlier
+  simplification restricting this was removed once it became clear
+  nothing in the protocol actually needed it).
 
 Validated with a genuine three-process test (`op-proxy` + `op-portal` +
 `op-cloudportal`, real compiled binaries, real TCP connections): the
 bootstrap completes, each side fires its synthesised `Connected` event,
 and a real templemeads `Register` command sent immediately afterwards is
-correctly relayed and processed on the other side.
+correctly relayed and processed on the other side, including recovering
+correctly across a simulated server-side restart.
 
 ---
 

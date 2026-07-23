@@ -13,19 +13,28 @@ dependency entirely) are all in place and covered by unit/integration tests,
 including the cross-domain round-trip proofs in §10 (real `Job<Hpc>`/
 `Notification<Hpc>` relayed through `Job<Erased>`/`Notification<Erased>` and
 re-serialised byte-identical, including through multiple chained hops).
-**Not yet done**: a live, running multi-process smoke test (actual
-`op-provider`/leaf-agent binaries exchanging traffic over real connections,
-as opposed to in-process serialisation round-trips) - step 9.6 (leaving
-other routing-role agents on their current `Domain`) was a deliberate
-non-action, not skipped work. This document is kept as the design record;
-see the code (and `writing-a-domain.md` §1.1) for current behaviour.
+A live multi-process run has since happened incidentally, as part of
+testing [blind-relay-proxy-design.md](blind-relay-proxy-design.md): a real
+`op-provider` binary (compiled against `Erased`) connected to a real
+`op-portal` binary (compiled against `Hpc`/`greatwestern`) and registered
+successfully - `op-provider`'s `Register` correctly reported
+`domain=erased`, and the connection was accepted and processed normally
+despite the domain mismatch, confirming `Erased` behaves correctly in a
+live setting and doesn't break ordinary connection/registration. **Still
+not done**: a dedicated live test of `op-provider` actually *routing* a
+Job between two different-domain leaf agents over real connections (as
+opposed to the in-process serialisation round-trips in §10, or the
+incidental registration above). Step 9.6 (leaving other routing-role
+agents on their current `Domain`) was a deliberate non-action, not skipped
+work. This document is kept as the design record; see the code (and
+`writing-a-domain.md` §1.1) for current behaviour.
 
 ## 1. Goal
 
 Today, an OpenPortal agent binary is compiled against exactly one
 `L: templemeads::domain::Domain` (see
-[grammar-split-design.md](archive/grammar-split-design.md) and
-[writing-a-domain.md](../specifications/writing-a-domain.md)), and every
+[grammar-split-design.md](grammar-split-design.md) and
+[writing-a-domain.md](../../specifications/writing-a-domain.md)), and every
 agent in a deployment must speak the same `L` to interoperate at all. That's
 fine for leaf agents (`freeipa`, `slurm`, `filesystem`, ...) - they only ever
 need to understand *one* vocabulary, their own.
@@ -80,20 +89,20 @@ both are covered here.
 
 - `Job<L>`'s `command` field is a private `Command<L>` struct holding
   `{ destination: Destination, instruction: L::Instruction }`
-  ([job.rs:198-214](../../templemeads/src/job.rs#L198)), and routing
+  ([job.rs:198-214](../../../templemeads/src/job.rs#L198)), and routing
   (`Position::Downstream` in `handler.rs`) only ever looks at `destination` -
   it never touches `instruction` to decide where a Job goes next. So far, so
   domain-oblivious.
 - The blocker is *deserialisation*. `Command<L>`'s custom `Deserialize`
-  ([job.rs:183-194](../../templemeads/src/job.rs#L183)) calls
+  ([job.rs:183-194](../../../templemeads/src/job.rs#L183)) calls
   `Command::parse(&s, false)`, which calls `L::parse_instruction(...)`
-  ([job.rs:119](../../templemeads/src/job.rs#L119)) - a call that
+  ([job.rs:119](../../../templemeads/src/job.rs#L119)) - a call that
   **fails** if the incoming instruction string doesn't belong to `L`'s
   grammar. A router compiled with `L = greatwestern::Hpc` simply cannot
   deserialise (and therefore cannot relay) a Job whose instruction belongs to
   a different domain - `serde_json::from_str` returns `Err`, and
   `impl<L: Domain> From<Message> for Command<L>`
-  ([command.rs:328-333](../../templemeads/src/command.rs#L328)) silently
+  ([command.rs:328-333](../../../templemeads/src/command.rs#L328)) silently
   turns that into a `Command::Error`, dropping the Job rather than
   forwarding it.
 - Nothing else in the routing path cares about `L::Instruction` at all:
@@ -109,20 +118,20 @@ for a router to be able to relay arbitrary domains' Jobs.
 
 ### 3.2 Notifications
 
-- `notification::send()` ([notification.rs:113-171](../../templemeads/src/notification.rs#L113))
+- `notification::send()` ([notification.rs:113-171](../../../templemeads/src/notification.rs#L113))
   and the `Position::Downstream` arm of `handler.rs`'s notification dispatch
-  ([handler.rs:555-566](../../templemeads/src/handler.rs#L555)) route purely
+  ([handler.rs:555-566](../../../templemeads/src/handler.rs#L555)) route purely
   on `notification.destination()` - `event` is never inspected to decide
   where a Notification goes next, exactly like Jobs.
 - The blocker is again *deserialisation* - but the mechanism is different
   from Jobs, not the same one. `Notification<L>` derives `Serialize`/
   `Deserialize` directly on the struct
-  ([notification.rs:19-25](../../templemeads/src/notification.rs#L19)):
+  ([notification.rs:19-25](../../../templemeads/src/notification.rs#L19)):
   `event: L::NotificationEvent` is deserialised by `L::NotificationEvent`'s
   own (plain, derived) `Deserialize` impl - **not** via
   `Domain::parse_notification_event`, which is only ever called from
   `Notification::parse(s: &str)`
-  ([notification.rs:40-51](../../templemeads/src/notification.rs#L40)), the
+  ([notification.rs:40-51](../../../templemeads/src/notification.rs#L40)), the
   text-command entry point (e.g. a bridge's `POST /notify`). A router only
   ever receives already-serialised `Notification<L>` values over the wire
   and relays them via ordinary struct deserialisation - it never calls
@@ -138,9 +147,9 @@ to actually satisfy it.
 ## 4. Key insight: the wire format is domain-oblivious for routing - but Jobs and Notifications get there differently
 
 `Command<L>` (the private struct behind `Job.command`) serialises via
-`Display` ([job.rs:165-169](../../templemeads/src/job.rs#L165)) to a single
+`Display` ([job.rs:165-169](../../../templemeads/src/job.rs#L165)) to a single
 string: `"<destination> <instruction-display>"` - this is the `"command"`
-field documented in [json-types.md](../specifications/json-types.md) §Job.
+field documented in [json-types.md](../../specifications/json-types.md) §Job.
 It is **not** a structured `{destination: ..., instruction: {...}}` object.
 So if a `Domain`'s `Instruction` type is defined so that `parse_instruction`
 always succeeds and `Display` reproduces exactly what it was given, a
@@ -159,7 +168,7 @@ wire form is
 - a **structured JSON object**, one key per enum variant, produced by
 `NotificationEvent`'s ordinary `#[derive(Serialize, Deserialize)]`. (This
 also means the existing
-[notification-protocol.md](../specifications/notification-protocol.md) §4
+[notification-protocol.md](../../specifications/notification-protocol.md) §4
 documentation of `"event": "<event-string>"` was wrong - fixed alongside
 this design.) Consequently, `Erased::NotificationEvent` can't just be a
 `String` wrapper the way `Erased::Instruction` can - it needs to preserve
@@ -280,7 +289,7 @@ closely related context.
 
 `agent::ensure_domain_matches::<L>(peer)` and the `domain`/`domain_version`
 fields on `Register` (added before this design existed - see
-[wire-protocol.md](../specifications/wire-protocol.md) §Register) tell an
+[wire-protocol.md](../../specifications/wire-protocol.md) §Register) tell an
 agent what `Domain` its **directly connected peer** speaks. That's exactly
 right for a leaf agent talking directly to another leaf agent. It stops
 being useful the moment an `Erased` router sits in between: the peer a
@@ -304,22 +313,22 @@ The natural place to reach for this is `Envelope<L>`/`NotificationEnvelope<L>`
 - but neither is **ever serialised over the wire**. Both are purely local,
 in-process wrappers: every call site that constructs one builds it fresh,
 right before handing the message to the registered runner - for Jobs,
-[handler.rs:316](../../templemeads/src/handler.rs#L316) (the generic
+[handler.rs:316](../../../templemeads/src/handler.rs#L316) (the generic
 dispatch path) and the same pattern independently in the `account`,
 `filesystem`, `portal`, and `scheduler` role modules
-([account.rs:57](../../templemeads/src/account.rs#L57),
-[filesystem.rs:57](../../templemeads/src/filesystem.rs#L57),
-[portal.rs:53](../../templemeads/src/portal.rs#L53),
-[scheduler.rs:56](../../templemeads/src/scheduler.rs#L56)); for
+([account.rs:57](../../../templemeads/src/account.rs#L57),
+[filesystem.rs:57](../../../templemeads/src/filesystem.rs#L57),
+[portal.rs:53](../../../templemeads/src/portal.rs#L53),
+[scheduler.rs:56](../../../templemeads/src/scheduler.rs#L56)); for
 Notifications,
-[handler.rs:574](../../templemeads/src/handler.rs#L574) (destination) and
-[handler.rs:605](../../templemeads/src/handler.rs#L605) (bridge sidecar),
-plus [notification.rs:120](../../templemeads/src/notification.rs#L120)
+[handler.rs:574](../../../templemeads/src/handler.rs#L574) (destination) and
+[handler.rs:605](../../../templemeads/src/handler.rs#L605) (bridge sidecar),
+plus [notification.rs:120](../../../templemeads/src/notification.rs#L120)
 (self-addressed). What actually travels hop-to-hop over the wire is
 `Job<L>`/`Notification<L>` themselves, via
 `Command::Put/Update/Delete { job: Job<L> }` /
 `Command::Notify { notification: Notification<L> }`
-([command.rs:29-42](../../templemeads/src/command.rs#L29)).
+([command.rs:29-42](../../../templemeads/src/command.rs#L29)).
 
 So the provenance tag has to live on `Job<L>` and `Notification<L>`, not
 their respective Envelopes, to survive being relayed. Two new fields on
@@ -359,9 +368,9 @@ pub struct Notification<L: Domain> {
 ```
 
 Populated in `Job::parse()`
-([job.rs:238](../../templemeads/src/job.rs#L238)) and in both
+([job.rs:238](../../../templemeads/src/job.rs#L238)) and in both
 `Notification::new()`/`Notification::parse()`
-([notification.rs:28-51](../../templemeads/src/notification.rs#L28)) with
+([notification.rs:28-51](../../../templemeads/src/notification.rs#L28)) with
 `Some(L::name().to_string())` / `Some(L::version().to_string())` -
 mirroring exactly how `Register` picked up `domain`/`domain_version` for the
 connection-level check, just captured once per-message instead of once
@@ -406,7 +415,7 @@ other traffic relayed over it may well be correctly addressed. So:
 - `ensure_notification_domain_matches` simply causes the notification to be
   dropped (logged, not delivered to the notify runner) - Notifications
   already have no return channel and no delivery guarantee
-  ([notification-protocol.md](../specifications/notification-protocol.md)
+  ([notification-protocol.md](../../specifications/notification-protocol.md)
   §8), so "drop and log" is the existing failure mode for every other kind
   of notification delivery problem too; this is one more reason added to
   that same bucket, not a new kind of failure a caller needs to newly
@@ -525,7 +534,7 @@ suspicious in that log line).
    automatic-vs-opt-in question for how agents wire them into their
    runner/notify-runner dispatch.
 4. Pick `provider` as the proof of concept -
-   [templemeads::provider::run](../../templemeads/src/provider.rs#L15)
+   [templemeads::provider::run](../../../templemeads/src/provider.rs#L15)
    doesn't even take a runner argument (it hardcodes `None` to
    `set_my_service_details`, so it can only ever run the generic
    `default_runner`), and `provider/src/main.rs` has zero references to
@@ -598,7 +607,7 @@ suspicious in that log line).
 The original grammar-split design considered and rejected a fully
 type-erased `Job` payload (`(String, String)` json+type-name, downcast per
 agent) for the *entire* framework
-([grammar-split-design.md](archive/grammar-split-design.md) §11) - rejected
+([grammar-split-design.md](grammar-split-design.md) §11) - rejected
 because it costs every leaf agent a fallible downcast for a property
 (compile-time exhaustive matching) they'd otherwise get for free.
 

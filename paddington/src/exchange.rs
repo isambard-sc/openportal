@@ -682,6 +682,21 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
     Ok(())
 }
 
+///
+/// Whether a real, direct connection to `name@zone` currently exists -
+/// used by `paddington::relay` to detect when the underlying connection
+/// to a proxy has dropped, so a relayed session built on top of it can be
+/// re-bootstrapped once it comes back.
+///
+pub fn is_connected(name: &str, zone: &str) -> bool {
+    match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange
+            .connections
+            .contains_key(&get_key_from_str(name, zone)),
+        Err(_) => false,
+    }
+}
+
 pub async fn send(message: Message) -> Result<(), Error> {
     let connection = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
@@ -854,5 +869,18 @@ pub fn worker_count() -> usize {
             tracing::error!("Error getting exchange read lock: {}", e);
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_is_connected_false_for_unregistered_peer() {
+        assert!(!is_connected(
+            "definitely-not-a-registered-peer-name",
+            "default"
+        ));
     }
 }

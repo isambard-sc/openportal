@@ -82,6 +82,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   connection key that didn't exist and failed with `Connection <proxy>
   not found` even though the real connection to the proxy was up and
   healthy. The proxy's own zone is now tracked and used separately.
+- **`op-proxy` forwarding to the wrong zone when two relayed peers relay
+  to each other under a different zone from the one they each connect to
+  the proxy in** — the same class of bug as above, but on the proxy's own
+  side: `proxy_handler` was forwarding using the *relayed relationship's*
+  zone (meaningful only to the two relayed peers) instead of the zone the
+  destination peer actually connected to the proxy under, causing
+  `Could not relay message from X to Y: Connection Y not found` even
+  though Y was connected and healthy. `op-proxy` now tracks each of its
+  own clients' real zones separately and forwards using those.
+- **A relayed bootstrap that failed (e.g. the other side hadn't connected
+  to the proxy yet) gave up permanently instead of retrying** — bootstrap
+  now retries forever, at the same 5-second cadence direct connections
+  already use, so relayed peers reconnect exactly as persistently as
+  directly-connected ones regardless of which order agents happen to
+  start in.
+- **A relayed peer whose "server" side restarted stayed silently
+  unreachable until something external noticed** — the relayed *server*
+  role (the one that waits rather than initiates) has no way to detect a
+  stale session on its own after restarting and losing its in-memory
+  session state, and the relayed *client* had no way to know its
+  still-cached session was now invalid, so every message it sent was
+  silently dropped and it just timed out. The server side now tells the
+  client side to redo the handshake the moment it receives traffic it
+  can't decrypt, so a server-side restart recovers automatically instead
+  of requiring a client restart to fix.
 
 ## [0.32.2] - 2026-06-03
 

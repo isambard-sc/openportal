@@ -656,15 +656,6 @@ pub struct ServiceConfig {
     heathcheck_port: Option<u16>,
     proxy_header: Option<String>,
 
-    /// Name of the `servers` entry this service uses as its blind relay
-    /// proxy (see `docs/plans/blind-relay-proxy-design.md`), if any. Every
-    /// relayed `clients` entry must name this same proxy -
-    /// `add_relayed_client` enforces this, so a service can only ever be
-    /// reachable via one proxy at a time (it may still mix relayed and
-    /// directly-connected `clients` entries).
-    #[serde(default)]
-    proxy: Option<String>,
-
     servers: Vec<ServerConfig>,
     clients: Vec<ClientConfig>,
     encryption: Option<EncryptionScheme>,
@@ -705,7 +696,6 @@ impl ServiceConfig {
             port: *port,
             heathcheck_port: *healthcheck_port,
             proxy_header: proxy_header.clone(),
-            proxy: None,
             servers: Vec::new(),
             clients: Vec::new(),
             encryption: None,
@@ -781,22 +771,14 @@ impl ServiceConfig {
     }
 
     ///
-    /// The name of the `servers` entry this service uses as its blind
-    /// relay proxy, if it uses one at all (see
-    /// `docs/plans/blind-relay-proxy-design.md`).
+    /// Checks that `relay` names an existing `servers` entry - every
+    /// relayed peer names, independently, which of this service's
+    /// `servers` entries relays it (see `docs/plans/blind-relay-proxy-design.md`
+    /// §4.3), so a service can freely use different proxies for different
+    /// peers (as well as mix relayed and directly-connected peers) - there
+    /// is no requirement to pick just one.
     ///
-    pub fn proxy(&self) -> Option<String> {
-        self.proxy.clone()
-    }
-
-    ///
-    /// Checks that `relay` names an existing `servers` entry, and that it
-    /// is consistent with any proxy this service already uses - a service
-    /// can only ever be reachable via one blind relay proxy at a time
-    /// (see `docs/plans/blind-relay-proxy-design.md` §4.3). Sets
-    /// `self.proxy` on first use.
-    ///
-    fn use_relay(&mut self, relay: &str) -> Result<(), Error> {
+    fn check_relay_exists(&self, relay: &str) -> Result<(), Error> {
         let relay = relay.trim();
 
         if relay.is_empty() {
@@ -808,19 +790,6 @@ impl ServiceConfig {
                 "Relay '{}' is not a known server - add it as a server first.",
                 relay
             )));
-        }
-
-        match &self.proxy {
-            Some(existing) if existing != relay => {
-                return Err(Error::Peer(format!(
-                    "This service already uses relay '{}' - it cannot also use '{}'. \
-                     A service can only be reachable via one blind relay proxy at a time.",
-                    existing, relay
-                )));
-            }
-            _ => {
-                self.proxy = Some(relay.to_string());
-            }
         }
 
         Ok(())
@@ -906,7 +875,7 @@ impl ServiceConfig {
 
         let zone = self.clean_zone(zone)?;
 
-        self.use_relay(relay)?;
+        self.check_relay_exists(relay)?;
 
         // check if we already have a client with this name in this zone
         for c in self.clients.iter() {
@@ -1005,7 +974,7 @@ impl ServiceConfig {
 
         let server = match invite.proxy() {
             Some(relay) => {
-                self.use_relay(&relay)?;
+                self.check_relay_exists(&relay)?;
                 ServerConfig::from_relayed_invite(&relay, invite)?
             }
             None => {
@@ -1465,9 +1434,6 @@ mod tests {
             .add_server(&invite)
             .unwrap_or_else(|e| unreachable!("Cannot add relayed airr to brics: {}", e));
 
-        assert_eq!(airr.proxy(), Some("proxy".to_string()));
-        assert_eq!(brics.proxy(), Some("proxy".to_string()));
-
         let relayed_client = airr
             .clients()
             .into_iter()
@@ -1498,7 +1464,12 @@ mod tests {
     }
 
     #[test]
-    fn test_relayed_peer_only_one_proxy_allowed() {
+    fn test_relayed_peers_can_use_different_proxies() {
+        // A service can relay different peers via different proxies at
+        // the same time - there is no requirement to pick just one (see
+        // `check_relay_exists`). Mixing relayed and direct peers already
+        // worked; this proves mixing *relayed peers reached via different
+        // proxies* works too.
         let mut airr =
             ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &5550, &None, &None)
                 .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
@@ -1535,14 +1506,24 @@ mod tests {
         airr.add_server(&invite)
             .unwrap_or_else(|e| unreachable!("Cannot add proxy2 to airr: {}", e));
 
-        // first relayed client via proxy1 - fine, and fixes airr's proxy
+        // relayed clients via two *different* proxies must both succeed
         airr.add_relayed_client("brics", "proxy1", &None)
             .unwrap_or_else(|e| unreachable!("Cannot add relayed brics via proxy1: {}", e));
-        assert_eq!(airr.proxy(), Some("proxy1".to_string()));
+        airr.add_relayed_client("someone_else", "proxy2", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add relayed peer via proxy2: {}", e));
 
-        // a second relayed client via a *different* proxy must be rejected
-        assert!(airr
-            .add_relayed_client("someone_else", "proxy2", &None)
-            .is_err());
+        let brics = airr
+            .clients()
+            .into_iter()
+            .find(|c| c.name() == "brics")
+            .unwrap_or_else(|| unreachable!("brics should be a client of airr"));
+        assert_eq!(brics.proxy(), Some("proxy1".to_string()));
+
+        let someone_else = airr
+            .clients()
+            .into_iter()
+            .find(|c| c.name() == "someone_else")
+            .unwrap_or_else(|| unreachable!("someone_else should be a client of airr"));
+        assert_eq!(someone_else.proxy(), Some("proxy2".to_string()));
     }
 }

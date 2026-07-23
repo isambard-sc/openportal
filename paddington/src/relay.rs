@@ -79,6 +79,17 @@ struct RelayedConnectionAccepted {
 enum BootstrapMessage {
     Start(StartRelayedConnection),
     Accepted(RelayedConnectionAccepted),
+    /// Sent by whichever side finds it has no session for the sender of
+    /// some ongoing traffic - almost always because *it* just restarted
+    /// and lost its in-memory session state while the sender (never
+    /// having restarted) still thinks its old session is valid. Unlike a
+    /// sender-side restart, which self-heals by re-bootstrapping on its
+    /// own startup, the receiving side has no way to notice this
+    /// happened on its own - see `notify_session_unknown` /
+    /// `handle_incoming_envelope`. Carries no data; encrypted with the
+    /// permanent pre-shared key like any other bootstrap message, so the
+    /// proxy cannot forge it.
+    SessionUnknown,
 }
 
 /// Which side of the *virtual* relayed connection we are - independent of
@@ -155,6 +166,16 @@ const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RELAY_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long to wait before retrying a whole bootstrap attempt that failed
+/// or timed out (e.g. the relayed peer hadn't connected to the proxy yet)
+/// - matches `client::run`'s own reconnect cadence for direct connections,
+/// so a relayed peer is exactly as persistent as a direct one.
+const BOOTSTRAP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often to check whether the real connection to the relay is still
+/// up, once bootstrapped - see `maintain_relayed_client`.
+const RELAY_HEALTH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 ///
 /// Fixed, non-secret salt used only for the one-off bootstrap messages -
 /// there is no live connection to generate a per-connection salt from.
@@ -222,10 +243,12 @@ fn decrypt_with_keys<T: DeserializeOwned>(
 pub async fn configure(config: &ServiceConfig) -> Result<(), Error> {
     let mut peers = HashMap::new();
 
-    // the zone of the real, direct connection to the relay itself - a
+    // the zone of the real, direct connection to a given relay - a
     // property of that one `servers` entry, shared by every relayed peer
-    // that uses it (a service can only use one proxy at a time - see
-    // `ServiceConfig::use_relay`).
+    // that uses it. A service can freely use different proxies for
+    // different peers (see `ServiceConfig::check_relay_exists`), so this
+    // is looked up per relay name, not assumed to be the same for every
+    // relayed peer.
     let relay_zone_of = |relay: &str| -> String {
         config
             .servers()
@@ -494,6 +517,14 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
 /// `servers`. Peers for which we are the relayed *server* are left alone;
 /// they wait for their own client to initiate.
 ///
+/// Spawns one persistent background task per peer (see
+/// `maintain_relayed_client`) rather than bootstrapping once and stopping -
+/// exactly as `client::run` keeps retrying a direct connection forever,
+/// each relayed peer keeps retrying its bootstrap forever too, so a
+/// startup-ordering race (the other side not connected to the proxy yet)
+/// or a later drop of the underlying relay connection both resolve
+/// themselves without needing anything else to trigger a fresh attempt.
+///
 pub async fn bootstrap_all_as_client() -> Result<(), Error> {
     let names: Vec<String> = {
         let config = RELAY_CONFIG.read().await;
@@ -511,10 +542,115 @@ pub async fn bootstrap_all_as_client() -> Result<(), Error> {
     };
 
     for name in names {
-        bootstrap(&name).await?;
+        tokio::spawn(maintain_relayed_client(name));
     }
 
     Ok(())
+}
+
+///
+/// Keep a relayed-client peer bootstrapped for as long as this process
+/// runs: bootstrap, then watch the real connection to the relay for as
+/// long as it stays up; once bootstrapped or once the relay connection
+/// drops, retry after [`BOOTSTRAP_RETRY_DELAY`] - the same cadence
+/// `client::run` uses for direct connections. Runs forever; intended to
+/// be spawned once per peer and never awaited.
+///
+async fn maintain_relayed_client(peer_name: String) {
+    loop {
+        match bootstrap(&peer_name).await {
+            Ok(()) => {
+                wait_while_relay_connected(&peer_name).await;
+                SESSIONS.write().await.remove(&peer_name);
+                tracing::info!(
+                    "Real connection to the relay for '{}' has dropped - will re-bootstrap \
+                     once it reconnects.",
+                    peer_name
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not bootstrap relayed peer '{}': {:?} - retrying in {}s.",
+                    peer_name,
+                    e,
+                    BOOTSTRAP_RETRY_DELAY.as_secs()
+                );
+            }
+        }
+
+        tokio::time::sleep(BOOTSTRAP_RETRY_DELAY).await;
+    }
+}
+
+///
+/// Blocks until the real, direct connection to `peer_name`'s relay is no
+/// longer present in paddington's connection registry (or forever, if
+/// `peer_name` isn't a configured relayed-client peer at all - this
+/// should never actually happen since only `maintain_relayed_client`
+/// calls this, for a peer name it just read from `RELAY_CONFIG` itself).
+/// A session built on a dropped connection is no longer trustworthy - the
+/// proxy may have restarted and lost nothing (it's stateless), but *we*
+/// have no way to know whether the other real hop's process also
+/// restarted meanwhile, so the safest assumption is to redo the bootstrap
+/// (and get fresh, forward-secret session keys in the process).
+///
+async fn wait_while_relay_connected(peer_name: &str) {
+    let peer = match get_peer(peer_name).await {
+        Ok(peer) => peer,
+        Err(_) => return,
+    };
+
+    let relay = match &peer.role {
+        RelayedRole::Client { relay } => relay.clone(),
+        RelayedRole::Server { .. } => return,
+    };
+
+    loop {
+        tokio::time::sleep(RELAY_HEALTH_POLL_INTERVAL).await;
+
+        if !exchange::is_connected(&relay, &peer.relay_zone) {
+            return;
+        }
+    }
+}
+
+///
+/// Tell `peer_name` that we have no relayed session with it - see
+/// [`BootstrapMessage::SessionUnknown`]. Encrypted with the permanent
+/// pre-shared key, exactly like a real bootstrap message, sent over the
+/// real connection to `peer`'s relay - so a restarted relayed *server*
+/// (which cannot initiate a bootstrap itself) can still prompt its
+/// relayed *client* peer to redo the handshake, rather than silently
+/// dropping every message the client sends until something else notices.
+///
+async fn notify_session_unknown(peer_name: &str, peer: &RelayedPeer) -> Result<(), Error> {
+    let bootstrap_salt = bootstrap_salt()?;
+    let ciphertext = encrypt_with_keys(
+        &BootstrapMessage::SessionUnknown,
+        &peer.inner_key,
+        &peer.outer_key,
+        &bootstrap_salt,
+        &bootstrap_salt,
+    )?;
+
+    let my_name = my_name().await?;
+
+    let relay = match &peer.role {
+        RelayedRole::Client { relay } | RelayedRole::Server { relay } => relay.clone(),
+    };
+
+    let envelope = RelayEnvelope {
+        from: my_name,
+        to: peer_name.to_string(),
+        zone: peer.zone.clone(),
+        ciphertext,
+    };
+
+    let payload = serde_json::to_string(&envelope)
+        .with_context(|| "Could not serialise relay envelope")
+        .map_err(Error::Any)?;
+
+    exchange::send(Message::send_to(&relay, &peer.relay_zone, &payload)).await
 }
 
 async fn handle_start(
@@ -596,14 +732,14 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
 
     // try the permanent pre-shared key first - only ever used for the two
     // bootstrap message types.
-    if let Ok(bootstrap) = decrypt_with_keys::<BootstrapMessage>(
+    if let Ok(bootstrap_message) = decrypt_with_keys::<BootstrapMessage>(
         &envelope.ciphertext,
         &peer.inner_key,
         &peer.outer_key,
         &bootstrap_salt,
         &bootstrap_salt,
     ) {
-        match bootstrap {
+        match bootstrap_message {
             BootstrapMessage::Start(start) => {
                 let relay = match &peer.role {
                     RelayedRole::Server { relay } => relay.clone(),
@@ -628,19 +764,66 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
                     );
                 }
             }
+            BootstrapMessage::SessionUnknown => {
+                tracing::info!(
+                    "'{}' reports it has no relayed session with us (it likely just \
+                     restarted) - clearing our own session for it, if any.",
+                    envelope.from
+                );
+                SESSIONS.write().await.remove(&envelope.from);
+
+                // only the relayed *client* can initiate a fresh
+                // bootstrap - if we're the relayed server for this peer,
+                // there's nothing more to do than wait for it to
+                // re-bootstrap with us (which it should do immediately,
+                // having just told us the same problem exists for it).
+                if matches!(peer.role, RelayedRole::Client { .. }) {
+                    let peer_name = envelope.from.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = bootstrap(&peer_name).await {
+                            tracing::warn!(
+                                "Immediate re-bootstrap for '{}' after SessionUnknown failed: \
+                                 {:?} - the regular retry loop will keep trying.",
+                                peer_name,
+                                e
+                            );
+                        }
+                    });
+                }
+            }
         }
         return Ok(None);
     }
 
     // not decryptable with the permanent key - must be ongoing traffic
     // under an established session.
-    let sessions = SESSIONS.read().await;
-    let session = sessions.get(&envelope.from).ok_or_else(|| {
-        Error::InvalidPeer(format!(
-            "No relayed session established with '{}' yet - dropping message.",
-            envelope.from
-        ))
-    })?;
+    let session = SESSIONS.read().await.get(&envelope.from).cloned();
+
+    let session = match session {
+        Some(session) => session,
+        None => {
+            // we have no session for this peer - most likely because *we*
+            // restarted and lost our in-memory session state while the
+            // sender (which never restarted) still thinks its old session
+            // is valid. Unlike a sender-side restart (which self-heals by
+            // re-bootstrapping at its own startup), the sender has no way
+            // to notice this happened on its own, so tell it directly -
+            // see `notify_session_unknown`.
+            if let Err(e) = notify_session_unknown(&envelope.from, &peer).await {
+                tracing::warn!(
+                    "Could not notify '{}' that we have no session with it: {:?}",
+                    envelope.from,
+                    e
+                );
+            }
+
+            return Err(Error::InvalidPeer(format!(
+                "No relayed session established with '{}' yet - dropping message \
+                 (told it to re-bootstrap).",
+                envelope.from
+            )));
+        }
+    };
 
     let payload: String = decrypt_with_keys(
         &envelope.ciphertext,
@@ -915,7 +1098,41 @@ mod tests {
         match decrypted {
             BootstrapMessage::Start(start) => assert_eq!(start.magic, "abc123"),
             BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
+            BootstrapMessage::SessionUnknown => unreachable!("expected Start"),
         }
+    }
+
+    #[test]
+    fn test_session_unknown_message_roundtrips_and_is_forgeable_only_with_the_permanent_key() {
+        // A restarted relayed server (which cannot initiate a fresh
+        // bootstrap itself) tells its relayed client peer to redo the
+        // handshake via this message - it must round-trip correctly with
+        // the real permanent key, and fail to decrypt with any other key
+        // (so the proxy - or anyone else without the permanent key - can
+        // never forge it and force spurious re-bootstraps).
+        let peer = test_peer(RelayedRole::Client {
+            relay: "proxy".to_string(),
+        });
+        let wrong_inner_key = Key::generate();
+        let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("bootstrap_salt: {:?}", e));
+
+        let ciphertext = encrypt_with_keys(
+            &BootstrapMessage::SessionUnknown,
+            &peer.inner_key,
+            &peer.outer_key,
+            &salt,
+            &salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        let decrypted: BootstrapMessage =
+            decrypt_with_keys(&ciphertext, &peer.inner_key, &peer.outer_key, &salt, &salt)
+                .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+        assert!(matches!(decrypted, BootstrapMessage::SessionUnknown));
+
+        let forged: Result<BootstrapMessage, Error> =
+            decrypt_with_keys(&ciphertext, &wrong_inner_key, &peer.outer_key, &salt, &salt);
+        assert!(forged.is_err());
     }
 
     #[test]
@@ -1175,6 +1392,7 @@ mod tests {
         let start = match decrypted {
             BootstrapMessage::Start(start) => start,
             BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
+            BootstrapMessage::SessionUnknown => unreachable!("expected Start"),
         };
         assert_eq!(start.magic, magic);
 
@@ -1209,6 +1427,7 @@ mod tests {
         let accepted = match decrypted {
             BootstrapMessage::Accepted(accepted) => accepted,
             BootstrapMessage::Start(_) => unreachable!("expected Accepted"),
+            BootstrapMessage::SessionUnknown => unreachable!("expected Accepted"),
         };
         assert_eq!(accepted.magic, magic);
 
@@ -1298,6 +1517,7 @@ mod tests {
                     session_keys.push(format!("{:?}", start.session_outer_key.expose_secret()))
                 }
                 BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
+                BootstrapMessage::SessionUnknown => unreachable!("expected Start"),
             }
         }
 

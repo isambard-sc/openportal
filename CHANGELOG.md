@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **Domain-oblivious multi-domain routing (`Erased`)** — `templemeads`
+  gains an `Erased` domain for building router/proxy agents that forward
+  Jobs and Notifications between other agents without needing to
+  understand their instruction vocabulary at all. `Job`/`Notification` now
+  carry their originating domain's name and version through every hop,
+  surviving serialization through any number of `Erased`-typed relays
+  completely unchanged. New opt-in compatibility checks,
+  `ensure_domain_matches` (connection-level) and
+  `ensure_job_domain_matches`/`ensure_notification_domain_matches`
+  (per-message), let an agent refuse to talk to a peer speaking a
+  different domain - a peer identifying as `Erased` is always accepted at
+  the connection level, since routers are meant to carry any domain.
+  `op-provider` now uses `Erased` as its domain, making it a genuine
+  multi-domain router rather than being hardcoded to `greatwestern`. See
+  `docs/plans/multi-domain-routing-design.md`.
+- **`greatwestern` — `Domain::name()`/`version()`/`assume_legacy_domain_version()`**
+  — `Hpc` now reports itself as `"greatwestern"` plus its crate version
+  (used by the connection-level check above), and treats any peer whose
+  reported engine version predates the `templemeads`/`greatwestern` crate
+  split (`<= 0.32.2`) as implicitly speaking `greatwestern 0.32.2` - those
+  older agents have no way to report a domain of their own, since the
+  split didn't exist yet when they were built.
+- **`op-proxy` — blind relay proxy for outbound-only agents** — a new agent
+  that relays encrypted traffic between two agents that can each only make
+  outbound connections (neither can open a port the other can reach),
+  without ever being able to decrypt what it forwards. Agents opt in
+  explicitly via a `proxy` field in their paddington config, and the proxy
+  operator must separately `allow` each `(agent, agent)` pair before it
+  will relay between them (default-deny). Every `templemeads`-based agent
+  (`op-portal`, `op-provider`, `op-cluster`, etc.) can act as one of the
+  two relayed peers: `client --add <name> --proxy <relay-name>` introduces
+  a relayed peer, and the resulting invite file is self-describing, so the
+  importing side's ordinary `server --add` picks up the relay
+  automatically with no extra flag. Validated end-to-end with real
+  `op-proxy`/`op-portal`/`op-cloudportal` processes. See
+  `docs/plans/blind-relay-proxy-design.md`.
+
+### Changed
+
+- **`op-proxy` config file location and layout** — now defaults to the
+  standard `~/.config/openportal/proxy-config.toml`, matching every other
+  agent, instead of the current directory. The relay policy (the
+  `allow`-listed agent pairs) now lives in the same config file as
+  everything else instead of a separate `policy.toml`, so operators only
+  have one file to manage.
+
+### Fixed
+
+- **Invalid IP ranges no longer silently break connections or panic** — a
+  hand-edited or mistyped range (e.g. `0.0.0.0/0.0.0.0`) is now rejected
+  with a clear error when the config is loaded, instead of loading
+  successfully and only failing later, silently, at connection time. The
+  canonical "match everything" CIDR range `0.0.0.0/0` is now handled
+  correctly and no longer triggers an integer-overflow panic in the
+  underlying `iptools` dependency. `client --add` without `--ip` now also
+  errors clearly instead of falling back to an invalid default range.
+- **`server --remove` / `client --remove` silently doing nothing** —
+  removal used to match on name *and* zone together, defaulting to the
+  `"default"` zone when `--zone` wasn't given; if the peer had actually
+  been added under a different zone, the command reported success but left
+  the peer list unchanged. Removal by name now succeeds without needing
+  `--zone` at all as long as the name is unambiguous, and errors clearly
+  (rather than silently doing nothing) if the name doesn't exist or exists
+  in more than one zone.
+
 ## [0.32.2] - 2026-06-03
 
 ### Fixed

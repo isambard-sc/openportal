@@ -5,23 +5,39 @@ SPDX-License-Identifier: CC0-1.0
 
 # A blind relay proxy for outbound-only agents
 
-Status: **implemented (§7 steps 1-4, 6-7)**. `paddington::relay` (bootstrap,
-envelope forwarding, `RelayPolicy`), the `proxy` config field on
-`ServerConfig`/`ClientConfig`/`ServiceConfig`, and the `op-proxy` binary
-crate all exist and are covered by unit tests (mutual key contribution,
-blindness of the raw bytes, wrong-key rejection, default-deny policy in
-both directions, config round-tripping). Step 5's live three-process
-end-to-end test was **not** done as an automated test: paddington's
-connection registry and this design's own relay state are process-global
-singletons, so a genuine three-agent handshake needs three separate OS
-processes, not tokio tasks in one `#[tokio::test]` - the same constraint
-already noted for the `Erased` design's live smoke test
-([multi-domain-routing-design.md](multi-domain-routing-design.md)). Instead,
-the protocol was validated at the unit level without a live connection, and
-the `op-proxy` binary's CLI/runtime wiring (`init`, `client --add`, `allow`,
-`run`) was validated manually against the real compiled binary. A genuine
-multi-process `airr`/`proxy`/`brics` smoke test remains open for whoever
-picks this up next.
+Status: **implemented and integrated into every real agent** (§7 all
+steps). `paddington::relay` (bootstrap, envelope forwarding,
+`RelayPolicy`), the `proxy` config field, the self-describing `Invite`
+(carries the relay's name so the importing side auto-detects it), the
+`op-proxy` binary, and the `client --add --proxy` / auto-detecting
+`server --add` CLI are all implemented and covered by unit tests (mutual
+key contribution, blindness of the raw bytes, wrong-key rejection,
+default-deny policy in both directions, config round-tripping).
+
+Every `templemeads`-based agent can now act as a relayed peer -
+`templemeads::handler::run_with_relay` (called by every agent's `run()`
+instead of `paddington::set_handler`/`paddington::run` directly) wires up
+`relay::configure`, the relay dispatch handler, and
+`bootstrap_all_as_client`; `paddington::exchange::send` transparently
+falls back to the relay for a peer with no real connection, so relaying
+is invisible to templemeads' own `Command::send_to` and keepalive code;
+`paddington::eventloop::run` skips dialling relayed `servers` entries
+directly.
+
+Step 5's live three-process end-to-end test **has now been done**, for
+real: `op-proxy` + `op-portal` + `op-cloudportal`, three genuinely
+separate OS processes (not tokio tasks in one test - paddington's
+connection registry and this design's relay state are process-global
+singletons, the same constraint noted for the `Erased` design's live
+smoke test in
+[multi-domain-routing-design.md](multi-domain-routing-design.md)). The
+bootstrap completed, both sides logged their synthesised `Connected`
+event, and a real templemeads `Register` command sent immediately
+afterwards was relayed and processed correctly on the other side - proof
+that ordinary templemeads traffic, not just the bootstrap handshake
+itself, works transparently through the proxy. See
+[agent-configuration.md](../specifications/agent-configuration.md)
+§3.11.1 for the exact command sequence used.
 
 ## 1. Goal
 

@@ -16,6 +16,12 @@ pub struct Invite {
     zone: String,
     inner_key: SecretKey,
     outer_key: SecretKey,
+    /// Name of the blind relay proxy the issuer reaches this peer through,
+    /// if any (see `docs/plans/blind-relay-proxy-design.md`) - carried in
+    /// the invite so the importing side doesn't need to be told separately
+    /// which relay to use: it reads everything it needs from this file.
+    #[serde(default)]
+    proxy: Option<String>,
 }
 
 impl Invite {
@@ -25,6 +31,7 @@ impl Invite {
         zone: &str,
         inner_key: &SecretKey,
         outer_key: &SecretKey,
+        proxy: &Option<String>,
     ) -> Self {
         Invite {
             name: name.to_string(),
@@ -32,6 +39,7 @@ impl Invite {
             zone: zone.to_string(),
             inner_key: inner_key.clone(),
             outer_key: outer_key.clone(),
+            proxy: proxy.clone(),
         }
     }
 
@@ -53,6 +61,12 @@ impl Invite {
 
     pub fn outer_key(&self) -> SecretKey {
         self.outer_key.clone()
+    }
+
+    /// The blind relay proxy this peer must be reached through, if any -
+    /// `None` for an ordinary, directly-dialled peer.
+    pub fn proxy(&self) -> Option<String> {
+        self.proxy.clone()
     }
 
     pub fn assert_valid(&self) -> Result<(), Error> {
@@ -146,11 +160,18 @@ impl Invite {
 
 impl Display for Invite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Invite {{ name: {}, url: {}, zone: {} }}",
-            self.name, self.url, self.zone
-        )
+        match &self.proxy {
+            Some(proxy) => write!(
+                f,
+                "Invite {{ name: {}, proxy: {}, zone: {} }}",
+                self.name, proxy, self.zone
+            ),
+            None => write!(
+                f,
+                "Invite {{ name: {}, url: {}, zone: {} }}",
+                self.name, self.url, self.zone
+            ),
+        }
     }
 }
 

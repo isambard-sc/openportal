@@ -694,14 +694,25 @@ pub async fn send(message: Message) -> Result<(), Error> {
     .cloned();
 
     if let Some(connection) = connection {
-        connection.send_message(message.payload()).await?;
-        Ok(())
-    } else {
-        Err(Error::UnnamedConnection(format!(
-            "Connection {} not found",
-            message.recipient()
-        )))
+        return connection.send_message(message.payload()).await;
     }
+
+    // no real paddington connection - transparently fall back to the
+    // blind relay if this recipient is only reachable via a proxy (see
+    // `paddington::relay` and `docs/plans/blind-relay-proxy-design.md`),
+    // so callers above this layer (templemeads' `Command::send_to`,
+    // keepalive replies, ...) never need to know the difference.
+    if crate::relay::is_configured(message.recipient()).await {
+        // boxed to break the mutual async-fn recursion with
+        // `relay::bootstrap`, which itself calls back into this function
+        // to reach the proxy over its own real, direct connection.
+        return Box::pin(crate::relay::send(message.recipient(), message.payload())).await;
+    }
+
+    Err(Error::UnnamedConnection(format!(
+        "Connection {} not found",
+        message.recipient()
+    )))
 }
 
 pub fn received(message: Message) -> Result<(), Error> {

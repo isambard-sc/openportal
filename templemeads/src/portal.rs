@@ -6,7 +6,7 @@ use crate::agent_core::Config;
 use crate::domain::Domain;
 use crate::error::Error;
 
-use crate::handler::{process_message, set_my_service_details};
+use crate::handler::{run_with_relay, set_my_service_details};
 use crate::job::{Envelope, Job};
 use crate::runnable::AsyncRunnable;
 use anyhow::Result;
@@ -81,8 +81,7 @@ pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<
     }
 
     // run the Portal OpenPortal agent
-    paddington::set_handler(process_message::<L>).await?;
-    paddington::run(config.service()).await?;
+    run_with_relay::<L>(config.service()).await?;
 
     Ok(())
 }

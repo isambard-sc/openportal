@@ -18,6 +18,7 @@ use crate::restart;
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
+use paddington::config::ServiceConfig;
 use paddington::message::{Message, MessageType};
 use std::any::Any;
 use std::boxed::Box;
@@ -761,4 +762,37 @@ pub fn process_message<L: Domain>(
             }
         }
     })
+}
+
+///
+/// Start the paddington event loop with blind relay support - every
+/// `run()` in this crate calls this instead of calling
+/// `paddington::set_handler`/`paddington::run` directly, so that any
+/// `servers`/`clients` peer configured with a `proxy` (see
+/// `paddington::relay` and `docs/plans/blind-relay-proxy-design.md`) works
+/// the same way for every agent kind without each one needing its own
+/// wiring.
+///
+/// Registers [`process_message::<L>`] as the *inner* handler behind
+/// [`paddington::relay::relay_dispatch_handler`] (which passes non-relay
+/// traffic through unchanged, so this is a no-op for agents with no
+/// relayed peers configured), then spawns bootstrapping of any relayed
+/// peers this agent connects to as the relayed *client* - relayed
+/// *servers* wait for their peer to initiate instead, so there's nothing
+/// to spawn for them. Bootstrapping runs concurrently with, not before,
+/// `paddington::run` below, since that's what actually dials the
+/// underlying connection to the relay in the first place.
+///
+pub async fn run_with_relay<L: Domain>(config: ServiceConfig) -> Result<(), paddington::Error> {
+    paddington::relay::configure(&config).await?;
+    paddington::relay::set_inner_handler(process_message::<L>).await?;
+    paddington::set_handler(paddington::relay::relay_dispatch_handler).await?;
+
+    tokio::spawn(async {
+        if let Err(e) = paddington::relay::bootstrap_all_as_client().await {
+            tracing::error!("Could not bootstrap relayed peer(s): {:?}", e);
+        }
+    });
+
+    paddington::run(config).await
 }

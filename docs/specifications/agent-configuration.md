@@ -136,6 +136,7 @@ Manage inbound peers (agents that connect to this one).
 
 ```
 <agent> client --add <name> --ip <ip-or-cidr> [--zone <zone>]
+<agent> client --add <name> --proxy <relay-name> [--zone <zone>]
 <agent> client --remove <name> [--zone <zone>]
 <agent> client --list
 <agent> client --rotate <name> [--zone <zone>]
@@ -144,6 +145,15 @@ Manage inbound peers (agents that connect to this one).
 `--add` generates fresh keys and writes an invite file
 (`invite_<name>_<zone>.toml`) to the current directory. Give this file to
 the remote agent operator to import.
+
+`--proxy <relay-name>` introduces a client that can only reach this agent
+through a blind relay proxy (`relay-name` must already be a known
+`servers` entry - i.e. an `op-proxy` invite already imported via
+`server --add`) rather than a direct IP allowlist; `--ip` is not required
+and is ignored if given alongside `--proxy`. The generated invite carries
+the relay's name, so the importing side's `server --add` (below) picks it
+up automatically. See [§3.11.1](#3111-connecting-two-real-agents-through-a-proxy)
+for a full worked example.
 
 `--rotate` generates new keys and writes a rotation invite file
 (`rotate_<name>_<zone>.toml`).
@@ -160,7 +170,10 @@ Manage outbound peers (agents that this one connects to).
 ```
 
 `--add` imports the invite file produced by the remote agent's `client --add`
-command.
+command. No separate flag is needed for a relayed peer - if the invite was
+created with `client --add --proxy`, it already names the relay, and this
+agent picks it up automatically (as long as that same relay is already a
+known `servers` entry here too).
 
 ### `encryption`
 
@@ -923,37 +936,57 @@ allowing `("airr", "brics")` also allows traffic the other way. There is no
 CLI to remove a pair; edit `policy.toml` by hand and restart (or re-run
 `init`-equivalent tooling) to revoke one.
 
-**Current integration status - important caveat:** the pieces above (the
-proxy binary, the `proxy` config field, and the `add_relayed_client`/
-`add_relayed_server`/`ClientConfig::new_relayed`/
-`ServerConfig::from_relayed_invite` functions in `paddington::config`) are
-implemented and unit-tested as standalone primitives (§6). **No real agent
-binary can use them yet.** Specifically:
-
-- The common `client`/`server` subcommands shared by every `templemeads`-based
-  agent (`op-portal`, `op-cluster`, `op-freeipa`, etc. - defined in
-  `templemeads/src/agent_core.rs`) have no `--relay` flag or equivalent to
-  call `add_relayed_client`/`add_relayed_server` instead of the direct
-  `add_client`/`add_server` - there is currently no CLI-level way for an
-  operator of a real agent to configure a relayed peer.
-- No agent's `run()` path (e.g. `templemeads::portal::run()`) calls
-  `paddington::relay::configure()`, registers
-  `paddington::relay::relay_dispatch_handler` in place of its normal
-  handler, or calls `paddington::relay::bootstrap_all_as_client()` at
-  startup - so even a hand-populated relayed config entry would not
-  actually engage the relay protocol at runtime.
-
-In other words: `op-proxy` itself is fully usable today (it only ever
-needs the proxy-side handler, which *is* wired up), but there is no agent
-in this repository that can currently act as one of the two relayed
-peers. Wiring `paddington::relay` into `agent_core.rs`'s CLI and run loop
-is necessary follow-up work before any two real agents can actually talk
-through a proxy.
-
 **Typical peer relationships:**
 - **Client:** every agent it relays for (both the relayed "server" and
   relayed "client" role connect to the proxy the same way - as an ordinary
   paddington client)
+
+#### 3.11.1 Connecting two real agents through a proxy
+
+Every other agent in this document (all built on the common CLI in §2)
+can act as one of the two relayed peers - the `client`/`server`
+subcommands take a `--proxy <relay-name>` flag for exactly this. Worked
+example: `airr` (an `op-portal`) and `brics` (an `op-cloudportal`) can
+each only make outbound connections, so they talk through a shared
+`proxy` (`op-proxy`).
+
+```bash
+# 1. Both airr and brics are introduced to the proxy like any other
+#    client - this secures each real agent<->proxy hop, and is separate
+#    from allowing airr and brics to be relayed to each other
+op-proxy client --add airr  --ip <airr-ip>  --invitation invite_airr.toml
+op-proxy client --add brics --ip <brics-ip> --invitation invite_brics.toml
+airr  server --add invite_airr.toml
+brics server --add invite_brics.toml
+
+# 2. Allow the proxy to relay between them (default-deny otherwise)
+op-proxy allow airr brics
+
+# 3. airr and brics exchange their own pre-shared key pair - the proxy
+#    never sees this one. --proxy here names the *local* servers entry
+#    airr already has for the proxy (added in step 1, "proxy" by
+#    default) - airr becomes the relayed "server" (it waits).
+airr client --add brics --proxy proxy
+# -> writes ./invite_airr_default.toml (named after airr, the issuer -
+#    same convention as an ordinary client --add)
+
+# 4. brics imports that invite - no --proxy flag needed here: the
+#    invite itself already carries which relay to use (embedded in step
+#    3), so this is auto-detected. brics becomes the relayed "client"
+#    (it initiates the bootstrap).
+brics server --add invite_airr_default.toml
+```
+
+Once both are running (`airr run` / `brics run`, alongside `proxy run`),
+`brics` bootstraps a session with `airr` automatically at startup and
+re-bootstraps (with fresh session keys) on every reconnect - nothing
+templemeads-level (`Register`, `Sync`, Jobs, Notifications, health
+cascades, ...) needs to know a proxy is involved at all.
+
+Validated end-to-end with real compiled `op-proxy`/`op-portal`/
+`op-cloudportal` processes: the bootstrap completes, both sides log their
+synthesised `Connected` event, and `Register` (part of every agent's
+normal post-handshake sequence) is relayed and processed correctly.
 
 ---
 
@@ -1040,4 +1073,8 @@ op-freeipa  run
 | Portal one-shot CLI mode | `templemeads/src/portal.rs` |
 | Blind relay proxy main (CLI subcommands) | `proxy/src/main.rs` |
 | Blind relay protocol, `RelayPolicy` | `paddington/src/relay.rs` |
-| `proxy` config field, `add_relayed_client`/`add_relayed_server` | `paddington/src/config.rs` |
+| `proxy` config field, `add_relayed_client`, auto-detecting `add_server` | `paddington/src/config.rs` |
+| Invite `proxy` field | `paddington/src/invite.rs` |
+| Real-agent relay wiring (`run_with_relay`) | `templemeads/src/handler.rs` |
+| `client --add --proxy` CLI flag | `templemeads/src/agent_core.rs` |
+| Relay fallback for ordinary sends, skip-dial for relayed servers | `paddington/src/exchange.rs`, `paddington/src/eventloop.rs` |

@@ -883,6 +883,7 @@ impl ServiceConfig {
             &zone,
             &client.inner_key,
             &client.outer_key,
+            &None,
         ))
     }
 
@@ -927,22 +928,70 @@ impl ServiceConfig {
             &zone,
             &client.inner_key,
             &client.outer_key,
+            &Some(relay.to_string()),
         ))
     }
 
+    ///
+    /// Remove the client named `name`. If `zone` is given, only a client in
+    /// that exact zone is removed (erroring if none matches). If `zone` is
+    /// not given, the name alone must be unambiguous: exactly one client
+    /// with that name, in any zone, is removed; zero or multiple matches
+    /// (i.e. the same name added in more than one zone) is an error asking
+    /// the caller to disambiguate with `--zone`.
+    ///
     pub fn remove_client(&mut self, name: &str, zone: &Option<String>) -> Result<(), Error> {
-        let zone = self.clean_zone(zone)?;
-
-        self.clients = self
+        let matching_zones: Vec<String> = self
             .clients
             .iter()
-            .filter(|client| client.name != name || client.zone != zone)
-            .cloned()
+            .filter(|c| c.name == name)
+            .map(|c| c.zone.clone())
             .collect();
+
+        let zone_to_remove = match zone {
+            Some(_) => {
+                let zone = self.clean_zone(zone)?;
+                if !matching_zones.iter().any(|z| z == &zone) {
+                    return Err(Error::Peer(format!(
+                        "Client with name '{}' not found in zone {}.",
+                        name, zone
+                    )));
+                }
+                zone
+            }
+            None => match matching_zones.as_slice() {
+                [] => {
+                    return Err(Error::Peer(format!(
+                        "Client with name '{}' not found.",
+                        name
+                    )));
+                }
+                [only] => only.clone(),
+                _ => {
+                    return Err(Error::Peer(format!(
+                        "Multiple clients named '{}' exist (zones: {}) - pass --zone to \
+                         disambiguate.",
+                        name,
+                        matching_zones.join(", ")
+                    )));
+                }
+            },
+        };
+
+        self.clients
+            .retain(|client| !(client.name == name && client.zone == zone_to_remove));
 
         Ok(())
     }
 
+    ///
+    /// Add a server from an invite. If the invite names a blind relay
+    /// proxy (see `docs/plans/blind-relay-proxy-design.md`) - i.e. it was
+    /// created by `add_relayed_client` on the issuing side - this peer is
+    /// automatically added as relayed, reached via that proxy, rather than
+    /// dialling `invite.url()` directly. Nothing extra needs to be passed
+    /// in: the invite is self-describing.
+    ///
     pub fn add_server(&mut self, invite: &Invite) -> Result<(), Error> {
         for server in self.servers.iter() {
             if server.name == invite.name() && server.zone == invite.zone() {
@@ -954,53 +1003,76 @@ impl ServiceConfig {
             }
         }
 
-        let server = ServerConfig::from_invite(invite)?;
-
-        if server.url.is_empty() {
-            tracing::warn!("No valid URL provided for server {}.", server.name());
-            return Err(Error::Null("No URL provided.".to_string()));
-        }
-
-        self.servers.push(server.clone());
-
-        Ok(())
-    }
-
-    ///
-    /// Add a server that can only be reached via the blind relay proxy
-    /// named `relay` (an existing `servers` entry), rather than dialling
-    /// a direct URL - see `docs/plans/blind-relay-proxy-design.md`. The
-    /// invite's `url` is ignored; this peer is never dialled directly.
-    ///
-    pub fn add_relayed_server(&mut self, relay: &str, invite: &Invite) -> Result<(), Error> {
-        for server in self.servers.iter() {
-            if server.name == invite.name() && server.zone == invite.zone() {
-                return Err(Error::Peer(format!(
-                    "Server with name '{}' already exists in zone {}.",
-                    invite.name(),
-                    invite.zone()
-                )));
+        let server = match invite.proxy() {
+            Some(relay) => {
+                self.use_relay(&relay)?;
+                ServerConfig::from_relayed_invite(&relay, invite)?
             }
-        }
+            None => {
+                let server = ServerConfig::from_invite(invite)?;
 
-        self.use_relay(relay)?;
+                if server.url.is_empty() {
+                    tracing::warn!("No valid URL provided for server {}.", server.name());
+                    return Err(Error::Null("No URL provided.".to_string()));
+                }
 
-        let server = ServerConfig::from_relayed_invite(relay, invite)?;
+                server
+            }
+        };
 
         self.servers.push(server);
 
         Ok(())
     }
 
+    ///
+    /// Remove the server named `name`. If `zone` is given, only a server in
+    /// that exact zone is removed (erroring if none matches). If `zone` is
+    /// not given, the name alone must be unambiguous: exactly one server
+    /// with that name, in any zone, is removed; zero or multiple matches
+    /// (i.e. the same name added in more than one zone) is an error asking
+    /// the caller to disambiguate with `--zone`.
+    ///
     pub fn remove_server(&mut self, name: &str, zone: &Option<String>) -> Result<(), Error> {
-        let zone = self.clean_zone(zone)?;
-
-        self.servers = self
+        let matching_zones: Vec<String> = self
             .servers
             .iter()
-            .filter(|server| server.name != name || server.zone != zone)
-            .cloned()
+            .filter(|s| s.name == name)
+            .map(|s| s.zone.clone())
             .collect();
+
+        let zone_to_remove = match zone {
+            Some(_) => {
+                let zone = self.clean_zone(zone)?;
+                if !matching_zones.iter().any(|z| z == &zone) {
+                    return Err(Error::Peer(format!(
+                        "Server with name '{}' not found in zone {}.",
+                        name, zone
+                    )));
+                }
+                zone
+            }
+            None => match matching_zones.as_slice() {
+                [] => {
+                    return Err(Error::Peer(format!(
+                        "Server with name '{}' not found.",
+                        name
+                    )));
+                }
+                [only] => only.clone(),
+                _ => {
+                    return Err(Error::Peer(format!(
+                        "Multiple servers named '{}' exist (zones: {}) - pass --zone to \
+                         disambiguate.",
+                        name,
+                        matching_zones.join(", ")
+                    )));
+                }
+            },
+        };
+
+        self.servers
+            .retain(|server| !(server.name == name && server.zone == zone_to_remove));
 
         Ok(())
     }
@@ -1034,6 +1106,7 @@ impl ServiceConfig {
             &zone,
             &client.inner_key,
             &client.outer_key,
+            &client.proxy,
         ))
     }
 
@@ -1191,6 +1264,101 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_client_and_server_require_a_match() {
+        // Removing a peer that was added in a different zone (or never
+        // added at all) must error clearly, not silently leave the peer
+        // list unchanged - `remove_client`/`remove_server` filter on
+        // (name, zone) together, so a zone mismatch used to look
+        // indistinguishable from a successful removal.
+        let mut service =
+            ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &5560, &None, &None)
+                .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        service
+            .add_client("brics", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add client: {}", e));
+
+        // wrong zone - must error, not silently no-op
+        assert!(service
+            .remove_client("brics", &Some("other-zone".to_string()))
+            .is_err());
+        assert_eq!(service.clients().len(), 1);
+
+        // unknown name - must error
+        assert!(service.remove_client("nonexistent", &None).is_err());
+        assert_eq!(service.clients().len(), 1);
+
+        // correct name and zone - actually removes it
+        service
+            .remove_client("brics", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot remove client: {}", e));
+        assert_eq!(service.clients().len(), 0);
+
+        // same behaviour for servers
+        let mut proxy = ServiceConfig::new(
+            "proxy",
+            "http://localhost",
+            "127.0.0.1",
+            &5561,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        let invite = proxy
+            .add_client("airr", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add client: {}", e));
+        service
+            .add_server(&invite)
+            .unwrap_or_else(|e| unreachable!("Cannot add server: {}", e));
+
+        assert!(service
+            .remove_server("proxy", &Some("other-zone".to_string()))
+            .is_err());
+        assert_eq!(service.servers().len(), 1);
+
+        service
+            .remove_server("proxy", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot remove server: {}", e));
+        assert_eq!(service.servers().len(), 0);
+    }
+
+    #[test]
+    fn test_remove_client_ambiguous_name_requires_zone() {
+        // A name added in more than one zone is genuinely ambiguous without
+        // --zone - unlike the single-match case, which now removes without
+        // requiring --zone at all.
+        let mut service =
+            ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &5562, &None, &None)
+                .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        service
+            .add_client("brics", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add client: {}", e));
+        service
+            .add_client("brics", "127.0.0.1", &Some("other-zone".to_string()))
+            .unwrap_or_else(|e| unreachable!("Cannot add client in second zone: {}", e));
+
+        assert_eq!(service.clients().len(), 2);
+
+        // ambiguous - must error rather than guessing which one
+        assert!(service.remove_client("brics", &None).is_err());
+        assert_eq!(service.clients().len(), 2);
+
+        // disambiguated with --zone - removes only that one
+        service
+            .remove_client("brics", &Some("other-zone".to_string()))
+            .unwrap_or_else(|e| unreachable!("Cannot remove client: {}", e));
+        assert_eq!(service.clients().len(), 1);
+
+        // now unambiguous again - removes without --zone
+        service
+            .remove_client("brics", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot remove client: {}", e));
+        assert_eq!(service.clients().len(), 0);
+    }
+
+    #[test]
     fn test_invitations() {
         let mut primary = ServiceConfig::new(
             "primary",
@@ -1290,9 +1458,11 @@ mod tests {
             .add_relayed_client("brics", "proxy", &None)
             .unwrap_or_else(|e| unreachable!("Cannot add relayed brics to airr: {}", e));
 
-        // brics is the relayed "client" - it reaches airr via the same proxy
+        // brics is the relayed "client" - it reaches airr via the same
+        // proxy, auto-detected from the invite (no separate relay name
+        // needs to be passed in - the invite is self-describing)
         brics
-            .add_relayed_server("proxy", &invite)
+            .add_server(&invite)
             .unwrap_or_else(|e| unreachable!("Cannot add relayed airr to brics: {}", e));
 
         assert_eq!(airr.proxy(), Some("proxy".to_string()));

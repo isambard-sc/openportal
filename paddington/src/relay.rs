@@ -131,6 +131,11 @@ static PROXY_POLICY: Lazy<TokioRwLock<RelayPolicy>> =
 
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long to keep retrying the initial bootstrap send while the
+/// underlying connection to the relay is still being established.
+const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RELAY_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 ///
 /// Fixed, non-secret salt used only for the one-off bootstrap messages -
 /// there is no live connection to generate a per-connection salt from.
@@ -256,6 +261,20 @@ async fn get_peer(name: &str) -> Result<RelayedPeer, Error> {
 }
 
 ///
+/// Whether `name` is a configured relayed peer - used by
+/// [`crate::exchange::send`] to transparently fall back to [`send`] when a
+/// caller (e.g. templemeads' `Command::send_to`) addresses a peer that has
+/// no real paddington connection because it is only reachable via a proxy.
+///
+pub async fn is_configured(name: &str) -> bool {
+    RELAY_CONFIG
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|s| s.peers.contains_key(name))
+}
+
+///
 /// Register the real message handler to call once a relay envelope has
 /// been dealt with (relayed, bootstrapped, or unwrapped) - or immediately,
 /// for any payload that isn't relay-related at all. Register
@@ -354,9 +373,31 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
     let (tx, rx) = oneshot::channel();
     PENDING_BOOTSTRAPS.lock().await.insert(magic.clone(), tx);
 
-    if let Err(e) = exchange::send(Message::send_to(&relay, &peer.zone, &payload)).await {
-        PENDING_BOOTSTRAPS.lock().await.remove(&magic);
-        return Err(e);
+    // the connection to the relay is normally still being dialled by
+    // paddington's own event loop when a caller bootstraps at startup
+    // (see `bootstrap_all_as_client`) - `exchange::send` fails immediately
+    // rather than queuing if that connection doesn't exist yet, so retry
+    // for a while rather than giving up on the first attempt.
+    let mut retries_remaining =
+        RELAY_CONNECT_TIMEOUT.as_millis() / RELAY_CONNECT_RETRY_DELAY.as_millis();
+    loop {
+        match exchange::send(Message::send_to(&relay, &peer.zone, &payload)).await {
+            Ok(()) => break,
+            Err(e) if retries_remaining > 0 => {
+                retries_remaining -= 1;
+                tracing::debug!(
+                    "Not yet connected to relay '{}' to bootstrap '{}' ({:?}) - retrying shortly.",
+                    relay,
+                    peer_name,
+                    e
+                );
+                tokio::time::sleep(RELAY_CONNECT_RETRY_DELAY).await;
+            }
+            Err(e) => {
+                PENDING_BOOTSTRAPS.lock().await.remove(&magic);
+                return Err(e);
+            }
+        }
     }
 
     let accepted = match tokio::time::timeout(BOOTSTRAP_TIMEOUT, rx).await {
@@ -567,11 +608,18 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
         &session.outer_key_salt,
     )?;
 
-    Ok(Some(Message::received_from(
-        &envelope.from,
-        &envelope.zone,
-        &payload,
-    )))
+    // synthesised messages are dispatched directly to the inner handler
+    // (see `relay_dispatch_handler` below), bypassing paddington's own
+    // `exchange::event_loop` - which is what normally calls
+    // `set_recipient` on a real message just before handing it to the
+    // registered handler (see `exchange.rs`). Without this, templemeads'
+    // `process_message` rejects it: `MessageType::Message` payloads are
+    // checked against `message.recipient()`, which `received_from` always
+    // leaves blank.
+    let mut message = Message::received_from(&envelope.from, &envelope.zone, &payload);
+    message.set_recipient(&my_name);
+
+    Ok(Some(message))
 }
 
 ///

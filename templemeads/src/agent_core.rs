@@ -257,6 +257,7 @@ where
             remove,
             zone,
             rotate,
+            proxy,
         }) => {
             if *list {
                 let config = load_config::<Config<T>>(&config_file)?;
@@ -267,20 +268,25 @@ where
             }
 
             if let Some(client) = add {
-                if ip.is_none() {
-                    return Err(Error::PeerEdit(format!(
-                        "No IP address or IP range provided for client {}.",
-                        client
-                    )));
-                }
-
                 let mut config = load_config::<Config<T>>(&config_file)?;
 
-                let invite = config.service.add_client(
-                    client,
-                    &ip.clone().unwrap_or_else(|| "".to_string()),
-                    zone,
-                )?;
+                let invite = match proxy {
+                    Some(relay) => config.service.add_relayed_client(client, relay, zone)?,
+                    None => {
+                        if ip.is_none() {
+                            return Err(Error::PeerEdit(format!(
+                                "No IP address or IP range provided for client {}.",
+                                client
+                            )));
+                        }
+
+                        config.service.add_client(
+                            client,
+                            &ip.clone().unwrap_or_else(|| "".to_string()),
+                            zone,
+                        )?
+                    }
+                };
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -348,7 +354,13 @@ where
                 }
 
                 let mut config = load_config::<Config<T>>(&config_file)?;
+
+                // if the invite names a blind relay proxy (i.e. it was
+                // created with `client --add --proxy` on the issuing side),
+                // this is added as a relayed server automatically - nothing
+                // else needs to be passed in here.
                 config.service.add_server(&invite)?;
+
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' added.", server.display());
                 return Ok(None);
@@ -488,6 +500,15 @@ enum Commands {
             help = "Name of the client whose keys are being rotated"
         )]
         rotate: Option<String>,
+
+        #[arg(
+            long,
+            short = 'p',
+            help = "Name of a blind relay proxy (an op-proxy server already added to this \
+                    service) this client can only be reached through - if set, --ip is not \
+                    required and is ignored"
+        )]
+        proxy: Option<String>,
     },
 
     /// Adding and removing servers

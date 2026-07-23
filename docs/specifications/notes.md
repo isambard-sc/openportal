@@ -189,32 +189,42 @@ The current schema is:
 
 **Source:** `templemeads/src/diagnostics.rs`
 
-### 1.3 Blind relay proxy: no real agent can use it yet
+### 1.3 Blind relay proxy: real-agent integration
 
-The blind relay proxy protocol (`paddington::relay` - see
-[wire-protocol.md](wire-protocol.md) §7 and
-[security-model.md](security-model.md) §7.1) and the `op-proxy` binary are
-implemented and unit-tested as standalone primitives, but **no agent
-binary in this repository can currently act as one of the two relayed
-peers**:
+Every `templemeads`-based agent can now act as a relayed peer, not just
+`op-proxy` itself - see [agent-configuration.md](agent-configuration.md)
+§3.11 for the operator-facing walkthrough. The pieces that make this work:
 
-- `templemeads/src/agent_core.rs`'s common `client`/`server` subcommands
-  (shared by every `templemeads`-based agent) have no flag to call
-  `add_relayed_client`/`add_relayed_server` instead of the direct
-  `add_client`/`add_server` - there is no CLI path to configure a relayed
-  peer on a real agent.
-- No agent's `run()` path calls `paddington::relay::configure()`,
-  registers `paddington::relay::relay_dispatch_handler` in place of its
-  normal handler, or calls `bootstrap_all_as_client()` at startup, so even
-  a hand-edited config with a relayed peer entry would not engage the
-  relay protocol at runtime.
+- `templemeads/src/agent_core.rs`'s common `client --add` subcommand takes
+  a `--proxy <relay-name>` flag - this is the only place an operator needs
+  to say "this peer is relayed"; the resulting invite file carries the
+  relay's name, so `server --add` on the importing side auto-detects it
+  (`paddington::config::ServiceConfig::add_server` reads `invite.proxy()`)
+  and needs no separate flag.
+- `templemeads::handler::run_with_relay` - what every agent's `run()` now
+  calls instead of `paddington::set_handler`/`paddington::run` directly -
+  calls `paddington::relay::configure()`, registers the real message
+  handler behind `paddington::relay::relay_dispatch_handler`, and spawns
+  `bootstrap_all_as_client()` concurrently with `paddington::run()` (since
+  that's what actually dials the real connection to the proxy in the first
+  place).
+- `paddington::relay::bootstrap()` retries its initial send for up to 30s
+  if the underlying connection to the relay isn't up yet - a real race at
+  startup, since `exchange::send` fails immediately rather than queuing.
+- `paddington::exchange::send()` transparently falls back to
+  `paddington::relay::send()` for a recipient with no real connection but
+  a configured relay entry - this is what makes relayed peers invisible to
+  templemeads' own `Command::send_to` and keepalive-reply code, which
+  otherwise have no idea relaying is happening.
+- `paddington::eventloop::run()` skips dialling `servers` entries that
+  have `proxy` set (they have no real URL - they're bootstrapped
+  separately, over the real connection to the proxy itself).
 
-`op-proxy` itself is fully usable today - it only ever needs the
-proxy-side handler, which is wired up correctly. Wiring `paddington::relay`
-into `agent_core.rs`'s CLI and run loop is necessary follow-up work before
-any two real agents can talk to each other through a proxy. See
-[agent-configuration.md](agent-configuration.md) §3.11 for the current
-detailed status.
+Validated with a genuine three-process test (`op-proxy` + `op-portal` +
+`op-cloudportal`, real compiled binaries, real TCP connections): the
+bootstrap completes, each side fires its synthesised `Connected` event,
+and a real templemeads `Register` command sent immediately afterwards is
+correctly relayed and processed on the other side.
 
 ---
 

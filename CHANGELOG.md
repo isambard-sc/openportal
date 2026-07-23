@@ -72,6 +72,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `--zone` at all as long as the name is unambiguous, and errors clearly
   (rather than silently doing nothing) if the name doesn't exist or exists
   in more than one zone.
+- **Relayed peer bootstrap/traffic sent to the wrong zone** — a relayed
+  peer reached via a proxy (`paddington::relay`) could be introduced in a
+  different zone from the real, direct connection to the proxy itself
+  (e.g. the proxy connection is zone `default`, but the relayed peer was
+  added with `--zone something-else`). Bootstrap and ongoing relayed
+  traffic were being addressed using the relayed peer's own zone instead
+  of the proxy connection's zone, so `exchange::send` looked up a
+  connection key that didn't exist and failed with `Connection <proxy>
+  not found` even though the real connection to the proxy was up and
+  healthy. The proxy's own zone is now tracked and used separately.
 
 ## [0.32.2] - 2026-06-03
 

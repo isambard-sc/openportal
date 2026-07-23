@@ -96,7 +96,20 @@ enum RelayedRole {
 
 #[derive(Debug, Clone)]
 struct RelayedPeer {
+    /// Zone of the *relayed* relationship itself (e.g. `ukri`'s zone from
+    /// `airr`'s perspective) - carried end-to-end in `RelayEnvelope.zone`
+    /// and used for the synthesised `Message`, exactly like a direct
+    /// connection's zone would be.
     zone: String,
+    /// Zone of the *real, direct* connection to the relay/proxy itself
+    /// (e.g. `airr`'s own `servers` entry for `"proxy"`) - this is what
+    /// paddington's connection registry is actually keyed on, and is very
+    /// often but **not necessarily** the same as `zone` above. Using
+    /// `zone` here by mistake sends the bootstrap/relay traffic to
+    /// `"proxy@<ukri's zone>"`, which paddington's real connection table
+    /// has no entry for if `ukri` was added in a different zone to the
+    /// proxy itself - see `Message::send_to` call sites below.
+    relay_zone: String,
     role: RelayedRole,
     inner_key: SecretKey,
     outer_key: SecretKey,
@@ -203,12 +216,33 @@ fn decrypt_with_keys<T: DeserializeOwned>(
 pub async fn configure(config: &ServiceConfig) -> Result<(), Error> {
     let mut peers = HashMap::new();
 
+    // the zone of the real, direct connection to the relay itself - a
+    // property of that one `servers` entry, shared by every relayed peer
+    // that uses it (a service can only use one proxy at a time - see
+    // `ServiceConfig::use_relay`).
+    let relay_zone_of = |relay: &str| -> String {
+        config
+            .servers()
+            .iter()
+            .find(|s| s.name() == relay)
+            .map(|s| s.zone())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "Relay '{}' is not a known server - defaulting its zone to 'default'.",
+                    relay
+                );
+                "default".to_string()
+            })
+    };
+
     for server in config.servers() {
         if let Some(relay) = server.proxy() {
+            let relay_zone = relay_zone_of(&relay);
             peers.insert(
                 server.name(),
                 RelayedPeer {
                     zone: server.zone(),
+                    relay_zone,
                     role: RelayedRole::Client { relay },
                     inner_key: server.inner_key(),
                     outer_key: server.outer_key(),
@@ -219,10 +253,12 @@ pub async fn configure(config: &ServiceConfig) -> Result<(), Error> {
 
     for client in config.clients() {
         if let Some(relay) = client.proxy() {
+            let relay_zone = relay_zone_of(&relay);
             peers.insert(
                 client.name(),
                 RelayedPeer {
                     zone: client.zone(),
+                    relay_zone,
                     role: RelayedRole::Server { relay },
                     inner_key: client.inner_key(),
                     outer_key: client.outer_key(),
@@ -381,7 +417,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
     let mut retries_remaining =
         RELAY_CONNECT_TIMEOUT.as_millis() / RELAY_CONNECT_RETRY_DELAY.as_millis();
     loop {
-        match exchange::send(Message::send_to(&relay, &peer.zone, &payload)).await {
+        match exchange::send(Message::send_to(&relay, &peer.relay_zone, &payload)).await {
             Ok(()) => break,
             Err(e) if retries_remaining > 0 => {
                 retries_remaining -= 1;
@@ -513,7 +549,7 @@ async fn handle_start(
         .with_context(|| "Could not serialise relay envelope")
         .map_err(Error::Any)?;
 
-    exchange::send(Message::send_to(relay, zone, &payload)).await?;
+    exchange::send(Message::send_to(relay, &peer.relay_zone, &payload)).await?;
 
     let session = RelayedSession {
         inner_key,
@@ -699,7 +735,7 @@ pub async fn send(to: &str, payload: &str) -> Result<(), Error> {
         .with_context(|| "Could not serialise relay envelope")
         .map_err(Error::Any)?;
 
-    exchange::send(Message::send_to(&relay, &peer.zone, &payload)).await
+    exchange::send(Message::send_to(&relay, &peer.relay_zone, &payload)).await
 }
 
 ///
@@ -794,6 +830,7 @@ mod tests {
     fn test_peer(role: RelayedRole) -> RelayedPeer {
         RelayedPeer {
             zone: "default".to_string(),
+            relay_zone: "default".to_string(),
             role,
             inner_key: Key::generate(),
             outer_key: Key::generate(),
@@ -924,6 +961,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_configure_reads_relayed_peers_from_service_config() {
+        // NOTE: every assertion that depends on `configure()`'s effect on
+        // the global `RELAY_CONFIG`/`my_name()` state lives in this single
+        // test function, deliberately - `RELAY_CONFIG` is a process-wide
+        // static, and `cargo test` runs test functions concurrently by
+        // default, so two tests each calling `configure()` race and
+        // clobber each other's state. Add new `configure()`-based
+        // assertions here rather than in a new `#[tokio::test]`.
         let mut airr =
             ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &6001, &None, &None)
                 .unwrap_or_else(|e| unreachable!("service config: {}", e));
@@ -948,6 +992,18 @@ mod tests {
             .unwrap_or_else(|e| unreachable!("add_relayed_client: {}", e));
         let _ = invite; // brics's side isn't configured in this test
 
+        // "ukri" is introduced via the same proxy but in a *different*
+        // zone - the real connection to the proxy itself stays in the
+        // default zone (§ above), but this relayed peer's own zone
+        // differs. Bootstrap/relay traffic must be addressed using the
+        // *proxy's* zone (`relay_zone`), not the relayed peer's own zone
+        // (`zone`) - otherwise `exchange::send` looks up a connection key
+        // that doesn't exist ("proxy@custom-zone" instead of
+        // "proxy@default") and fails with `UnnamedConnection`, even though
+        // the real connection to the proxy is up.
+        airr.add_relayed_client("ukri", "proxy", &Some("custom-zone".to_string()))
+            .unwrap_or_else(|e| unreachable!("add_relayed_client: {}", e));
+
         configure(&airr)
             .await
             .unwrap_or_else(|e| unreachable!("configure: {}", e));
@@ -956,7 +1012,15 @@ mod tests {
             .await
             .unwrap_or_else(|e| unreachable!("get_peer: {}", e));
         assert!(matches!(peer.role, RelayedRole::Server { .. }));
+        assert_eq!(peer.zone, "default");
+        assert_eq!(peer.relay_zone, "default");
         assert_eq!(my_name().await.unwrap_or_default(), "airr");
+
+        let peer = get_peer("ukri")
+            .await
+            .unwrap_or_else(|e| unreachable!("get_peer: {}", e));
+        assert_eq!(peer.zone, "custom-zone");
+        assert_eq!(peer.relay_zone, "default");
 
         assert!(get_peer("nonexistent").await.is_err());
     }
@@ -973,6 +1037,7 @@ mod tests {
 
         let airr_peer_for_brics = RelayedPeer {
             zone: "default".to_string(),
+            relay_zone: "default".to_string(),
             role: RelayedRole::Server {
                 relay: "proxy".to_string(),
             },
@@ -981,6 +1046,7 @@ mod tests {
         };
         let brics_peer_for_airr = RelayedPeer {
             zone: "default".to_string(),
+            relay_zone: "default".to_string(),
             role: RelayedRole::Client {
                 relay: "proxy".to_string(),
             },

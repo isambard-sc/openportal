@@ -141,6 +141,12 @@ static PENDING_BOOTSTRAPS: Lazy<
 static INNER_HANDLER: Lazy<StdRwLock<Option<MessageHandler>>> = Lazy::new(|| StdRwLock::new(None));
 static PROXY_POLICY: Lazy<TokioRwLock<RelayPolicy>> =
     Lazy::new(|| TokioRwLock::new(RelayPolicy::default()));
+/// On the proxy itself: name -> zone of each of *its own* real `clients`
+/// connections (both real hops of a relayed pair are always `clients` of
+/// the proxy - it never dials out). Populated by [`configure_proxy`] -
+/// see [`proxy_handler`] for why this is needed.
+static PROXY_CLIENT_ZONES: Lazy<TokioRwLock<HashMap<String, String>>> =
+    Lazy::new(|| TokioRwLock::new(HashMap::new()));
 
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -774,6 +780,27 @@ pub async fn set_proxy_policy(policy: RelayPolicy) {
 }
 
 ///
+/// Configure the proxy's own view of its real `clients` connections - call
+/// once at startup, alongside [`set_proxy_policy`]. Needed so
+/// [`proxy_handler`] can forward on the zone each real hop actually
+/// connected under, rather than the zone the *relayed relationship*
+/// happens to use (which is meaningful to the two relayed peers, not to
+/// the proxy's own connection registry, and is very often different -
+/// e.g. two peers connect to the proxy in zone `default`, but relay to
+/// each other in a peer-specific zone like `ukri>brics`).
+///
+pub async fn configure_proxy(config: &ServiceConfig) {
+    let zones = config
+        .clients()
+        .iter()
+        .map(|c| (c.name(), c.zone()))
+        .collect();
+
+    let mut state = PROXY_CLIENT_ZONES.write().await;
+    *state = zones;
+}
+
+///
 /// Message handler for a pure relay/proxy agent - register this via
 /// `paddington::set_handler` on the proxy. Forwards a `RelayEnvelope`
 /// payload unchanged to its `to` peer if [`RelayPolicy`] allows the
@@ -807,7 +834,26 @@ pub fn proxy_handler(message: Message) -> Pin<Box<dyn Future<Output = Result<(),
             return Ok(());
         }
 
-        let outgoing = Message::send_to(&envelope.to, &envelope.zone, message.payload());
+        // `envelope.zone` is the zone of the *relayed relationship* between
+        // `from` and `to` - meaningful to those two peers, not to the
+        // proxy's own connection registry. The proxy must instead address
+        // this send using the zone `to` actually connected to *it* under
+        // (see `configure_proxy`), which is very often a different zone.
+        let real_zone = match PROXY_CLIENT_ZONES.read().await.get(&envelope.to).cloned() {
+            Some(zone) => zone,
+            None => {
+                tracing::warn!(
+                    "'{}' is not a known client of this proxy (or configure_proxy() was never \
+                     called) - falling back to the relayed relationship's own zone '{}', which \
+                     will likely fail.",
+                    envelope.to,
+                    envelope.zone
+                );
+                envelope.zone.clone()
+            }
+        };
+
+        let outgoing = Message::send_to(&envelope.to, &real_zone, message.payload());
 
         if let Err(e) = exchange::send(outgoing).await {
             tracing::warn!(
@@ -957,6 +1003,43 @@ mod tests {
         assert!(policy.permits("airr", "brics"));
         assert!(policy.permits("brics", "airr"));
         assert!(!policy.permits("airr", "someone_else"));
+    }
+
+    #[tokio::test]
+    async fn test_configure_proxy_captures_client_zones() {
+        // The proxy must forward using the zone each real client actually
+        // connected to *it* under, not the zone the relayed relationship
+        // between two of its clients happens to use (see `proxy_handler`).
+        // NOTE: like `configure()`, `configure_proxy()` writes to a
+        // process-global static (`PROXY_CLIENT_ZONES`) - this is the only
+        // test that calls it, deliberately, to avoid racing another test
+        // that also calls it concurrently.
+        let mut proxy = ServiceConfig::new(
+            "proxy-czones",
+            "http://localhost",
+            "127.0.0.1",
+            &6005,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service config: {}", e));
+
+        proxy
+            .add_client("ukri", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("add_client: {}", e));
+        proxy
+            .add_client("cloud", "127.0.0.1", &Some("special-zone".to_string()))
+            .unwrap_or_else(|e| unreachable!("add_client: {}", e));
+
+        configure_proxy(&proxy).await;
+
+        let zones = PROXY_CLIENT_ZONES.read().await;
+        assert_eq!(zones.get("ukri").cloned(), Some("default".to_string()));
+        assert_eq!(
+            zones.get("cloud").cloned(),
+            Some("special-zone".to_string())
+        );
+        assert_eq!(zones.get("nonexistent"), None);
     }
 
     #[tokio::test]

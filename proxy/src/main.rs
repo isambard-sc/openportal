@@ -290,6 +290,7 @@ async fn run(config_file: PathBuf) -> Result<()> {
         .with_context(|| format!("Could not load proxy config from {:?}", config_file))?;
 
     relay::set_proxy_policy(config.policy).await;
+    relay::configure_proxy(&config.service).await;
 
     paddington::set_handler(relay::proxy_handler).await?;
 

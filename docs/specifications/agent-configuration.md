@@ -82,9 +82,10 @@ relay proxy (an `op-proxy` agent) rather than directly — see
 relayed `[[clients]]` entry has no `ip` (authentication comes from
 completing the relayed handshake, not an IP allowlist); a relayed
 `[[servers]]` entry has no meaningful `url` (it is reached via the named
-proxy instead). A service can only ever be reachable via **one** proxy at
-a time — every relayed peer entry must name the same `proxy` value, even
-though the service can still mix relayed and directly-connected peers.
+proxy instead). Each relayed peer names its own proxy independently — a
+service can freely mix relayed and directly-connected peers, and can use
+*different* proxies for different relayed peers, as long as each named
+proxy is itself a known `servers` entry.
 
 ### 1.3 Extras (agent-specific key-value options)
 

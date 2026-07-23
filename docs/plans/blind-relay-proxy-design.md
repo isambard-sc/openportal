@@ -329,16 +329,19 @@ pub struct ClientConfig {
 from the relayed handshake itself (§4.2.1) succeeding, which is a stronger
 guarantee than an IP check, not a weaker substitute for one.
 
-`ServiceConfig` itself gains a top-level `proxy: Option<String>` naming
-*which one* of this service's `servers` entries is its own relay, for the
-simplification rule: **if a service uses a proxy at all, every one of its
-`clients` entries with `proxy` set must name that same one** - checked at
-config-load time, not left as an implicit convention. A service is free to
-mix relayed and directly-connected `clients` entries (some peers reach it
-via the proxy, others connect to it directly on a real port), but it cannot
-be reachable via two *different* proxies at once. This keeps "how do I find
-out whether I've been introduced to this proxy at all" a single lookup
-rather than a per-client search.
+Each relayed peer entry names its own relay independently, and nothing
+requires them to agree - a service can mix relayed and directly-connected
+`clients`/`servers` entries freely, and can use *different* proxies for
+different relayed peers, as long as each named relay is itself a known
+`servers` entry (`ServiceConfig::check_relay_exists`, checked at
+config-load time). An earlier revision of this design added a top-level
+`ServiceConfig.proxy` field and restricted every relayed peer to naming
+the same one, as a simplification - "how do I find out whether I've been
+introduced to this proxy at all" - but that field was never actually read
+by anything except its own validation check (`paddington::relay::configure`
+already resolved each relayed peer's relay independently), so the
+restriction was dropped once that became clear, with no changes needed
+anywhere else in the protocol.
 
 Operator-facing UX is unchanged: the existing `client --add`/`server --add`
 commands ([docs/cmdline](../cmdline/README.md)) generate and consume

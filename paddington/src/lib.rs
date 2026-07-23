@@ -27,3 +27,4 @@ pub use exchange::worker_count;
 pub use exchange::SoftRestartGuard;
 pub mod invite;
 pub mod message;
+pub mod relay;

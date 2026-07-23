@@ -141,6 +141,13 @@ impl Defaults {
 pub struct ServerConfig {
     name: String,
     url: String,
+    /// Name of a `servers` entry (on this same `ServiceConfig`) to reach
+    /// this peer via, instead of dialling `url` directly - set when this
+    /// peer can only be reached through a blind relay proxy (see
+    /// `docs/plans/blind-relay-proxy-design.md`). `url` is ignored when
+    /// this is set.
+    #[serde(default)]
+    proxy: Option<String>,
     #[serde(default = "default_zone")]
     zone: String,
     inner_key: SecretKey,
@@ -200,6 +207,7 @@ impl ServerConfig {
                 tracing::warn!("Could not create websocket URL {}: {:?}", url, e);
                 "".to_string()
             }),
+            proxy: None,
             zone: zone.to_string(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
@@ -210,6 +218,28 @@ impl ServerConfig {
         Ok(ServerConfig {
             name: invite.name(),
             url: create_websocket_url(&invite.url())?,
+            proxy: None,
+            zone: invite.zone(),
+            inner_key: invite.inner_key(),
+            outer_key: invite.outer_key(),
+        })
+    }
+
+    ///
+    /// Create a `ServerConfig` for a peer reached only via a blind relay
+    /// proxy (see `docs/plans/blind-relay-proxy-design.md`) - `relay` names
+    /// an existing entry in this same service's `servers` list. The
+    /// invite's `url` is ignored - this peer is never dialled directly.
+    ///
+    pub fn from_relayed_invite(relay: &str, invite: &Invite) -> Result<Self, Error> {
+        if relay.trim().is_empty() {
+            return Err(Error::Peer("No relay name provided.".to_string()));
+        }
+
+        Ok(ServerConfig {
+            name: invite.name(),
+            url: "".to_string(),
+            proxy: Some(relay.trim().to_string()),
             zone: invite.zone(),
             inner_key: invite.inner_key(),
             outer_key: invite.outer_key(),
@@ -220,6 +250,7 @@ impl ServerConfig {
         ServerConfig {
             name: "".to_string(),
             url: "".to_string(),
+            proxy: None,
             zone: "".to_string(),
             inner_key: Key::null(),
             outer_key: Key::null(),
@@ -253,6 +284,14 @@ impl ServerConfig {
 
     pub fn url(&self) -> String {
         self.url.clone()
+    }
+
+    ///
+    /// The name of the `servers` entry to reach this peer via, if it can
+    /// only be reached through a blind relay proxy rather than directly.
+    ///
+    pub fn proxy(&self) -> Option<String> {
+        self.proxy.clone()
     }
 
     pub fn zone(&self) -> String {
@@ -330,7 +369,17 @@ impl IpOrRange {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
     name: String,
-    ip: IpOrRange,
+    /// `None` for a client reached only via a blind relay proxy - see
+    /// `proxy` below. Always `Some` for a directly-connecting client.
+    #[serde(default)]
+    ip: Option<IpOrRange>,
+    /// Name of a `servers` entry (on this same `ServiceConfig`) this
+    /// client is expected to arrive via, instead of being IP-allowlisted -
+    /// set when this peer can only reach us through a blind relay proxy
+    /// (see `docs/plans/blind-relay-proxy-design.md`). Authentication then
+    /// comes from completing the relayed handshake, not from `ip`.
+    #[serde(default)]
+    proxy: Option<String>,
     #[serde(default = "default_zone")]
     zone: String,
     inner_key: SecretKey,
@@ -339,11 +388,23 @@ pub struct ClientConfig {
 
 impl Display for ClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ClientConfig {{ name: {}, ip: {}, zone: {} }}",
-            self.name, self.ip, self.zone
-        )
+        match &self.proxy {
+            Some(proxy) => write!(
+                f,
+                "ClientConfig {{ name: {}, proxy: {}, zone: {} }}",
+                self.name, proxy, self.zone
+            ),
+            None => write!(
+                f,
+                "ClientConfig {{ name: {}, ip: {}, zone: {} }}",
+                self.name,
+                self.ip
+                    .as_ref()
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_default(),
+                self.zone
+            ),
+        }
     }
 }
 
@@ -351,18 +412,41 @@ impl ClientConfig {
     pub fn new(name: &str, ip: &IpOrRange, zone: &str) -> Self {
         ClientConfig {
             name: name.to_string(),
-            ip: ip.clone(),
+            ip: Some(ip.clone()),
+            proxy: None,
             zone: zone.to_string(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
     }
 
+    ///
+    /// Create a `ClientConfig` for a peer that can only reach us via a
+    /// blind relay proxy (see `docs/plans/blind-relay-proxy-design.md`) -
+    /// `relay` names an existing entry in this same service's `servers`
+    /// list.
+    ///
+    pub fn new_relayed(name: &str, relay: &str, zone: &str) -> Result<Self, Error> {
+        if relay.trim().is_empty() {
+            return Err(Error::Peer("No relay name provided.".to_string()));
+        }
+
+        Ok(ClientConfig {
+            name: name.to_string(),
+            ip: None,
+            proxy: Some(relay.trim().to_string()),
+            zone: zone.to_string(),
+            inner_key: Key::generate(),
+            outer_key: Key::generate(),
+        })
+    }
+
     pub fn create_null() -> Self {
         ClientConfig {
             name: "".to_string(),
             #[allow(clippy::unwrap_used)]
-            ip: IpOrRange::IP("127.0.0.1".parse().unwrap()),
+            ip: Some(IpOrRange::IP("127.0.0.1".parse().unwrap())),
+            proxy: None,
             zone: "".to_string(),
             inner_key: Key::null(),
             outer_key: Key::null(),
@@ -377,8 +461,20 @@ impl ClientConfig {
         !self.is_null()
     }
 
+    ///
+    /// Whether this client is reached via a blind relay proxy rather than
+    /// a direct, IP-allowlisted connection.
+    ///
+    pub fn is_relayed(&self) -> bool {
+        self.proxy.is_some()
+    }
+
+    ///
+    /// Returns `false` for a relayed client - it is never matched by IP,
+    /// only by successfully completing the relayed handshake.
+    ///
     pub fn matches(&self, addr: IpAddr) -> bool {
-        self.ip.matches(&addr)
+        self.ip.as_ref().is_some_and(|ip| ip.matches(&addr))
     }
 
     pub fn to_peer(&self) -> PeerConfig {
@@ -389,8 +485,16 @@ impl ClientConfig {
         self.name.clone()
     }
 
-    pub fn ip(&self) -> IpOrRange {
+    pub fn ip(&self) -> Option<IpOrRange> {
         self.ip.clone()
+    }
+
+    ///
+    /// The name of the `servers` entry to expect this client to arrive
+    /// via, if it can only reach us through a blind relay proxy.
+    ///
+    pub fn proxy(&self) -> Option<String> {
+        self.proxy.clone()
     }
 
     pub fn zone(&self) -> String {
@@ -500,6 +604,15 @@ pub struct ServiceConfig {
     heathcheck_port: Option<u16>,
     proxy_header: Option<String>,
 
+    /// Name of the `servers` entry this service uses as its blind relay
+    /// proxy (see `docs/plans/blind-relay-proxy-design.md`), if any. Every
+    /// relayed `clients` entry must name this same proxy -
+    /// `add_relayed_client` enforces this, so a service can only ever be
+    /// reachable via one proxy at a time (it may still mix relayed and
+    /// directly-connected `clients` entries).
+    #[serde(default)]
+    proxy: Option<String>,
+
     servers: Vec<ServerConfig>,
     clients: Vec<ClientConfig>,
     encryption: Option<EncryptionScheme>,
@@ -540,6 +653,7 @@ impl ServiceConfig {
             port: *port,
             heathcheck_port: *healthcheck_port,
             proxy_header: proxy_header.clone(),
+            proxy: None,
             servers: Vec::new(),
             clients: Vec::new(),
             encryption: None,
@@ -614,6 +728,52 @@ impl ServiceConfig {
         self.proxy_header.clone()
     }
 
+    ///
+    /// The name of the `servers` entry this service uses as its blind
+    /// relay proxy, if it uses one at all (see
+    /// `docs/plans/blind-relay-proxy-design.md`).
+    ///
+    pub fn proxy(&self) -> Option<String> {
+        self.proxy.clone()
+    }
+
+    ///
+    /// Checks that `relay` names an existing `servers` entry, and that it
+    /// is consistent with any proxy this service already uses - a service
+    /// can only ever be reachable via one blind relay proxy at a time
+    /// (see `docs/plans/blind-relay-proxy-design.md` §4.3). Sets
+    /// `self.proxy` on first use.
+    ///
+    fn use_relay(&mut self, relay: &str) -> Result<(), Error> {
+        let relay = relay.trim();
+
+        if relay.is_empty() {
+            return Err(Error::Peer("No relay name provided.".to_string()));
+        }
+
+        if !self.servers.iter().any(|s| s.name == relay) {
+            return Err(Error::Peer(format!(
+                "Relay '{}' is not a known server - add it as a server first.",
+                relay
+            )));
+        }
+
+        match &self.proxy {
+            Some(existing) if existing != relay => {
+                return Err(Error::Peer(format!(
+                    "This service already uses relay '{}' - it cannot also use '{}'. \
+                     A service can only be reachable via one blind relay proxy at a time.",
+                    existing, relay
+                )));
+            }
+            _ => {
+                self.proxy = Some(relay.to_string());
+            }
+        }
+
+        Ok(())
+    }
+
     fn clean_zone(&self, zone: &Option<String>) -> Result<String, Error> {
         let zone = zone.clone().unwrap_or_else(default_zone);
         let zone = zone.trim();
@@ -674,6 +834,50 @@ impl ServiceConfig {
         ))
     }
 
+    ///
+    /// Add a client that can only reach us via the blind relay proxy
+    /// named `relay` (an existing `servers` entry), rather than a direct,
+    /// IP-allowlisted connection - see
+    /// `docs/plans/blind-relay-proxy-design.md`. Returns an `Invite` to
+    /// pass to the client exactly as `add_client` does.
+    ///
+    pub fn add_relayed_client(
+        &mut self,
+        name: &str,
+        relay: &str,
+        zone: &Option<String>,
+    ) -> Result<Invite, Error> {
+        if name.is_empty() {
+            return Err(Error::Peer("No client name provided.".to_string()));
+        }
+
+        let zone = self.clean_zone(zone)?;
+
+        self.use_relay(relay)?;
+
+        // check if we already have a client with this name in this zone
+        for c in self.clients.iter() {
+            if c.name == name && c.zone == zone {
+                return Err(Error::Peer(format!(
+                    "Client with name '{}' already exists in zone {}.",
+                    name, zone
+                )));
+            }
+        }
+
+        let client = ClientConfig::new_relayed(name, relay, &zone)?;
+
+        self.clients.push(client.clone());
+
+        Ok(Invite::new(
+            &self.name,
+            &self.url,
+            &zone,
+            &client.inner_key,
+            &client.outer_key,
+        ))
+    }
+
     pub fn remove_client(&mut self, name: &str, zone: &Option<String>) -> Result<(), Error> {
         let zone = self.clean_zone(zone)?;
 
@@ -706,6 +910,32 @@ impl ServiceConfig {
         }
 
         self.servers.push(server.clone());
+
+        Ok(())
+    }
+
+    ///
+    /// Add a server that can only be reached via the blind relay proxy
+    /// named `relay` (an existing `servers` entry), rather than dialling
+    /// a direct URL - see `docs/plans/blind-relay-proxy-design.md`. The
+    /// invite's `url` is ignored; this peer is never dialled directly.
+    ///
+    pub fn add_relayed_server(&mut self, relay: &str, invite: &Invite) -> Result<(), Error> {
+        for server in self.servers.iter() {
+            if server.name == invite.name() && server.zone == invite.zone() {
+                return Err(Error::Peer(format!(
+                    "Server with name '{}' already exists in zone {}.",
+                    invite.name(),
+                    invite.zone()
+                )));
+            }
+        }
+
+        self.use_relay(relay)?;
+
+        let server = ServerConfig::from_relayed_invite(relay, invite)?;
+
+        self.servers.push(server);
 
         Ok(())
     }
@@ -855,7 +1085,7 @@ mod tests {
         let client = ClientConfig::new("test", &ip, &default_zone());
 
         assert_eq!(client.name, "test".to_string());
-        assert_eq!(client.ip, ip);
+        assert_eq!(client.ip, Some(ip));
 
         let peer = PeerConfig::from_client(&client);
 
@@ -907,5 +1137,146 @@ mod tests {
 
         assert_eq!(primary.clients()[0].name(), "secondary".to_string());
         assert_eq!(secondary.servers()[0].name(), "primary".to_string());
+    }
+
+    #[test]
+    fn test_relayed_peer_requires_known_relay() {
+        let mut airr =
+            ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &5546, &None, &None)
+                .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        // "proxy" is not yet a known server - must be rejected
+        assert!(airr.add_relayed_client("brics", "proxy", &None).is_err());
+    }
+
+    #[test]
+    fn test_relayed_peer_introduction() {
+        let mut airr =
+            ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &5547, &None, &None)
+                .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+        let mut brics = ServiceConfig::new(
+            "brics",
+            "http://localhost",
+            "127.0.0.1",
+            &5548,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+        let mut proxy = ServiceConfig::new(
+            "proxy",
+            "http://localhost",
+            "127.0.0.1",
+            &5549,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        // both airr and brics have an ordinary, direct relationship with
+        // the proxy - unaffected by anything relay-related
+        let invite = proxy
+            .add_client("airr", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add airr to proxy: {}", e));
+        airr.add_server(&invite)
+            .unwrap_or_else(|e| unreachable!("Cannot add proxy to airr: {}", e));
+
+        let invite = proxy
+            .add_client("brics", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add brics to proxy: {}", e));
+        brics
+            .add_server(&invite)
+            .unwrap_or_else(|e| unreachable!("Cannot add proxy to brics: {}", e));
+
+        // airr is the relayed "server" - it authorises brics to reach it
+        // via the proxy
+        let invite = airr
+            .add_relayed_client("brics", "proxy", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add relayed brics to airr: {}", e));
+
+        // brics is the relayed "client" - it reaches airr via the same proxy
+        brics
+            .add_relayed_server("proxy", &invite)
+            .unwrap_or_else(|e| unreachable!("Cannot add relayed airr to brics: {}", e));
+
+        assert_eq!(airr.proxy(), Some("proxy".to_string()));
+        assert_eq!(brics.proxy(), Some("proxy".to_string()));
+
+        let relayed_client = airr
+            .clients()
+            .into_iter()
+            .find(|c| c.name() == "brics")
+            .unwrap_or_else(|| unreachable!("brics should be a client of airr"));
+        assert!(relayed_client.is_relayed());
+        assert_eq!(relayed_client.proxy(), Some("proxy".to_string()));
+        assert!(relayed_client.ip().is_none());
+
+        let relayed_server = brics
+            .servers()
+            .into_iter()
+            .find(|s| s.name() == "airr")
+            .unwrap_or_else(|| unreachable!("airr should be a server of brics"));
+        assert_eq!(relayed_server.proxy(), Some("proxy".to_string()));
+        assert_eq!(relayed_server.url(), "".to_string());
+
+        // the shared key material must actually match between the two sides
+        use secrecy::ExposeSecret;
+        assert_eq!(
+            format!("{:?}", relayed_client.inner_key().expose_secret()),
+            format!("{:?}", relayed_server.inner_key().expose_secret())
+        );
+        assert_eq!(
+            format!("{:?}", relayed_client.outer_key().expose_secret()),
+            format!("{:?}", relayed_server.outer_key().expose_secret())
+        );
+    }
+
+    #[test]
+    fn test_relayed_peer_only_one_proxy_allowed() {
+        let mut airr =
+            ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &5550, &None, &None)
+                .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        // introduce two candidate relays as ordinary direct servers
+        let mut proxy1 = ServiceConfig::new(
+            "proxy1",
+            "http://localhost",
+            "127.0.0.1",
+            &5551,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+        let mut proxy2 = ServiceConfig::new(
+            "proxy2",
+            "http://localhost",
+            "127.0.0.1",
+            &5552,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        let invite = proxy1
+            .add_client("airr", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add airr to proxy1: {}", e));
+        airr.add_server(&invite)
+            .unwrap_or_else(|e| unreachable!("Cannot add proxy1 to airr: {}", e));
+
+        let invite = proxy2
+            .add_client("airr", "127.0.0.1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add airr to proxy2: {}", e));
+        airr.add_server(&invite)
+            .unwrap_or_else(|e| unreachable!("Cannot add proxy2 to airr: {}", e));
+
+        // first relayed client via proxy1 - fine, and fixes airr's proxy
+        airr.add_relayed_client("brics", "proxy1", &None)
+            .unwrap_or_else(|e| unreachable!("Cannot add relayed brics via proxy1: {}", e));
+        assert_eq!(airr.proxy(), Some("proxy1".to_string()));
+
+        // a second relayed client via a *different* proxy must be rejected
+        assert!(airr
+            .add_relayed_client("someone_else", "proxy2", &None)
+            .is_err());
     }
 }

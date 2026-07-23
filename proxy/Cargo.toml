@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
+[package]
+name = "op-proxy"
+version = "0.32.2"
+description = "A blind relay proxy for OpenPortal agents that can only make outbound connections"
+edition = "2021"
+license = "MIT"
+homepage = "https://github.com/chryswoods/openportal/"
+repository = "https://github.com/chryswoods/openportal/"
+
+[build-dependencies]
+built = { version = "0.8", default-features = false, features = ["git2"] }
+
+[dependencies]
+anyhow = { version="1.0.100", features = ["backtrace"] }
+clap = { version = "4.5.51", default-features = false, features = ["derive", "color", "help", "usage", "error-context","suggestions", "env", "std", "string"] }
+paddington = { path = "../paddington" }
+tokio = { version = "1.48", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_crate_dependencies = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+
+[package.metadata.clippy]
+allow-dbg-in-tests = true

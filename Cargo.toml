@@ -6,7 +6,7 @@
 members = [
     "bridge", "cloudaccount", "cloudportal", "cluster", "clusters",
     "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
-    "provider", "python", "slurm", "templemeads",
+    "provider", "proxy", "python", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
     "docs/cmdline/cluster"
 ]
@@ -17,7 +17,7 @@ members = [
 default-members = [
     "bridge", "cloudaccount", "cloudportal", "cluster", "clusters",
     "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
-    "provider", "slurm", "templemeads",
+    "provider", "proxy", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
     "docs/cmdline/cluster"
 ]

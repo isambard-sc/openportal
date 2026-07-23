@@ -213,7 +213,7 @@ impl CheckStandby {
     }
 }
 
-fn envelope_message<T>(
+pub(crate) fn envelope_message<T>(
     message: T,
     inner_key: &SecretKey,
     outer_key: &SecretKey,
@@ -244,7 +244,7 @@ where
     ))
 }
 
-fn deenvelope_message<T>(
+pub(crate) fn deenvelope_message<T>(
     message: TokioMessage,
     inner_key: &SecretKey,
     outer_key: &SecretKey,

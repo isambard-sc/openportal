@@ -196,6 +196,7 @@ where
             port,
             healthcheck_port,
             proxy_header,
+            trusted_proxy,
             force,
         }) => {
             let local_healthcheck_port;
@@ -206,7 +207,7 @@ where
                 local_healthcheck_port = defaults.service.healthcheck_port();
             }
 
-            let config = Config {
+            let mut config = Config {
                 service: {
                     ServiceConfig::new(
                         &service.clone().unwrap_or(defaults.service.name()),
@@ -227,6 +228,8 @@ where
                 one_shot_sender: None,
                 one_shot_zone: None,
             };
+
+            config.service.set_trusted_proxy(trusted_proxy.as_deref())?;
 
             if config_file.try_exists()? {
                 if *force {
@@ -585,6 +588,14 @@ enum Commands {
             help = "Proxy header to use for the client IP address - look here for the client IP address"
         )]
         proxy_header: Option<String>,
+
+        #[arg(
+            long,
+            help = "IP address(es)/range(s) of trusted reverse proxies whose proxy_header may be \
+                    trusted (comma-separated, CIDR allowed, e.g. 127.0.0.0/8). Required for \
+                    proxy_header to have any effect."
+        )]
+        trusted_proxy: Option<String>,
 
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,

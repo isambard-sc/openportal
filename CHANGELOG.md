@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- ** Separated out the grammar of the Job commands and the Notifications
+  into a new Domain** - Now paddington and templemeads do not know about or
+  force any particular command or notification grammar onto the agents,
+  and could, in theory, be used to create agents that work in any number
+  of domains. The previous HPC domain commands and notifications have
+  been broken out into the `greatwestern` domain,
+  and the `op-provider` agent has been updated to be a
+  multi-domain router.
+- **`greatwestern` — `Domain::name()`/`version()`/`assume_legacy_domain_version()`**
+  — `Hpc` now reports itself as `"greatwestern"` plus its crate version
+  (used by the connection-level check), and treats any peer whose
+  reported engine version predates the `templemeads`/`greatwestern` crate
+  split (`<= 0.32.2`) as implicitly speaking `greatwestern 0.32.2` - those
+  older agents have no way to report a domain of their own, since the
+  split didn't exist yet when they were built.
+- **Domain-oblivious multi-domain routing (`Erased`)** — `templemeads`
+  gains an `Erased` domain for building router/proxy agents that forward
+  Jobs and Notifications between other agents without needing to
+  understand their instruction vocabulary at all. `Job`/`Notification` now
+  carry their originating domain's name and version through every hop,
+  surviving serialization through any number of `Erased`-typed relays
+  completely unchanged. New opt-in compatibility checks,
+  `ensure_domain_matches` (connection-level) and
+  `ensure_job_domain_matches`/`ensure_notification_domain_matches`
+  (per-message), let an agent refuse to talk to a peer speaking a
+  different domain - a peer identifying as `Erased` is always accepted at
+  the connection level, since routers are meant to carry any domain.
+  `op-provider` now uses `Erased` as its domain, making it a genuine
+  multi-domain router rather than being hardcoded to `greatwestern`. See
+  `docs/plans/archive/multi-domain-routing-design.md`.
 - **`op-cloudaccount` — new agent representing a single cloud account** —
   lets a project be assigned to a cloud account (e.g. one AWS account) the
   same way a project is assigned to an `op-cluster` instance. Deliberately
@@ -76,28 +106,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   Dual-stack listening (one socket accepting both families) remains
   outside OpenPortal's control - it's an OS-level socket option this
   layer doesn't expose - see `docs/plans/ipv6-support-design.md`.
-- **Domain-oblivious multi-domain routing (`Erased`)** — `templemeads`
-  gains an `Erased` domain for building router/proxy agents that forward
-  Jobs and Notifications between other agents without needing to
-  understand their instruction vocabulary at all. `Job`/`Notification` now
-  carry their originating domain's name and version through every hop,
-  surviving serialization through any number of `Erased`-typed relays
-  completely unchanged. New opt-in compatibility checks,
-  `ensure_domain_matches` (connection-level) and
-  `ensure_job_domain_matches`/`ensure_notification_domain_matches`
-  (per-message), let an agent refuse to talk to a peer speaking a
-  different domain - a peer identifying as `Erased` is always accepted at
-  the connection level, since routers are meant to carry any domain.
-  `op-provider` now uses `Erased` as its domain, making it a genuine
-  multi-domain router rather than being hardcoded to `greatwestern`. See
-  `docs/plans/archive/multi-domain-routing-design.md`.
-- **`greatwestern` — `Domain::name()`/`version()`/`assume_legacy_domain_version()`**
-  — `Hpc` now reports itself as `"greatwestern"` plus its crate version
-  (used by the connection-level check above), and treats any peer whose
-  reported engine version predates the `templemeads`/`greatwestern` crate
-  split (`<= 0.32.2`) as implicitly speaking `greatwestern 0.32.2` - those
-  older agents have no way to report a domain of their own, since the
-  split didn't exist yet when they were built.
 - **`op-proxy` — blind relay proxy for outbound-only agents** — a new agent
   that relays encrypted traffic between two agents that can each only make
   outbound connections (neither can open a port the other can reach),
@@ -154,20 +162,133 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `nonce` there is a plain required field. See
   `docs/plans/replay-protection-design.md` §10.
 
-- **`op-proxy` config file location and layout** — now defaults to the
-  standard `~/.config/openportal/proxy-config.toml`, matching every other
-  agent, instead of the current directory. The relay policy (the
-  `allow`-listed agent pairs) now lives in the same config file as
-  everything else instead of a separate `policy.toml`, so operators only
-  have one file to manage.
-- **An agent can now use different proxies for different relayed peers**
-  — earlier, once a service relayed any peer through a proxy, every other
-  relayed peer had to go through that same proxy (mixing relayed and
-  directly-connected peers was already fine; only using *two different*
-  proxies at once was rejected). That restriction was a config-time
-  simplification that nothing in the actual relay protocol ever required
-  - each relayed peer already named its own proxy independently under the
-  hood - so it's been removed with no other changes needed.
+### Security
+
+- **New `docs/specifications/security-review.md`** — an independent,
+  code-level security assessment complementing the existing
+  `security-model.md`. Where the model document describes how security is
+  *intended* to work, the review *evaluates* it for security professionals:
+  the threat model, verified strengths (bounded trust topology, sound
+  transport crypto with no nonce reuse, a correct anti-replay window, the
+  genuinely-blind relay proxy, no-shell privileged agents), and graded
+  findings (F1-F15) with `file:line` references and remediation, cited from
+  `security-model.md` and cross-linked from the specifications index. It
+  records which findings were fixed while writing it (below) and which
+  remain open.
+- **Fixed: arbitrary absolute-path file write in `op-cloudaccount` /
+  `op-cloudportal`** (review finding F1) — a crafted `ProjectIdentifier`
+  whose project component began with `/` escaped the configured state
+  directory, because `Path::join` discards its base on an absolute
+  argument. Closed both at the source (identifier validation, below) and at
+  the write path, which now rejects any filename that is not a single plain
+  path component.
+- **Fixed: strict identifier validation** (F5) — `UserIdentifier` /
+  `ProjectIdentifier` components are now restricted to `[A-Za-z0-9_-]` with
+  no leading `-` and a length cap, and mapping targets reject `/`, a
+  leading `-`, and control characters. This closes argument (flag)
+  injection into the privileged tools agents spawn (`useradd`, `sacctmgr`,
+  …) and the path-escape enabling F1, at the point identifiers enter the
+  system.
+- **Fixed: reachable panic decoding wire frames** (F4) —
+  `deenvelope_message` sliced an attacker-controlled text frame at fixed
+  byte offsets, which panics (aborting the process) if a multi-byte UTF-8
+  character straddles a boundary. It now slices with `str::get`, returning
+  a clean error instead.
+- **Fixed: proxy now binds the relayed `from` to the authenticated sender**
+  (F7) — `op-proxy` dropped any envelope whose claimed `from` did not match
+  the peer identity the connection authenticated as, so `RelayPolicy` no
+  longer rests on attacker-supplied labels.
+- **Fixed: secrets no longer leak into error messages** (F10) —
+  `Key::from_password` and `ServiceConfig::get_key` no longer interpolate
+  the password (or a secret environment variable's *value*) into error
+  context that can reach logs.
+- **Fixed: config and invite files are written `0600`** (F9) — files
+  holding plaintext pre-shared keys are now owner-only on Unix, rather than
+  landing at the process umask.
+- **Fixed: strong, versioned config-secret encryption** (F2) — secrets
+  stored in a config's `extras` (e.g. FreeIPA/Slurm credentials) are now
+  encrypted with a fresh per-secret random salt and a realistic Argon2 cost
+  (19 MiB / 3 passes) via `Key::from_password_with_salt`, in a versioned
+  `op-secret-v1:` format. Previously the derivation used orion's minimum
+  cost (8 KiB) with a hardcoded salt, making it deterministic and cheap to
+  brute-force. Legacy (v0) secrets still decrypt, and re-running the
+  `secret` command upgrades a value to the strong format. The `Simple`
+  encryption scheme is now documented as obfuscation only (its "password"
+  is the public agent name) - use `Environment` in production.
+- **Fixed: forwarded client IPs are only trusted from a configured proxy**
+  (F3, F6) — a new `trusted_proxy` config field / `--trusted-proxy` init
+  flag (IP or CIDR list) gates all trust in `proxy_header` /
+  `X-Forwarded-For`. On the agent (paddington) side, a forwarded client
+  address is honoured only when the real TCP peer matches `trusted_proxy`,
+  else the header is ignored (fail-closed), closing IP-allow-list spoofing.
+  On the bridge HTTP side, a new middleware resolves the client IP from the
+  real TCP peer (`ConnectInfo`), honouring `X-Forwarded-For`/`X-Real-IP`
+  only from a trusted peer, so rate limiting can no longer be bypassed by a
+  spoofed header. Works with a Cloudflare tunnel / in-cluster proxy on an
+  internal address (e.g. `--trusted-proxy 127.0.0.0/8`).
+- **Fixed: pre-authentication resource-exhaustion (DoS) hardening** (F11) —
+  the agent (paddington) accept loop now fail-fasts any inbound connection
+  whose source address matches neither a configured client IP nor the
+  `trusted_proxy` range, dropping it before any WebSocket-upgrade or crypto
+  work; and it bounds concurrent *unauthenticated* connections with a
+  process-wide semaphore (limit 2048, released the moment a peer
+  authenticates, so long-lived authenticated peers never occupy the pool).
+  On the bridge, `verify_headers` now verifies the request signature
+  **before** reading or growing the nonce store (so only authenticated
+  callers can touch it), and the store has a hard size cap.
+- **Fixed: `op-localaccount` now only removes accounts/groups it manages**
+  (F13) — `remove_user` applies the same managed-group guard as
+  `block_user`/`unblock_user` (a pre-existing system account is never
+  `userdel`'d), and `remove_project` refuses to `groupdel` any group with a
+  system GID (`< 1000`) or a configured system/managed group name — closing
+  the case where a crafted project identifier (e.g. `docker.system`) mapped
+  to a bare system group name. `op-localaccount` is a **testing agent**
+  (for a containerised test Slurm cluster; use `op-freeipa` in production)
+  and now logs a warning to that effect on every startup, with matching
+  notes added to its docs.
+- **Noted (by design): the bridge's `X-Nonce` is optional for backward
+  compatibility** (F8) — the official Python client always sends a fresh
+  per-request nonce (included in the signature), so current clients get
+  full replay protection; the optional path exists only for older clients,
+  mirroring the negotiated nonce rollout on the agent side.
+- **Documented: TLS is an external concern by design** (F12) — the wire
+  protocol is confidential and authenticated over plain HTTP/`ws` on its own
+  (double-envelope AEAD; HMAC on the bridge), so terminating TLS is left to
+  the operator's infrastructure. Operators who also want the residual
+  metadata (salts, IPs, sizes, timing) protected layer on HTTPS/`wss` with
+  standard tooling (nginx, ingress, Cloudflare tunnel) and point
+  `trusted_proxy` at the terminator. Clarified in the security review and
+  agent-configuration docs as a deliberate design decision, not a gap.
+- **Documented: no forward secrecy, by design** (F14) — session keys are
+  freshly random per connection but key-transported (encrypted) under the
+  permanent pre-shared keys, never negotiated in-band; OpenPortal
+  deliberately provides no in-band key-agreement route (not even
+  Diffie-Hellman). The permanent keys only ever encrypt high-entropy random
+  session keys, so there is no crib to attack them from the wire; security
+  rests on out-of-band permanent-key secrecy plus the `rotate` path.
+  Corrected inaccurate "forward secrecy" wording in `wire-protocol.md`,
+  `highavailability.md`, `security-model.md` (new §2.5), and the relay
+  source comments.
+- **Fixed: lower-severity hardening (F15)** — replaced the bridge's
+  hand-rolled constant-time compare with `paddington::constant_time_eq`
+  (orion `secure_cmp`); the bridge no longer echoes internal `Debug` error
+  detail to clients (logged server-side, generic message returned);
+  `op-slurm` no longer logs the token-fetch command (may embed a
+  credential); FreeIPA login now uses `reqwest`'s `.form()` for correct
+  URL-encoding; both handshake paths reject an all-zero session key;
+  `clean_and_check_path` now rejects relative paths and `..` components; and
+  `op-localaccount`'s shadow-utils mutation commands gained a `--`
+  end-of-options separator. The handshake now sends HKDF salts **in the
+  clear** (they are public by design) instead of XOR-masking them, negotiated
+  via a new `openportal-salt-format: plain` header so an upgraded server still
+  reads legacy (XOR) clients — upgrade servers before clients, since a client
+  commits to its salt encoding in the first message (see
+  `wire-protocol.md` §4.1). AEAD/MAC key domain separation was assessed and
+  deliberately not changed: no code path uses one key for both (wire = AEAD
+  only, bridge = MAC only, config = AEAD only), so it would be a breaking
+  change for zero benefit; the invariant is instead documented on `Key::sign`.
+  The auth-layer timing distinction and the healthcheck worker count are left
+  as-is (not exploitable / useful monitoring signal).
 
 ### Fixed
 
@@ -196,41 +317,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `--zone` at all as long as the name is unambiguous, and errors clearly
   (rather than silently doing nothing) if the name doesn't exist or exists
   in more than one zone.
-- **Relayed peer bootstrap/traffic sent to the wrong zone** — a relayed
-  peer reached via a proxy (`paddington::relay`) could be introduced in a
-  different zone from the real, direct connection to the proxy itself
-  (e.g. the proxy connection is zone `default`, but the relayed peer was
-  added with `--zone something-else`). Bootstrap and ongoing relayed
-  traffic were being addressed using the relayed peer's own zone instead
-  of the proxy connection's zone, so `exchange::send` looked up a
-  connection key that didn't exist and failed with `Connection <proxy>
-  not found` even though the real connection to the proxy was up and
-  healthy. The proxy's own zone is now tracked and used separately.
-- **`op-proxy` forwarding to the wrong zone when two relayed peers relay
-  to each other under a different zone from the one they each connect to
-  the proxy in** — the same class of bug as above, but on the proxy's own
-  side: `proxy_handler` was forwarding using the *relayed relationship's*
-  zone (meaningful only to the two relayed peers) instead of the zone the
-  destination peer actually connected to the proxy under, causing
-  `Could not relay message from X to Y: Connection Y not found` even
-  though Y was connected and healthy. `op-proxy` now tracks each of its
-  own clients' real zones separately and forwards using those.
-- **A relayed bootstrap that failed (e.g. the other side hadn't connected
-  to the proxy yet) gave up permanently instead of retrying** — bootstrap
-  now retries forever, at the same 5-second cadence direct connections
-  already use, so relayed peers reconnect exactly as persistently as
-  directly-connected ones regardless of which order agents happen to
-  start in.
-- **A relayed peer whose "server" side restarted stayed silently
-  unreachable until something external noticed** — the relayed *server*
-  role (the one that waits rather than initiates) has no way to detect a
-  stale session on its own after restarting and losing its in-memory
-  session state, and the relayed *client* had no way to know its
-  still-cached session was now invalid, so every message it sent was
-  silently dropped and it just timed out. The server side now tells the
-  client side to redo the handshake the moment it receives traffic it
-  can't decrypt, so a server-side restart recovers automatically instead
-  of requiring a client restart to fix.
 
 ## [0.32.2] - 2026-06-03
 

@@ -14,6 +14,15 @@ use crate::error::Error;
 pub const KEY_SIZE: usize = 32;
 pub const SALT_SIZE: usize = KEY_SIZE;
 
+/// Argon2 parameters for versioned (v1) password-based secret encryption
+/// (`from_password_with_salt`). Far above orion's minimum (`MIN_MEMORY = 8`
+/// KiB, `MIN_ITERATIONS = 3`): 19 MiB / 3 passes matches the current OWASP
+/// Argon2 floor. Used only for config-at-rest secrets, derived rarely (at
+/// startup and when the operator sets a `secret`), so the cost is never on a
+/// hot path. See docs/specifications/security-review.md (finding F2).
+const SECRET_KDF_MEMORY_KIB: u32 = 19456;
+const SECRET_KDF_ITERATIONS: u32 = 3;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signature {
     sig: orion::auth::Tag,
@@ -62,6 +71,18 @@ pub fn random_bytes(size: usize) -> Result<Vec<u8>, Error> {
     let mut data: Vec<u8> = vec![0; size];
     orion::util::secure_rand_bytes(&mut data).context("Failed to generate random bytes.")?;
     Ok(data)
+}
+
+///
+/// Constant-time equality check for two byte slices, using orion's vetted
+/// `secure_cmp`. Returns `true` iff the slices are equal. Use this instead of
+/// `==` (or a hand-rolled loop) when comparing authentication tags, tokens, or
+/// other secret-derived values, to avoid a timing side-channel. Slices of
+/// differing length compare unequal (the length itself is not treated as
+/// secret).
+///
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    orion::util::secure_cmp(a, b).is_ok()
 }
 
 #[serde_as]
@@ -166,8 +187,48 @@ impl Key {
     }
 
     ///
+    /// Derive a secret key from a password and an explicit salt, using strong
+    /// Argon2 parameters (`SECRET_KDF_*`). This is the derivation used by the
+    /// versioned (v1) config-secret encryption: a fresh random salt is stored
+    /// alongside each ciphertext, so identical passwords no longer produce
+    /// identical keys and the derivation cost is realistic. See
+    /// `ServiceConfig::encrypt`/`decrypt` and
+    /// docs/specifications/security-review.md (finding F2).
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - The password to derive the key from.
+    /// * `salt` - A per-secret random salt (see `SECRET_SALT_SIZE`).
+    ///
+    pub fn from_password_with_salt(password: &str, salt: &[u8]) -> Result<SecretKey, Error> {
+        let salt = kdf::Salt::from_slice(salt)
+            .context("Failed to create a salt from the supplied salt bytes.")?;
+
+        Ok(Box::new(Key {
+            data: kdf::derive_key(
+                &kdf::Password::from_slice(password.as_bytes())
+                    .context("Failed to build a KDF password from the supplied secret")?,
+                &salt,
+                SECRET_KDF_ITERATIONS,
+                SECRET_KDF_MEMORY_KIB,
+                KEY_SIZE as u32,
+            )
+            .context("Failed to derive key from password and salt.")?
+            .unprotected_as_bytes()
+            .to_vec(),
+        })
+        .into())
+    }
+
+    ///
     /// Generate a new secret key from the supplied password - this will
     /// reproducibly generate the same key from the same password.
+    ///
+    /// **Legacy.** This uses a fixed application-defined salt and orion's
+    /// minimum Argon2 cost, so it is deterministic and weak. It is retained
+    /// only to decrypt pre-existing (v0) config secrets; new secrets are
+    /// written with `from_password_with_salt`. See
+    /// docs/specifications/security-review.md (finding F2).
     ///
     /// # Arguments
     ///
@@ -200,8 +261,11 @@ impl Key {
 
         Ok(Box::new(Key {
             data: kdf::derive_key(
+                // Do not interpolate `password` into this context: it is the
+                // secret (the OPENPORTAL_SECRET_KEY value under the Environment
+                // scheme) and would otherwise be leaked into logs/stderr.
                 &kdf::Password::from_slice(password.as_bytes())
-                    .context(format!("Failed to generate a password from {}", password))?,
+                    .context("Failed to build a KDF password from the supplied secret")?,
                 &salt,
                 3,
                 8,
@@ -322,6 +386,19 @@ impl Key {
     /// Sign (authenticate) the passed data with this key.
     /// This will return the signed data as a hex-encoded string.
     ///
+    /// # Key domain separation
+    ///
+    /// `sign`/`verify` (BLAKE2b MAC) and `encrypt`/`decrypt` (XChaCha20-Poly1305
+    /// AEAD) use the key bytes directly, with no domain-separating sub-key
+    /// derivation. This is safe **only because a given `Key` is never used for
+    /// both purposes** in OpenPortal: the AEAD is used for wire messages and
+    /// config-at-rest secrets, and the MAC is used solely for the `op-bridge`
+    /// HTTP request signatures - always distinct keys. If a future caller ever
+    /// needs to use one key for both, it must first derive purpose-specific
+    /// sub-keys (e.g. `derive` with an `"enc"`/`"mac"` `info`) to avoid
+    /// cross-protocol key reuse. See docs/specifications/security-review.md
+    /// (finding F15).
+    ///
     /// Arguments
     ///
     /// * `data` - The data to sign.
@@ -426,6 +503,32 @@ mod tests {
         });
 
         assert_eq!(key.expose_secret().data, key2.expose_secret().data);
+    }
+
+    #[test]
+    fn test_salt_xor_roundtrip() {
+        // The legacy salt masking relies on XOR being self-inverse:
+        // (salt XOR key) XOR key == salt. The server un-masks an old client's
+        // salts this way (finding F15).
+        let key = Key::generate();
+        let salt = Salt::generate().unwrap_or_else(|err| {
+            unreachable!("Failed to generate salt: {}", err);
+        });
+
+        let masked = salt.xor(key.expose_secret());
+        let unmasked = masked.xor(key.expose_secret());
+
+        assert_eq!(salt.to_string(), unmasked.to_string());
+        // Masking actually changes the value (keys are non-null random).
+        assert_ne!(salt.to_string(), masked.to_string());
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"abcdef", b"abcdef"));
+        assert!(!constant_time_eq(b"abcdef", b"abcdeg"));
+        assert!(!constant_time_eq(b"abc", b"abcdef"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]

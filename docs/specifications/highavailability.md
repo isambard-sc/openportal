@@ -206,8 +206,8 @@ of code in isolation.
    `SessionUnknown`.
 6. The relayed client clears its session and re-bootstraps
    (`StartRelayedConnection`); the proxy forwards this to server2; server2
-   completes the bootstrap and a fresh, forward-secret session is
-   established.
+   completes the bootstrap and a fresh session is established (fresh session
+   keys, not forward secrecy - see [security-model.md](security-model.md) §2.5).
 7. Traffic flows again, now via server2, with the client and any upstream
    agent none the wiser about which physical replica is behind "server" -
    see §4.1 for how in-flight jobs are reconciled once this reconnects.

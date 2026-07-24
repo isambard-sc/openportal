@@ -64,8 +64,29 @@ pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
         )
     })?;
 
-    std::fs::write(config_file, config_toml)
+    write_secret_file(config_file, &config_toml)
         .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
+
+    Ok(())
+}
+
+/// Write `contents` to `path`, then (on Unix) restrict the file to owner-only
+/// read/write (mode 0600).
+///
+/// The service config and invite files both contain plaintext pre-shared key
+/// material. Written with a plain `std::fs::write` they land at the process
+/// umask, which is commonly group/world-readable (0644) - leaving long-term
+/// keys readable by any local user. This keeps them owner-only. See
+/// docs/specifications/security-review.md (finding F9).
+pub(crate) fn write_secret_file(path: &path::Path, contents: &str) -> Result<(), Error> {
+    std::fs::write(path, contents).with_context(|| format!("Could not write file: {:?}", path))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Could not restrict permissions on file: {:?}", path))?;
+    }
 
     Ok(())
 }
@@ -715,9 +736,33 @@ impl PeerConfig {
     }
 }
 
+/// Prefix marking a versioned (v1) encrypted secret: strong, salted Argon2
+/// derivation (`Key::from_password_with_salt`). A stored value lacking this
+/// prefix is a legacy (v0) secret - fixed-salt, minimal-Argon2 - which is
+/// still decryptable for backward compatibility but never written any more.
+/// Re-running the `secret` CLI command re-encrypts a value in the v1 format.
+/// See docs/specifications/security-review.md (finding F2).
+const SECRET_V1_PREFIX: &str = "op-secret-v1:";
+
+/// Length (bytes) of the per-secret random salt used by v1 encryption.
+const SECRET_SALT_SIZE: usize = 16;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum EncryptionScheme {
+    /// Derive the at-rest secret-encryption key from the value of a named
+    /// environment variable (read at startup). This is the recommended
+    /// production scheme - its strength is that of the operator-supplied
+    /// secret, combined with the strong salted Argon2 derivation used for
+    /// v1 secrets.
     Environment { key: String },
+    /// Derive the key from the service's own (non-secret) name.
+    ///
+    /// **Not for production.** The service name is not secret - it is stored
+    /// in this same config file, embedded in every issued invite, and printed
+    /// to logs - so anyone who can read the config can re-derive the key. This
+    /// scheme is **obfuscation, not encryption**, intended only for
+    /// development or low-security deployments. Use `Environment` in
+    /// production. See docs/specifications/security-review.md (finding F2).
     Simple {},
     /*Vault {
         url: String,
@@ -732,6 +777,18 @@ pub struct ServiceConfig {
     port: u16,
     heathcheck_port: Option<u16>,
     proxy_header: Option<String>,
+
+    /// IP address(es)/range(s) of reverse proxies whose `proxy_header` (e.g.
+    /// `X-Forwarded-For`) may be trusted to carry the real client address.
+    /// A forwarded client address is only honoured when the actual TCP peer
+    /// matches one of these entries; otherwise the header is ignored and the
+    /// real peer address is used. Without this, `proxy_header` alone would let
+    /// any direct connector spoof an allow-listed IP. Accepts the same
+    /// comma-separated IP/CIDR syntax as a client's `ip` (see `IpOrRange`) -
+    /// e.g. a Cloudflare tunnel daemon on loopback is `"127.0.0.0/8"`. See
+    /// docs/specifications/security-review.md (finding F6).
+    #[serde(default)]
+    trusted_proxy: Option<IpOrRange>,
 
     servers: Vec<ServerConfig>,
     clients: Vec<ClientConfig>,
@@ -773,23 +830,32 @@ impl ServiceConfig {
             port: *port,
             heathcheck_port: *healthcheck_port,
             proxy_header: proxy_header.clone(),
+            trusted_proxy: None,
             servers: Vec::new(),
             clients: Vec::new(),
             encryption: None,
         })
     }
 
-    fn get_key(&self) -> Result<SecretKey, Error> {
+    /// Return the password the configured encryption scheme derives its key
+    /// from. The returned value is a secret (the environment variable's
+    /// contents under `Environment`) and must never be logged or interpolated
+    /// into error messages.
+    fn get_password(&self) -> Result<String, Error> {
         match self.encryption.clone() {
             Some(EncryptionScheme::Environment { key }) => {
-                let key = std::env::var(&key)
+                // `key` is the *name* of the environment variable; the value it
+                // holds is the secret. Only ever interpolate the name into
+                // error contexts - the value would leak the secret to logs.
+                let value = std::env::var(&key)
                     .with_context(|| format!("Could not get environment variable: {}", key))?;
-
-                Ok(Key::from_password(&key).with_context(|| {
-                    format!("Could not parse key from environment variable: {}", key)
-                })?)
+                Ok(value)
             }
-            Some(EncryptionScheme::Simple {}) => Ok(Key::from_password(&self.name)?),
+            Some(EncryptionScheme::Simple {}) => {
+                // The service name is not secret; `Simple` is obfuscation only
+                // (see `EncryptionScheme::Simple`).
+                Ok(self.name.clone())
+            }
             None => Err(Error::Null(
                 "No encryption in use. Please choose a scheme from the options provided."
                     .to_string(),
@@ -809,18 +875,51 @@ impl ServiceConfig {
         Ok(())
     }
 
+    /// Encrypt a secret value for storage in the config (`extras`), using the
+    /// versioned (v1) format: a fresh random salt, a strong salted Argon2
+    /// derivation, then XChaCha20-Poly1305 AEAD. The salt is stored alongside
+    /// the ciphertext (`op-secret-v1:<hex salt>:<hex ciphertext>`). See
+    /// docs/specifications/security-review.md (finding F2).
     pub fn encrypt<T>(&self, data: &T) -> Result<String, Error>
     where
         T: Serialize,
     {
-        self.get_key()?.expose_secret().encrypt(data)
+        let password = self.get_password()?;
+        let salt = crate::crypto::random_bytes(SECRET_SALT_SIZE)?;
+        let key = Key::from_password_with_salt(&password, &salt)?;
+        let ciphertext = key.expose_secret().encrypt(data)?;
+        Ok(format!(
+            "{}{}:{}",
+            SECRET_V1_PREFIX,
+            hex::encode(&salt),
+            ciphertext
+        ))
     }
 
+    /// Decrypt a secret value previously stored by `encrypt`. Values carrying
+    /// the `op-secret-v1:` prefix use the salted strong derivation; any other
+    /// value is treated as a legacy (v0) secret and decrypted with the old
+    /// fixed-salt derivation, so pre-existing config files keep working.
     pub fn decrypt<T>(&self, data: &str) -> Result<T, Error>
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.get_key()?.expose_secret().decrypt::<T>(data)
+        let password = self.get_password()?;
+
+        if let Some(rest) = data.strip_prefix(SECRET_V1_PREFIX) {
+            let (salt_hex, ciphertext) = rest.split_once(':').ok_or_else(|| {
+                Error::Parse(
+                    "Malformed versioned secret: missing salt/ciphertext separator".to_string(),
+                )
+            })?;
+            let salt = hex::decode(salt_hex).with_context(|| "Could not decode secret salt")?;
+            let key = Key::from_password_with_salt(&password, &salt)?;
+            key.expose_secret().decrypt::<T>(ciphertext)
+        } else {
+            // Legacy (v0) secret: fixed-salt, minimal-Argon2 derivation.
+            let key = Key::from_password(&password)?;
+            key.expose_secret().decrypt::<T>(data)
+        }
     }
 
     pub fn clients(&self) -> Vec<ClientConfig> {
@@ -845,6 +944,44 @@ impl ServiceConfig {
 
     pub fn proxy_header(&self) -> Option<String> {
         self.proxy_header.clone()
+    }
+
+    pub fn trusted_proxy(&self) -> Option<IpOrRange> {
+        self.trusted_proxy.clone()
+    }
+
+    /// Set (or clear, with `None`) the trusted-proxy IP/range allow-list. The
+    /// value uses the same comma-separated IP/CIDR syntax as a client's `ip`.
+    pub fn set_trusted_proxy(&mut self, value: Option<&str>) -> Result<(), Error> {
+        self.trusted_proxy = match value {
+            Some(value) => Some(IpOrRange::new(value)?),
+            None => None,
+        };
+        Ok(())
+    }
+
+    /// Whether an inbound TCP connection from `peer_ip` should be allowed to
+    /// even *attempt* authentication. True when the address matches any
+    /// configured client's allow-listed IP, or the `trusted_proxy` allow-list
+    /// (for `proxy_header` deployments, where the real client IP arrives in a
+    /// header after the connection is up and the TCP peer is the proxy).
+    ///
+    /// This is a cheap pre-handshake filter used to fail-fast a connection
+    /// flood before any WebSocket-upgrade or cryptographic work is done, sharply
+    /// reducing the cost an unauthenticated attacker can impose. See
+    /// docs/specifications/security-review.md (finding F11).
+    ///
+    /// Note: relayed clients (whose `ip` is `None`) are reached via the blind
+    /// relay proxy, never via this inbound listener, so their absence from this
+    /// set is correct - they never connect here directly.
+    pub fn may_attempt_connection(&self, peer_ip: &IpAddr) -> bool {
+        if let Some(trusted) = &self.trusted_proxy {
+            if trusted.matches(peer_ip) {
+                return true;
+            }
+        }
+
+        self.clients.iter().any(|client| client.matches(*peer_ip))
     }
 
     ///
@@ -1221,6 +1358,89 @@ impl ServiceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn simple_config() -> ServiceConfig {
+        let mut config = ServiceConfig::new(
+            "test-service",
+            "http://localhost:8000",
+            "127.0.0.1",
+            &8042,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("Could not create config: {:?}", e));
+        config
+            .set_simple_encryption()
+            .unwrap_or_else(|e| unreachable!("Could not set encryption: {:?}", e));
+        config
+    }
+
+    #[test]
+    fn test_secret_encrypt_roundtrip_is_versioned() {
+        let config = simple_config();
+
+        let encrypted = config
+            .encrypt(&"hunter2".to_string())
+            .unwrap_or_else(|e| unreachable!("Could not encrypt: {:?}", e));
+
+        // New secrets are written in the versioned (v1) format with a salt.
+        assert!(encrypted.starts_with(SECRET_V1_PREFIX));
+
+        let decrypted: String = config
+            .decrypt(&encrypted)
+            .unwrap_or_else(|e| unreachable!("Could not decrypt: {:?}", e));
+        assert_eq!(decrypted, "hunter2");
+
+        // A fresh random salt each time -> ciphertext differs for the same input.
+        let encrypted2 = config
+            .encrypt(&"hunter2".to_string())
+            .unwrap_or_else(|e| unreachable!("Could not encrypt: {:?}", e));
+        assert_ne!(encrypted, encrypted2);
+    }
+
+    #[test]
+    fn test_secret_decrypt_reads_legacy_v0() {
+        let config = simple_config();
+
+        // Simulate a value written by the old (v0) code path: legacy
+        // fixed-salt derivation, stored as bare hex with no version prefix.
+        let legacy = Key::from_password("test-service")
+            .unwrap_or_else(|e| unreachable!("Could not derive legacy key: {:?}", e))
+            .expose_secret()
+            .encrypt("legacy-secret".to_string())
+            .unwrap_or_else(|e| unreachable!("Could not encrypt legacy: {:?}", e));
+
+        assert!(!legacy.starts_with(SECRET_V1_PREFIX));
+
+        let decrypted: String = config
+            .decrypt(&legacy)
+            .unwrap_or_else(|e| unreachable!("Could not decrypt legacy: {:?}", e));
+        assert_eq!(decrypted, "legacy-secret");
+    }
+
+    #[test]
+    fn test_may_attempt_connection() {
+        let mut config = simple_config();
+
+        // No clients, no trusted proxy: nothing may connect.
+        assert!(!config.may_attempt_connection(&IpAddr::from([10, 0, 0, 5])));
+
+        // A configured client's IP may connect; other addresses may not.
+        config
+            .add_client("peer", "10.0.0.5", &None)
+            .unwrap_or_else(|e| unreachable!("Could not add client: {:?}", e));
+        assert!(config.may_attempt_connection(&IpAddr::from([10, 0, 0, 5])));
+        assert!(!config.may_attempt_connection(&IpAddr::from([10, 0, 0, 6])));
+
+        // With a trusted proxy set, the proxy's address may also connect (the
+        // real client IP is validated later, from the forwarded header).
+        config
+            .set_trusted_proxy(Some("127.0.0.0/8"))
+            .unwrap_or_else(|e| unreachable!("Could not set trusted proxy: {:?}", e));
+        assert!(config.may_attempt_connection(&IpAddr::from([127, 0, 0, 1])));
+        assert!(config.may_attempt_connection(&IpAddr::from([10, 0, 0, 5])));
+        assert!(!config.may_attempt_connection(&IpAddr::from([192, 168, 1, 1])));
+    }
 
     #[test]
     fn test_ip_or_range() {

@@ -141,6 +141,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             bridge_port,
             healthcheck_port,
             proxy_header,
+            trusted_proxy,
             signal_url,
             notification_url,
             force,
@@ -153,7 +154,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 local_healthcheck_port = defaults.service.healthcheck_port();
             }
 
-            let config = Config {
+            let mut config = Config {
                 service: {
                     ServiceConfig::new(
                         &service.clone().unwrap_or(defaults.service.name()),
@@ -183,6 +184,11 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 ),
                 agent: AgentType::Bridge,
             };
+
+            // Apply the trusted-proxy allow-list to both the agent (paddington,
+            // finding F6) and the bridge HTTP (finding F3) layers.
+            config.service.set_trusted_proxy(trusted_proxy.as_deref())?;
+            config.bridge.set_trusted_proxy(trusted_proxy.as_deref())?;
 
             if config_file.try_exists()? {
                 if *force {
@@ -513,6 +519,15 @@ enum Commands {
             help = "Optional header to use for proxying requests - look in this for the client IP address"
         )]
         proxy_header: Option<String>,
+
+        #[arg(
+            long,
+            help = "IP address(es)/range(s) of trusted reverse proxies whose forwarded client \
+                    IP headers may be trusted (comma-separated, CIDR allowed, e.g. 127.0.0.0/8). \
+                    Applies to both the agent (proxy_header) and bridge HTTP layers. Required for \
+                    any forwarded client IP to be trusted."
+        )]
+        trusted_proxy: Option<String>,
 
         #[arg(
             long,

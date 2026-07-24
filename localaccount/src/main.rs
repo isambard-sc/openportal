@@ -28,15 +28,27 @@ type Job = templemeads::job::Job<Hpc>;
 ///
 /// Main function for the localaccount agent.
 ///
-/// This agent implements the Account agent interface using standard Unix
-/// commands (useradd, groupadd, etc.).  Each command is configurable so
-/// that, for example, commands can be prefixed with "docker exec slurmctld"
-/// to run inside a container without requiring local root access.
+/// **This agent is intended for testing only** (managing accounts in a
+/// containerised test Slurm cluster). It implements the Account agent
+/// interface using standard Unix commands (useradd, groupadd, etc.). Each
+/// command is configurable so that, for example, commands can be prefixed with
+/// "docker exec slurmctld" to run inside a container without requiring local
+/// root access. Use `op-freeipa` for production account management. It is
+/// written to fail safe against real systems all the same - it only removes
+/// accounts/groups it manages (see the `localaccount` module docs and
+/// docs/specifications/security-review.md finding F13).
 ///
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
     templemeads::config::initialise_tracing();
+
+    // op-localaccount is a testing agent - warn loudly on every startup so a
+    // mistaken production deployment is obvious in the logs.
+    tracing::warn!(
+        "op-localaccount is a TESTING agent (for a containerised test Slurm cluster). \
+         Use op-freeipa for production account management."
+    );
 
     // start system monitoring
     templemeads::spawn_system_monitor::<Hpc>();

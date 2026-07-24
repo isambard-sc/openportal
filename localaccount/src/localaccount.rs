@@ -1,6 +1,21 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+//! # op-localaccount — a testing agent
+//!
+//! **This agent is intended for testing only.** It manages Unix accounts and
+//! groups directly with `useradd`/`groupadd`/… (typically `docker exec`'d into
+//! a containerised test Slurm cluster), rather than through a managed directory
+//! service like FreeIPA. Production account management should use `op-freeipa`.
+//!
+//! It is nonetheless written to be safe if it is mistakenly deployed against a
+//! real system: it only ever removes accounts and groups it manages — a user
+//! must be a member of the managed group before it will `userdel` them
+//! (`is_protected_user`), and a group must have a normal (non-system) GID and
+//! not be a configured system/managed group before it will `groupdel` it
+//! (`is_protected_project`). See docs/specifications/security-review.md
+//! (finding F13).
+
 use anyhow::Result;
 use chrono::Utc;
 use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
@@ -189,7 +204,7 @@ async fn ensure_group_exists(
         return Ok(());
     }
 
-    let (gc_exit, _, stderr) = run_command(&cmds.groupadd, &[group_name]).await?;
+    let (gc_exit, _, stderr) = run_command(&cmds.groupadd, &["--", group_name]).await?;
     match gc_exit {
         0 => tracing::info!("Created group: {}", group_name),
         9 => tracing::debug!("Group already exists: {}", group_name),
@@ -256,7 +271,7 @@ async fn sync_groups(
     tracing::info!("Syncing user '{}' into groups: {}", local_user, groups_str);
 
     let (exit_code, _, stderr) =
-        run_command(&cmds.usermod, &["-aG", &groups_str, local_user]).await?;
+        run_command(&cmds.usermod, &["-aG", &groups_str, "--", local_user]).await?;
 
     if exit_code != 0 {
         return Err(Error::Call(format!(
@@ -300,9 +315,25 @@ pub async fn remove_project(
     let group_name = identifier_to_projectid(project);
     let cmds = get_commands()?;
 
+    let mapping =
+        ProjectMapping::new(project, &group_name).map_err(|e| Error::Call(e.to_string()))?;
+
+    // Refuse to delete a group this agent does not manage (finding F13). This
+    // guards against a crafted ProjectIdentifier whose derived group name
+    // collides with a system group (e.g. a project identifier "docker.system"
+    // maps to the bare group name "docker"). See `is_protected_project`.
+    if is_protected_project(project, expires).await? {
+        tracing::warn!(
+            "Ignoring request to remove group '{}' as it is not an OpenPortal-managed \
+             project group",
+            group_name
+        );
+        return Ok(mapping);
+    }
+
     tracing::info!("Removing project group: {}", group_name);
 
-    let (exit_code, _, stderr) = run_command(&cmds.groupdel, &[&group_name]).await?;
+    let (exit_code, _, stderr) = run_command(&cmds.groupdel, &["--", &group_name]).await?;
 
     match exit_code {
         0 => {
@@ -319,7 +350,7 @@ pub async fn remove_project(
         }
     }
 
-    ProjectMapping::new(project, &group_name).map_err(|e| Error::Call(e.to_string()))
+    Ok(mapping)
 }
 
 ///
@@ -359,7 +390,17 @@ pub async fn add_user(
 
     let (exit_code, _, stderr) = run_command(
         &cmds.useradd,
-        &["-d", homedir_str, "-m", "-s", "/bin/bash", &local_user],
+        // `--` ends option parsing so a name can never be read as a flag
+        // (defence-in-depth on top of identifier validation, finding F15).
+        &[
+            "-d",
+            homedir_str,
+            "-m",
+            "-s",
+            "/bin/bash",
+            "--",
+            &local_user,
+        ],
     )
     .await?;
 
@@ -404,9 +445,23 @@ pub async fn remove_user(
     let mapping = UserMapping::new(user, &local_user, &local_group)
         .map_err(|e| Error::Call(e.to_string()))?;
 
+    // Refuse to delete an account this agent does not manage (finding F13).
+    // Mirrors the guard block_user/unblock_user already apply: a managed user
+    // is a member of the managed group; anything else is a pre-existing system
+    // account we must never touch. `is_protected_user` returns false for a
+    // non-existent user, so removal stays idempotent for accounts we did
+    // create but that are already gone.
+    if is_protected_user(user, expires).await? {
+        tracing::warn!(
+            "Ignoring request to remove {} as they are not managed by this agent",
+            local_user
+        );
+        return Ok(mapping);
+    }
+
     tracing::info!("Removing user: {}", local_user);
 
-    let (exit_code, _, stderr) = run_command(&cmds.userdel, &[&local_user]).await?;
+    let (exit_code, _, stderr) = run_command(&cmds.userdel, &["--", &local_user]).await?;
 
     match exit_code {
         0 => {
@@ -441,7 +496,8 @@ pub async fn update_homedir(
 
     tracing::info!("Updating home directory for {}: {}", local_user, homedir);
 
-    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-d", homedir, &local_user]).await?;
+    let (exit_code, _, stderr) =
+        run_command(&cmds.usermod, &["-d", homedir, "--", &local_user]).await?;
 
     if exit_code != 0 {
         return Err(Error::Call(format!(
@@ -738,7 +794,7 @@ pub async fn block_user(
     ensure_group_exists(&blocked_group, expires).await?;
 
     let (exit_code, _, stderr) =
-        run_command(&cmds.usermod, &["-aG", &blocked_group, &local_user]).await?;
+        run_command(&cmds.usermod, &["-aG", &blocked_group, "--", &local_user]).await?;
 
     if exit_code != 0 {
         return Err(Error::Call(format!(
@@ -747,7 +803,7 @@ pub async fn block_user(
         )));
     }
 
-    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-L", &local_user]).await?;
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-L", "--", &local_user]).await?;
 
     if exit_code != 0 {
         return Err(Error::Call(format!(
@@ -803,7 +859,7 @@ pub async fn unblock_user(
         )));
     }
 
-    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-U", &local_user]).await?;
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-U", "--", &local_user]).await?;
 
     if exit_code != 0 {
         return Err(Error::Call(format!(
@@ -815,6 +871,66 @@ pub async fn unblock_user(
     tracing::info!("Unblocked user: {}", local_user);
 
     Ok(mapping)
+}
+
+/// Minimum GID this agent treats as a "normal" (non-system) group. Groups
+/// with a GID below this are OS/system groups (`wheel`, `sudo`, `docker`, …)
+/// created by the distribution, never OpenPortal project groups (which
+/// `groupadd` allocates from the normal range), so this agent must never
+/// remove them regardless of name. 1000 is the usual `GID_MIN` on Linux.
+const MANAGED_GID_MIN: u64 = 1000;
+
+///
+/// Return true if the project's Unix group is "protected" — i.e. it must not
+/// be removed by this agent because it is a system group or a
+/// specially-configured group rather than an OpenPortal-managed project group.
+///
+/// A group is protected if it: has a GID below `MANAGED_GID_MIN` (a system
+/// group); has a GID that cannot be parsed (fail safe); or is the managed
+/// group, the blocked group, or one of the configured system groups. A group
+/// that does not exist is *not* protected (there is nothing to remove, so
+/// removal stays idempotent). This guards against a crafted `ProjectIdentifier`
+/// whose derived group name collides with a real system group — see
+/// docs/specifications/security-review.md (finding F13).
+///
+pub async fn is_protected_project(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let group_name = identifier_to_projectid(project);
+    let cmds = get_commands()?;
+
+    let (exit_code, stdout, _) = run_command(&cmds.getent, &["group", &group_name]).await?;
+
+    if exit_code != 0 {
+        // Group does not exist — nothing to protect (removal is a no-op).
+        return Ok(false);
+    }
+
+    // getent group output: groupname:x:gid:member1,member2,...
+    let line = stdout.trim();
+    match line
+        .split(':')
+        .nth(2)
+        .and_then(|g| g.trim().parse::<u64>().ok())
+    {
+        Some(gid) if gid < MANAGED_GID_MIN => return Ok(true),
+        Some(_) => {}
+        // Could not parse the GID — refuse to remove, to be safe.
+        None => return Ok(true),
+    }
+
+    // Never remove specially-configured groups, even with a normal GID.
+    if group_name == cmds.managed_group
+        || group_name == blocked_group_name(cmds)
+        || cmds.system_groups.iter().any(|g| g == &group_name)
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 ///

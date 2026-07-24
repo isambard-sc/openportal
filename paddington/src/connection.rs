@@ -18,6 +18,7 @@ use std::sync::Mutex as StdMutex;
 use std::vec::Vec;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::RwLock as TokioRwLock;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
@@ -361,9 +362,23 @@ where
         return Err(Error::Incompatible("Message too short to de-envelop".to_string()).into());
     }
 
+    // Slice with `str::get` rather than `&message[..]`: the byte offsets
+    // below (64, 128) land mid-way through a multi-byte UTF-8 character if an
+    // attacker crafts a text frame with one straddling those positions, and
+    // direct `str` byte-indexing panics on a non-char-boundary. `get` returns
+    // `None` instead, which we turn into a clean de-envelope error. A
+    // legitimate frame is always pure ASCII hex, so this never rejects real
+    // traffic.
+    let too_short = || Error::Incompatible("Message too short to de-envelop".to_string());
+
     // the hex-encoded string is 2 times the number of bytes
-    let inner_info = hex::decode(&message[0..(2 * KEY_SIZE)])?;
-    let outer_info = hex::decode(&message[(2 * KEY_SIZE)..(4 * KEY_SIZE)])?;
+    let inner_info = hex::decode(message.get(0..(2 * KEY_SIZE)).ok_or_else(too_short)?)?;
+    let outer_info = hex::decode(
+        message
+            .get((2 * KEY_SIZE)..(4 * KEY_SIZE))
+            .ok_or_else(too_short)?,
+    )?;
+    let ciphertext = message.get((4 * KEY_SIZE)..).ok_or_else(too_short)?;
 
     let inner_key = inner_key
         .expose_secret()
@@ -373,11 +388,9 @@ where
         .expose_secret()
         .derive(outer_key_salt, Some(&outer_info))?;
 
-    Ok(inner_key.expose_secret().decrypt::<T>(
-        &outer_key
-            .expose_secret()
-            .decrypt::<String>(&message[(4 * KEY_SIZE)..])?,
-    )?)
+    Ok(inner_key
+        .expose_secret()
+        .decrypt::<T>(&outer_key.expose_secret().decrypt::<String>(ciphertext)?)?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,33 +651,38 @@ impl Connection {
 
         tracing::info!("Connecting to WebSocket at: {} - initiating handshake", url);
 
-        // add the salts to the headers, xor'd with the server's keys
-        // (just to keep them more secret)
+        // Send the HKDF salts in the clear. HKDF salts are public by design, so
+        // there is no need to hide them - and message security does not rely on
+        // salt secrecy (a fresh random per-message `info` is mixed into every
+        // derivation regardless, see §3.3). We advertise this "plain" format
+        // with an explicit header; a server reading it knows not to un-XOR (an
+        // old server, lacking this negotiation, would instead un-XOR and fail,
+        // so upgrade listening/server sides before initiating/client sides). See
+        // docs/specifications/security-review.md (finding F15).
         let mut request = url
             .clone()
             .into_client_request()
             .with_context(|| format!("Error creating client request for WebSocket at: {}", url))?;
 
         request.headers_mut().insert(
-            "openportal-inner-salt",
-            inner_key_salt
-                .xor(server.outer_key().expose_secret())
-                .to_string()
+            "openportal-salt-format",
+            "plain"
                 .parse()
-                .with_context(|| {
-                    format!("Error parsing inner key salt for WebSocket at: {}", url)
-                })?,
+                .with_context(|| format!("Error setting salt format for WebSocket at: {}", url))?,
+        );
+
+        request.headers_mut().insert(
+            "openportal-inner-salt",
+            inner_key_salt.to_string().parse().with_context(|| {
+                format!("Error parsing inner key salt for WebSocket at: {}", url)
+            })?,
         );
 
         request.headers_mut().insert(
             "openportal-outer-salt",
-            outer_key_salt
-                .xor(server.inner_key().expose_secret())
-                .to_string()
-                .parse()
-                .with_context(|| {
-                    format!("Error parsing outer key salt for WebSocket at: {}", url)
-                })?,
+            outer_key_salt.to_string().parse().with_context(|| {
+                format!("Error parsing outer key salt for WebSocket at: {}", url)
+            })?,
         );
 
         let socket = match connect_async(request).await {
@@ -765,6 +783,16 @@ impl Connection {
         }
 
         let inner_key = handshake.session_key.clone();
+
+        // Reject a null (all-zero) session key from the peer (finding F15).
+        // Only the peer could send this, and it would weaken the session, so
+        // refuse rather than proceed with a degenerate key.
+        if inner_key.expose_secret().is_null() {
+            tracing::warn!("Rejected null session key from server - closing connection.");
+            return Err(Error::InvalidPeer(
+                "Peer sent a null session key - closing connection.".to_string(),
+            ));
+        }
 
         // the final step is for the client to send the server its PeerDetails,
         // and for the server to respond. These should match up with
@@ -1138,7 +1166,17 @@ impl Connection {
     /// loop to handle the sending and receiving of messages.
     ///
     #[allow(clippy::result_large_err)]
-    pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
+    pub async fn handle_connection(
+        &mut self,
+        stream: TcpStream,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(), Error> {
+        // Hold the unauthenticated-connection slot (finding F11) until this peer
+        // authenticates. Kept in an `Option` so it can be released explicitly
+        // at that point; if the handshake fails first, it is released when this
+        // function returns and `permit` is dropped.
+        let mut permit = Some(permit);
+
         // Reject new connections during soft restart
         if crate::exchange::is_soft_restart_in_progress() {
             tracing::warn!("Rejecting new connection - soft restart in progress");
@@ -1183,6 +1221,16 @@ impl Connection {
         let mut inner_key_salt: String = String::new();
         let mut outer_key_salt: String = String::new();
 
+        // Whether the client sent its salts in the clear (new format) or
+        // XOR-masked with the pre-shared keys (legacy). The client advertises
+        // the plain format with the `openportal-salt-format: plain` header; an
+        // old client omits it, so we default to the legacy un-masking. The
+        // client initiates and cannot negotiate before this first message, so
+        // it commits to one encoding - detecting it here per-connection is what
+        // lets an upgraded server keep talking to not-yet-upgraded clients. See
+        // docs/specifications/security-review.md (finding F15).
+        let mut client_salt_is_plain = false;
+
         let process_headers = |request: &HandshakeRequest,
                                response: HandshakeResponse|
          -> Result<HandshakeResponse, HandshakeErrorResponse> {
@@ -1195,6 +1243,13 @@ impl Connection {
                     proxy_client = Some(value.to_string());
                 }
             }
+
+            client_salt_is_plain = request
+                .headers()
+                .get("openportal-salt-format")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.eq_ignore_ascii_case("plain"))
+                .unwrap_or(false);
 
             inner_key_salt = request
                 .headers()
@@ -1230,11 +1285,44 @@ impl Connection {
             .parse()
             .with_context(|| "Error parsing outer key salt")?;
 
+        // `client_ip` is currently the real TCP peer address. A proxy-supplied
+        // client address (from `proxy_header`) is only honoured when that peer
+        // is a configured trusted proxy; otherwise the header is ignored and
+        // the real peer address is kept. This closes the X-Forwarded-For-style
+        // spoofing of the IP allow-list described in
+        // docs/specifications/security-review.md (finding F6). Fails closed: if
+        // `proxy_header` is set but no `trusted_proxy` is configured, forwarded
+        // addresses are never trusted.
         if let Some(proxy_client) = proxy_client {
-            tracing::info!("Proxy client: {:?}", proxy_client);
-            client_ip = proxy_client
-                .parse()
-                .with_context(|| "Error parsing proxy client address")?;
+            let peer_ip = client_ip;
+            match self.config.trusted_proxy() {
+                Some(trusted) if trusted.matches(&peer_ip) => {
+                    let forwarded: std::net::IpAddr = proxy_client
+                        .parse()
+                        .with_context(|| "Error parsing proxy client address")?;
+                    tracing::info!(
+                        "Trusted proxy {} supplied client address {}",
+                        peer_ip,
+                        forwarded
+                    );
+                    client_ip = forwarded;
+                }
+                Some(_) => {
+                    tracing::warn!(
+                        "Ignoring proxy header from {}: it is not a configured trusted proxy. \
+                         Set `trusted_proxy` to the proxy's address/range to honour it.",
+                        peer_ip
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        "Ignoring proxy header from {}: `proxy_header` is set but no \
+                         `trusted_proxy` is configured, so a forwarded client address cannot \
+                         be trusted. Set `trusted_proxy` to the proxy's address/range.",
+                        peer_ip
+                    );
+                }
+            }
         }
 
         // this doesn't need to be mutable any more
@@ -1288,12 +1376,25 @@ impl Connection {
                 // but then we would lose tracing messages - these are very helpful
                 // to debug issues
 
+                // Un-mask the salts unless the client advertised the plain
+                // format (finding F15). Legacy clients XOR the salts with the
+                // pre-shared keys; the un-masking key is the client's own key,
+                // which is why this is done per candidate client here.
+                let (eff_inner_salt, eff_outer_salt) = if client_salt_is_plain {
+                    (inner_key_salt.clone(), outer_key_salt.clone())
+                } else {
+                    (
+                        inner_key_salt.xor(client.outer_key().expose_secret()),
+                        outer_key_salt.xor(client.inner_key().expose_secret()),
+                    )
+                };
+
                 match deenvelope_message::<Handshake>(
                     message.clone(),
                     &client.inner_key(),
                     &client.outer_key(),
-                    &inner_key_salt.xor(client.outer_key().expose_secret()),
-                    &outer_key_salt.xor(client.inner_key().expose_secret()),
+                    &eff_inner_salt,
+                    &eff_outer_salt,
                 ) {
                     Ok(_) => {
                         tracing::info!(
@@ -1347,8 +1448,17 @@ impl Connection {
         );
 
         // we have found the right client to xor the salts
-        let inner_key_salt = inner_key_salt.xor(peer.outer_key().expose_secret());
-        let outer_key_salt = outer_key_salt.xor(peer.inner_key().expose_secret());
+        // Un-mask the selected peer's salts (unless plain - see the filter above).
+        let inner_key_salt = if client_salt_is_plain {
+            inner_key_salt
+        } else {
+            inner_key_salt.xor(peer.outer_key().expose_secret())
+        };
+        let outer_key_salt = if client_salt_is_plain {
+            outer_key_salt
+        } else {
+            outer_key_salt.xor(peer.inner_key().expose_secret())
+        };
 
         // the peer has sent us the new session outer key that should be used,
         // wrapped in the client/server inner and outer keys
@@ -1374,6 +1484,15 @@ impl Connection {
         }
 
         let outer_key = handshake.session_key.clone();
+
+        // Reject a null (all-zero) session key from the peer (finding F15) -
+        // see the matching check on the client side.
+        if outer_key.expose_secret().is_null() {
+            tracing::warn!("Rejected null session key from client - closing connection.");
+            return Err(Error::InvalidPeer(
+                "Peer sent a null session key - closing connection.".to_string(),
+            ));
+        }
 
         let peer_engine = handshake.engine;
         let peer_version = handshake.version;
@@ -1473,6 +1592,12 @@ impl Connection {
                 "Peer version does not match expected version - closing connection.".to_string(),
             ));
         }
+
+        // Peer is now fully authenticated (key possession + name + zone +
+        // version). Release the unauthenticated-connection slot so long-lived
+        // authenticated peers never occupy the pool (finding F11); any
+        // remaining work below runs on behalf of a trusted peer.
+        drop(permit.take());
 
         // now we know that the peer is valid, check to see if either we or the
         // peer are 'standby' (secondary), and so would need to wait until

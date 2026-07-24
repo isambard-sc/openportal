@@ -156,6 +156,28 @@ pub async fn clean_and_check_permissions(permissions: &str) -> Result<u32, Error
 pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<PathBuf, Error> {
     let mut path = path.to_owned();
 
+    // Reject relative paths and any '..' components up front (finding F15), so
+    // that neither the sensitive-location check below nor the eventual mkdir can
+    // be steered out of the intended tree by traversal - even when
+    // `check_exists` is false and no canonicalisation runs. Configured volume
+    // paths are always absolute, so this never rejects a legitimate path.
+    if !path.is_absolute() {
+        return Err(Error::State(format!(
+            "The path '{}' is not absolute.",
+            path.to_string_lossy()
+        )));
+    }
+
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(Error::State(format!(
+            "The path '{}' contains a '..' component.",
+            path.to_string_lossy()
+        )));
+    }
+
     // convert into a path
     if check_exists {
         path = path

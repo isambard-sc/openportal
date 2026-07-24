@@ -17,6 +17,59 @@ use ts_rs::TS;
 use url::Url;
 use wildmatch::WildMatch;
 
+/// Maximum length of any single identifier component (username, project, or
+/// portal). Generous enough for any real portal/project/user name while
+/// bounding the size of everything derived from it downstream (Unix account
+/// and group names, filesystem path components, Slurm account names, FreeIPA
+/// cn/uid values).
+const MAX_IDENTIFIER_COMPONENT_LEN: usize = 64;
+
+/// Validate a single identifier component against a strict allow-list.
+///
+/// Identifier components flow, unescaped, into privileged operations: Unix
+/// `useradd`/`groupadd` operands, filesystem paths, Slurm account names,
+/// FreeIPA RPC parameters, and (for `op-cloudaccount`) state-file names.
+/// Restricting them to `[A-Za-z0-9_-]`, forbidding a leading `-`, and capping
+/// the length closes argument-injection (a leading-dash name read as a flag by
+/// a spawned tool), path-traversal (a `/` or `.` in a name), and
+/// resource-exhaustion vectors at the point identifiers enter the system. See
+/// `docs/specifications/security-review.md` (finding F5).
+fn validate_identifier_component(value: &str, field: &str, identifier: &str) -> Result<(), Error> {
+    if value.is_empty() {
+        return Err(Error::Parse(format!(
+            "Invalid identifier - {} cannot be empty '{}'",
+            field, identifier
+        )));
+    }
+
+    if value.len() > MAX_IDENTIFIER_COMPONENT_LEN {
+        return Err(Error::Parse(format!(
+            "Invalid identifier - {} is longer than {} characters '{}'",
+            field, MAX_IDENTIFIER_COMPONENT_LEN, identifier
+        )));
+    }
+
+    if value.starts_with('-') {
+        return Err(Error::Parse(format!(
+            "Invalid identifier - {} cannot start with '-' '{}'",
+            field, identifier
+        )));
+    }
+
+    if let Some(bad) = value
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-'))
+    {
+        return Err(Error::Parse(format!(
+            "Invalid identifier - {} contains an illegal character '{}' \
+             (allowed: A-Z, a-z, 0-9, '_', '-') '{}'",
+            field, bad, identifier
+        )));
+    }
+
+    Ok(())
+}
+
 ///
 /// A project identifier - this is a double of project.portal
 ///
@@ -46,19 +99,8 @@ impl ProjectIdentifier {
         let project = parts[0].trim();
         let portal = parts[1].trim();
 
-        if project.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid ProjectIdentifier - project cannot be empty '{}'",
-                identifier
-            )));
-        };
-
-        if portal.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid ProjectIdentifier - portal cannot be empty '{}'",
-                identifier
-            )));
-        };
+        validate_identifier_component(project, "project", identifier)?;
+        validate_identifier_component(portal, "portal", identifier)?;
 
         Ok(Self {
             project: project.to_string(),
@@ -144,26 +186,9 @@ impl UserIdentifier {
         let project = parts[1].trim();
         let portal = parts[2].trim();
 
-        if username.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid UserIdentifier - username cannot be empty '{}'",
-                identifier
-            )));
-        };
-
-        if project.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid UserIdentifier - project cannot be empty '{}'",
-                identifier
-            )));
-        };
-
-        if portal.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid UserIdentifier - portal cannot be empty '{}'",
-                identifier
-            )));
-        };
+        validate_identifier_component(username, "username", identifier)?;
+        validate_identifier_component(project, "project", identifier)?;
+        validate_identifier_component(portal, "portal", identifier)?;
 
         Ok(Self {
             username: username.to_string(),
@@ -252,8 +277,9 @@ impl ProjectMapping {
 
         if local_group.starts_with(".")
             || local_group.ends_with(".")
-            || local_group.starts_with("/")
-            || local_group.ends_with("/")
+            || local_group.contains('/')
+            || local_group.starts_with('-')
+            || local_group.chars().any(|c| c.is_control())
         {
             return Err(Error::Parse(format!(
                 "Invalid ProjectMapping - local group contains invalid characters '{}'",
@@ -357,8 +383,9 @@ impl UserMapping {
 
         if local_user.starts_with(".")
             || local_user.ends_with(".")
-            || local_user.starts_with("/")
-            || local_user.ends_with("/")
+            || local_user.contains('/')
+            || local_user.starts_with('-')
+            || local_user.chars().any(|c| c.is_control())
         {
             return Err(Error::Parse(format!(
                 "Invalid UserMapping - local_user account contains invalid characters '{}'",
@@ -375,8 +402,9 @@ impl UserMapping {
 
         if local_group.starts_with(".")
             || local_group.ends_with(".")
-            || local_group.starts_with("/")
-            || local_group.ends_with("/")
+            || local_group.contains('/')
+            || local_group.starts_with('-')
+            || local_group.chars().any(|c| c.is_control())
         {
             return Err(Error::Parse(format!(
                 "Invalid UserMapping - local_group contains invalid characters '{}'",
@@ -4884,6 +4912,56 @@ mod tests {
             mapping.to_string(),
             "user.project.portal:local_user:local_group"
         );
+    }
+
+    #[test]
+    fn test_identifier_validation_rejects_dangerous_characters() {
+        // Legitimate identifiers still parse.
+        assert!(UserIdentifier::parse("user.project.portal").is_ok());
+        assert!(UserIdentifier::parse("a-b_c.proj-1.brics").is_ok());
+        assert!(ProjectIdentifier::parse("project.portal").is_ok());
+
+        // Path separators (traversal / absolute-path escape) are rejected.
+        assert!(ProjectIdentifier::parse("/etc/cron.portal").is_err());
+        assert!(UserIdentifier::parse("us/er.project.portal").is_err());
+
+        // A leading '-' (argument injection into spawned tools) is rejected.
+        assert!(UserIdentifier::parse("-rf.project.portal").is_err());
+        assert!(ProjectIdentifier::parse("project.-g").is_err());
+
+        // Shell/quoting metacharacters and whitespace are rejected.
+        for bad in [
+            "a;b.project.portal",
+            "a b.project.portal",
+            "a$b.project.portal",
+            "a\tb.project.portal",
+        ] {
+            assert!(UserIdentifier::parse(bad).is_err(), "should reject {bad:?}");
+        }
+
+        // Over-length components are rejected; exactly at the limit is fine.
+        let at_limit = "a".repeat(MAX_IDENTIFIER_COMPONENT_LEN);
+        let over_limit = "a".repeat(MAX_IDENTIFIER_COMPONENT_LEN + 1);
+        assert!(ProjectIdentifier::parse(&format!("{at_limit}.portal")).is_ok());
+        assert!(ProjectIdentifier::parse(&format!("{over_limit}.portal")).is_err());
+    }
+
+    #[test]
+    fn test_mapping_validation_rejects_dangerous_local_names() {
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let project = ProjectIdentifier::parse("project.portal").unwrap();
+
+        // A '.'-containing local group is still allowed (cloudaccount reuses
+        // "project.portal" as a placeholder group).
+        assert!(ProjectMapping::new(&project, "project.portal").is_ok());
+
+        // Path separators and leading dashes in local names are rejected.
+        assert!(UserMapping::new(&user, "-rf", "local_group").is_err());
+        assert!(UserMapping::new(&user, "local_user", "grp/../x").is_err());
+        assert!(ProjectMapping::new(&project, "-g").is_err());
+        assert!(ProjectMapping::new(&project, "a/b").is_err());
     }
 
     #[test]

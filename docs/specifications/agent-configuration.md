@@ -28,6 +28,7 @@ port     = <listen-port>
 # Optional
 heathcheck_port = <port>
 proxy_header    = "<header-name>"
+trusted_proxy   = "<ip-or-cidr-list>"
 agent           = "<AgentType>"
 
 # Optional config file encryption at rest
@@ -45,7 +46,8 @@ key  = "ENV_VAR_NAME"
 | `ip` | string | IP address to bind the WebSocket listener to. A single IPv4 or IPv6 address (not a range or list - see the note below). |
 | `port` | integer | Port to bind the WebSocket listener to. |
 | `heathcheck_port` | integer (optional) | If set, a minimal HTTP health endpoint is exposed on this port (responds `200 OK` to `GET /`). |
-| `proxy_header` | string (optional) | HTTP header to read the real client IP from when behind a reverse proxy (e.g. `X-Forwarded-For`). |
+| `proxy_header` | string (optional) | HTTP header to read the real client IP from when behind a reverse proxy (e.g. `X-Forwarded-For`). Only honoured together with `trusted_proxy` (see below). |
+| `trusted_proxy` | string (optional) | IP address(es)/range(s) of reverse proxies whose `proxy_header` may be trusted - same comma-separated IP/CIDR syntax as a client's `ip`. A forwarded client address is honoured **only** when the real TCP peer matches this list; otherwise the header is ignored (fail-closed). Required for `proxy_header` to have any effect. For a Cloudflare tunnel or in-cluster ingress on loopback, use e.g. `"127.0.0.0/8"`. See [security-review.md](security-review.md) F3/F6. |
 | `agent` | string | Agent type tag stored in the config. Set automatically by `init`. |
 | `encryption` | table (optional) | Encryption scheme for secrets stored in the config file. See [security-model.md](security-model.md) §5. |
 
@@ -129,7 +131,8 @@ Create and write a new configuration file.
 
 ```
 <agent> init [--service <name>] [--url <url>] [--ip <ip>] [--port <port>]
-             [--healthcheck-port <port>] [--proxy-header <header>] [--force]
+             [--healthcheck-port <port>] [--proxy-header <header>]
+             [--trusted-proxy <ip-or-cidr-list>] [--force]
 ```
 
 | Flag | Description |
@@ -140,6 +143,7 @@ Create and write a new configuration file.
 | `--port` | Listen port |
 | `--healthcheck-port` | Optional health check port |
 | `--proxy-header` | Optional reverse proxy client-IP header |
+| `--trusted-proxy` | IP/range(s) of trusted reverse proxies whose `--proxy-header` may be believed (required for it to have any effect). For the bridge, also gates the HTTP layer's forwarded-IP trust. See [security-review.md](security-review.md) F3/F6. |
 | `--force` | Overwrite existing config file |
 
 ### `client`
@@ -189,14 +193,25 @@ known `servers` entry here too).
 
 ### `encryption`
 
-Set config file encryption for secrets stored in the `extras` map.
+Set config file encryption for secrets stored in the `extras` map (e.g. a
+FreeIPA bind password or Slurm token added with `secret`).
 
 ```
 <agent> encryption --simple
 <agent> encryption --environment <ENV_VAR_NAME>
 ```
 
-See [security-model.md](security-model.md) §5 for details.
+- `--environment` (**recommended for production**): derives the encryption key
+  from the value of the named environment variable, via a strong salted Argon2
+  derivation. Its strength is that of the operator-supplied secret.
+- `--simple`: derives the key from the agent's own (non-secret) name. This is
+  **obfuscation, not encryption** - anyone who can read the config file can
+  re-derive the key - and is intended only for development/low-security use.
+
+Secrets are written in a versioned format; re-running `secret` after upgrading
+re-encrypts a value with the current (strong) scheme. See
+[security-model.md](security-model.md) §5 and
+[security-review.md](security-review.md) F2 for details.
 
 ### `extra`
 
@@ -415,6 +430,16 @@ op-freeipa secret --key freeipa-password --value 'secret'
 ---
 
 ### 3.6.1 Local Account (`op-localaccount`)
+
+> **⚠️ Testing agent only.** `op-localaccount` is intended for **testing** —
+> specifically for managing accounts in a containerised test Slurm cluster. Use
+> `op-freeipa` for production account management. The agent logs a warning on
+> every startup to make a mistaken production deployment obvious. It is
+> nonetheless written to fail safe against a real system: it only removes
+> accounts and groups it manages — a user must be in the managed group before it
+> is deleted, and a group must have a normal (non-system) GID and not be a
+> configured system/managed group before it is deleted (see
+> [security-review.md](security-review.md) F13).
 
 The local account agent manages user and project accounts using standard Unix
 commands (`useradd`, `groupadd`, etc.). It implements the same Account agent

@@ -18,19 +18,26 @@ use crate::portal_identifier::PortalIdentifier;
 use anyhow::{Context, Result};
 use axum::{
     body::Bytes,
-    extract::{Json, State},
+    extract::{ConnectInfo, Json, Request, State},
     http::header::HeaderMap,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use chrono::{DateTime, Duration, Utc};
+use paddington::config::IpOrRange;
 use paddington::{Key, SecretKey};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, net::IpAddr, path, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    path,
+    sync::Arc,
+};
 use tokio::{net::TcpListener, sync::Mutex};
 use url::Url;
 use uuid::Uuid;
@@ -95,6 +102,15 @@ pub struct Config {
     pub key: SecretKey,
     pub signal_url: Option<Url>,
     pub notification_url: Option<Url>,
+    /// IP address(es)/range(s) of reverse proxies whose forwarded client-IP
+    /// headers (`X-Forwarded-For`/`X-Real-IP`) may be trusted. A forwarded
+    /// address is only honoured when the actual TCP peer matches one of these
+    /// entries; otherwise the real peer address is used. Same comma-separated
+    /// IP/CIDR syntax as elsewhere (e.g. `"127.0.0.0/8"` for a Cloudflare
+    /// tunnel or in-cluster ingress on loopback). See
+    /// docs/specifications/security-review.md (finding F3).
+    #[serde(default)]
+    pub trusted_proxy: Option<IpOrRange>,
 }
 
 fn create_webserver_url(url: &str) -> Result<Url, Error> {
@@ -173,7 +189,19 @@ impl Config {
                 );
                 None
             }),
+            trusted_proxy: None,
         }
+    }
+
+    /// Set (or clear, with `None`) the trusted-proxy IP/range allow-list used
+    /// to decide whether a forwarded client-IP header may be believed. Uses the
+    /// same comma-separated IP/CIDR syntax as an agent's `ip`.
+    pub fn set_trusted_proxy(&mut self, value: Option<&str>) -> Result<(), Error> {
+        self.trusted_proxy = match value {
+            Some(value) => Some(IpOrRange::new(value)?),
+            None => None,
+        };
+        Ok(())
     }
 }
 
@@ -281,34 +309,97 @@ pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
 }
 
 ///
-/// Extract client IP from headers (X-Forwarded-For or X-Real-IP), with fallback
-///
-fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
-    // Try X-Forwarded-For first
+/// Internal header into which `resolve_client_ip_middleware` writes the
+/// authoritative client IP for `extract_client_ip` to read. The middleware
+/// always strips any inbound copy first, so a client cannot set it itself.
+/// This is not part of the public API and clients must not send it.
+const RESOLVED_CLIENT_IP_HEADER: &str = "x-openportal-client-ip";
+
+/// How long a nonce is remembered for replay detection.
+const NONCE_TTL_SECONDS: i64 = 30;
+
+/// Hard cap on the number of nonces tracked at once. Nonces are only recorded
+/// for requests that have already passed signature verification (see
+/// `verify_headers`) and expire after `NONCE_TTL_SECONDS`, so this is a
+/// defence-in-depth backstop that should never be reached in normal operation.
+/// See docs/specifications/security-review.md (finding F11).
+const MAX_NONCE_ENTRIES: usize = 100_000;
+
+/// Parse a forwarded client IP from `X-Forwarded-For` (first entry) or
+/// `X-Real-IP`. Only consulted for a request whose TCP peer is a configured
+/// trusted proxy - never trusted on its own (finding F3).
+fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
     if let Some(forwarded) = headers.get("X-Forwarded-For") {
         if let Ok(forwarded_str) = forwarded.to_str() {
             if let Some(first_ip) = forwarded_str.split(',').next() {
                 if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
-                    return ip;
+                    return Some(ip);
                 }
             }
         }
     }
 
-    // Try X-Real-IP
     if let Some(real_ip) = headers.get("X-Real-IP") {
         if let Ok(ip_str) = real_ip.to_str() {
             if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                return ip;
+                return Some(ip);
             }
         }
     }
 
-    // Fallback to localhost (not ideal, but safe default)
-    "127.0.0.1".parse::<IpAddr>().unwrap_or_else(|_| {
-        // This should never fail, but handle it anyway
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
-    })
+    None
+}
+
+/// Middleware that determines the real client IP and stamps it into
+/// `RESOLVED_CLIENT_IP_HEADER`.
+///
+/// The TCP peer address (`ConnectInfo`) is authoritative unless that peer is a
+/// configured trusted proxy, in which case the forwarded client IP is honoured.
+/// Any client-supplied copy of the header is removed first, so the value
+/// `extract_client_ip` later reads cannot be spoofed. This is what lets rate
+/// limiting (and any other IP decision) key on a real, non-forgeable address -
+/// see docs/specifications/security-review.md (finding F3).
+async fn resolve_client_ip_middleware(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let peer_ip = peer.ip();
+
+    let peer_is_trusted = state
+        .config
+        .trusted_proxy
+        .as_ref()
+        .map(|trusted| trusted.matches(&peer_ip))
+        .unwrap_or(false);
+
+    let client_ip = if peer_is_trusted {
+        forwarded_ip(request.headers()).unwrap_or(peer_ip)
+    } else {
+        peer_ip
+    };
+
+    // Never let a client set the resolved-IP header itself.
+    request.headers_mut().remove(RESOLVED_CLIENT_IP_HEADER);
+    if let Ok(value) = HeaderValue::from_str(&client_ip.to_string()) {
+        request
+            .headers_mut()
+            .insert(RESOLVED_CLIENT_IP_HEADER, value);
+    }
+
+    next.run(request).await
+}
+
+/// Read the client IP resolved by `resolve_client_ip_middleware`. Never reads
+/// `X-Forwarded-For`/`X-Real-IP` directly - those are only consulted, and only
+/// when trusted, by the middleware above.
+fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
+    headers
+        .get(RESOLVED_CLIENT_IP_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
 
 ///
@@ -393,29 +484,11 @@ async fn verify_headers(
         ));
     }
 
-    // Check nonce for replay attack prevention
-    if let Some(ref nonce_value) = nonce {
-        let mut nonce_store = state.nonce_store.lock().await;
-
-        // Check if nonce has been used before
-        if let Some(last_used) = nonce_store.get(nonce_value) {
-            // If nonce was used recently, reject as replay attack
-            if now - *last_used < Duration::seconds(30) {
-                tracing::warn!("Replay attack detected: nonce {} already used", nonce_value);
-                return Err(AppError(
-                    anyhow::anyhow!("Nonce has already been used (replay attack)"),
-                    Some(StatusCode::UNAUTHORIZED),
-                ));
-            }
-        }
-
-        // Store nonce with current timestamp
-        nonce_store.insert(nonce_value.clone(), now);
-
-        // Clean up old nonces (older than 30 seconds)
-        let cutoff = now - Duration::seconds(30);
-        nonce_store.retain(|_, timestamp| *timestamp > cutoff);
-    }
+    // Verify the request signature BEFORE touching any replay/nonce state.
+    // The nonce store must only ever be read or grown by an authenticated
+    // caller, otherwise an unauthenticated flood of distinct nonces could grow
+    // it without bound or probe it (finding F11). The nonce is part of the
+    // signed material, so verifying the signature also binds the nonce.
 
     // Generate the expected signature from the raw body bytes
     let expected_key = sign_api_call(
@@ -427,24 +500,10 @@ async fn verify_headers(
         nonce.as_deref(),
     )?;
 
-    // Use constant-time comparison to prevent timing attacks
-    let key_bytes = key.as_bytes();
-    let expected_bytes = expected_key.as_bytes();
-
-    // Constant-time comparison: always compare all bytes
-    let mut matches = key_bytes.len() == expected_bytes.len();
-    let compare_len = key_bytes.len().min(expected_bytes.len());
-
-    for i in 0..compare_len {
-        matches &= key_bytes[i] == expected_bytes[i];
-    }
-
-    // If lengths differ, still compare something to maintain constant time
-    if key_bytes.len() != expected_bytes.len() {
-        for i in compare_len..key_bytes.len().max(expected_bytes.len()) {
-            let _ = i; // Ensure compiler doesn't optimize this away
-        }
-    }
+    // Compare the provided and expected authorization headers in constant time,
+    // using orion's vetted `secure_cmp` rather than a hand-rolled loop
+    // (finding F15).
+    let matches = paddington::constant_time_eq(key.as_bytes(), expected_key.as_bytes());
 
     if !matches {
         tracing::error!("API key is invalid");
@@ -455,6 +514,44 @@ async fn verify_headers(
             anyhow::anyhow!("API key is invalid!"),
             Some(StatusCode::UNAUTHORIZED),
         ));
+    }
+
+    // The request is now authenticated. Only now record the nonce for replay
+    // prevention, so unauthenticated requests never reach this state (F11).
+    if let Some(ref nonce_value) = nonce {
+        let mut nonce_store = state.nonce_store.lock().await;
+
+        // Purge expired nonces first so the check and the size cap below both
+        // work against current state.
+        let cutoff = now - Duration::seconds(NONCE_TTL_SECONDS);
+        nonce_store.retain(|_, timestamp| *timestamp > cutoff);
+
+        // Reject a nonce we have seen within the TTL window (replay).
+        if let Some(last_used) = nonce_store.get(nonce_value) {
+            if now - *last_used < Duration::seconds(NONCE_TTL_SECONDS) {
+                tracing::warn!("Replay attack detected: nonce {} already used", nonce_value);
+                return Err(AppError(
+                    anyhow::anyhow!("Nonce has already been used (replay attack)"),
+                    Some(StatusCode::UNAUTHORIZED),
+                ));
+            }
+        }
+
+        // Defence-in-depth: never let the store grow without bound, even under
+        // a flood of authenticated requests.
+        if nonce_store.len() >= MAX_NONCE_ENTRIES && !nonce_store.contains_key(nonce_value) {
+            tracing::error!(
+                "Nonce store is full ({} entries) - rejecting request",
+                nonce_store.len()
+            );
+            return Err(AppError(
+                anyhow::anyhow!("Server nonce store is full; please retry shortly"),
+                Some(StatusCode::SERVICE_UNAVAILABLE),
+            ));
+        }
+
+        // Store nonce with current timestamp
+        nonce_store.insert(nonce_value.clone(), now);
     }
 
     Ok(())
@@ -1138,8 +1235,14 @@ async fn remove_offerings<L: Domain>(
 ///
 /// Function spawned to run the API server in a background thread
 ///
-async fn run_server(app: Router, listener: TcpListener) -> Result<()> {
-    match axum::serve(listener, app).await {
+async fn run_server(
+    make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
+    listener: TcpListener,
+) -> Result<()> {
+    // `into_make_service_with_connect_info::<SocketAddr>()` is what makes the
+    // TCP peer address available to `resolve_client_ip_middleware` via
+    // `ConnectInfo` (finding F3).
+    match axum::serve(listener, make_service).await {
         Ok(_) => {
             tracing::info!("Server ran successfully");
         }
@@ -1178,14 +1281,21 @@ pub async fn spawn<L: Domain>(config: Config) -> Result<(), Error> {
         .route("/add_offerings", post(add_offerings::<L>))
         .route("/get_offerings", get(get_offerings::<L>))
         .route("/remove_offerings", post(remove_offerings::<L>))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            resolve_client_ip_middleware,
+        ))
         .with_state(state);
 
     // create a TCP listener on the specified port
     let listener =
         tokio::net::TcpListener::bind(&std::net::SocketAddr::new(config.ip, config.port)).await?;
 
-    // spawn a new task to run the web server to listen for requests
-    tokio::spawn(run_server(app, listener));
+    // spawn a new task to run the web server to listen for requests.
+    // `into_make_service_with_connect_info` exposes the TCP peer address to the
+    // client-IP-resolving middleware (finding F3).
+    let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+    tokio::spawn(run_server(make_service, listener));
 
     Ok(())
 }
@@ -1197,11 +1307,23 @@ struct AppError(anyhow::Error, Option<axum::http::StatusCode>);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (
-            self.1.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            Json(json!({"message":format!("Something went wrong: {:?}", self.0)})),
-        )
-            .into_response()
+        let status = self.1.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Log the full error chain server-side, but return only a generic,
+        // status-appropriate message to the client - do not echo internal
+        // error/Debug detail, which aids reconnaissance (finding F15).
+        tracing::error!("Request failed ({}): {:?}", status, self.0);
+
+        let client_message = match status {
+            StatusCode::UNAUTHORIZED => "Unauthorized",
+            StatusCode::TOO_MANY_REQUESTS => "Too many requests",
+            StatusCode::SERVICE_UNAVAILABLE => "Service unavailable",
+            StatusCode::BAD_REQUEST => "Bad request",
+            StatusCode::NOT_FOUND => "Not found",
+            _ => "Internal server error",
+        };
+
+        (status, Json(json!({ "message": client_message }))).into_response()
     }
 }
 
@@ -1217,6 +1339,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_client_ip_ignores_forwarded_headers() {
+        // extract_client_ip must read ONLY the internal header stamped by the
+        // trusted middleware - never a client-supplied X-Forwarded-For /
+        // X-Real-IP (finding F3).
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", HeaderValue::from_static("1.2.3.4"));
+        headers.insert("X-Real-IP", HeaderValue::from_static("5.6.7.8"));
+
+        // No resolved header set -> safe localhost fallback, not the spoofed IPs.
+        assert_eq!(
+            extract_client_ip(&headers),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+
+        // With the resolved header set (as the middleware would), that value wins.
+        headers.insert(
+            RESOLVED_CLIENT_IP_HEADER,
+            HeaderValue::from_static("10.0.0.9"),
+        );
+        assert_eq!(
+            extract_client_ip(&headers),
+            "10.0.0.9"
+                .parse::<IpAddr>()
+                .unwrap_or_else(|e| unreachable!("Could not parse IP: {:?}", e))
+        );
+    }
+
+    #[test]
+    fn test_forwarded_ip_parses_first_xff_then_xri() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(forwarded_ip(&headers), None);
+
+        headers.insert("X-Real-IP", HeaderValue::from_static("5.6.7.8"));
+        assert_eq!(forwarded_ip(&headers), "5.6.7.8".parse::<IpAddr>().ok());
+
+        // X-Forwarded-For takes precedence and uses the first entry.
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("1.2.3.4, 9.9.9.9"),
+        );
+        assert_eq!(forwarded_ip(&headers), "1.2.3.4".parse::<IpAddr>().ok());
+    }
 
     #[test]
     fn test_sign_api_call() {

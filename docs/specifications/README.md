@@ -132,6 +132,29 @@ provisioned using the invite file mechanism. Also covers:
 
 ---
 
+### [security-review.md](security-review.md)
+**Independent security assessment**
+
+Where `security-model.md` *describes* the intended model, this document
+*evaluates* it: a code-level security review for professionals who need to
+judge how strong OpenPortal actually is and where the genuine gaps are.
+Written with full candour, findings cite `file:line` and are graded by
+severity. Covers:
+
+- The threat model (on-path attacker, compromised peer key, malicious proxy,
+  bridge client, local user) and what each can and cannot do
+- Verified security strengths (bounded trust topology, sound transport crypto
+  with no nonce reuse, a correct anti-replay window, blind relay, no-shell
+  privileged agents, memory safety)
+- Graded findings (F1–F15) with locations and remediation — all now resolved
+  (fixed in code, or recorded as deliberate, documented design decisions)
+- Residual risks and accepted trade-offs (out-of-band key management, TLS as a
+  deployment responsibility, negotiated replay-protection rollout, no forward
+  secrecy, the prototype cloud agents)
+- A prioritised remediation list
+
+---
+
 ### [highavailability.md](highavailability.md)
 **Client and server high availability**
 

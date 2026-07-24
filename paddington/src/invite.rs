@@ -151,7 +151,7 @@ impl Invite {
             )
         })?;
 
-        std::fs::write(filename, invite_toml)
+        crate::config::write_secret_file(filename, &invite_toml)
             .with_context(|| format!("Could not write invite file: {:?}", filename))?;
 
         Ok(())
@@ -214,7 +214,7 @@ pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
         )
     })?;
 
-    std::fs::write(invite_file, invite_toml)
+    crate::config::write_secret_file(invite_file, &invite_toml)
         .with_context(|| format!("Could not write invite file: {:?}", invite_file))?;
 
     Ok(())

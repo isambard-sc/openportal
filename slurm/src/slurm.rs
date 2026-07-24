@@ -169,7 +169,9 @@ async fn login(
     // add on the lifespan to the token command
     token_command = format!("{} lifespan={}", token_command, token_lifespan);
 
-    tracing::info!("Getting JWT token from command: {}", token_command);
+    // Do not log the token command itself - some deployments embed a
+    // credential in it, which would then land in the logs (finding F15).
+    tracing::info!("Getting JWT token from the configured token command");
 
     // parse 'token_command' into an executable plus arguments
     let token_command = shlex::split(&token_command).context("Could not parse token command")?;

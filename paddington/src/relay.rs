@@ -457,8 +457,10 @@ fn call_inner_handler(message: Message) -> Pin<Box<dyn Future<Output = Result<()
 /// (Re-)establish a relayed session with `peer_name`, if we are the
 /// relayed *client* for it. Blocks (with a timeout) until the bootstrap
 /// completes. Produces fresh, mutually-contributed session keys every
-/// time it's called - this is where forward secrecy for relayed sessions
-/// comes from (see `docs/plans/archive/blind-relay-proxy-design.md` §4.2.1, §5).
+/// time it's called - this is per-session key freshness, NOT forward
+/// secrecy (the keys are key-transported under the permanent pre-shared
+/// keys, not agreed in-band; see `docs/specifications/security-model.md`
+/// §2.5 and `docs/plans/archive/blind-relay-proxy-design.md` §4.2.1, §5).
 ///
 pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
     let peer = get_peer(peer_name).await?;
@@ -672,7 +674,8 @@ async fn maintain_relayed_client(peer_name: String) {
 /// proxy may have restarted and lost nothing (it's stateless), but *we*
 /// have no way to know whether the other real hop's process also
 /// restarted meanwhile, so the safest assumption is to redo the bootstrap
-/// (and get fresh, forward-secret session keys in the process).
+/// (and get fresh session keys in the process - fresh, not forward-secret;
+/// see `docs/specifications/security-model.md` §2.5).
 ///
 async fn wait_while_relay_connected(peer_name: &str) {
     let peer = match get_peer(peer_name).await {
@@ -1152,6 +1155,23 @@ pub fn proxy_handler(message: Message) -> Pin<Box<dyn Future<Output = Result<(),
                 return Ok(());
             }
         };
+
+        // Bind `envelope.from` to the peer identity this connection actually
+        // authenticated as (`message.sender()`, set by the framework from the
+        // handshake - see connection.rs). Without this, any authenticated
+        // client of the proxy could assert an arbitrary `from` label to
+        // satisfy a RelayPolicy pair it is not part of. The claimed `from`
+        // must match the authenticated sender. See
+        // docs/specifications/security-review.md (finding F7).
+        if envelope.from != message.sender() {
+            tracing::warn!(
+                "Proxy received an envelope claiming from='{}' over the connection \
+                 authenticated as '{}' - dropping (from-spoofing).",
+                envelope.from,
+                message.sender()
+            );
+            return Ok(());
+        }
 
         if !PROXY_POLICY
             .read()
@@ -1742,8 +1762,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_bootstraps_produce_different_session_keys() {
-        // Forward secrecy: each bootstrap must produce fresh keys, not a
-        // deterministic derivation from the permanent pre-shared key.
+        // Per-session key freshness (not forward secrecy): each bootstrap must
+        // produce fresh keys, not a deterministic derivation from the permanent
+        // pre-shared key. See security-model.md §2.5.
         let inner_key = Key::generate();
         let outer_key = Key::generate();
 

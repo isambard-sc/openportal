@@ -485,16 +485,29 @@ proceeds in three phases.
 ### 4.1 Salt Exchange (HTTP headers)
 
 When the client initiates the WebSocket upgrade, two per-connection 32-byte
-salts are exchanged via HTTP headers:
+salts are exchanged via HTTP headers, along with a marker declaring their
+encoding:
 
 | Header | Direction | Value |
 |--------|-----------|-------|
-| `openportal-inner-salt` | client → server | `hex(client_inner_salt XOR pre_shared_inner_key)` |
-| `openportal-outer-salt` | client → server | `hex(client_outer_salt XOR pre_shared_outer_key)` |
+| `openportal-salt-format` | client → server | `"plain"` (current clients) or absent (legacy clients) |
+| `openportal-inner-salt` | client → server | `hex(client_inner_salt)` (plain) or `hex(client_inner_salt XOR pre_shared_inner_key)` (legacy) |
+| `openportal-outer-salt` | client → server | `hex(client_outer_salt)` (plain) or `hex(client_outer_salt XOR pre_shared_outer_key)` (legacy) |
 
-The server XORs the received values with the same pre-shared keys to recover
-`client_inner_salt` and `client_outer_salt`. This prevents an observer without
-the pre-shared key from learning the session salts.
+HKDF salts are **public by design**, so current clients send them in the clear
+and set `openportal-salt-format: plain`. Message security does not rely on salt
+secrecy — a fresh random per-message `info` is mixed into every derivation
+regardless (§3.3).
+
+For backward compatibility, a client that omits `openportal-salt-format` is
+treated as legacy: it XOR-masks each salt with the corresponding pre-shared key,
+and the server un-XORs to recover the real salt. The server detects the format
+per connection from the header, so an upgraded server interoperates with both
+old and new clients. Because the client commits to an encoding in this first
+message (before any negotiation is possible), servers must be upgraded before
+clients — see [security-review.md](security-review.md) F15. (The XOR-masking was
+never load-bearing: the masked value on the wire is `salt XOR key`, and the real
+salt is never transmitted, so an observer cannot recover the key from it.)
 
 ### 4.2 Session Key Negotiation
 
@@ -731,9 +744,14 @@ always mixed in regardless of salt, not from the salt itself).
 
 The client contributes `session_outer_key` and both salts; the server
 contributes `session_inner_key`. Neither side alone determines the
-resulting session key pair - this is what gives each relayed session
-forward secrecy, exactly as the real handshake's `Handshake` message does
-in §4.2. `magic` correlates the `Accepted` response with its `Start`; a
+resulting session key pair - this is what gives each relayed session a
+**fresh** key pair, exactly as the real handshake's `Handshake` message
+does in §4.2. Note this is per-session key freshness, **not** forward
+secrecy: both halves are key-transported under the permanent pre-shared
+keys, not agreed in-band (there is deliberately no Diffie-Hellman), so it
+does not protect past traffic against later compromise of the permanent
+keys - see [security-model.md](security-model.md) §2.5. `magic` correlates
+the `Accepted` response with its `Start`; a
 response with unrecognised `magic` is dropped (stale or forged, not a
 protocol error).
 

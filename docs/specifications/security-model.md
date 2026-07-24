@@ -10,6 +10,11 @@ designed to address, how cryptographic keys are structured and provisioned, how
 connections are authenticated, and how zone isolation limits the blast radius of
 any compromise.
 
+> For an independent, code-level *evaluation* of this model — graded findings,
+> known gaps, and residual risks — see the
+> [security review](security-review.md). This document describes how the model
+> is intended to work; the review assesses how strong it actually is.
+
 ---
 
 ## 1. Design Goals
@@ -79,6 +84,41 @@ A fresh random 32-byte `info` value is generated for each message, ensuring
 that no two messages are encrypted with the same key even if the session salt is
 reused. See [wire-protocol.md](wire-protocol.md) §3 for the full wire frame
 format.
+
+### 2.5 Session Keys — and the Deliberate Absence of Forward Secrecy
+
+Every connection (and every relayed-session bootstrap) uses a **fresh, randomly
+generated session key pair**. These session keys are **key-transported** to the
+peer — that is, sent already encrypted under the two peers' long-term pre-shared
+keys — rather than agreed via an in-band exchange such as Diffie-Hellman.
+
+This is a deliberate design decision: **OpenPortal provides no in-band mechanism
+for agents to share or change key material themselves.** All key material is
+provisioned out-of-band (§3), and the only key ever placed on the wire is a
+random session key sealed under the permanent pre-shared keys. Adding a
+Diffie-Hellman exchange to obtain forward secrecy would reintroduce exactly the
+in-band key-agreement path the design excludes.
+
+The consequences, stated plainly so nothing here is mistaken for forward secrecy:
+
+- **There is no forward secrecy.** An attacker who records a connection's traffic
+  *and* later obtains the permanent pre-shared keys could recover that
+  connection's session keys and decrypt the captured traffic. Fresh session keys
+  per connection mean one session's keys do not expose another's, but they do not
+  protect past traffic against later compromise of the *permanent* keys.
+- **The permanent keys are hard to attack from the wire.** They are only ever
+  used to encrypt the initial, randomly generated, **high-entropy** session keys.
+  There is no low-entropy or known plaintext sealed under a permanent key to act
+  as a crib, so an attacker observing the wire sees only high-entropy plaintext
+  under a high-entropy key — no leverage for reverse-guessing the permanent key.
+  "Obtaining the permanent keys" therefore means compromising a config or invite
+  file out-of-band, not cracking traffic.
+- **Security rests on the secrecy of the permanent keys**, which is why key
+  rotation is a first-class, out-of-band operation (§3.3): rotating periodically
+  bounds the traffic any single key pair ever covers.
+
+See also the [security review](security-review.md) F14, which records this as an
+accepted, deliberate trade-off.
 
 ---
 
@@ -234,8 +274,12 @@ selected in Layer 2. A mismatched name causes the connection to be rejected.
 
 ## 5. Configuration File Encryption at Rest
 
-The `ServiceConfig` (stored in TOML on disk) contains all peer keys. It can be
-encrypted at rest using one of two schemes controlled by the `encryption` field:
+The `encryption` field controls how **secret values stored in the config's
+`extras` map** (e.g. a FreeIPA bind password or Slurm token, added via the
+`secret` CLI command) are encrypted at rest. (The pre-shared peer keys
+themselves are stored as hex in the TOML and are protected by restrictive file
+permissions - `0600` on Unix - rather than by this scheme.) Two schemes are
+available:
 
 ### 5.1 Environment Variable Scheme
 
@@ -245,10 +289,10 @@ type = "Environment"
 key  = "OPENPORTAL_SECRET_KEY"
 ```
 
-The named environment variable is read at startup. Its value is passed through
-**Argon2** key derivation (`Key::from_password`) to produce a 32-byte
-encryption key, which is then used to encrypt/decrypt the config file contents
-with XChaCha20-Poly1305. This is the recommended scheme for production.
+The named environment variable is read at startup. Its value is used as the
+password for **Argon2** key derivation to produce a 32-byte key, which encrypts
+/decrypts each stored secret with XChaCha20-Poly1305. This is the recommended
+scheme for production; its strength is that of the operator-supplied secret.
 
 ### 5.2 Simple Scheme
 
@@ -257,24 +301,32 @@ with XChaCha20-Poly1305. This is the recommended scheme for production.
 type = "Simple"
 ```
 
-The service's own name is used as the password for `Key::from_password`. This
-provides obfuscation but not strong protection, since the "password" is not
-secret. Suitable for development or low-security deployments only.
+The service's own name is used as the password. Because the name is **not
+secret** (it appears in this same config file, in every issued invite, and in
+logs), this scheme is **obfuscation, not encryption** - anyone who can read the
+config can re-derive the key. Suitable for development or low-security
+deployments only; use `Environment` in production.
 
 ### 5.3 Password-Based Key Derivation
 
-`Key::from_password` uses **Argon2** (via the `orion::kdf` module) with a
-fixed application-defined salt and the following parameters:
+Secrets are stored in a **versioned format**. New secrets (v1,
+`Key::from_password_with_salt`) use a fresh random per-secret salt stored
+alongside the ciphertext, with strong Argon2 parameters:
 
 | Parameter | Value |
 |-----------|-------|
 | Iterations | 3 |
-| Memory | 8 blocks |
+| Memory | 19456 KiB (19 MiB) |
 | Output length | 32 bytes |
+| Salt | 16 random bytes, stored with the ciphertext |
 
-The fixed salt ensures reproducible key derivation from the same password, which
-is necessary so the config can be decrypted on restart without storing the
-derived key.
+The random salt means identical passwords no longer produce identical keys
+across deployments. For backward compatibility, older (v0) secrets - which used
+`Key::from_password` with a fixed application-defined salt and orion's minimum
+Argon2 cost (3 iterations / 8 KiB) - are still decryptable; re-running the
+`secret` command re-encrypts them in the v1 format. See
+[security-review.md](security-review.md) F2 for the assessment that motivated
+this.
 
 ---
 
@@ -336,11 +388,15 @@ in §7's topology is - it is deliberately kept blind:
   (again, provisioned exactly as in §3) - this secures only the
   agent↔proxy hop, and authenticates each agent to the proxy as itself. It
   grants no ability to read agent↔agent traffic.
-- On top of the permanent pre-shared key, every relayed session negotiates
+- On top of the permanent pre-shared key, every relayed session establishes
   a **fresh** session key pair via a mutual-contribution bootstrap (one
   side contributes `session_outer_key`, the other `session_inner_key`) -
   see [wire-protocol.md](wire-protocol.md) §7.1. Compromise of one past
   session's keys does not expose any other session between the same pair.
+  This is per-session key freshness, **not** forward secrecy: the session
+  keys are key-transported under the permanent pre-shared keys, not agreed
+  in-band, so it does not protect past traffic against later compromise of
+  the permanent keys - see §2.5.
 - The proxy enforces an explicit, default-deny `RelayPolicy`: it forwards
   a `(from, to)` pair only if an operator has explicitly `allow`ed it.
   Every other pair is dropped and logged, never silently forwarded.

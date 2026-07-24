@@ -526,13 +526,12 @@ async fn login(
     let result = client
         .post(&url)
         .header("Referer", format!("{}/ipa", server))
-        .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "text/plain")
-        .body(format!(
-            "user={}&password={}",
-            user,
-            password.expose_secret()
-        ))
+        // Use `.form()` so the credentials are correctly URL-encoded (it also
+        // sets the application/x-www-form-urlencoded Content-Type). Hand-building
+        // the body would corrupt auth for a user/password containing `&`, `=`,
+        // or `%` (finding F15).
+        .form(&[("user", user), ("password", password.expose_secret())])
         .send()
         .await
         .with_context(|| format!("Could not login calling URL: {}", url))?;

@@ -88,12 +88,27 @@ async fn state_dir() -> Result<PathBuf, Error> {
     })
 }
 
-fn record_path(state_dir: &Path, project: &ProjectIdentifier) -> PathBuf {
-    state_dir.join(format!("{}.json", project))
+fn record_path(state_dir: &Path, project: &ProjectIdentifier) -> Result<PathBuf, Error> {
+    let filename = format!("{}.json", project);
+
+    // Defence in depth against an absolute-path escape - see the identical
+    // guard in `op-cloudaccount`'s `state_path` and
+    // docs/specifications/security-review.md (finding F1). `Path::join`
+    // discards the base directory on an absolute argument, so never join an
+    // identifier-derived filename without confirming it is a single, plain
+    // path component.
+    let mut components = Path::new(&filename).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(state_dir.join(filename)),
+        _ => Err(Error::Failed(format!(
+            "Refusing to build an Award state-file path from an unsafe project identifier '{}'",
+            project
+        ))),
+    }
 }
 
 async fn read_record(project: &ProjectIdentifier) -> Result<Option<AwardRecord>, Error> {
-    let path = record_path(&state_dir().await?, project);
+    let path = record_path(&state_dir().await?, project)?;
 
     match tokio::fs::read_to_string(&path).await {
         Ok(contents) => Ok(Some(serde_json::from_str(&contents)?)),
@@ -108,7 +123,7 @@ async fn read_record(project: &ProjectIdentifier) -> Result<Option<AwardRecord>,
 
 async fn write_record(record: &AwardRecord) -> Result<(), Error> {
     let dir = state_dir().await?;
-    let path = record_path(&dir, &record.project);
+    let path = record_path(&dir, &record.project)?;
     let tmp_path = path.with_extension("json.tmp");
 
     let contents = serde_json::to_string_pretty(record)?;
@@ -219,7 +234,7 @@ pub async fn update_award(
 pub async fn remove_award(project: &ProjectIdentifier) -> Result<ProjectMapping, Error> {
     let dir = state_dir().await?;
     let mapping = ProjectMapping::new(project, &project.to_string())?;
-    let path = record_path(&dir, project);
+    let path = record_path(&dir, project)?;
 
     match tokio::fs::remove_file(&path).await {
         Ok(_) => {}

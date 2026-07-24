@@ -57,8 +57,26 @@ static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| {
     })
 });
 
-fn state_path(state_dir: &Path, project: &ProjectIdentifier) -> PathBuf {
-    state_dir.join(format!("{}.json", project))
+fn state_path(state_dir: &Path, project: &ProjectIdentifier) -> Result<PathBuf, Error> {
+    let filename = format!("{}.json", project);
+
+    // Defence in depth: never `join` an identifier-derived filename without
+    // confirming it is a single, plain path component. `Path::join` silently
+    // *discards* the base directory when its argument is absolute, so a
+    // ProjectIdentifier whose project component began with '/' would escape
+    // `state_dir` and write to an arbitrary absolute path. The greatwestern
+    // identifier grammar now forbids '/' (and other separators) in an
+    // identifier, so this can no longer be reached - but the write path
+    // re-checks rather than trusting that upstream invariant. See
+    // docs/specifications/security-review.md (finding F1).
+    let mut components = Path::new(&filename).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(state_dir.join(filename)),
+        _ => Err(Error::Failed(format!(
+            "Refusing to build a state-file path from an unsafe project identifier '{}'",
+            project
+        ))),
+    }
 }
 
 /// Point the state store at `state_dir` and load any project state files
@@ -120,7 +138,7 @@ pub async fn initialise(state_dir: &Path) -> Result<(), Error> {
 }
 
 async fn write_state(state_dir: &Path, state: &ProjectState) -> Result<(), Error> {
-    let path = state_path(state_dir, state.mapping.project());
+    let path = state_path(state_dir, state.mapping.project())?;
     let tmp_path = path.with_extension("json.tmp");
 
     let contents = serde_json::to_string_pretty(state)?;
@@ -182,7 +200,7 @@ pub async fn remove_project(project: &ProjectIdentifier) -> Result<ProjectMappin
         None => ProjectMapping::new(project, &project.to_string())?,
     };
 
-    let path = state_path(&dir, project);
+    let path = state_path(&dir, project)?;
     match tokio::fs::remove_file(&path).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

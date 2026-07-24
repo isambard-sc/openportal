@@ -3,7 +3,7 @@
 
 [package]
 name = "op-cloudaccount"
-version = "0.32.2"
+version = "0.90.0"
 description = "Agent that represents a cloud account (e.g. an AWS account) assigned to a project"
 edition = "2021"
 license = "MIT"

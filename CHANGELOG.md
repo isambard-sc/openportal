@@ -8,6 +8,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`op-cloudaccount` — new agent representing a single cloud account** —
+  lets a project be assigned to a cloud account (e.g. one AWS account) the
+  same way a project is assigned to an `op-cluster` instance. Deliberately
+  a rough prototype, built alongside cloud operators who are still
+  developing their own side of the integration: there is no cloud-side
+  API yet to record project/user assignment, so this agent is the source
+  of truth for that (one JSON file per project, atomic writes, in-memory
+  cache); usage reports are reconstructed by parsing whatever cost-report
+  JSON files the operators drop into a directory, diffing consecutive
+  cumulative reports and spreading the delta evenly across the calendar
+  days each pair of reports spans. `Usage` (normally compute-seconds
+  elsewhere in OpenPortal) is reinterpreted here as micro-currency-units
+  (1 second = 1e-6 of the configured currency) - the same
+  "reinterpret-the-base-unit" move `op-slurm` already makes for
+  node-seconds, just for cost instead of time. See
+  `docs/plans/archive/op-cloudaccount-design.md`.
+- **`op-cloudportal` — new agent representing a self-contained "cloud"
+  portal** — a `Portal` agent for the other side of a portal-to-portal
+  Award relationship (e.g. a central portal creating Awards on it), with
+  no real portal management software (no Waldur) behind it. Also a rough
+  prototype: it stores Award state itself as plain JSON files, read fresh
+  from disk on every instruction rather than cached, since the separate
+  CLI approval step described below can edit the same files while the
+  server process is running; `AwardDetails.template` picks which cloud
+  provider an Award targets, mapped via config to a specific
+  `op-cloudaccount` peer. Award creation and infrastructure provisioning
+  are deliberately decoupled
+  behind a human-in-the-loop approval step: `list-pending`/`approve`/
+  `reject` CLI subcommands (pure state-file edits, no network calls)
+  alongside a background poller inside the running `run` process that
+  makes the actual `add_project`/`add_user` calls once an Award is
+  approved, retrying automatically on its next cycle if a previous
+  attempt partially failed. An earlier design based on `op-portal`'s
+  virtual-resource/offering mechanism was abandoned after tracing
+  `templemeads::virtual_agent::send()` showed it only ever routes jobs
+  within the same process, never between genuinely separate peers -
+  `airr`/`cloud` are just an ordinary direct portal-to-portal connection
+  instead. See `docs/plans/archive/op-cloudportal-design.md`.
+- **One-shot CLI support for `Portal` agents** — `templemeads::portal::run()`
+  gained the `run --one-shot "instruction args"` mode (synthesize a local
+  Job, run it through the real instruction handler, print the JSON
+  result, exit) already available to Account/Filesystem/Scheduler agents,
+  mirroring `account.rs` exactly. Added to support debugging/inspecting
+  `op-cloudportal` state without a live network peer, but applies to any
+  `Portal` agent, `op-portal` included.
 - **Multiple IPs/ranges per client allowlist entry** — a `[[clients]]`
   entry's `ip` now accepts a comma-separated list of addresses and/or
   CIDR ranges (IPv4, IPv6, or a mix of both), any one of which is allowed
@@ -126,6 +171,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **Slurm hourly usage-report fallback silently dropped per-component
+  usage** — `sacctmgr::get_hourly_report()` (used when a project has too
+  many jobs for the daily `sacct` query to complete in time) only
+  accumulated total usage, job counts, and wait times; unlike the normal
+  daily path, it never called `add_component_usage`, so any day that fell
+  back to hourly reporting kept a correct overall total but lost its
+  cpu/memory/gpu/billing breakdown entirely, in both the cached-hour and
+  freshly-fetched branches. Fixed by adding the same per-job component
+  accumulation the daily path already does.
 - **Invalid IP ranges no longer silently break connections or panic** — a
   hand-edited or mistyped range (e.g. `0.0.0.0/0.0.0.0`) is now rejected
   with a clear error when the config is loaded, instead of loading

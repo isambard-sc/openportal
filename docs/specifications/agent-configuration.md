@@ -42,18 +42,23 @@ key  = "ENV_VAR_NAME"
 |-------|------|-------------|
 | `name` | string | Agent name. Alphanumeric, `-`, `_` only. Used as the agent's identity in the network. |
 | `url` | string | Public WebSocket URL peers will connect to, e.g. `wss://hpc.example.com:8042`. |
-| `ip` | string | IP address to bind the WebSocket listener to. IPv4 or IPv6 - see the note below. |
+| `ip` | string | IP address to bind the WebSocket listener to. A single IPv4 or IPv6 address (not a range or list - see the note below). |
 | `port` | integer | Port to bind the WebSocket listener to. |
 | `heathcheck_port` | integer (optional) | If set, a minimal HTTP health endpoint is exposed on this port (responds `200 OK` to `GET /`). |
 | `proxy_header` | string (optional) | HTTP header to read the real client IP from when behind a reverse proxy (e.g. `X-Forwarded-For`). |
 | `agent` | string | Agent type tag stored in the config. Set automatically by `init`. |
 | `encryption` | table (optional) | Encryption scheme for secrets stored in the config file. See [security-model.md](security-model.md) §5. |
 
-Both this `ip` and a `[[clients]]` entry's `ip` (§1.2) accept either
-address family, with no difference in syntax between them - a plain
-address (`10.1.2.3` or `2001:db8::1`) or a CIDR range (`10.0.0.0/24` or
-`2001:db8::/32`). See [security-model.md](security-model.md) §4.1 for the
-one thing IPv6 support here doesn't cover: dual-stack listening.
+This `ip` (the listener's own bind address) is always a single address,
+IPv4 or IPv6 (`10.1.2.3` or `2001:db8::1`) - never a range or a list. See
+[security-model.md](security-model.md) §4.1 for the one thing IPv6
+support here doesn't cover: dual-stack listening.
+
+A `[[clients]]` entry's `ip` (§1.2) is more flexible: a single address, a
+CIDR range (`10.0.0.0/24` or `2001:db8::/32`), or a comma-separated list
+of several addresses and/or ranges, any one of which is allowed to match -
+e.g. `ip = "127.0.0.1,10.0.0.0/24,2001:db8::/32"`. IPv4 and IPv6 entries
+can be freely mixed in the same list.
 
 ### 1.2 Peer Lists
 

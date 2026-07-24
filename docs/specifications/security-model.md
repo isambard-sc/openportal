@@ -168,18 +168,22 @@ sequence. **All four must pass** before the connection is accepted.
 ### 4.1 Layer 1: IP Address Allowlisting
 
 The server maintains a list of `ClientConfig` entries, each with an expected IP
-address or CIDR range. The first thing the server does after accepting a TCP
-connection is check the client's IP against this list.
+address, CIDR range, or comma-separated list of several of either. The first
+thing the server does after accepting a TCP connection is check the client's
+IP against this list - a connection is allowed if it matches *any* entry in
+a multi-entry list, not all of them.
 
 If no `ClientConfig` matches the connecting IP, the connection is immediately
 rejected before any message processing occurs.
 
 IP ranges are specified in CIDR notation (e.g. `10.0.0.0/24` or
 `2001:db8::/32`) - both IPv4 and IPv6 addresses and ranges are supported,
-with identical syntax either way (`IpOrRange`, `paddington/src/config.rs`;
-see [ipv6-support-design.md](../plans/ipv6-support-design.md) for how this
-was extended to cover IPv6). A reverse proxy may be configured via
-`proxy_header` to extract the real client IP from a header such as
+with identical syntax either way, and can be freely mixed within a
+comma-separated list (`IpOrRange`, `paddington/src/config.rs`; see
+[ipv6-support-design.md](../plans/ipv6-support-design.md) for how IPv6
+support was added, and [agent-configuration.md](agent-configuration.md)
+§1.2 for the multi-entry list syntax). A reverse proxy may be configured
+via `proxy_header` to extract the real client IP from a header such as
 `X-Forwarded-For`.
 
 **Dual-stack listening is outside OpenPortal's control.** Whether a

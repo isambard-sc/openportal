@@ -327,6 +327,13 @@ impl ServerConfig {
 pub enum IpOrRange {
     IP(IpAddr),
     Range(String),
+    /// Several addresses and/or ranges, any one of which is allowed - built
+    /// from a comma-separated `--ip` value (e.g.
+    /// `"127.0.0.1,10.0.0.0/24,2001:db8::/32"`), see `IpOrRange::new`. A
+    /// single-entry input never produces this variant (it returns the
+    /// plain `IP`/`Range` directly), so existing single-address configs
+    /// are unaffected.
+    List(Vec<IpOrRange>),
 }
 
 /// Whether `range` is CIDR notation for "every IPv4 address" (prefix `/0`,
@@ -393,6 +400,10 @@ impl<'de> Deserialize<'de> for IpOrRange {
         enum Raw {
             IP(IpAddr),
             Range(String),
+            // Each element is deserialised (and so validated) via this
+            // same `Deserialize` impl, recursively - no separate
+            // validation needed here.
+            List(Vec<IpOrRange>),
         }
 
         match Raw::deserialize(deserializer)? {
@@ -406,6 +417,7 @@ impl<'de> Deserialize<'de> for IpOrRange {
                 })?;
                 Ok(IpOrRange::Range(range))
             }
+            Raw::List(list) => Ok(IpOrRange::List(list)),
         }
     }
 }
@@ -415,12 +427,42 @@ impl Display for IpOrRange {
         match self {
             IpOrRange::IP(ip) => write!(f, "{}", ip),
             IpOrRange::Range(range) => write!(f, "{}", range),
+            IpOrRange::List(entries) => {
+                let joined = entries
+                    .iter()
+                    .map(|entry| entry.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                write!(f, "{}", joined)
+            }
         }
     }
 }
 
 impl IpOrRange {
+    ///
+    /// Parses a single IP address or CIDR range, or a comma-separated
+    /// list of several (e.g. `"127.0.0.1,10.0.0.0/24,2001:db8::/32"`),
+    /// any one of which is allowed to match. A single entry (no comma)
+    /// returns the plain `IP`/`Range` directly rather than a one-element
+    /// `List`, so existing single-address configuration is unaffected.
+    ///
     pub fn new(ip: &str) -> Result<Self, Error> {
+        let entries = ip.split(',').collect::<Vec<_>>();
+
+        if entries.len() == 1 {
+            return Self::new_single(entries[0].trim());
+        }
+
+        Ok(IpOrRange::List(
+            entries
+                .into_iter()
+                .map(|entry| Self::new_single(entry.trim()))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
+    }
+
+    fn new_single(ip: &str) -> Result<Self, Error> {
         match ip.parse() {
             Ok(ip) => Ok(IpOrRange::IP(ip)),
             Err(_) => match validate_ip_range(ip) {
@@ -436,6 +478,7 @@ impl IpOrRange {
     pub fn matches(&self, addr: &IpAddr) -> bool {
         match self {
             IpOrRange::IP(ip) => ip == addr,
+            IpOrRange::List(entries) => entries.iter().any(|entry| entry.matches(addr)),
             IpOrRange::Range(range) if is_full_ipv4_range(range) => addr.is_ipv4(),
             IpOrRange::Range(range) if is_full_ipv6_range(range) => addr.is_ipv6(),
             IpOrRange::Range(range) => match IpRange::<iptools::iprange::IPv4>::new(range, "") {
@@ -1342,6 +1385,107 @@ mod tests {
 
         let result: Result<IpOrRange, _> = toml::from_str(r#"Range = "::/0""#);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ip_or_range_single_entry_is_not_wrapped_in_a_list() {
+        // a single entry (no comma) must produce the plain IP/Range
+        // variant directly, not a one-element List - so existing
+        // single-address configuration round-trips byte-for-byte.
+        assert_eq!(
+            IpOrRange::new("127.0.0.1").unwrap_or_else(|e| unreachable!("{:?}", e)),
+            IpOrRange::IP(
+                "127.0.0.1"
+                    .parse()
+                    .unwrap_or_else(|e| unreachable!("{:?}", e))
+            )
+        );
+        assert_eq!(
+            IpOrRange::new("10.0.0.0/24").unwrap_or_else(|e| unreachable!("{:?}", e)),
+            IpOrRange::Range("10.0.0.0/24".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ip_or_range_list() {
+        let ip = IpOrRange::new("127.0.0.1,10.0.0.0/24,2001:db8::/32")
+            .unwrap_or_else(|e| unreachable!("Could not create IpOrRange list: {:?}", e));
+
+        assert!(matches!(ip, IpOrRange::List(ref entries) if entries.len() == 3));
+
+        // matches any one of the three entries...
+        assert!(ip.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(ip.matches(&IpAddr::from([10, 0, 0, 42])));
+        assert!(ip.matches(
+            &"2001:db8::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+
+        // ...but nothing outside all three
+        assert!(!ip.matches(&IpAddr::from([127, 0, 0, 2])));
+        assert!(!ip.matches(&IpAddr::from([10, 0, 1, 1])));
+        assert!(!ip.matches(
+            &"2001:db9::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+
+        // Display round-trips back to a comma-separated string `new` can
+        // re-parse identically.
+        assert_eq!(format!("{}", ip), "127.0.0.1,10.0.0.0/24,2001:db8::/32");
+        let reparsed = IpOrRange::new(&format!("{}", ip))
+            .unwrap_or_else(|e| unreachable!("Could not re-parse: {:?}", e));
+        assert_eq!(reparsed, ip);
+    }
+
+    #[test]
+    fn test_ip_or_range_list_tolerates_whitespace_around_entries() {
+        // `client --add name --ip "127.0.0.1, 10.0.0.0/24"` - a space
+        // after the comma (or around any entry) is a natural thing for an
+        // operator to type and must not be treated as part of the address.
+        let ip = IpOrRange::new(" 127.0.0.1 , 10.0.0.0/24 ")
+            .unwrap_or_else(|e| unreachable!("Could not create IpOrRange list: {:?}", e));
+
+        assert!(ip.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(ip.matches(&IpAddr::from([10, 0, 0, 1])));
+        assert!(!ip.matches(&IpAddr::from([8, 8, 8, 8])));
+    }
+
+    #[test]
+    fn test_ip_or_range_list_rejects_any_invalid_entry() {
+        // one bad entry in an otherwise-valid list must fail the whole
+        // thing at parse/load time, not silently drop just that entry.
+        assert!(IpOrRange::new("127.0.0.1,not-an-ip,10.0.0.0/24").is_err());
+    }
+
+    #[test]
+    fn test_ip_or_range_list_round_trips_through_toml() {
+        // confirms List survives a real serialise/deserialise cycle - not
+        // just the in-memory Display/new round-trip above.
+        let ip = IpOrRange::new("127.0.0.1,10.0.0.0/24")
+            .unwrap_or_else(|e| unreachable!("Could not create IpOrRange list: {:?}", e));
+
+        let toml_str =
+            toml::to_string(&ip).unwrap_or_else(|e| unreachable!("Could not serialise: {:?}", e));
+
+        let reloaded: IpOrRange = toml::from_str(&toml_str)
+            .unwrap_or_else(|e| unreachable!("Could not deserialise: {:?}", e));
+
+        assert_eq!(reloaded, ip);
+        assert!(reloaded.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(reloaded.matches(&IpAddr::from([10, 0, 0, 1])));
+    }
+
+    #[test]
+    fn test_ip_or_range_list_rejects_invalid_entry_on_deserialize() {
+        // a hand-edited config with one bad entry inside a saved List
+        // must be rejected at load time too, not just when first typed on
+        // the CLI - each element is validated recursively via the same
+        // Deserialize impl.
+        let bad_toml = r#"List = [{ IP = "127.0.0.1" }, { Range = "0.0.0.0/0.0.0.0" }]"#;
+        let result: Result<IpOrRange, _> = toml::from_str(bad_toml);
+        assert!(result.is_err());
     }
 
     #[test]

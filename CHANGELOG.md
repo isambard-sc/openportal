@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Multiple IPs/ranges per client allowlist entry** — a `[[clients]]`
+  entry's `ip` now accepts a comma-separated list of addresses and/or
+  CIDR ranges (IPv4, IPv6, or a mix of both), any one of which is allowed
+  to match, e.g. `client --add new_agent --ip
+  127.0.0.1,10.0.0.0/24,2001:db8::/32`. A single entry (no comma) behaves
+  exactly as before - no change to how existing configs are stored or
+  read. Implemented as a new `IpOrRange::List` variant rather than
+  changing `ClientConfig.ip`'s type, so it composes with the existing
+  single-address/CIDR-range/IPv4-IPv6 logic instead of duplicating it.
 - **IPv6 support for IP allowlisting and server binding** — `paddington`'s
   IP-based connection authentication (`IpOrRange`) and a server's own
   listen address now both work correctly for IPv6, not just IPv4. A

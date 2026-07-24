@@ -23,3 +23,8 @@ path = "templemeads/bindings/**"
 SPDX-FileCopyrightText = "© 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>"
 SPDX-License-Identifier = "MIT"
 
+[[annotations]]
+path = "greatwestern/bindings/**"
+SPDX-FileCopyrightText = "© 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>"
+SPDX-License-Identifier = "MIT"
+

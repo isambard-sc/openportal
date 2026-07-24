@@ -45,25 +45,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `op-proxy`/`op-portal`/`op-cloudportal` processes. See
   `docs/plans/archive/blind-relay-proxy-design.md`.
 - **Replay protection for ongoing message traffic** — every ongoing
-  message (Jobs, Notifications, keepalives - not the handshake/bootstrap
-  messages themselves) now carries a per-sender nonce, checked against a
-  receiver-side sliding window before being processed: the standard
-  IPsec/WireGuard-style anti-replay scheme (a high-water-mark plus a
-  fixed-size bitmap of recently-accepted values), chosen deliberately over
-  a bespoke design. Without this, a captured, validly-encrypted message -
-  by an attacker, or the blind relay proxy itself - could be resent later
-  to re-trigger its effect; encryption alone never prevented that. The
-  nonce lives inside the encrypted, authenticated content, so the proxy
-  can no more forge or strip it than it can read the payload, and the same
-  protection applies uniformly to direct and relayed connections. Rollout
-  is negotiated, not a coordinated flag-day: each peer advertises
-  `supports_nonce` in its `PeerDetails` (or relayed bootstrap message), and
-  a sender only wraps outgoing traffic with a nonce once the specific peer
-  it's talking to has confirmed support - an upgraded server therefore
-  gains full protection against every already-upgraded peer immediately,
-  while continuing to interoperate, unprotected but functioning, with
-  peers that haven't been upgraded yet. See
+  message (Jobs, Notifications, keepalives) now carries a per-sender
+  nonce, checked against a receiver-side sliding window before being
+  processed: the standard IPsec/WireGuard-style anti-replay scheme (a
+  high-water-mark plus a fixed-size bitmap of recently-accepted values),
+  chosen deliberately over a bespoke design. Without this, a captured,
+  validly-encrypted message - by an attacker, or the blind relay proxy
+  itself - could be resent later to re-trigger its effect; encryption
+  alone never prevented that. The nonce lives inside the encrypted,
+  authenticated content, so the proxy can no more forge or strip it than
+  it can read the payload, and the same protection applies uniformly to
+  direct and relayed connections. Rollout is negotiated, not a
+  coordinated flag-day: each peer advertises `supports_nonce` in its
+  `PeerDetails` (or relayed bootstrap message), and a sender only wraps
+  outgoing traffic with a nonce once the specific peer it's talking to
+  has confirmed support - an upgraded server therefore gains full
+  protection against every already-upgraded peer immediately, while
+  continuing to interoperate, unprotected but functioning, with peers
+  that haven't been upgraded yet. See
   `docs/plans/replay-protection-design.md` §5.
+- **Replay protection for handshake/bootstrap messages** — `Handshake`/
+  `PeerDetails` (direct connections) and `StartRelayedConnection`/
+  `RelayedConnectionAccepted`/`SessionUnknown` (relayed bootstrap) now
+  carry a nonce too, checked against a per-peer window that - unlike the
+  ongoing-traffic window above - persists across reconnects rather than
+  resetting, since these messages are encrypted under the *permanent*
+  pre-shared key pair, which doesn't change across reconnects. Tracing
+  through the actual threat showed `StartRelayedConnection` and
+  `SessionUnknown` are where this closes a real, repeatable disruption (a
+  single captured message could otherwise reset a peer's live session, or
+  force endless re-bootstrap churn, indefinitely); `Handshake`/
+  `PeerDetails` get it too for defense-in-depth, though a session hijack
+  via their replay was never actually possible (session keys are freshly
+  random per connection). For direct connections this needed no
+  capability negotiation at all - `nonce` is an additive optional field on
+  messages that were already structured objects, so an old peer's message
+  is simply read with `nonce: None` and the check is skipped, with no
+  wire-shape change to gate on. For relayed bootstrap, no backward
+  compatibility was needed at all (`op-proxy` isn't deployed yet), so
+  `nonce` there is a plain required field. See
+  `docs/plans/replay-protection-design.md` §10.
 
 - **`op-proxy` config file location and layout** — now defaults to the
   standard `~/.config/openportal/proxy-config.toml`, matching every other

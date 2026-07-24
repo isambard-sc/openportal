@@ -7,8 +7,10 @@ use anyhow::Error as AnyError;
 use futures::{SinkExt, StreamExt};
 use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
+use once_cell::sync::Lazy;
 use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use std::sync::Mutex as StdMutex;
 use std::vec::Vec;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::RwLock as TokioRwLock;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
 use tungstenite::client::IntoClientRequest;
@@ -24,13 +27,45 @@ use tungstenite::handshake::server::{
     Response as HandshakeResponse,
 };
 
-use crate::anti_replay::{NoncedPayload, ReplayWindow};
+use crate::anti_replay::{HandshakeNonceState, NoncedPayload, ReplayWindow};
 use crate::command::Command;
 use crate::config::{ClientConfig, PeerConfig, ServiceConfig};
 use crate::crypto::{random_bytes, Key, Salt, SecretKey, KEY_SIZE};
 use crate::error::Error;
 use crate::exchange;
 use crate::message::Message;
+
+/// Per-peer, process-lifetime nonce state for `Handshake`/`PeerDetails` -
+/// unlike `ConnectionState`'s nonce fields, this must **not** reset per
+/// connection, since it protects messages encrypted (at least partly)
+/// under the permanent pre-shared key pair, which doesn't change across
+/// reconnects. Keyed the same way `exchange.rs`'s connection registry
+/// keys peers: `"{name}@{zone}"`. See
+/// `docs/plans/replay-protection-design.md` §10.
+static HANDSHAKE_NONCE_STATE: Lazy<TokioRwLock<HashMap<String, HandshakeNonceState>>> =
+    Lazy::new(|| TokioRwLock::new(HashMap::new()));
+
+fn handshake_peer_key(name: &str, zone: &str) -> String {
+    format!("{}@{}", name, zone)
+}
+
+async fn take_handshake_nonce(name: &str, zone: &str) -> u64 {
+    HANDSHAKE_NONCE_STATE
+        .write()
+        .await
+        .entry(handshake_peer_key(name, zone))
+        .or_default()
+        .take_next_nonce()
+}
+
+async fn check_handshake_replay(name: &str, zone: &str, nonce: Option<u64>) -> bool {
+    HANDSHAKE_NONCE_STATE
+        .write()
+        .await
+        .entry(handshake_peer_key(name, zone))
+        .or_default()
+        .check_replay(nonce)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum ConnectionStatus {
@@ -218,6 +253,11 @@ struct PeerDetails {
     /// genuinely doesn't support this yet.
     #[serde(default)]
     supports_nonce: bool,
+    /// Replay-protection nonce for this `PeerDetails` message - see
+    /// `Handshake::nonce` and `docs/plans/replay-protection-design.md`
+    /// §10. Same `#[serde(default)]` backward-compatibility reasoning.
+    #[serde(default)]
+    nonce: Option<u64>,
 }
 
 impl Display for PeerDetails {
@@ -227,7 +267,7 @@ impl Display for PeerDetails {
 }
 
 impl PeerDetails {
-    fn new(name: &str, zone: &str, status: &StandbyStatus) -> Self {
+    fn new(name: &str, zone: &str, status: &StandbyStatus, nonce: u64) -> Self {
         // everything is currently version 2
         PeerDetails {
             name: name.to_string(),
@@ -235,6 +275,7 @@ impl PeerDetails {
             version: 2,
             standby_status: status.clone(),
             supports_nonce: true,
+            nonce: Some(nonce),
         }
     }
 
@@ -256,6 +297,10 @@ impl PeerDetails {
 
     fn supports_nonce(&self) -> bool {
         self.supports_nonce
+    }
+
+    fn nonce(&self) -> Option<u64> {
+        self.nonce
     }
 }
 
@@ -340,6 +385,16 @@ struct Handshake {
     session_key: SecretKey,
     engine: String,
     version: String,
+    /// Replay-protection nonce for this handshake message, checked against
+    /// a per-peer window that (unlike ongoing traffic's) persists across
+    /// reconnects - see `docs/plans/replay-protection-design.md` §10.
+    /// `#[serde(default)]` so a pre-upgrade peer's `Handshake` (which
+    /// predates this field) deserialises as `None`, meaning "nothing to
+    /// check, accept unconditionally" - safe, since serde already ignores
+    /// unknown fields, so this side sending a nonce to an old peer never
+    /// breaks it either.
+    #[serde(default)]
+    nonce: Option<u64>,
 }
 
 impl Connection {
@@ -628,11 +683,13 @@ impl Connection {
         // the name of its comms engine and version, and sends this to the server
         // using the pre-shared client/server inner and outer keys
         let outer_key = Key::generate();
+        let handshake_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
 
         let handshake = Handshake {
             session_key: outer_key.clone(),
             engine: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            nonce: Some(handshake_nonce),
         };
 
         let message = match envelope_message(
@@ -694,13 +751,31 @@ impl Connection {
             }
         };
 
+        if !check_handshake_replay(&peer_name, &peer_zone, handshake.nonce).await {
+            tracing::warn!(
+                "Rejected replayed (or too-old) Handshake response from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                handshake.nonce
+            );
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Rejected replayed Handshake response - closing connection.".to_string(),
+            ));
+        }
+
         let inner_key = handshake.session_key.clone();
 
         // the final step is for the client to send the server its PeerDetails,
         // and for the server to respond. These should match up with
         // what we expect
-        let peer_details =
-            PeerDetails::new(&self.config.name(), &peer_zone, &StandbyStatus::primary());
+        let peer_details_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
+        let peer_details = PeerDetails::new(
+            &self.config.name(),
+            &peer_zone,
+            &StandbyStatus::primary(),
+            peer_details_nonce,
+        );
 
         let message = match envelope_message(
             peer_details,
@@ -758,6 +833,19 @@ impl Connection {
                 return Err(e.into());
             }
         };
+
+        if !check_handshake_replay(&peer_name, &peer_zone, peer_details.nonce()).await {
+            tracing::warn!(
+                "Rejected replayed (or too-old) PeerDetails from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                peer_details.nonce()
+            );
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Rejected replayed PeerDetails - closing connection.".to_string(),
+            ));
+        }
 
         tracing::info!(
             "Connecting to peer {}, comms engine {} version {}",
@@ -1273,6 +1361,18 @@ impl Connection {
         )
         .with_context(|| "Error de-enveloping message - closing connection.")?;
 
+        if !check_handshake_replay(&peer_name, &peer_zone, handshake.nonce).await {
+            tracing::warn!(
+                "Rejected replayed (or too-old) Handshake from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                handshake.nonce
+            );
+            return Err(Error::InvalidPeer(
+                "Rejected replayed Handshake - closing connection.".to_string(),
+            ));
+        }
+
         let outer_key = handshake.session_key.clone();
 
         let peer_engine = handshake.engine;
@@ -1281,11 +1381,13 @@ impl Connection {
         // we will create a new session inner key and send it back to the
         // client, wrapped in the client/server inner key and session outer key
         let inner_key = Key::generate();
+        let handshake_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
 
         let handshake = Handshake {
             session_key: inner_key.clone(),
             engine: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            nonce: Some(handshake_nonce),
         };
 
         let response = envelope_message(
@@ -1316,6 +1418,18 @@ impl Connection {
             &outer_key_salt,
         )
         .with_context(|| "Error de-enveloping message - closing connection.")?;
+
+        if !check_handshake_replay(&peer_name, &peer_zone, peer_details.nonce()).await {
+            tracing::warn!(
+                "Rejected replayed (or too-old) PeerDetails from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                peer_details.nonce()
+            );
+            return Err(Error::InvalidPeer(
+                "Rejected replayed PeerDetails - closing connection.".to_string(),
+            ));
+        }
 
         // captured now, before `peer_details` is shadowed below by the
         // `PeerDetails` we send back describing ourselves.
@@ -1375,7 +1489,9 @@ impl Connection {
         );
 
         // now send back our PeerDetials
-        let peer_details = PeerDetails::new(&service_name, &peer_zone, &standby);
+        let peer_details_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
+        let peer_details =
+            PeerDetails::new(&service_name, &peer_zone, &standby, peer_details_nonce);
 
         let message = envelope_message(
             peer_details,
@@ -1626,6 +1742,31 @@ impl Connection {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn test_handshake_nonce_state_persists_and_rejects_replay_across_connections() {
+        // unlike ConnectionState's ephemeral nonce state, this must NOT
+        // reset per "connection attempt" - simulated here by calling
+        // take/check repeatedly against the same peer identity, standing
+        // in for what would otherwise be several distinct reconnects. Use
+        // a name unique to this test to avoid colliding with the global
+        // registry other tests might touch.
+        let name = "test-handshake-nonce-persists";
+        let zone = "default";
+
+        let first = take_handshake_nonce(name, zone).await;
+        let second = take_handshake_nonce(name, zone).await;
+        assert_eq!(second, first + 1);
+
+        assert!(check_handshake_replay(name, zone, Some(first)).await);
+        assert!(check_handshake_replay(name, zone, Some(second)).await);
+
+        // a later "connection attempt" replaying an already-seen nonce
+        // must still be rejected - proving the window survived rather
+        // than resetting.
+        assert!(!check_handshake_replay(name, zone, Some(first)).await);
+        assert!(!check_handshake_replay(name, zone, Some(second)).await);
+    }
+
     #[test]
     fn test_enveloping() {
         let inner_key = Key::generate();
@@ -1664,8 +1805,14 @@ mod tests {
 
     #[test]
     fn test_peer_details_new_supports_nonce() {
-        let details = PeerDetails::new("airr", "default", &StandbyStatus::primary());
+        let details = PeerDetails::new("airr", "default", &StandbyStatus::primary(), 0);
         assert!(details.supports_nonce());
+    }
+
+    #[test]
+    fn test_peer_details_new_carries_its_nonce() {
+        let details = PeerDetails::new("airr", "default", &StandbyStatus::primary(), 42);
+        assert_eq!(details.nonce(), Some(42));
     }
 
     #[test]
@@ -1680,5 +1827,45 @@ mod tests {
             unreachable!("deserialise: {:?}", e);
         });
         assert!(!details.supports_nonce());
+    }
+
+    #[test]
+    fn test_peer_details_without_nonce_field_defaults_to_none() {
+        // same wire shape as above - old peers predate both fields at
+        // once, but this confirms `nonce` specifically defaults correctly
+        // (see docs/plans/replay-protection-design.md §10).
+        let json = r#"{"name":"airr","zone":"default","version":2,"standby_status":{"server_is_secondary":false,"client_is_secondary":false}}"#;
+        let details: PeerDetails = serde_json::from_str(json).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert_eq!(details.nonce(), None);
+    }
+
+    #[test]
+    fn test_handshake_without_nonce_field_defaults_to_none() {
+        // what a not-yet-upgraded peer's `Handshake` looks like on the
+        // wire - serialised before this field existed. Build a real one,
+        // then strip the field from its JSON (rather than hand-writing
+        // the wire format of `SecretKey`, which isn't this test's
+        // concern) - `#[serde(default)]` must still deserialise it, as
+        // `nonce: None`.
+        let handshake = Handshake {
+            session_key: Key::generate(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            nonce: Some(7),
+        };
+        let mut value = serde_json::to_value(&handshake).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("nonce");
+
+        let handshake: Handshake = serde_json::from_value(value).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert_eq!(handshake.nonce, None);
     }
 }

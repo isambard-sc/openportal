@@ -191,6 +191,41 @@ impl NoncedPayload {
     }
 }
 
+/// Per-peer nonce/replay state for handshake- and bootstrap-phase
+/// messages (`Handshake`/`PeerDetails` for direct connections;
+/// `StartRelayedConnection`/`RelayedConnectionAccepted`/`SessionUnknown`
+/// for relayed bootstrap) - see
+/// `docs/plans/replay-protection-design.md` §10.
+///
+/// Structurally identical to the nonce fields on `ConnectionState`/
+/// `RelayedSession`, but deliberately **not** reset on reconnect: those
+/// two protect session keys that are fresh every reconnect, so resetting
+/// alongside them is correct. The messages this type protects are
+/// encrypted wholly or partly under the *permanent* pre-shared key pair,
+/// which never changes across reconnects - a window that reset per
+/// connection would accept nonce 0 all over again on every replay
+/// attempt against a fresh connection, which is as good as no window at
+/// all. Callers keep one of these per peer for as long as the process
+/// runs, in a registry separate from the per-connection/per-session
+/// state (see `connection.rs`'s and `relay.rs`'s own per-peer maps).
+#[derive(Debug, Default)]
+pub(crate) struct HandshakeNonceState {
+    next_nonce: u64,
+    replay_window: ReplayWindow,
+}
+
+impl HandshakeNonceState {
+    pub(crate) fn take_next_nonce(&mut self) -> u64 {
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
+        nonce
+    }
+
+    pub(crate) fn check_replay(&mut self, nonce: Option<u64>) -> bool {
+        self.replay_window.check_and_record_optional(nonce)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +353,32 @@ mod tests {
         let (nonce, payload) = parsed.into_parts();
         assert_eq!(nonce, None);
         assert_eq!(payload, "a bare payload string");
+    }
+
+    #[test]
+    fn test_handshake_nonce_state_take_next_nonce_increments() {
+        let mut state = HandshakeNonceState::default();
+        assert_eq!(state.take_next_nonce(), 0);
+        assert_eq!(state.take_next_nonce(), 1);
+        assert_eq!(state.take_next_nonce(), 2);
+    }
+
+    #[test]
+    fn test_handshake_nonce_state_rejects_duplicate() {
+        let mut state = HandshakeNonceState::default();
+        assert!(state.check_replay(Some(0)));
+        assert!(state.check_replay(Some(1)));
+        assert!(!state.check_replay(Some(0)), "duplicate must be rejected");
+    }
+
+    #[test]
+    fn test_handshake_nonce_state_none_always_accepted() {
+        // a not-yet-upgraded peer's `Handshake`/`PeerDetails` has no
+        // `nonce` field at all, so deserialises as `None` - there is
+        // nothing to check it against, so it must always be accepted.
+        let mut state = HandshakeNonceState::default();
+        assert!(state.check_replay(None));
+        assert!(state.check_replay(None));
+        assert!(state.check_replay(None));
     }
 }

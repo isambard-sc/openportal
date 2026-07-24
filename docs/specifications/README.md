@@ -103,7 +103,9 @@ network layer:
   `StartRelayedConnection`/`RelayedConnectionAccepted` bootstrap used by
   `op-proxy` to relay two outbound-only agents' traffic without decrypting it
 - **Replay protection**: the `NoncedPayload` wrapper carrying a per-sender
-  nonce on every ongoing message, direct or relayed
+  nonce on every ongoing message, direct or relayed, plus a nonce on
+  `Handshake`/`PeerDetails` and the relayed bootstrap messages themselves,
+  checked against a separate, longer-lived per-peer window
 
 ---
 
@@ -123,7 +125,9 @@ provisioned using the invite file mechanism. Also covers:
   relayed agent's traffic or pre-shared keys
 - Replay protection - the IPsec/WireGuard-style anti-replay window that
   stops a captured, validly-encrypted message from being resent to
-  re-trigger its effect
+  re-trigger its effect, applied to both ongoing traffic and to the
+  handshake/bootstrap messages that establish a connection or relayed
+  session in the first place
 - Memory safety guarantees (`SecretBox`, `Zeroize`)
 
 ---

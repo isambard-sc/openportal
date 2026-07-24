@@ -30,7 +30,7 @@ use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
 
 use once_cell::sync::Lazy;
 
-use crate::anti_replay::{NoncedPayload, ReplayWindow};
+use crate::anti_replay::{HandshakeNonceState, NoncedPayload, ReplayWindow};
 use crate::command::Command;
 use crate::config::ServiceConfig;
 use crate::connection::{deenvelope_message, envelope_message};
@@ -70,6 +70,14 @@ struct StartRelayedConnection {
     /// field) deserialises as `false`, the correct answer for it.
     #[serde(default)]
     supports_nonce: bool,
+    /// Replay-protection nonce for this bootstrap message, checked against
+    /// a per-peer window that persists across every bootstrap attempt for
+    /// this peer (unlike `RelayedSession`'s ongoing-traffic nonce, which
+    /// resets on every bootstrap) - see
+    /// `docs/plans/replay-protection-design.md` §10. No backward
+    /// compatibility needed here (unlike `supports_nonce` above): `op-proxy`
+    /// isn't deployed yet, so this is a plain required field, not negotiated.
+    nonce: u64,
 }
 
 /// airr → brics, via proxy. Same permanent pre-shared keys - the last
@@ -84,6 +92,11 @@ struct RelayedConnectionAccepted {
     /// direction.
     #[serde(default)]
     supports_nonce: bool,
+    /// See `StartRelayedConnection::nonce` - same mechanism, other
+    /// direction. Redundant with `magic`'s existing single-use protection
+    /// (§10.1) but kept for uniformity across all three bootstrap message
+    /// types.
+    nonce: u64,
 }
 
 /// Internally tagged so a successful permanent-key decryption can be
@@ -100,10 +113,14 @@ enum BootstrapMessage {
     /// sender-side restart, which self-heals by re-bootstrapping on its
     /// own startup, the receiving side has no way to notice this
     /// happened on its own - see `notify_session_unknown` /
-    /// `handle_incoming_envelope`. Carries no data; encrypted with the
-    /// permanent pre-shared key like any other bootstrap message, so the
-    /// proxy cannot forge it.
-    SessionUnknown,
+    /// `handle_incoming_envelope`. Encrypted with the permanent pre-shared
+    /// key like any other bootstrap message, so the proxy cannot forge it -
+    /// `nonce` additionally stops it (or anyone else) replaying a genuine,
+    /// previously-captured one to force repeated re-bootstrap churn (see
+    /// `docs/plans/replay-protection-design.md` §10.1).
+    SessionUnknown {
+        nonce: u64,
+    },
 }
 
 /// Which side of the *virtual* relayed connection we are - independent of
@@ -189,6 +206,32 @@ static PROXY_POLICY: Lazy<TokioRwLock<RelayPolicy>> =
 /// see [`proxy_handler`] for why this is needed.
 static PROXY_CLIENT_ZONES: Lazy<TokioRwLock<HashMap<String, String>>> =
     Lazy::new(|| TokioRwLock::new(HashMap::new()));
+/// Per-peer, process-lifetime nonce state for bootstrap messages
+/// (`Start`/`Accepted`/`SessionUnknown`) - unlike `RelayedSession`'s
+/// ongoing-traffic nonce fields, this must **not** reset on every
+/// bootstrap, since these messages are encrypted (at least partly) under
+/// the permanent pre-shared key pair, which never changes across
+/// bootstrap attempts. See `docs/plans/replay-protection-design.md` §10.
+static BOOTSTRAP_NONCE_STATE: Lazy<TokioRwLock<HashMap<String, HandshakeNonceState>>> =
+    Lazy::new(|| TokioRwLock::new(HashMap::new()));
+
+async fn take_bootstrap_nonce(peer_name: &str) -> u64 {
+    BOOTSTRAP_NONCE_STATE
+        .write()
+        .await
+        .entry(peer_name.to_string())
+        .or_default()
+        .take_next_nonce()
+}
+
+async fn check_bootstrap_replay(peer_name: &str, nonce: u64) -> bool {
+    BOOTSTRAP_NONCE_STATE
+        .write()
+        .await
+        .entry(peer_name.to_string())
+        .or_default()
+        .check_replay(Some(nonce))
+}
 
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -436,6 +479,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
     let inner_key_salt = Salt::generate()?;
     let outer_key_salt = Salt::generate()?;
     let magic = generate_magic()?;
+    let nonce = take_bootstrap_nonce(peer_name).await;
 
     let start = StartRelayedConnection {
         session_outer_key: outer_key.clone(),
@@ -445,6 +489,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
         engine: env!("CARGO_PKG_NAME").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         supports_nonce: true,
+        nonce,
     };
 
     let bootstrap_salt = bootstrap_salt()?;
@@ -659,9 +704,10 @@ async fn wait_while_relay_connected(peer_name: &str) {
 /// dropping every message the client sends until something else notices.
 ///
 async fn notify_session_unknown(peer_name: &str, peer: &RelayedPeer) -> Result<(), Error> {
+    let nonce = take_bootstrap_nonce(peer_name).await;
     let bootstrap_salt = bootstrap_salt()?;
     let ciphertext = encrypt_with_keys(
-        &BootstrapMessage::SessionUnknown,
+        &BootstrapMessage::SessionUnknown { nonce },
         &peer.inner_key,
         &peer.outer_key,
         &bootstrap_salt,
@@ -695,7 +741,20 @@ async fn handle_start(
     relay: &str,
     start: StartRelayedConnection,
 ) -> Result<(), Error> {
+    // checked first, before generating any session key material or
+    // touching SESSIONS - this is the check that actually matters (see
+    // docs/plans/replay-protection-design.md §10.1): this message alone
+    // is sufficient to reset our live session for `from`, so a replayed
+    // `Start` must never get this far.
+    if !check_bootstrap_replay(from, start.nonce).await {
+        return Err(Error::InvalidPeer(format!(
+            "Rejected replayed (or too-old) StartRelayedConnection from '{}' (nonce {})",
+            from, start.nonce
+        )));
+    }
+
     let inner_key = Key::generate();
+    let nonce = take_bootstrap_nonce(from).await;
 
     let accepted = RelayedConnectionAccepted {
         session_inner_key: inner_key.clone(),
@@ -703,6 +762,7 @@ async fn handle_start(
         engine: env!("CARGO_PKG_NAME").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         supports_nonce: true,
+        nonce,
     };
 
     let bootstrap_salt = bootstrap_salt()?;
@@ -795,7 +855,18 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
             BootstrapMessage::Accepted(accepted) => {
                 let mut pending = PENDING_BOOTSTRAPS.lock().await;
                 if let Some(tx) = pending.remove(&accepted.magic) {
-                    let _ = tx.send(accepted);
+                    // redundant with `magic`'s existing single-use
+                    // protection (see docs/plans/replay-protection-design.md
+                    // §10.1) - kept for uniformity across all three
+                    // bootstrap message types.
+                    if check_bootstrap_replay(&envelope.from, accepted.nonce).await {
+                        let _ = tx.send(accepted);
+                    } else {
+                        tracing::warn!(
+                            "Rejected replayed (or too-old) RelayedConnectionAccepted from '{}' (nonce {})",
+                            envelope.from, accepted.nonce
+                        );
+                    }
                 } else {
                     tracing::warn!(
                         "Received a RelayedConnectionAccepted with unrecognised magic from '{}' - ignoring (stale or forged).",
@@ -803,7 +874,16 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
                     );
                 }
             }
-            BootstrapMessage::SessionUnknown => {
+            BootstrapMessage::SessionUnknown { nonce } => {
+                if !check_bootstrap_replay(&envelope.from, nonce).await {
+                    tracing::warn!(
+                        "Rejected replayed (or too-old) SessionUnknown from '{}' (nonce {})",
+                        envelope.from,
+                        nonce
+                    );
+                    return Ok(None);
+                }
+
                 tracing::info!(
                     "'{}' reports it has no relayed session with us (it likely just \
                      restarted) - clearing our own session for it, if any.",
@@ -1135,6 +1215,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_bootstrap_nonce_state_persists_and_rejects_replay_across_bootstraps() {
+        // unlike RelayedSession's ongoing-traffic nonce (reset on every
+        // bootstrap), this must survive across bootstrap attempts - see
+        // docs/plans/replay-protection-design.md §10.2. A name unique to
+        // this test avoids colliding with the global registry other tests
+        // might touch.
+        let peer_name = "test-bootstrap-nonce-persists";
+
+        let first = take_bootstrap_nonce(peer_name).await;
+        let second = take_bootstrap_nonce(peer_name).await;
+        assert_eq!(second, first + 1);
+
+        assert!(check_bootstrap_replay(peer_name, first).await);
+        assert!(check_bootstrap_replay(peer_name, second).await);
+
+        // simulates a captured Start/Accepted/SessionUnknown replayed
+        // against a *later* bootstrap attempt for the same peer - must
+        // still be rejected, proving the window survived rather than
+        // resetting the way RelayedSession's does.
+        assert!(!check_bootstrap_replay(peer_name, first).await);
+        assert!(!check_bootstrap_replay(peer_name, second).await);
+    }
+
     #[test]
     fn test_bootstrap_message_roundtrip() {
         let peer = test_peer(RelayedRole::Server {
@@ -1150,6 +1254,7 @@ mod tests {
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
             supports_nonce: true,
+            nonce: 0,
         };
 
         let ciphertext = encrypt_with_keys(
@@ -1168,7 +1273,7 @@ mod tests {
         match decrypted {
             BootstrapMessage::Start(start) => assert_eq!(start.magic, "abc123"),
             BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
-            BootstrapMessage::SessionUnknown => unreachable!("expected Start"),
+            BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Start"),
         }
     }
 
@@ -1188,6 +1293,7 @@ mod tests {
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
             supports_nonce: true,
+            nonce: 0,
         };
         let mut value = serde_json::to_value(&start).unwrap_or_else(|e| {
             unreachable!("serialise: {:?}", e);
@@ -1211,6 +1317,7 @@ mod tests {
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
             supports_nonce: true,
+            nonce: 0,
         };
         let mut value = serde_json::to_value(&accepted).unwrap_or_else(|e| {
             unreachable!("serialise: {:?}", e);
@@ -1242,7 +1349,7 @@ mod tests {
         let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("bootstrap_salt: {:?}", e));
 
         let ciphertext = encrypt_with_keys(
-            &BootstrapMessage::SessionUnknown,
+            &BootstrapMessage::SessionUnknown { nonce: 0 },
             &peer.inner_key,
             &peer.outer_key,
             &salt,
@@ -1253,7 +1360,7 @@ mod tests {
         let decrypted: BootstrapMessage =
             decrypt_with_keys(&ciphertext, &peer.inner_key, &peer.outer_key, &salt, &salt)
                 .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
-        assert!(matches!(decrypted, BootstrapMessage::SessionUnknown));
+        assert!(matches!(decrypted, BootstrapMessage::SessionUnknown { .. }));
 
         let forged: Result<BootstrapMessage, Error> =
             decrypt_with_keys(&ciphertext, &wrong_inner_key, &peer.outer_key, &salt, &salt);
@@ -1276,6 +1383,7 @@ mod tests {
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
             supports_nonce: true,
+            nonce: 0,
         };
 
         let ciphertext = encrypt_with_keys(
@@ -1494,6 +1602,7 @@ mod tests {
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
             supports_nonce: true,
+            nonce: 0,
         };
 
         let bootstrap_salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
@@ -1519,7 +1628,7 @@ mod tests {
         let start = match decrypted {
             BootstrapMessage::Start(start) => start,
             BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
-            BootstrapMessage::SessionUnknown => unreachable!("expected Start"),
+            BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Start"),
         };
         assert_eq!(start.magic, magic);
 
@@ -1531,6 +1640,7 @@ mod tests {
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
             supports_nonce: true,
+            nonce: 0,
         };
 
         let accepted_ciphertext = encrypt_with_keys(
@@ -1555,7 +1665,7 @@ mod tests {
         let accepted = match decrypted {
             BootstrapMessage::Accepted(accepted) => accepted,
             BootstrapMessage::Start(_) => unreachable!("expected Accepted"),
-            BootstrapMessage::SessionUnknown => unreachable!("expected Accepted"),
+            BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Accepted"),
         };
         assert_eq!(accepted.magic, magic);
 
@@ -1652,6 +1762,7 @@ mod tests {
                 engine: "test".to_string(),
                 version: "0.0.0".to_string(),
                 supports_nonce: true,
+                nonce: 0,
             };
 
             let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
@@ -1673,7 +1784,7 @@ mod tests {
                     session_keys.push(format!("{:?}", start.session_outer_key.expose_secret()))
                 }
                 BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
-                BootstrapMessage::SessionUnknown => unreachable!("expected Start"),
+                BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Start"),
             }
         }
 

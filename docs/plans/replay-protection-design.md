@@ -6,23 +6,25 @@ SPDX-License-Identifier: CC0-1.0
 # Message replay protection: an IPsec-style anti-replay window
 
 Status: **implemented** (§7 steps 1-3; step 5's doc updates are this same
-edit), **plus §5 revised**: what was originally a coordinated flag-day
-rollout is now a negotiated one - see §5 and §9's former "negotiated,
-gradual rollout" item, now implemented rather than deferred.
-`paddington::anti_replay` (`ReplayWindow`, `NoncedPayload`) exists exactly
-as designed below, wired into both `Connection`
-(`ConnectionState::next_nonce`/`replay_window`, checked in
-`send_message`/both post-handshake receive loops) and `RelayedSession`
-(same two fields, checked in `relay::send`/`handle_incoming_envelope`).
-Covered by 8 unit tests against `ReplayWindow` directly (the cases in §7
-step 1) plus an extension of the relay design's own
-`test_full_bootstrap_and_message_exchange_in_process` proving a captured,
-validly-encrypted ciphertext is rejected on replay even though it decrypts
-identically both times, plus the capability-negotiation tests described in
-§5. Validated live against real `op-portal`/`op-provider` processes, both
-directly connected and via a real `op-proxy`, confirming ordinary traffic
-(`Register`, at minimum) still flows correctly with the new wrapping in
-place - no false-positive replay rejections.
+edit), **plus §5 revised** (what was originally a coordinated flag-day
+rollout is now a negotiated one - see §5 and §9), **plus §10 added**
+(handshake/bootstrap message replay protection, §9's other former
+deferred item, now implemented).
+
+`paddington::anti_replay` (`ReplayWindow`, `NoncedPayload`,
+`HandshakeNonceState`) exists exactly as designed below, wired into
+`Connection` (`ConnectionState::next_nonce`/`replay_window` for ongoing
+traffic; the process-lifetime `HANDSHAKE_NONCE_STATE` registry for
+`Handshake`/`PeerDetails`), `RelayedSession` (same ongoing-traffic fields),
+and a second process-lifetime `BOOTSTRAP_NONCE_STATE` registry in
+`relay.rs` for `StartRelayedConnection`/`RelayedConnectionAccepted`/
+`SessionUnknown`. Covered by 8 unit tests against `ReplayWindow` directly
+(the cases in §7 step 1), the capability-negotiation tests described in
+§5, and the handshake/bootstrap tests described in §10.5 (49 `paddington`
+unit tests total). Validated live against real `op-portal`/`op-provider`
+processes, both directly connected and via a real `op-proxy`, confirming
+ordinary traffic (`Register`, at minimum) still flows correctly with the
+new wrapping in place - no false-positive replay rejections.
 
 **Not yet done**: step 4's live "capture real wire bytes from a running
 connection and replay them at the transport level" integration test -
@@ -33,7 +35,8 @@ binary has also not been done (no old build was readily available to test
 against) - only unit-tested by asserting an old-shaped, field-less
 `PeerDetails`/`StartRelayedConnection`/`RelayedConnectionAccepted` JSON
 deserialises with `supports_nonce: false`, and that `NoncedPayload::Legacy`
-serialises identically to a bare string. The `docs/specifications` updates
+serialises identically to a bare string; the same caveat applies to §10's
+`Handshake`/`PeerDetails` `nonce` field. The `docs/specifications` updates
 the phased plan calls for (wire-protocol.md, security-model.md) are
 included in this same change; this document is being left in `docs/plans/`
 rather than moved to `archive/` for now.
@@ -370,14 +373,7 @@ gradual-rollout compatibility, not an oversight.
 
 ## 9. Deferred: what this design still doesn't cover
 
-- **Handshake/bootstrap message replay** (§2). A dedicated pass could add
-  the same `ReplayWindow` machinery to `Handshake`/`PeerDetails` and to
-  `StartRelayedConnection`/`Accepted`/`SessionUnknown`, scoped per
-  permanent pre-shared key rather than per session (since, unlike a
-  session, the permanent key doesn't change across reconnects - the
-  window would need to live on `RelayedPeer`, which is config-derived and
-  long-lived, not on the ephemeral `RelayedSession`). Left out here to
-  keep this pass's surface area to ongoing traffic only.
+- ~~Handshake/bootstrap message replay~~ - **implemented, see §10.**
 - ~~A negotiated, gradual rollout~~ - **implemented, see §5**. The live
   fleet's clients turned out to lag servers significantly, so a coordinated
   flag-day wasn't realistic; `supports_nonce` on `PeerDetails`/the relayed
@@ -385,4 +381,206 @@ gradual-rollout compatibility, not an oversight.
 - **Persisted window state across a process restart.** Not attempted -
   see §2. A restarting agent's peers simply get a fresh window the moment
   a new connection/session is established, exactly as session keys
-  themselves already work.
+  themselves already work. §10's per-peer handshake/bootstrap window is
+  also in-memory-only, for the same reason.
+
+## 10. Addendum: handshake/bootstrap message replay protection
+
+Status: **implemented**. Picks up §9's first deferred item.
+
+### 10.1 What's actually replayable, traced through the code
+
+§2 originally waved this off with "narrower protections... adequate for
+now." Tracing through what a captured handshake/bootstrap message can
+actually be used for (not assumed) turns up a real gap, but a narrower one
+than "the whole handshake is unprotected":
+
+- **`StartRelayedConnection` (relayed bootstrap client → server)** - this
+  message *alone* is sufficient for `handle_start` (`relay.rs`) to
+  overwrite `SESSIONS` for that peer and fire a `Connected` event, with no
+  further live input needed from whoever sent it. A captured `Start`
+  replayed later forces the server side to silently reset its live session
+  for that peer and re-announce it connected - a genuine, repeatable
+  disruption (the peer's *real* session is torn down and replaced without
+  it doing anything), not merely "a spurious re-key that repairs itself"
+  as §2 characterised it before this was traced through properly.
+- **`SessionUnknown` (either direction)** - similarly self-sufficient: the
+  receiver wipes its cached session and (if it holds the client role)
+  immediately re-bootstraps, purely from receiving this one message. A
+  single captured `SessionUnknown` can be replayed indefinitely to force
+  constant re-bootstrap churn between two peers, long after whatever
+  restart originally produced it.
+- **`RelayedConnectionAccepted`** - already effectively replay-proof: `magic`
+  is freshly random per `bootstrap()` call and consumed exactly once via
+  `PENDING_BOOTSTRAPS.remove(&accepted.magic)`; a replayed `Accepted`
+  carries a `magic` that no longer matches anything pending and is dropped
+  today, logged as "unrecognised magic... (stale or forged)."
+- **Direct `Handshake`** - replaying the client's message alone gets the
+  server to generate a fresh session key and reply, but the connection
+  cannot actually complete: `PeerDetails` is encrypted under that freshly
+  *and randomly* generated session key (`Key::generate()`, not derived
+  from anything replayable), which an attacker replaying captured bytes
+  has no way to produce. So a replayed `Handshake` cannot impersonate a
+  peer or hijack a session - it can only make the server do wasted
+  handshake-processing work for a connection that will never complete.
+  Real, but a mild resource-consumption concern, not an authentication
+  bypass.
+- **Direct `PeerDetails`** - for the same reason, a captured `PeerDetails`
+  from one connection cannot be replayed against a *different* connection
+  attempt: its encryption key is freshly random each time, so old
+  ciphertext simply fails to decrypt under the new one.
+
+So `Start` and `SessionUnknown` are where nonce protection actually closes
+a real, repeatable disruption; `Handshake`/`PeerDetails`/`Accepted` get it
+too below, for uniformity and because it's cheap once the machinery
+exists, but the honest security value there is smaller (defense-in-depth
+for `Handshake`, decorative for `Accepted`/`PeerDetails`).
+
+### 10.2 Scoping: persistent per-peer state, not per-connection
+
+§4.3's ephemeral, reset-every-reconnect window works for ongoing traffic
+*because* the session keys it protects are also fresh every reconnect - a
+replayed nonce against a new session is moot, since the new session's key
+differs too. That reasoning doesn't hold here: the *permanent* pre-shared
+key pair (`Handshake`'s first message, and all three relayed bootstrap
+messages, are encrypted wholly or partly under it) never changes across
+reconnects. A window that reset per connection would accept nonce 0 all
+over again on every fresh connection attempt - exactly as useless as no
+window at all, since a replay attempt just needs a new connection to reset
+the check.
+
+The window instead needs to live for as long as the peer relationship
+itself - a new, shared type in `anti_replay.rs`:
+
+```rust
+#[derive(Debug, Default)]
+struct HandshakeNonceState {
+    next_nonce: u64,
+    replay_window: ReplayWindow,
+}
+```
+
+Structurally identical to `ConnectionState`'s/`RelayedSession`'s existing
+nonce fields (same two-line `take_next_nonce`, same delegation to
+`ReplayWindow` for the receive-side check) - the only thing that changes
+is *where it lives* and *when it resets* (never, short of a process
+restart - consistent with §2's existing "no persisted window state"
+non-goal, now extended to this window too).
+
+- **Direct connections**: a new process-lifetime registry in
+  `connection.rs`, keyed by `"{name}@{zone}"` (the same peer-identity
+  convention `exchange.rs`'s connection registry already uses), separate
+  from `ConnectionState` since it must outlive any one `Connection`.
+- **Relayed bootstrap**: the same struct, keyed by plain peer name in
+  `relay.rs` (matching `RELAY_CONFIG`/`SESSIONS`/`PENDING_BOOTSTRAPS`'s
+  existing keying), separate from `RelayedSession` for the same reason.
+
+Both maps are populated lazily (`entry(...).or_default()`) on first
+contact with a given peer - a never-before-seen peer's first nonce is
+simply accepted, exactly as `ReplayWindow` already handles "first nonce
+ever seen" for ongoing traffic.
+
+### 10.3 Wire changes and backward compatibility
+
+**Relayed bootstrap - no backward compatibility needed** (`op-proxy` isn't
+deployed yet, per §5's own reasoning for why it didn't need this either):
+a plain, required `nonce: u64` added to `StartRelayedConnection` and
+`RelayedConnectionAccepted`, and `BootstrapMessage::SessionUnknown`
+(previously a unit variant) becomes `SessionUnknown { nonce: u64 }`. No
+`#[serde(default)]`, no negotiation - every relayed peer speaks the same
+version from day one.
+
+**Direct connections - backward compatibility needed, and simpler than §5's
+than expected**: `Handshake` and `PeerDetails` are *already* structured
+objects (unlike ongoing traffic's bare string), so adding `#[serde(default)]
+nonce: Option<u64>` to each is exactly as safe as `domain`/`domain_version`
+on `Register` was, or `supports_nonce` on `PeerDetails` itself (§5) - a
+pre-upgrade peer's message simply lacks the field and deserialises with
+`nonce: None`, which is read as "no nonce to check, accept unconditionally"
+(the pre-this-feature behaviour, for that one message).
+
+Crucially, **this needs no capability-negotiation step at all** - the
+wrinkle flagged when this was first discussed (that `Handshake` is
+exchanged *before* `PeerDetails`, the point capability is normally learned,
+so a not-yet-known peer's very first `Handshake` couldn't be gated on a
+capability learned only afterward) turns out not to apply, because there's
+no gating decision to make in the first place. §5's negotiation exists
+because sending the wrong *shape* to an old peer breaks it outright
+(a bare string vs. an object). Adding an optional field to an
+already-structured message has no such failure mode: serde silently
+ignores unknown fields on the receiving end by default, so a not-yet-
+upgraded peer decoding a `nonce`-bearing `Handshake`/`PeerDetails` simply
+never notices the extra field. This side always sends its own nonce,
+unconditionally, on every message, to every peer, upgraded or not - there
+is nothing to learn or remember before deciding whether it's safe to do
+so. The only asymmetry is on receipt: check the nonce if present, skip the
+check if absent (`None`) - which is exactly how `ReplayWindow`
+already treats "first nonce ever seen" as an unconditional accept, just
+applied per-message instead of per-window.
+
+(One consequence worth naming plainly: this means direct-connection
+handshake replay protection is bidirectionally live from the very first
+connection between two upgraded peers - there is no "first connection is
+still unprotected while capability is learned" gap the way there might
+have been with a negotiated approach.)
+
+### 10.4 Where the checks land
+
+- **Client (`make_connection`)**: takes a nonce for its outgoing `Handshake`
+  before sending; checks the server's replied `Handshake`'s nonce once
+  decrypted; takes a nonce for its outgoing `PeerDetails`; checks the
+  server's replied `PeerDetails`'s nonce once decrypted and peer identity
+  is confirmed.
+- **Server (`handle_connection`)**: mirrors the above - checks the client's
+  `Handshake` nonce once peer identity is resolved (this only becomes
+  possible after the four-layer IP/crypto matching already narrows down
+  which configured peer this is, so the check happens right after that
+  point, not before); takes a nonce for its own `Handshake` reply; checks
+  the client's `PeerDetails` nonce; takes a nonce for its own `PeerDetails`
+  reply.
+- **Relayed `bootstrap()`**: takes a nonce for the outgoing `Start`; checks
+  the returned `Accepted`'s nonce (redundant with `magic`, kept for
+  uniformity - see §10.1) before completing.
+- **Relayed `handle_start()`**: checks the incoming `Start`'s nonce first,
+  before doing anything else (generating a session key, replying, or
+  touching `SESSIONS`) - this is the check that actually matters (§10.1);
+  takes a nonce for the outgoing `Accepted`.
+- **Relayed `notify_session_unknown()`**: takes a nonce for the outgoing
+  `SessionUnknown`.
+- **Relayed `handle_incoming_envelope()`**: checks an incoming
+  `SessionUnknown`'s nonce before acting on it (the other check that
+  actually matters); checks an incoming `Accepted`'s nonce after its
+  `magic` already matched, before forwarding it through the pending
+  bootstrap's oneshot channel.
+
+Rejection on failure mirrors the existing convention for every other
+"this message looks wrong" case at each of these call sites: log a
+warning and return `Err`/drop, no special handling.
+
+### 10.5 Testing
+
+- `HandshakeNonceState` unit tests mirroring `ReplayWindow`'s own (first
+  nonce accepted, duplicate rejected, `None` always accepted) - thin,
+  since the underlying logic is already exhaustively tested; these confirm
+  the wiring, not `ReplayWindow` itself again.
+- An old-shaped (field-missing) `Handshake`/`PeerDetails` JSON deserialises
+  with `nonce: None` and is accepted without a replay check - proving the
+  backward-compatibility claim in §10.3 directly, the same way §5's
+  `supports_nonce`-defaults-to-`false` tests do for ongoing traffic.
+- A replayed `StartRelayedConnection`/`SessionUnknown` (same nonce value
+  reused) is rejected the second time - proving §10.1's actual threat is
+  closed.
+
+### 10.6 What this still doesn't cover
+
+- **Process-restart persistence** - as already accepted for the ongoing-
+  traffic window (§9), this window is in-memory only. A process restart
+  gets a fresh window for every peer, exactly as if it were a new peer
+  relationship - no worse than today's behaviour, since there was no replay
+  protection here at all before this addendum.
+- **A genuine authentication bypass via `Handshake`/`PeerDetails` replay**
+  was never actually possible (§10.1) - this addendum closes a real
+  disruption vector (`Start`/`SessionUnknown`) and adds defense-in-depth
+  where the risk was already low, but it isn't "fixing a hole that let
+  attackers impersonate a peer," since no such hole existed once the
+  fresh-session-key behaviour was traced through properly.

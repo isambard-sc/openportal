@@ -381,10 +381,9 @@ protect a single message against being resent, since a replayed message
 carries its original `info` value with it and re-derives the same key.
 
 Ongoing message traffic (post-handshake application messages - Jobs,
-Notifications, keepalives; not the handshake/bootstrap messages
-themselves, see the design doc §2 and §9) carries a monotonically
-increasing per-sender nonce, checked against a receiver-side sliding
-window - the standard IPsec/WireGuard-style anti-replay scheme: a
+Notifications, keepalives) carries a monotonically increasing per-sender
+nonce, checked against a receiver-side sliding window - the standard
+IPsec/WireGuard-style anti-replay scheme: a
 high-water-mark plus a fixed-size bitmap of recently-accepted values,
 rejecting anything already seen or too old to have a slot in the window.
 The nonce lives inside the AEAD-authenticated ciphertext (not a plaintext
@@ -415,6 +414,34 @@ pre-nonce behaviour, not a weaker version of the new one - while every
 pair where both ends have been upgraded gets full protection immediately,
 independent of the rest of the fleet's rollout state. See the design doc
 §5 for the full mechanism.
+
+**Handshake and bootstrap messages** (`Handshake`/`PeerDetails` for direct
+connections; `StartRelayedConnection`/`RelayedConnectionAccepted`/
+`SessionUnknown` for relayed bootstrap) carry the same kind of nonce,
+checked against a *separate*, longer-lived window per peer that - unlike
+the ongoing-traffic window above - does **not** reset on reconnect, since
+these messages are encrypted (at least partly) under the *permanent*
+pre-shared key pair, which itself never changes across reconnects; a
+window that reset per connection would accept a replay against any fresh
+connection attempt. Tracing through what a captured message here can
+actually be used for shows the real risk is narrower than "the whole
+handshake is unforgeable": `StartRelayedConnection` and `SessionUnknown`
+can each unilaterally cause the receiver to reset session state or
+re-bootstrap from a single captured message with no further live input
+needed, which nonce-checking now closes; `Handshake`/`PeerDetails` cannot
+be used to hijack or impersonate a session even without this (each
+connection's session keys are freshly random and never derivable from
+captured bytes), and `RelayedConnectionAccepted` was already effectively
+replay-proof via its single-use `magic` correlation. All five message
+types are nonce-checked uniformly regardless. For direct connections, this
+needed no capability negotiation at all (unlike ongoing traffic): `nonce`
+is `#[serde(default)] Option<u64>` on messages that were already
+structured objects, so an old peer's message simply lacks the field
+(read as `None`, skip the check) and serde already ignores the field on
+an old peer's *receiving* end - there is no wire-shape change to gate. For
+relayed bootstrap, no backward compatibility was needed at all (`op-proxy`
+isn't deployed yet), so `nonce: u64` there is a plain, required field. See
+the design doc §10 for the full mechanism and its threat-model reasoning.
 
 ---
 

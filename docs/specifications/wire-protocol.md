@@ -505,7 +505,8 @@ object (encrypted using the pre-shared keys with the exchanged salts):
 {
   "session_key": "<hex-encoded-32-byte-key>",
   "engine":      "<engine-name-string>",
-  "version":     <integer>
+  "version":     "<engine-version-string>",
+  "nonce":       <integer>
 }
 ```
 
@@ -514,12 +515,25 @@ inner key for the remainder of the connection):
 
 ```json
 {
-  "session_key": "<hex-encoded-32-byte-key>"
+  "session_key": "<hex-encoded-32-byte-key>",
+  "engine":      "<engine-name-string>",
+  "version":     "<engine-version-string>",
+  "nonce":       <integer>
 }
 ```
 
 After the key exchange, both parties use the negotiated session keys for all
 subsequent messages on this connection.
+
+`nonce` is a replay-protection nonce, checked against a per-peer window
+that - unlike §3.5's ongoing-traffic window - persists across reconnects
+rather than resetting, since `Handshake` is encrypted (at least partly)
+under the *permanent* pre-shared key pair, which itself never changes
+across reconnects. `#[serde(default)] Option<u64>`, so a pre-upgrade
+peer's `Handshake` (which predates this field) is read as `nonce: None` -
+skip the check, accept unconditionally. See
+[security-model.md](security-model.md) §9 and
+[replay-protection-design.md](../plans/replay-protection-design.md) §10.
 
 ### 4.3 Peer Identity Exchange
 
@@ -535,7 +549,8 @@ encrypted messages):
     "server_is_secondary": <boolean>,
     "client_is_secondary": <boolean>
   },
-  "supports_nonce": <boolean>
+  "supports_nonce": <boolean>,
+  "nonce": <integer>
 }
 ```
 
@@ -546,13 +561,17 @@ encrypted messages):
 | `version` | integer | Protocol version; must be `2` |
 | `standby_status` | object | High-availability standby state (see §4.4) |
 | `supports_nonce` | boolean | Whether the sender understands the `{nonce, payload}` shape for ongoing traffic (§3.5) - `#[serde(default)]`, so a pre-upgrade peer's `PeerDetails` (which predates this field) is read as `false`. See [security-model.md](security-model.md) §9 and [replay-protection-design.md](../plans/replay-protection-design.md) §5. |
+| `nonce` | integer, optional | Replay-protection nonce for this `PeerDetails` message itself (distinct from `supports_nonce` above, which is about *ongoing* traffic) - `#[serde(default)] Option<u64>`, checked against the same persistent per-peer window `Handshake`'s nonce uses (§4.2). See [replay-protection-design.md](../plans/replay-protection-design.md) §10. |
 
 Once both `PeerDetails` have been exchanged successfully, the Templemeads layer
 is notified via a Paddington `Connected` control command and the `Register` /
 `Sync` sequence begins. Each side now remembers whether the *other* side's
 `PeerDetails` confirmed `supports_nonce` for the lifetime of this connection
 (`Connection::peer_supports_nonce`) - this is what §3.5's send path checks
-before choosing whether to wrap outgoing traffic.
+before choosing whether to wrap outgoing traffic. Unlike that per-connection
+capability flag, the `Handshake`/`PeerDetails` nonce window itself
+(`HANDSHAKE_NONCE_STATE`, keyed by `"{name}@{zone}"`) persists for the life
+of the process, not just this one connection - see §10.
 
 ### 4.4 High-Availability Standby
 
@@ -652,7 +671,8 @@ rather than at the transport level:
   "magic":              "<hex-encoded-32-byte-random-string>",
   "engine":             "<engine-name-string>",
   "version":            "<engine-version-string>",
-  "supports_nonce":     <boolean>
+  "supports_nonce":     <boolean>,
+  "nonce":              <integer>
 }
 ```
 
@@ -664,7 +684,8 @@ rather than at the transport level:
   "magic":             "<same-magic-as-Start>",
   "engine":             "<engine-name-string>",
   "version":            "<engine-version-string>",
-  "supports_nonce":     <boolean>
+  "supports_nonce":     <boolean>,
+  "nonce":              <integer>
 }
 ```
 
@@ -678,6 +699,22 @@ function (`bootstrap()` for the client, `handle_start()` for the server)
 completes, and stores it as `RelayedSession::peer_supports_nonce` for that
 session's lifetime - see
 [replay-protection-design.md](../plans/replay-protection-design.md) §5.
+
+`nonce` is a *separate* mechanism from `supports_nonce` above - a
+replay-protection nonce for the bootstrap message itself, checked against
+a per-peer window that persists across every bootstrap attempt for that
+peer (`BOOTSTRAP_NONCE_STATE`, keyed by peer name), unlike
+`RelayedSession`'s ongoing-traffic nonce state, which resets on every
+fresh bootstrap. Unlike `supports_nonce`/§3.5's ongoing-traffic nonce, this
+field is a plain required `u64`, not negotiated - `op-proxy` isn't deployed
+yet, so there is no not-yet-upgraded relayed peer to stay compatible with.
+`handle_start()` checks an incoming `Start`'s nonce *before* generating any
+session key material or touching the session table, since this message
+alone is otherwise sufficient to reset a peer's live session - see
+[replay-protection-design.md](../plans/replay-protection-design.md) §10.1
+for why this (and `SessionUnknown`, §7.3) are the bootstrap messages where
+this actually matters, versus `Accepted`, whose replay is already prevented
+by `magic`'s single-use correlation below.
 
 Both messages are internally tagged (`type: "Start"` / `"Accepted"`) so
 that a successful decryption can be identified as one specific bootstrap
@@ -732,7 +769,8 @@ out why.
 ```json
 // either direction, via proxy (ciphertext, once decrypted)
 {
-  "type": "SessionUnknown"
+  "type": "SessionUnknown",
+  "nonce": <integer>
 }
 ```
 
@@ -740,10 +778,17 @@ Whichever side receives ongoing traffic (§7.2) it cannot match to a
 session sends this back to `envelope.from`, encrypted with the same
 **permanent pre-shared key** as `Start`/`Accepted` above (so the proxy
 cannot forge it any more than it can forge a genuine bootstrap). On
-receipt, the recipient clears its own cached session for that peer and,
-if it holds the relayed *client* role for it (the only role that can
-initiate), immediately re-bootstraps rather than waiting for its next
-scheduled retry.
+receipt, the recipient checks `nonce` against the same persistent
+per-peer window `Start`/`Accepted` use (§7.1) before acting on it - this
+is one of the two bootstrap messages (with `Start`) where nonce-checking
+closes a real, repeatable disruption: without it, a single captured
+`SessionUnknown` could be replayed indefinitely to force constant
+re-bootstrap churn between two peers, long after whatever restart
+originally produced it. If the nonce checks out, the recipient clears its
+own cached session for that peer and, if it holds the relayed *client*
+role for it (the only role that can initiate), immediately re-bootstraps
+rather than waiting for its next scheduled retry. See
+[replay-protection-design.md](../plans/replay-protection-design.md) §10.1.
 
 **Source file:** `paddington/src/relay.rs`
 

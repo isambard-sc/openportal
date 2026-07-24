@@ -349,6 +349,13 @@ pair's trust properties above stand entirely on that pair's own
 out-of-band key exchange and are unaffected by how many different proxies
 are involved elsewhere in the agent's own connection graph.
 
+A side effect of this trust model, unrelated to security but worth noting
+here: because the proxy relays purely by peer identity and never
+distinguishes *which* physical process behind that identity it's talking
+to, several redundant server processes can share one identity behind a
+proxy and get automatic failover between them - see
+[highavailability.md](highavailability.md) §3.
+
 ---
 
 ## 8. Memory Safety

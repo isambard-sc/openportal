@@ -575,18 +575,22 @@ of the process, not just this one connection - see §10.
 
 ### 4.4 High-Availability Standby
 
-OpenPortal supports active/standby pairs for each agent. When two peers
-connect, the peer whose name is alphabetically earlier is designated the
-primary; the other is the secondary. The `standby_status` field in
+OpenPortal supports active/standby pairs of redundant clients connecting to
+one server: whichever physical connection under a given identity is
+registered *first* is primary, and any further connection under that same
+identity is told it's secondary. The `standby_status` field in
 `PeerDetails` communicates which role each side occupies:
 
 | Field | Meaning |
 |-------|---------|
-| `server_is_secondary` | `true` if the server-side peer is in standby mode |
+| `server_is_secondary` | `true` if the server-side peer is in standby mode (currently unused - see [highavailability.md](highavailability.md) §2.3) |
 | `client_is_secondary` | `true` if the client-side peer is in standby mode |
 
 Standby peers receive job-board synchronisation but do not actively process
-jobs unless the primary becomes unavailable.
+jobs unless the primary becomes unavailable. See
+[highavailability.md](highavailability.md) for the full mechanism,
+failover timing, and how the same building blocks give server-side
+redundancy too via the blind relay proxy.
 
 ---
 

@@ -132,6 +132,24 @@ provisioned using the invite file mechanism. Also covers:
 
 ---
 
+### [highavailability.md](highavailability.md)
+**Client and server high availability**
+
+Covers the two ways an OpenPortal agent can be run redundantly so a single
+host failure doesn't take down a peer relationship:
+
+- Client HA (direct connections) - multiple physical clients presenting
+  one identity to a server, arbitrated via `StandbyStatus`
+- Server HA (via `op-proxy`) - a later insight showing that composing
+  client HA with the blind relay proxy and its existing `SessionUnknown`
+  restart-recovery path gives genuine server-side redundancy too, for an
+  agent that is server-only
+- Why board-sync reconciliation, command idempotency, and portal-side
+  retries mean a brief failover gap isn't expected to surface as a failure
+- Practical guidance on where HA is actually worth deploying
+
+---
+
 ### [python-api.md](python-api.md)
 **OpenPortal Python API reference**
 

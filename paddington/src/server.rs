@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 use crate::config::ServiceConfig;
@@ -45,8 +46,14 @@ async fn handle_connection(
 ///
 pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
     // Create the event loop and TCP listener we'll accept connections on.
-
-    let addr = format!("{}:{}", config.ip(), config.port());
+    //
+    // Built as a typed `SocketAddr` rather than a formatted string -
+    // `Display` for an IPv6 `IpAddr` doesn't add the `[...]` brackets the
+    // string socket-address syntax requires, so `format!("{}:{}", ...)`
+    // would silently produce an unparseable address for an IPv6 `ip`. See
+    // `docs/plans/ipv6-support-design.md` §4.1; mirrors the same pattern
+    // already used in `healthcheck.rs`.
+    let addr = SocketAddr::new(config.ip(), config.port());
 
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Listening on: {}", listener.local_addr()?);

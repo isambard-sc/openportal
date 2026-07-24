@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **IPv6 support for IP allowlisting and server binding** — `paddington`'s
+  IP-based connection authentication (`IpOrRange`) and a server's own
+  listen address now both work correctly for IPv6, not just IPv4. A
+  single allowed IP already worked for either family; CIDR *ranges* were
+  previously hard-coded to IPv4 only (`iptools::iprange::IPv4`) and are
+  now tried against IPv6 too, with identical config syntax either way
+  (`ip = "2001:db8::/32"`, just like `ip = "10.0.0.0/24"`). Separately, a
+  server's own bind address was built via a formatted string that never
+  bracketed an IPv6 address correctly (`TcpListener::bind` requires
+  `[::1]:8080`, not `::1:8080`) - now built as a typed `SocketAddr`
+  instead, matching the pattern the health-check listener already used.
+  Dual-stack listening (one socket accepting both families) remains
+  outside OpenPortal's control - it's an OS-level socket option this
+  layer doesn't expose - see `docs/plans/ipv6-support-design.md`.
 - **Domain-oblivious multi-domain routing (`Erased`)** — `templemeads`
   gains an `Erased` domain for building router/proxy agents that forward
   Jobs and Notifications between other agents without needing to

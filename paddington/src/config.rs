@@ -345,6 +345,39 @@ fn is_full_ipv4_range(range: &str) -> bool {
     }
 }
 
+/// As `is_full_ipv4_range`, for IPv6: `IpRange::<IPv6>::new`'s `len = end -
+/// start + 1` is a `u128`, which overflows identically for the full
+/// 2^128-address range (`"::/0"`, i.e. `u128::MAX - 0 + 1`).
+fn is_full_ipv6_range(range: &str) -> bool {
+    match range.split_once('/') {
+        Some((ip, prefix)) => prefix.parse::<u32>() == Ok(0) && iptools::ipv6::validate_ip(ip),
+        None => false,
+    }
+}
+
+/// Validates `range` as CIDR notation for either address family, trying
+/// IPv4 first so behaviour and error messages are unchanged for anything
+/// that already parses as an IPv4 range - see
+/// `docs/plans/ipv6-support-design.md` §4.2.
+fn validate_ip_range(range: &str) -> Result<(), String> {
+    if is_full_ipv4_range(range) || is_full_ipv6_range(range) {
+        return Ok(());
+    }
+
+    let v4_err = match IpRange::<iptools::iprange::IPv4>::new(range, "") {
+        Ok(_) => return Ok(()),
+        Err(err) => err,
+    };
+
+    match IpRange::<iptools::iprange::IPv6>::new(range, "") {
+        Ok(_) => Ok(()),
+        Err(v6_err) => Err(format!(
+            "not a valid IPv4 range ({}) or IPv6 range ({})",
+            v4_err, v6_err
+        )),
+    }
+}
+
 impl<'de> Deserialize<'de> for IpOrRange {
     /// Validates a `Range` variant's CIDR syntax at load time, rather than
     /// only discovering it is unparseable later, silently, at connection
@@ -365,14 +398,12 @@ impl<'de> Deserialize<'de> for IpOrRange {
         match Raw::deserialize(deserializer)? {
             Raw::IP(ip) => Ok(IpOrRange::IP(ip)),
             Raw::Range(range) => {
-                if !is_full_ipv4_range(&range) {
-                    IpRange::<iptools::iprange::IPv4>::new(&range, "").map_err(|err| {
-                        serde::de::Error::custom(format!(
-                            "Could not parse IP range: {}, error {}",
-                            range, err
-                        ))
-                    })?;
-                }
+                validate_ip_range(&range).map_err(|err| {
+                    serde::de::Error::custom(format!(
+                        "Could not parse IP range: {}, error {}",
+                        range, err
+                    ))
+                })?;
                 Ok(IpOrRange::Range(range))
             }
         }
@@ -392,9 +423,8 @@ impl IpOrRange {
     pub fn new(ip: &str) -> Result<Self, Error> {
         match ip.parse() {
             Ok(ip) => Ok(IpOrRange::IP(ip)),
-            Err(_) if is_full_ipv4_range(ip) => Ok(IpOrRange::Range(ip.to_string())),
-            Err(_) => match IpRange::<iptools::iprange::IPv4>::new(ip, "") {
-                Ok(_) => Ok(IpOrRange::Range(ip.to_string())),
+            Err(_) => match validate_ip_range(ip) {
+                Ok(()) => Ok(IpOrRange::Range(ip.to_string())),
                 Err(err) => Err(Error::Parse(format!(
                     "Could not parse IP address or range: {}, error {}",
                     ip, err
@@ -407,12 +437,16 @@ impl IpOrRange {
         match self {
             IpOrRange::IP(ip) => ip == addr,
             IpOrRange::Range(range) if is_full_ipv4_range(range) => addr.is_ipv4(),
+            IpOrRange::Range(range) if is_full_ipv6_range(range) => addr.is_ipv6(),
             IpOrRange::Range(range) => match IpRange::<iptools::iprange::IPv4>::new(range, "") {
                 Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
-                Err(_) => {
-                    tracing::warn!("Could not parse IP range: {}", range);
-                    false
-                }
+                Err(_) => match IpRange::<iptools::iprange::IPv6>::new(range, "") {
+                    Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
+                    Err(_) => {
+                        tracing::warn!("Could not parse IP range: {}", range);
+                        false
+                    }
+                },
             },
         }
     }
@@ -1212,6 +1246,148 @@ mod tests {
 
         let result: Result<IpOrRange, _> = toml::from_str(r#"Range = "0.0.0.0/0""#);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ip_or_range_ipv6() {
+        // mirrors test_ip_or_range, but for IPv6 - see
+        // docs/plans/ipv6-support-design.md §4.2.
+        let mut ip = IpOrRange::new("::1").unwrap_or_else(|e| {
+            unreachable!("Could not create IPv6 address: {:?}", e);
+        });
+
+        assert_eq!(format!("{}", ip), "::1");
+
+        assert!(ip.matches(
+            &"::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+        assert!(!ip.matches(
+            &"::2"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+        assert!(!ip.matches(&IpAddr::from([127, 0, 0, 1])));
+
+        assert!(IpOrRange::new("::zzzz").is_err());
+
+        ip = IpOrRange::new("2001:db8::/32").unwrap_or_else(|e| {
+            unreachable!("Could not create IPv6 range: {:?}", e);
+        });
+
+        assert_eq!(format!("{}", ip), "2001:db8::/32");
+
+        assert!(ip.matches(
+            &"2001:db8::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+        assert!(ip.matches(
+            &"2001:db8:0:ffff::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+        assert!(!ip.matches(
+            &"2001:db9::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+        assert!(!ip.matches(&IpAddr::from([127, 0, 0, 1])));
+    }
+
+    #[test]
+    fn test_ip_or_range_rejects_invalid_range_on_deserialize_ipv6() {
+        let bad_toml = r#"Range = "2001:db8::/zz""#;
+        let result: Result<IpOrRange, _> = toml::from_str(bad_toml);
+        assert!(result.is_err());
+
+        let good_toml = r#"Range = "2001:db8::/32""#;
+        let result: Result<IpOrRange, _> = toml::from_str(good_toml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ip_or_range_full_ipv6_range_does_not_panic() {
+        // "::/0" is IPv6's equivalent of "0.0.0.0/0" - and hits the exact
+        // same `iptools::iprange::IPv6::new` `len` overflow (u128::MAX -
+        // 0 + 1) that the IPv4 case works around - see
+        // test_ip_or_range_full_range_does_not_panic and
+        // docs/plans/ipv6-support-design.md §3.
+        let ip = IpOrRange::new("::/0").unwrap_or_else(|e| {
+            unreachable!("Could not create full-range IpOrRange: {:?}", e);
+        });
+
+        assert!(ip.matches(
+            &"::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+        assert!(ip.matches(
+            &"2001:db8::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+        assert!(!ip.matches(&IpAddr::from([1, 2, 3, 4])));
+
+        // any prefix before /0 means the same thing
+        let ip = IpOrRange::new("2001:db8::1/0").unwrap_or_else(|e| {
+            unreachable!("Could not create full-range IpOrRange: {:?}", e);
+        });
+        assert!(ip.matches(
+            &"::1"
+                .parse()
+                .unwrap_or_else(|e| { unreachable!("Could not parse IPv6 address: {:?}", e) })
+        ));
+
+        let result: Result<IpOrRange, _> = toml::from_str(r#"Range = "::/0""#);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_service_config_ipv6_listen_address() {
+        // `ServiceConfig.ip` must accept an IPv6 address, and produce a
+        // `SocketAddr` that round-trips correctly - see
+        // docs/plans/ipv6-support-design.md §4.1 (the actual `bind()` call
+        // this feeds lives in `server.rs`, not exercised by this crate's
+        // unit tests, but the `SocketAddr` construction it depends on is).
+        let config =
+            ServiceConfig::new("test-ipv6", "http://localhost", "::1", &6010, &None, &None)
+                .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
+
+        assert!(config.ip().is_ipv6());
+
+        let addr = std::net::SocketAddr::new(config.ip(), config.port());
+        assert_eq!(addr.ip(), config.ip());
+        assert_eq!(addr.port(), 6010);
+    }
+
+    #[test]
+    fn test_create_websocket_url_ipv6_host() {
+        // The client-dial-out path (`ServerConfig::get_websocket_url`)
+        // goes through the `url` crate rather than the ad-hoc string
+        // formatting `server.rs`'s own bind address used to use (§4.1) -
+        // this confirms that path already handles a bracketed IPv6 host
+        // literal correctly, end to end through to the same
+        // `IntoClientRequest` conversion `make_connection` performs, per
+        // docs/plans/ipv6-support-design.md §5 ("expected to work" should
+        // be verified, not just assumed).
+        use tungstenite::client::IntoClientRequest;
+
+        let url = create_websocket_url("http://[2001:db8::1]:8080").unwrap_or_else(|e| {
+            unreachable!("Could not create websocket URL: {:?}", e);
+        });
+
+        assert_eq!(url, "ws://[2001:db8::1]:8080/");
+
+        let request = url.into_client_request().unwrap_or_else(|e| {
+            unreachable!("Bracketed IPv6 URL rejected by IntoClientRequest: {:?}", e);
+        });
+        assert!(request
+            .uri()
+            .host()
+            .unwrap_or_default()
+            .contains("2001:db8::1"));
     }
 
     #[test]

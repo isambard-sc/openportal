@@ -174,9 +174,23 @@ connection is check the client's IP against this list.
 If no `ClientConfig` matches the connecting IP, the connection is immediately
 rejected before any message processing occurs.
 
-IP ranges are specified in CIDR notation (e.g. `10.0.0.0/24`). A reverse proxy
-may be configured via `proxy_header` to extract the real client IP from a
-header such as `X-Forwarded-For`.
+IP ranges are specified in CIDR notation (e.g. `10.0.0.0/24` or
+`2001:db8::/32`) - both IPv4 and IPv6 addresses and ranges are supported,
+with identical syntax either way (`IpOrRange`, `paddington/src/config.rs`;
+see [ipv6-support-design.md](../plans/ipv6-support-design.md) for how this
+was extended to cover IPv6). A reverse proxy may be configured via
+`proxy_header` to extract the real client IP from a header such as
+`X-Forwarded-For`.
+
+**Dual-stack listening is outside OpenPortal's control.** Whether a
+listener bound to an IPv6 address also accepts IPv4-mapped connections is
+governed by the OS-level `IPV6_V6ONLY` socket option, which varies by
+platform default and which plain socket binding (as used here) does not
+expose a way to override. An operator who needs both families reachable
+should either rely on their OS's dual-stack default or run two listeners
+(one per family, on different ports or interfaces) - this is a deployment
+decision, not something OpenPortal's allowlisting or binding code can
+resolve on its own.
 
 ### 4.2 Layer 2: Cryptographic Authentication
 

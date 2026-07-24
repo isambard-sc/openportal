@@ -397,6 +397,25 @@ needing to know it exists. Window state resets alongside the session keys
 it protects on every reconnect/re-bootstrap, rather than being persisted
 across one.
 
+**Rollout is negotiated, not a coordinated flag-day.** Each peer
+advertises `supports_nonce: bool` in its `PeerDetails` (direct connections)
+or `StartRelayedConnection`/`RelayedConnectionAccepted` (relayed
+bootstrap) - fields that were already structured, safely-extensible
+messages, so adding this one is as safe as `domain`/`domain_version` on
+`Register`. A not-yet-upgraded peer's message simply lacks the field and
+so is read as `supports_nonce: false`, correctly. Each side remembers the
+other's confirmed support for the lifetime of the connection/session
+(`Connection::peer_supports_nonce`, `RelayedSession::peer_supports_nonce`)
+and only sends the wrapped `{nonce, payload}` shape to a peer that
+confirmed it; a peer that hasn't is sent exactly the bare-string shape it
+already expects (`NoncedPayload::for_peer`), not a degraded encoding of the
+new one. The trust-relevant consequence: **a pair where either end hasn't
+been upgraded gets no replay protection for that pair** - exactly the
+pre-nonce behaviour, not a weaker version of the new one - while every
+pair where both ends have been upgraded gets full protection immediately,
+independent of the rest of the fleet's rollout state. See the design doc
+§5 for the full mechanism.
+
 ---
 
 ## 10. Source File Reference

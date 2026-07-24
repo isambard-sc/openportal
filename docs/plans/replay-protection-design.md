@@ -6,8 +6,11 @@ SPDX-License-Identifier: CC0-1.0
 # Message replay protection: an IPsec-style anti-replay window
 
 Status: **implemented** (§7 steps 1-3; step 5's doc updates are this same
-edit). `paddington::anti_replay` (`ReplayWindow`, `NoncedPayload`) exists
-exactly as designed below, wired into both `Connection`
+edit), **plus §5 revised**: what was originally a coordinated flag-day
+rollout is now a negotiated one - see §5 and §9's former "negotiated,
+gradual rollout" item, now implemented rather than deferred.
+`paddington::anti_replay` (`ReplayWindow`, `NoncedPayload`) exists exactly
+as designed below, wired into both `Connection`
 (`ConnectionState::next_nonce`/`replay_window`, checked in
 `send_message`/both post-handshake receive loops) and `RelayedSession`
 (same two fields, checked in `relay::send`/`handle_incoming_envelope`).
@@ -15,19 +18,25 @@ Covered by 8 unit tests against `ReplayWindow` directly (the cases in §7
 step 1) plus an extension of the relay design's own
 `test_full_bootstrap_and_message_exchange_in_process` proving a captured,
 validly-encrypted ciphertext is rejected on replay even though it decrypts
-identically both times. Validated live against real `op-portal`/
-`op-provider` processes, both directly connected and via a real
-`op-proxy`, confirming ordinary traffic (`Register`, at minimum) still
-flows correctly with the new wrapping in place - no false-positive replay
-rejections.
+identically both times, plus the capability-negotiation tests described in
+§5. Validated live against real `op-portal`/`op-provider` processes, both
+directly connected and via a real `op-proxy`, confirming ordinary traffic
+(`Register`, at minimum) still flows correctly with the new wrapping in
+place - no false-positive replay rejections.
 
 **Not yet done**: step 4's live "capture real wire bytes from a running
 connection and replay them at the transport level" integration test -
 covered at the protocol level (decrypt-the-same-ciphertext-twice, as
-above) but not by literally intercepting a live WebSocket frame. The
-`docs/specifications` updates the phased plan calls for (wire-protocol.md,
-security-model.md) are included in this same change; this document is
-being left in `docs/plans/` rather than moved to `archive/` for now.
+above) but not by literally intercepting a live WebSocket frame. Live
+validation of §5's negotiation against an actual not-yet-upgraded peer
+binary has also not been done (no old build was readily available to test
+against) - only unit-tested by asserting an old-shaped, field-less
+`PeerDetails`/`StartRelayedConnection`/`RelayedConnectionAccepted` JSON
+deserialises with `supports_nonce: false`, and that `NoncedPayload::Legacy`
+serialises identically to a bare string. The `docs/specifications` updates
+the phased plan calls for (wire-protocol.md, security-model.md) are
+included in this same change; this document is being left in `docs/plans/`
+rather than moved to `archive/` for now.
 
 ## 1. Goal
 
@@ -70,14 +79,16 @@ handling.
   repairs itself the next time the legitimate peer sends anything - see
   §9 for the fuller argument for leaving this for a later pass rather than
   silently ignoring it).
-- **A gradual, one-agent-at-a-time rollout.** Unlike the `domain`/
-  `domain_version` fields added to `Register` (purely additive - `Register`
-  was already a structured object), this change alters the *shape* of the
-  encrypted content for ongoing traffic, from a bare string to a small
-  wrapper object. An agent that hasn't been upgraded cannot parse the new
-  shape at all. This is a coordinated redeployment for whichever agents
-  talk to each other (like raising a minimum protocol version), not a
-  silently-compatible field addition - see §5.
+- **Changing the shape of ongoing traffic without negotiation.** Unlike the
+  `domain`/`domain_version` fields added to `Register` (purely additive -
+  `Register` was already a structured object), wrapping ongoing traffic in
+  `{nonce, payload}` changes the *shape* of the encrypted content from a
+  bare string to an object - an agent that hasn't been upgraded cannot
+  parse that shape at all. §5 (revised after initial implementation)
+  covers how a gradual rollout is nonetheless made possible: by advertising
+  support for the new shape via an already-structured, safely-extensible
+  message and gating on the peer's confirmed support, rather than by
+  changing the ongoing-traffic shape itself unconditionally.
 - **Persisting nonce/window state across restarts.** Deliberately reset on
   every fresh connection/session, piggybacking on state that's already
   reconstructed from scratch on reconnect - see §4.3. No new on-disk state,
@@ -141,10 +152,13 @@ overwrite in the clear would be worthless, since they could just replay
 with a substituted, unused value. Being encrypted-and-authenticated is
 what makes it enforceable at all.
 
-The `Legacy(String)` arm only exists to fail closed (a JSON object
-plainly isn't a JSON string) rather than panic if an unrelated payload
-somehow reaches this deserialisation path - it does not provide a
-compatibility bridge to un-upgraded peers (§2, §5).
+The `Legacy(String)` arm serves two purposes: defensively recognising
+whatever an old-shaped payload actually looks like on decrypt (rather than
+failing outright, since a bare JSON string plainly isn't a JSON object),
+and - since §5 was revised - being the deliberate *sending* shape used for
+a peer that hasn't confirmed it understands `Nonced` (`NoncedPayload::
+for_peer`, `anti_replay.rs`). It serialises as exactly a bare string, so an
+old peer's receive path sees precisely the format it already expects.
 
 ### 4.2 The window itself
 
@@ -215,19 +229,77 @@ proxy itself is, as ever, irrelevant to this: it never sees inside the
 ciphertext, so it can no more see or forge a nonce than it can read a
 payload.
 
-## 5. Rollout: a coordinated change, not a gradual one
+## 5. Rollout: negotiated, gradual (revised after initial implementation)
 
-Both ends of a connection (direct) or a relayed pair need to be upgraded
-together. An upgraded sender talking to a not-yet-upgraded receiver
-produces a `{nonce, payload}` object where the old code expects a bare
-string; deserialisation fails, the message is logged and dropped (the
-existing "malformed message" handling already does this - no crash, no
-silent corruption), and that one hop simply doesn't work until both sides
-are redeployed. This is different from how `domain`/`domain_version` were
-introduced (§2), and worth being explicit about rather than implying a
-graceful mixed-version rollout is possible here - it isn't, because the
-change is to the *shape* of the encrypted envelope, not an additive field
-on an already-structured message.
+The first version of this design (§9 in its original form) treated this as
+a coordinated flag-day: both ends of a connection or relayed pair had to
+upgrade together, since an upgraded sender's `{nonce, payload}` object
+would fail to deserialise for an old receiver expecting a bare string.
+After shipping and testing that version, the operational reality turned
+out to be that clients lag servers significantly - a flag-day rollout
+across an entire fleet isn't realistic. This section describes the
+capability-negotiation mechanism added instead.
+
+**The insight that makes this possible without weakening anything**: the
+*receive* path was already tolerant of both shapes from the start (§4.1) -
+`NoncedPayload`'s `#[serde(untagged)]` `Legacy(String)` arm exists
+precisely because decrypting a bare string must not fail outright. Only the
+*send* path needed to change - to stop assuming every peer understands the
+new shape.
+
+**Advertising support**: a new `supports_nonce: bool` field, set to `true`
+whenever *this* code constructs the message describing itself:
+
+- `PeerDetails` (direct connections, `connection.rs`) - exchanged as the
+  last step of the handshake, exactly like `version`/`name`/`zone`.
+- `StartRelayedConnection` / `RelayedConnectionAccepted` (relayed
+  bootstrap, `relay.rs`) - the client's/server's respective half of a
+  relayed bootstrap.
+
+Each is `#[serde(default)]`, so a not-yet-upgraded peer's message (which
+simply lacks the field, since it predates this change) deserialises as
+`supports_nonce: false` - correctly, since that peer genuinely doesn't
+understand the new shape yet. This is safe to add unconditionally (unlike
+wrapping ongoing traffic itself) because `PeerDetails`/the bootstrap
+messages were already structured objects - adding a field to them is
+exactly the kind of purely-additive change `domain`/`domain_version`
+already established as safe for `Register` (§2).
+
+**Learning and remembering the peer's capability**: captured once, at the
+point each handshake/bootstrap completes, as connection/session-lifetime
+state - `Connection::peer_supports_nonce` (a plain field, parallel to
+`inner_key`/`peer`, since it never changes again for that connection's
+lifetime) and `RelayedSession::peer_supports_nonce` (populated from
+`accepted.supports_nonce` in `bootstrap()`, or `start.supports_nonce` in
+`handle_start()`). Both reset for free on reconnect/re-bootstrap, for the
+same reason `next_nonce`/`replay_window` already do (§4.3): a fresh
+`Connection`/`RelayedSession` is constructed from scratch each time, so a
+peer that gets upgraded mid-fleet-rollout is correctly detected as soon as
+it reconnects, without either side needing to restart to notice.
+
+**Gating the send path**: `NoncedPayload::for_peer(nonce, payload,
+peer_supports_nonce)` (`anti_replay.rs`) - the single, shared decision
+point both `Connection::send_message` and `relay::send` now call instead
+of unconditionally wrapping. Sends `Nonced { nonce, payload }` if the peer
+confirmed support; otherwise `Legacy(payload)`, which serialises as
+*exactly* the bare string an old peer's receive path already expects - not
+a lesser or degraded encoding, byte-identical to what shipped before this
+whole feature existed.
+
+**What this buys, concretely**: a server can be upgraded first and
+immediately gains full nonce protection for every peer that has *also*
+been upgraded, while continuing to interoperate, unprotected but
+functioning, with peers that haven't been upgraded yet. There is no
+flag-day: each pairwise relationship gets replay protection independently,
+the moment both its ends happen to be upgraded, with no coordination
+required beyond that.
+
+**What this does not buy**: replay protection against a peer that hasn't
+been upgraded. If either end of a pair is still old, that pair's traffic
+is exactly as replay-vulnerable as it was before this whole feature
+shipped - there is no way to force protection on an old peer that cannot
+speak the new shape. This is an explicit, accepted trade-off for
+gradual-rollout compatibility, not an oversight.
 
 ## 6. Security properties
 
@@ -238,6 +310,8 @@ on an already-structured message.
 | The proxy can forge a nonce, or strip/rewrite one to defeat the check | **No** | The nonce is inside the AEAD-authenticated ciphertext; the proxy has neither the permanent nor the session keys for either relayed peer |
 | A legitimate reconnect/re-bootstrap is mistaken for a replay | No | Nonce state is reset alongside the fresh session it protects (§4.3), not persisted across it |
 | Handshake/bootstrap messages are replay-protected by this mechanism | **No (see §2, §9)** | Out of scope for this pass; covered by narrower, pre-existing protections instead |
+| A pair where either end hasn't been upgraded gets replay protection | **No, by design (§5)** | Falls back to the pre-nonce, unprotected behaviour for that pair only - other, upgraded pairs are unaffected |
+| A not-yet-upgraded peer can be tricked into parsing the new `{nonce, payload}` shape | **No** | The send path never emits it unless that specific peer's `PeerDetails`/bootstrap message confirmed `supports_nonce` (§5) |
 
 ## 7. Phased implementation plan
 
@@ -264,6 +338,16 @@ on an already-structured message.
    [security-model.md](../specifications/security-model.md) (§9, added
    alongside this design) once implemented; move this document to
    `archive/`.
+6. *(Added after initial implementation, see §5.)* Negotiated rollout:
+   `supports_nonce` field on `PeerDetails` and on
+   `StartRelayedConnection`/`RelayedConnectionAccepted`;
+   `Connection::peer_supports_nonce`/`RelayedSession::peer_supports_nonce`
+   populated at handshake/bootstrap completion; `NoncedPayload::for_peer`
+   as the shared send-path gate. Unit tests: an old-shaped (field-missing)
+   `PeerDetails`/`StartRelayedConnection`/`RelayedConnectionAccepted`
+   deserialises with `supports_nonce: false`; `NoncedPayload::for_peer`
+   wraps only when told the peer supports it, and its `Legacy` output
+   serialises identically to a bare string.
 
 ## 8. Testing strategy
 
@@ -294,11 +378,10 @@ on an already-structured message.
   window would need to live on `RelayedPeer`, which is config-derived and
   long-lived, not on the ephemeral `RelayedSession`). Left out here to
   keep this pass's surface area to ongoing traffic only.
-- **A negotiated, gradual rollout.** If a live fleet ever needs one-at-a-
-  time upgrades instead of a coordinated flag-day, that would need an
-  explicit capability advertised during `Register`/`PeerDetails` (mirroring
-  `domain`/`domain_version`'s pattern) with format-switching gated on
-  confirming the peer supports it - deliberately not attempted here (§5).
+- ~~A negotiated, gradual rollout~~ - **implemented, see §5**. The live
+  fleet's clients turned out to lag servers significantly, so a coordinated
+  flag-day wasn't realistic; `supports_nonce` on `PeerDetails`/the relayed
+  bootstrap messages now makes the rollout gradual instead.
 - **Persisted window state across a process restart.** Not attempted -
   see §2. A restarting agent's peers simply get a fresh window the moment
   a new connection/session is established, exactly as session keys

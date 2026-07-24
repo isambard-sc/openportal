@@ -61,6 +61,15 @@ struct StartRelayedConnection {
     magic: String,
     engine: String,
     version: String,
+    /// Whether the sender of *this* message understands `NoncedPayload` for
+    /// ongoing traffic over the resulting session - the relayed-bootstrap
+    /// equivalent of `PeerDetails::supports_nonce` (`connection.rs`). See
+    /// `docs/plans/replay-protection-design.md` §9 and
+    /// `docs/specifications/security-model.md` §9. `#[serde(default)]` so a
+    /// pre-upgrade peer's `StartRelayedConnection` (which has no such
+    /// field) deserialises as `false`, the correct answer for it.
+    #[serde(default)]
+    supports_nonce: bool,
 }
 
 /// airr → brics, via proxy. Same permanent pre-shared keys - the last
@@ -71,6 +80,10 @@ struct RelayedConnectionAccepted {
     magic: String,
     engine: String,
     version: String,
+    /// See `StartRelayedConnection::supports_nonce` - same mechanism, other
+    /// direction.
+    #[serde(default)]
+    supports_nonce: bool,
 }
 
 /// Internally tagged so a successful permanent-key decryption can be
@@ -150,6 +163,13 @@ struct RelayedSession {
     /// needed.
     next_nonce: u64,
     replay_window: ReplayWindow,
+    /// Whether the peer confirmed (via `supports_nonce` on the
+    /// `StartRelayedConnection`/`RelayedConnectionAccepted` that bootstrapped
+    /// this session) that it understands `NoncedPayload` for ongoing
+    /// traffic. Gates whether `send` wraps its outgoing payload with a
+    /// nonce at all - see `Connection::peer_supports_nonce`
+    /// (`connection.rs`) for the direct-connection equivalent.
+    peer_supports_nonce: bool,
 }
 
 type MessageHandler = fn(Message) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
@@ -424,6 +444,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
         magic: magic.clone(),
         engine: env!("CARGO_PKG_NAME").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        supports_nonce: true,
     };
 
     let bootstrap_salt = bootstrap_salt()?;
@@ -500,6 +521,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
         outer_key_salt,
         next_nonce: 0,
         replay_window: ReplayWindow::new(),
+        peer_supports_nonce: accepted.supports_nonce,
     };
 
     SESSIONS
@@ -680,6 +702,7 @@ async fn handle_start(
         magic: start.magic.clone(),
         engine: env!("CARGO_PKG_NAME").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        supports_nonce: true,
     };
 
     let bootstrap_salt = bootstrap_salt()?;
@@ -713,6 +736,7 @@ async fn handle_start(
         outer_key_salt: start.outer_key_salt,
         next_nonce: 0,
         replay_window: ReplayWindow::new(),
+        peer_supports_nonce: start.supports_nonce,
     };
 
     SESSIONS.write().await.insert(from.to_string(), session);
@@ -946,8 +970,11 @@ pub async fn send(to: &str, payload: &str) -> Result<(), Error> {
         })?;
         let nonce = session.next_nonce;
         session.next_nonce += 1;
+        let wrapped =
+            NoncedPayload::for_peer(nonce, payload.to_string(), session.peer_supports_nonce);
+
         encrypt_with_keys(
-            &NoncedPayload::new(nonce, payload.to_string()),
+            &wrapped,
             &session.inner_key,
             &session.outer_key,
             &session.inner_key_salt,
@@ -1122,6 +1149,7 @@ mod tests {
             magic: "abc123".to_string(),
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
+            supports_nonce: true,
         };
 
         let ciphertext = encrypt_with_keys(
@@ -1142,6 +1170,61 @@ mod tests {
             BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
             BootstrapMessage::SessionUnknown => unreachable!("expected Start"),
         }
+    }
+
+    #[test]
+    fn test_start_relayed_connection_without_supports_nonce_field_defaults_to_false() {
+        // what a not-yet-upgraded peer's `StartRelayedConnection` looks
+        // like on the wire - serialised before this field existed, so it's
+        // simply absent. Build a real one, then strip the field from its
+        // JSON (rather than hand-writing the wire format of `SecretKey`/
+        // `Salt`, which isn't this test's concern) - `#[serde(default)]`
+        // must make the stripped JSON still deserialise, as `false`.
+        let start = StartRelayedConnection {
+            session_outer_key: Key::generate(),
+            inner_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            outer_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+        };
+        let mut value = serde_json::to_value(&start).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("supports_nonce");
+
+        let start: StartRelayedConnection = serde_json::from_value(value).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert!(!start.supports_nonce);
+    }
+
+    #[test]
+    fn test_relayed_connection_accepted_without_supports_nonce_field_defaults_to_false() {
+        let accepted = RelayedConnectionAccepted {
+            session_inner_key: Key::generate(),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+        };
+        let mut value = serde_json::to_value(&accepted).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("supports_nonce");
+
+        let accepted: RelayedConnectionAccepted =
+            serde_json::from_value(value).unwrap_or_else(|e| {
+                unreachable!("deserialise: {:?}", e);
+            });
+        assert!(!accepted.supports_nonce);
     }
 
     #[test]
@@ -1192,6 +1275,7 @@ mod tests {
             magic: "abc123".to_string(),
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
+            supports_nonce: true,
         };
 
         let ciphertext = encrypt_with_keys(
@@ -1409,6 +1493,7 @@ mod tests {
             magic: magic.clone(),
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
+            supports_nonce: true,
         };
 
         let bootstrap_salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
@@ -1445,6 +1530,7 @@ mod tests {
             magic: start.magic.clone(),
             engine: "test".to_string(),
             version: "0.0.0".to_string(),
+            supports_nonce: true,
         };
 
         let accepted_ciphertext = encrypt_with_keys(
@@ -1482,6 +1568,7 @@ mod tests {
             outer_key_salt: outer_key_salt.clone(),
             next_nonce: 0,
             replay_window: ReplayWindow::new(),
+            peer_supports_nonce: true,
         };
         let mut airr_session = RelayedSession {
             inner_key: airr_inner_key,
@@ -1490,6 +1577,7 @@ mod tests {
             outer_key_salt,
             next_nonce: 0,
             replay_window: ReplayWindow::new(),
+            peer_supports_nonce: true,
         };
 
         // brics sends real, ongoing traffic using the session keys, wrapped
@@ -1563,6 +1651,7 @@ mod tests {
                 magic: generate_magic().unwrap_or_else(|e| unreachable!("magic: {:?}", e)),
                 engine: "test".to_string(),
                 version: "0.0.0".to_string(),
+                supports_nonce: true,
             };
 
             let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));

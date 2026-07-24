@@ -164,6 +164,23 @@ impl NoncedPayload {
         NoncedPayload::Nonced { nonce, payload }
     }
 
+    /// Wraps `payload` for sending to a specific peer, given whether *that
+    /// peer* has confirmed (via `PeerDetails::supports_nonce` for a direct
+    /// connection, or `StartRelayedConnection`/`RelayedConnectionAccepted`
+    /// for a relayed one) that it understands the `Nonced` shape. Sending
+    /// `Nonced` to a peer that never confirmed support would break it
+    /// outright rather than degrade gracefully, so a peer that hasn't
+    /// confirmed gets `Legacy` instead - which serialises as exactly the
+    /// bare string it already expects. See
+    /// `docs/plans/replay-protection-design.md` §9.
+    pub(crate) fn for_peer(nonce: u64, payload: String, peer_supports_nonce: bool) -> Self {
+        if peer_supports_nonce {
+            Self::new(nonce, payload)
+        } else {
+            NoncedPayload::Legacy(payload)
+        }
+    }
+
     /// The nonce, if this payload carries one (i.e. came from an upgraded
     /// peer), and the inner payload string either way.
     pub(crate) fn into_parts(self) -> (Option<u64>, String) {
@@ -260,6 +277,31 @@ mod tests {
         let (nonce, payload) = parsed.into_parts();
         assert_eq!(nonce, Some(42));
         assert_eq!(payload, "hello");
+    }
+
+    #[test]
+    fn test_for_peer_wraps_only_when_peer_supports_nonce() {
+        let wrapped = NoncedPayload::for_peer(7, "hello".to_string(), true);
+        assert!(matches!(wrapped, NoncedPayload::Nonced { nonce: 7, .. }));
+
+        let wrapped = NoncedPayload::for_peer(7, "hello".to_string(), false);
+        assert!(matches!(wrapped, NoncedPayload::Legacy(ref s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_for_peer_legacy_serialises_identically_to_a_bare_string() {
+        // this is the entire backward-compatibility mechanism: sending
+        // `Legacy` to a peer that hasn't confirmed `supports_nonce` must
+        // produce byte-identical wire output to the pre-nonce bare-string
+        // format, or an old peer's deserialiser would choke on it.
+        let wrapped = NoncedPayload::for_peer(7, "hello".to_string(), false);
+        let wrapped_json = serde_json::to_string(&wrapped).unwrap_or_else(|e| {
+            unreachable!("serialise wrapped: {:?}", e);
+        });
+        let bare_json = serde_json::to_string("hello").unwrap_or_else(|e| {
+            unreachable!("serialise bare: {:?}", e);
+        });
+        assert_eq!(wrapped_json, bare_json);
     }
 
     #[test]

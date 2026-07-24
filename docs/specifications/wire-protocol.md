@@ -459,11 +459,19 @@ nonce protection for those is deferred (see
 §9).
 
 A payload deserialising as a bare JSON string rather than this object
-shape (i.e. no `nonce` field at all) is accepted without a nonce check -
-this is not a compatibility path a sender can opt into, just how a
-not-yet-upgraded peer's traffic happens to still parse; see the design
-doc §5 for why this is a coordinated deployment change, not a gradual
-one.
+shape (i.e. no `nonce` field at all) is accepted without a nonce check.
+Since the design was revised to support a gradual rollout (design doc §5),
+this bare-string shape **is** now a compatibility path a sender can
+deliberately opt into: a sender only emits the `{nonce, payload}` object
+to a specific peer once that peer's `PeerDetails` (§4.3) or relayed
+bootstrap message (§7.1) has confirmed `supports_nonce: true`; otherwise it
+sends the payload as a bare string, byte-identical to what a peer that
+predates this whole feature already expects. So a bare string on the wire
+means one of two things indistinguishable to the receiver - and
+indistinguishable deliberately, since either way the correct handling is
+identical: either the sender hasn't confirmed the receiver supports
+nonces, or the sender is itself not yet upgraded and has no nonce concept
+at all.
 
 **Source file:** `paddington/src/anti_replay.rs` (`NoncedPayload`)
 
@@ -526,7 +534,8 @@ encrypted messages):
   "standby_status": {
     "server_is_secondary": <boolean>,
     "client_is_secondary": <boolean>
-  }
+  },
+  "supports_nonce": <boolean>
 }
 ```
 
@@ -536,10 +545,14 @@ encrypted messages):
 | `zone` | string | Zone this connection belongs to |
 | `version` | integer | Protocol version; must be `2` |
 | `standby_status` | object | High-availability standby state (see §4.4) |
+| `supports_nonce` | boolean | Whether the sender understands the `{nonce, payload}` shape for ongoing traffic (§3.5) - `#[serde(default)]`, so a pre-upgrade peer's `PeerDetails` (which predates this field) is read as `false`. See [security-model.md](security-model.md) §9 and [replay-protection-design.md](../plans/replay-protection-design.md) §5. |
 
 Once both `PeerDetails` have been exchanged successfully, the Templemeads layer
 is notified via a Paddington `Connected` control command and the `Register` /
-`Sync` sequence begins.
+`Sync` sequence begins. Each side now remembers whether the *other* side's
+`PeerDetails` confirmed `supports_nonce` for the lifetime of this connection
+(`Connection::peer_supports_nonce`) - this is what §3.5's send path checks
+before choosing whether to wrap outgoing traffic.
 
 ### 4.4 High-Availability Standby
 
@@ -638,7 +651,8 @@ rather than at the transport level:
   "outer_key_salt":     "<hex-encoded-32-byte-salt>",
   "magic":              "<hex-encoded-32-byte-random-string>",
   "engine":             "<engine-name-string>",
-  "version":            "<engine-version-string>"
+  "version":            "<engine-version-string>",
+  "supports_nonce":     <boolean>
 }
 ```
 
@@ -649,9 +663,21 @@ rather than at the transport level:
   "session_inner_key": "<hex-encoded-32-byte-key>",
   "magic":             "<same-magic-as-Start>",
   "engine":             "<engine-name-string>",
-  "version":            "<engine-version-string>"
+  "version":            "<engine-version-string>",
+  "supports_nonce":     <boolean>
 }
 ```
+
+`supports_nonce` is the relayed-bootstrap equivalent of `PeerDetails`'
+field of the same name (§4.3): whether the sender understands the
+`{nonce, payload}` shape for ongoing traffic (§3.5/§7.2) over the session
+this bootstrap establishes. `#[serde(default)]`, so a pre-upgrade peer's
+message (which predates this field) is read as `false`. Each side learns
+the other's confirmed support once, at the point its own bootstrap
+function (`bootstrap()` for the client, `handle_start()` for the server)
+completes, and stores it as `RelayedSession::peer_supports_nonce` for that
+session's lifetime - see
+[replay-protection-design.md](../plans/replay-protection-design.md) §5.
 
 Both messages are internally tagged (`type: "Start"` / `"Accepted"`) so
 that a successful decryption can be identified as one specific bootstrap

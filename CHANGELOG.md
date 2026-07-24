@@ -55,9 +55,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   to re-trigger its effect; encryption alone never prevented that. The
   nonce lives inside the encrypted, authenticated content, so the proxy
   can no more forge or strip it than it can read the payload, and the same
-  protection applies uniformly to direct and relayed connections. This is
-  a coordinated wire-format change for whichever agents talk to each other
-  (not a gradual, one-at-a-time rollout) - see
+  protection applies uniformly to direct and relayed connections. Rollout
+  is negotiated, not a coordinated flag-day: each peer advertises
+  `supports_nonce` in its `PeerDetails` (or relayed bootstrap message), and
+  a sender only wraps outgoing traffic with a nonce once the specific peer
+  it's talking to has confirmed support - an upgraded server therefore
+  gains full protection against every already-upgraded peer immediately,
+  while continuing to interoperate, unprotected but functioning, with
+  peers that haven't been upgraded yet. See
   `docs/plans/replay-protection-design.md` §5.
 
 - **`op-proxy` config file location and layout** — now defaults to the

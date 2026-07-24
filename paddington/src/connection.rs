@@ -470,18 +470,7 @@ impl Connection {
             }
         };
 
-        // Only wrap the payload in `NoncedPayload::Nonced` if the peer has
-        // confirmed (via `PeerDetails`) that it understands that shape -
-        // sending it to a not-yet-upgraded peer would break it outright,
-        // not degrade gracefully. `NoncedPayload::Legacy` serialises as
-        // exactly the bare string an old peer already expects, so this
-        // branch is the entire backward-compatibility mechanism - see
-        // `docs/plans/replay-protection-design.md` §9.
-        let payload = if self.peer_supports_nonce {
-            NoncedPayload::new(nonce, message.to_string())
-        } else {
-            NoncedPayload::Legacy(message.to_string())
-        };
+        let payload = NoncedPayload::for_peer(nonce, message.to_string(), self.peer_supports_nonce);
 
         tx.send(envelope_message(
             payload,
@@ -1671,5 +1660,25 @@ mod tests {
         });
 
         assert_eq!(message, deenvelope);
+    }
+
+    #[test]
+    fn test_peer_details_new_supports_nonce() {
+        let details = PeerDetails::new("airr", "default", &StandbyStatus::primary());
+        assert!(details.supports_nonce());
+    }
+
+    #[test]
+    fn test_peer_details_without_supports_nonce_field_defaults_to_false() {
+        // what a not-yet-upgraded peer's `PeerDetails` looks like on the
+        // wire - it was serialised before this field existed, so it simply
+        // isn't present. `#[serde(default)]` must make this deserialise as
+        // `false`, the correct answer: that peer genuinely doesn't support
+        // `NoncedPayload` yet.
+        let json = r#"{"name":"airr","zone":"default","version":2,"standby_status":{"server_is_secondary":false,"client_is_secondary":false}}"#;
+        let details: PeerDetails = serde_json::from_str(json).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert!(!details.supports_nonce());
     }
 }

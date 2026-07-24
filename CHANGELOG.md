@@ -44,8 +44,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   automatically with no extra flag. Validated end-to-end with real
   `op-proxy`/`op-portal`/`op-cloudportal` processes. See
   `docs/plans/archive/blind-relay-proxy-design.md`.
-
-### Changed
+- **Replay protection for ongoing message traffic** — every ongoing
+  message (Jobs, Notifications, keepalives - not the handshake/bootstrap
+  messages themselves) now carries a per-sender nonce, checked against a
+  receiver-side sliding window before being processed: the standard
+  IPsec/WireGuard-style anti-replay scheme (a high-water-mark plus a
+  fixed-size bitmap of recently-accepted values), chosen deliberately over
+  a bespoke design. Without this, a captured, validly-encrypted message -
+  by an attacker, or the blind relay proxy itself - could be resent later
+  to re-trigger its effect; encryption alone never prevented that. The
+  nonce lives inside the encrypted, authenticated content, so the proxy
+  can no more forge or strip it than it can read the payload, and the same
+  protection applies uniformly to direct and relayed connections. This is
+  a coordinated wire-format change for whichever agents talk to each other
+  (not a gradual, one-at-a-time rollout) - see
+  `docs/plans/replay-protection-design.md` §5.
 
 - **`op-proxy` config file location and layout** — now defaults to the
   standard `~/.config/openportal/proxy-config.toml`, matching every other

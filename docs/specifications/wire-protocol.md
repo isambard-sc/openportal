@@ -426,6 +426,47 @@ Each encrypted frame is a flat string concatenation:
 **Source file:** `paddington/src/connection.rs` (`envelope_message` /
 `deenvelope_message`)
 
+### 3.5 Ongoing Traffic Payload: `NoncedPayload`
+
+Once the handshake completes, what actually gets serialised as `T` in the
+wire frame above for ordinary application traffic (§5) is not a bare
+payload string but a small wrapper carrying a replay-protection nonce (see
+[security-model.md](security-model.md) §9 for why):
+
+```json
+{
+  "nonce":   <integer>,
+  "payload": "<payload-string>"
+}
+```
+
+`nonce` is a per-sender, monotonically increasing counter starting at 0
+for the first message on a fresh connection/session, checked by the
+receiver against a sliding anti-replay window
+([security-model.md](security-model.md) §9) before the payload is passed
+on to templemeads. Applies uniformly to direct connections and relayed
+sessions (§7) - the same wrapper, checked at `Connection::send_message`/
+the post-handshake receive loops, and at `relay::send`/
+`handle_incoming_envelope`'s ongoing-traffic branch respectively - and to
+every kind of ongoing message alike (`Register`/`Sync`/`Put`/`Update`/
+`Delete`/`Notify`/keepalives), since all of them are just the `payload`
+string as far as this layer is concerned.
+
+This wrapper does not apply to the handshake-phase `Handshake`/
+`PeerDetails` messages (§4) or to relayed bootstrap messages (§7.1/§7.3) -
+nonce protection for those is deferred (see
+[replay-protection-design.md](../plans/replay-protection-design.md) §2,
+§9).
+
+A payload deserialising as a bare JSON string rather than this object
+shape (i.e. no `nonce` field at all) is accepted without a nonce check -
+this is not a compatibility path a sender can opt into, just how a
+not-yet-upgraded peer's traffic happens to still parse; see the design
+doc §5 for why this is a coordinated deployment change, not a gradual
+one.
+
+**Source file:** `paddington/src/anti_replay.rs` (`NoncedPayload`)
+
 ---
 
 ## 4. Connection Handshake
@@ -703,3 +744,4 @@ scheduled retry.
 | Message dispatch | `templemeads/src/handler.rs` |
 | Agent type definitions | `templemeads/src/agent.rs` |
 | Blind relay protocol (`RelayEnvelope`, bootstrap, `RelayPolicy`) | `paddington/src/relay.rs` |
+| Anti-replay window, `NoncedPayload` | `paddington/src/anti_replay.rs` |

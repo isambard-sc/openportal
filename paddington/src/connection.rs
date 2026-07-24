@@ -24,6 +24,7 @@ use tungstenite::handshake::server::{
     Response as HandshakeResponse,
 };
 
+use crate::anti_replay::{NoncedPayload, ReplayWindow};
 use crate::command::Command;
 use crate::config::{ClientConfig, PeerConfig, ServiceConfig};
 use crate::crypto::{random_bytes, Key, Salt, SecretKey, KEY_SIZE};
@@ -44,6 +45,15 @@ enum ConnectionStatus {
 struct ConnectionState {
     status: ConnectionStatus,
     last_activity: chrono::DateTime<chrono::Utc>,
+    /// Nonce to assign to the *next* ongoing message this side sends -
+    /// see `docs/plans/replay-protection-design.md`. Reset for free every
+    /// time a fresh `ConnectionState` is created (i.e. every new physical
+    /// connection), matching that a replayed message from a previous
+    /// connection's traffic is meaningless once new session keys exist.
+    next_nonce: u64,
+    /// Tracks which nonces this side has already accepted from the peer,
+    /// for detecting a replayed (or too-old) ongoing message.
+    replay_window: ReplayWindow,
 }
 
 impl Default for ConnectionState {
@@ -51,11 +61,30 @@ impl Default for ConnectionState {
         ConnectionState {
             status: ConnectionStatus::None,
             last_activity: chrono::Utc::now(),
+            next_nonce: 0,
+            replay_window: ReplayWindow::new(),
         }
     }
 }
 
 impl ConnectionState {
+    /// Returns the nonce to use for the next outgoing message, and
+    /// advances the counter for the one after that.
+    fn take_next_nonce(&mut self) -> u64 {
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
+        nonce
+    }
+
+    /// Whether `nonce` should be accepted as a genuinely new message from
+    /// the peer (`true`), or rejected as a replay / too old to tell
+    /// (`false`) - see `docs/plans/replay-protection-design.md` §4.2. A
+    /// payload with no nonce at all (`None` - a not-yet-upgraded peer) is
+    /// always accepted; there is nothing to check it against.
+    fn check_replay(&mut self, nonce: Option<u64>) -> bool {
+        self.replay_window.check_and_record_optional(nonce)
+    }
+
     fn set_error(&mut self) {
         self.status = ConnectionStatus::Error;
         self.last_activity = chrono::Utc::now();
@@ -107,6 +136,18 @@ pub struct Connection {
     outer_key_salt: Option<Salt>,
     peer: Option<PeerConfig>,
     tx: Option<Arc<TokioMutex<UnboundedSender<TokioMessage>>>>,
+    /// Whether the peer on the other end confirmed (via `PeerDetails`,
+    /// exchanged once during the handshake) that it understands
+    /// `NoncedPayload` for ongoing traffic. Set once, alongside
+    /// `inner_key`/`outer_key`, and never changed again for the lifetime
+    /// of this connection - a plain field rather than something behind
+    /// `state`'s mutex, since (unlike the nonce counter/window) it never
+    /// mutates per-message. Gates whether `send_message` wraps its
+    /// outgoing payload with a nonce at all: sending the new shape to a
+    /// peer that never confirmed support for it would break that peer
+    /// outright, not degrade gracefully - see
+    /// `docs/plans/replay-protection-design.md` §9.
+    peer_supports_nonce: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +209,15 @@ struct PeerDetails {
     zone: String,
     version: u32,
     standby_status: StandbyStatus,
+    /// Whether the sender of *this* `PeerDetails` understands
+    /// `NoncedPayload` for ongoing traffic - see
+    /// `docs/plans/replay-protection-design.md` §9 and
+    /// `docs/specifications/security-model.md` §9. `#[serde(default)]` so
+    /// a pre-upgrade peer (whose `PeerDetails` simply has no such field)
+    /// deserialises as `false`, which is the correct answer for it: it
+    /// genuinely doesn't support this yet.
+    #[serde(default)]
+    supports_nonce: bool,
 }
 
 impl Display for PeerDetails {
@@ -184,6 +234,7 @@ impl PeerDetails {
             zone: zone.to_string(),
             version: 2,
             standby_status: status.clone(),
+            supports_nonce: true,
         }
     }
 
@@ -201,6 +252,10 @@ impl PeerDetails {
 
     fn status(&self) -> &StandbyStatus {
         &self.standby_status
+    }
+
+    fn supports_nonce(&self) -> bool {
+        self.supports_nonce
     }
 }
 
@@ -298,6 +353,7 @@ impl Connection {
             outer_key_salt: None,
             peer: None,
             tx: None,
+            peer_supports_nonce: false,
         }
     }
 
@@ -404,8 +460,31 @@ impl Connection {
             Error::InvalidPeer("No outer key salt to send message with!".to_string())
         })?;
 
+        let nonce = match self.state.lock() {
+            Ok(mut state) => state.take_next_nonce(),
+            Err(e) => {
+                return Err(Error::Poison(format!(
+                    "Error getting connection state lock to assign a nonce: {}",
+                    e
+                )));
+            }
+        };
+
+        // Only wrap the payload in `NoncedPayload::Nonced` if the peer has
+        // confirmed (via `PeerDetails`) that it understands that shape -
+        // sending it to a not-yet-upgraded peer would break it outright,
+        // not degrade gracefully. `NoncedPayload::Legacy` serialises as
+        // exactly the bare string an old peer already expects, so this
+        // branch is the entire backward-compatibility mechanism - see
+        // `docs/plans/replay-protection-design.md` §9.
+        let payload = if self.peer_supports_nonce {
+            NoncedPayload::new(nonce, message.to_string())
+        } else {
+            NoncedPayload::Legacy(message.to_string())
+        };
+
         tx.send(envelope_message(
-            message.to_string(),
+            payload,
             inner_key,
             outer_key,
             inner_key_salt,
@@ -831,6 +910,7 @@ impl Connection {
         self.outer_key = Some(outer_key.clone());
         self.inner_key_salt = Some(inner_key_salt.clone());
         self.outer_key_salt = Some(outer_key_salt.clone());
+        self.peer_supports_nonce = peer_details.supports_nonce();
 
         // finally, we need to create a new channel for sending messages
         let (tx, rx) = unbounded::<TokioMessage>();
@@ -871,34 +951,57 @@ impl Connection {
             }
 
             // we need to deenvelope the message
-            let msg: String = match deenvelope_message(
+            let wrapped: NoncedPayload = match deenvelope_message(
                 msg,
                 &inner_key,
                 &outer_key,
                 &inner_key_salt,
                 &outer_key_salt,
             ) {
-                Ok(msg) => msg,
+                Ok(wrapped) => wrapped,
                 Err(e) => {
                     tracing::warn!("Error de-enveloping message: {:?}", e);
                     return future::ok(());
                 }
             };
 
+            let (nonce, msg) = wrapped.into_parts();
+
+            // check for replay and record the last time we successfully
+            // received a message in the same lock scope - see
+            // docs/plans/replay-protection-design.md. Fail closed (treat
+            // as a replay) if the state lock itself is unavailable, since
+            // we can no longer verify the message wasn't already seen.
+            let accepted = match self.state.lock() {
+                Ok(mut state) => {
+                    let accepted = state.check_replay(nonce);
+                    state.register_activity();
+                    accepted
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Error getting connection state lock to check for replay - \
+                         dropping message: {}",
+                        e
+                    );
+                    false
+                }
+            };
+
+            if !accepted {
+                tracing::warn!(
+                    "Rejected replayed (or too-old) message from {}@{} (nonce {:?})",
+                    peer_name,
+                    peer_zone,
+                    nonce
+                );
+                return future::ok(());
+            }
+
             exchange::received(Message::received_from(&peer_name, &peer_zone, &msg))
                 .unwrap_or_else(|e| {
                     tracing::warn!("Error handling message: {:?}", e);
                 });
-
-            // record the last time we successfully received a message
-            match self.state.lock() {
-                Ok(mut state) => {
-                    state.register_activity();
-                }
-                Err(e) => {
-                    tracing::warn!("Error registering activity: {:?}", e);
-                }
-            }
 
             future::ok(())
         });
@@ -1225,6 +1328,10 @@ impl Connection {
         )
         .with_context(|| "Error de-enveloping message - closing connection.")?;
 
+        // captured now, before `peer_details` is shadowed below by the
+        // `PeerDetails` we send back describing ourselves.
+        let peer_supports_nonce = peer_details.supports_nonce();
+
         tracing::info!(
             "Connected to peer {}, using engine {}, version {}",
             peer_details,
@@ -1410,6 +1517,7 @@ impl Connection {
         self.inner_key_salt = Some(inner_key_salt.clone());
         self.outer_key_salt = Some(outer_key_salt.clone());
         self.peer = Some(peer.to_peer().clone());
+        self.peer_supports_nonce = peer_supports_nonce;
 
         match self.state.lock() {
             Ok(mut state) => {
@@ -1437,34 +1545,57 @@ impl Connection {
         // handle the sending of messages to others
         let received_from_peer = incoming.try_for_each(|msg| {
             // we need to deenvelope the message
-            let msg: String = match deenvelope_message(
+            let wrapped: NoncedPayload = match deenvelope_message(
                 msg,
                 &inner_key,
                 &outer_key,
                 &inner_key_salt,
                 &outer_key_salt,
             ) {
-                Ok(msg) => msg,
+                Ok(wrapped) => wrapped,
                 Err(e) => {
                     tracing::warn!("Error de-enveloping message: {:?}", e);
                     return future::ok(());
                 }
             };
 
+            let (nonce, msg) = wrapped.into_parts();
+
+            // check for replay and record the last time we successfully
+            // received a message in the same lock scope - see
+            // docs/plans/replay-protection-design.md. Fail closed (treat
+            // as a replay) if the state lock itself is unavailable, since
+            // we can no longer verify the message wasn't already seen.
+            let accepted = match self.state.lock() {
+                Ok(mut state) => {
+                    let accepted = state.check_replay(nonce);
+                    state.register_activity();
+                    accepted
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Error getting connection state lock to check for replay - \
+                         dropping message: {}",
+                        e
+                    );
+                    false
+                }
+            };
+
+            if !accepted {
+                tracing::warn!(
+                    "Rejected replayed (or too-old) message from {}@{} (nonce {:?})",
+                    peer_name,
+                    peer_zone,
+                    nonce
+                );
+                return future::ok(());
+            }
+
             exchange::received(Message::received_from(&peer_name, &peer_zone, &msg))
                 .unwrap_or_else(|e| {
                     tracing::warn!("Error handling message: {:?}", e);
                 });
-
-            // record the last time we successfully received a message
-            match self.state.lock() {
-                Ok(mut state) => {
-                    state.register_activity();
-                }
-                Err(e) => {
-                    tracing::warn!("Error registering activity: {:?}", e);
-                }
-            }
 
             future::ok(())
         });

@@ -367,7 +367,39 @@ memory safety and error-handling bugs.
 
 ---
 
-## 9. Source File Reference
+## 9. Replay Protection
+
+See [replay-protection-design.md](../plans/replay-protection-design.md) for
+the full design; this section is the trust-model summary.
+
+Authentication and encryption (§2-§4) do not, on their own, stop an
+attacker (or the blind relay proxy itself) from capturing a legitimate,
+validly-encrypted ongoing message and replaying it later to re-trigger its
+effect. The per-message `info` value mixed into key derivation (§2.4)
+guards against key reuse between *different* messages; it does not
+protect a single message against being resent, since a replayed message
+carries its original `info` value with it and re-derives the same key.
+
+Ongoing message traffic (post-handshake application messages - Jobs,
+Notifications, keepalives; not the handshake/bootstrap messages
+themselves, see the design doc §2 and §9) carries a monotonically
+increasing per-sender nonce, checked against a receiver-side sliding
+window - the standard IPsec/WireGuard-style anti-replay scheme: a
+high-water-mark plus a fixed-size bitmap of recently-accepted values,
+rejecting anything already seen or too old to have a slot in the window.
+The nonce lives inside the AEAD-authenticated ciphertext (not a plaintext
+field), so the proxy - which never holds either relayed peer's keys - can
+no more forge or strip it than it can read the payload itself; the same
+mechanism applies uniformly to direct and relayed connections
+(`paddington::anti_replay`, wired into both `Connection` and
+`RelayedSession`), without either the proxy or any higher-level code
+needing to know it exists. Window state resets alongside the session keys
+it protects on every reconnect/re-bootstrap, rather than being persisted
+across one.
+
+---
+
+## 10. Source File Reference
 
 | Concept | Source file |
 |---------|-------------|
@@ -378,3 +410,4 @@ memory safety and error-handling bugs.
 | Wire encryption format | `paddington/src/connection.rs` (`envelope_message`) |
 | Zone enforcement | `paddington/src/connection.rs` (§726, §1255) |
 | Blind relay bootstrap, session keys, `RelayPolicy` | `paddington/src/relay.rs` |
+| Anti-replay window, `NoncedPayload` | `paddington/src/anti_replay.rs` |

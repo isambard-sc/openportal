@@ -102,6 +102,8 @@ network layer:
 - **Blind relay protocol**: the `RelayEnvelope` wire format and the
   `StartRelayedConnection`/`RelayedConnectionAccepted` bootstrap used by
   `op-proxy` to relay two outbound-only agents' traffic without decrypting it
+- **Replay protection**: the `NoncedPayload` wrapper carrying a per-sender
+  nonce on every ongoing message, direct or relayed
 
 ---
 
@@ -119,6 +121,9 @@ provisioned using the invite file mechanism. Also covers:
 - The per-agent trust topology
 - The blind relay proxy's trust model - why `op-proxy` never sees either
   relayed agent's traffic or pre-shared keys
+- Replay protection - the IPsec/WireGuard-style anti-replay window that
+  stops a captured, validly-encrypted message from being resent to
+  re-trigger its effect
 - Memory safety guarantees (`SecretBox`, `Zeroize`)
 
 ---

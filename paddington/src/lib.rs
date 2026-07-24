@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // internal API
+mod anti_replay;
 mod client;
 mod connection;
 mod crypto;

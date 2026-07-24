@@ -30,6 +30,7 @@ use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
 
 use once_cell::sync::Lazy;
 
+use crate::anti_replay::{NoncedPayload, ReplayWindow};
 use crate::command::Command;
 use crate::config::ServiceConfig;
 use crate::connection::{deenvelope_message, envelope_message};
@@ -139,6 +140,16 @@ struct RelayedSession {
     outer_key: SecretKey,
     inner_key_salt: Salt,
     outer_key_salt: Salt,
+    /// Nonce to assign to the next ongoing message *we* send over this
+    /// session, and the window tracking which nonces we've already
+    /// accepted from the peer over it - see
+    /// `docs/plans/replay-protection-design.md`. A fresh `RelayedSession`
+    /// is constructed on every bootstrap (deliberately, for forward
+    /// secrecy - see `bootstrap`/`handle_start`), so this resets for free
+    /// alongside the session keys it protects, with no extra logic
+    /// needed.
+    next_nonce: u64,
+    replay_window: ReplayWindow,
 }
 
 type MessageHandler = fn(Message) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
@@ -487,6 +498,8 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
         outer_key,
         inner_key_salt,
         outer_key_salt,
+        next_nonce: 0,
+        replay_window: ReplayWindow::new(),
     };
 
     SESSIONS
@@ -698,6 +711,8 @@ async fn handle_start(
         outer_key: start.session_outer_key,
         inner_key_salt: start.inner_key_salt,
         outer_key_salt: start.outer_key_salt,
+        next_nonce: 0,
+        replay_window: ReplayWindow::new(),
     };
 
     SESSIONS.write().await.insert(from.to_string(), session);
@@ -825,13 +840,36 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
         }
     };
 
-    let payload: String = decrypt_with_keys(
+    let wrapped: NoncedPayload = decrypt_with_keys(
         &envelope.ciphertext,
         &session.inner_key,
         &session.outer_key,
         &session.inner_key_salt,
         &session.outer_key_salt,
     )?;
+    let (nonce, payload) = wrapped.into_parts();
+
+    // check for replay against the *stored* session's window, not the
+    // clone we decrypted with above - a write lock, since this mutates it.
+    // See docs/plans/replay-protection-design.md.
+    let accepted = match SESSIONS.write().await.get_mut(&envelope.from) {
+        Some(session) => session.replay_window.check_and_record_optional(nonce),
+        None => {
+            // the session vanished between the read-clone above and now
+            // (e.g. a concurrent SessionUnknown/re-bootstrap) - nothing to
+            // check against any more, so there's no session-level replay
+            // state to defend; let it through rather than drop a message
+            // that just lost a race with a legitimate re-bootstrap.
+            true
+        }
+    };
+
+    if !accepted {
+        return Err(Error::InvalidPeer(format!(
+            "Rejected replayed (or too-old) message from '{}' (nonce {:?})",
+            envelope.from, nonce
+        )));
+    }
 
     // synthesised messages are dispatched directly to the inner handler
     // (see `relay_dispatch_handler` below), bypassing paddington's own
@@ -900,12 +938,16 @@ pub async fn send(to: &str, payload: &str) -> Result<(), Error> {
     let my_name = my_name().await?;
 
     let ciphertext = {
-        let sessions = SESSIONS.read().await;
-        let session = sessions.get(to).ok_or_else(|| {
+        // a write lock, not a read lock - assigning the next nonce
+        // mutates the session (see docs/plans/replay-protection-design.md).
+        let mut sessions = SESSIONS.write().await;
+        let session = sessions.get_mut(to).ok_or_else(|| {
             Error::InvalidPeer(format!("No relayed session established with '{}'.", to))
         })?;
+        let nonce = session.next_nonce;
+        session.next_nonce += 1;
         encrypt_with_keys(
-            &payload.to_string(),
+            &NoncedPayload::new(nonce, payload.to_string()),
             &session.inner_key,
             &session.outer_key,
             &session.inner_key_salt,
@@ -1438,18 +1480,23 @@ mod tests {
             outer_key: outer_key.clone(),
             inner_key_salt: inner_key_salt.clone(),
             outer_key_salt: outer_key_salt.clone(),
+            next_nonce: 0,
+            replay_window: ReplayWindow::new(),
         };
-        let airr_session = RelayedSession {
+        let mut airr_session = RelayedSession {
             inner_key: airr_inner_key,
             outer_key,
             inner_key_salt,
             outer_key_salt,
+            next_nonce: 0,
+            replay_window: ReplayWindow::new(),
         };
 
-        // brics sends real, ongoing traffic using the session keys
+        // brics sends real, ongoing traffic using the session keys, wrapped
+        // with a nonce exactly as `relay::send` does
         let real_payload = "portal.cluster add_user alice.myproject.myportal";
         let ciphertext = encrypt_with_keys(
-            &real_payload.to_string(),
+            &NoncedPayload::new(0, real_payload.to_string()),
             &brics_session.inner_key,
             &brics_session.outer_key,
             &brics_session.inner_key_salt,
@@ -1463,7 +1510,7 @@ mod tests {
         assert!(!ciphertext.contains("alice"));
 
         // airr decrypts using its side of the *same* session keys
-        let decrypted: String = decrypt_with_keys(
+        let wrapped: NoncedPayload = decrypt_with_keys(
             &ciphertext,
             &airr_session.inner_key,
             &airr_session.outer_key,
@@ -1471,8 +1518,28 @@ mod tests {
             &airr_session.outer_key_salt,
         )
         .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+        let (nonce, decrypted) = wrapped.into_parts();
 
         assert_eq!(decrypted, real_payload);
+        assert_eq!(nonce, Some(0));
+        assert!(airr_session.replay_window.check_and_record_optional(nonce));
+
+        // replaying the exact same (still perfectly validly-encrypted)
+        // ciphertext a second time - e.g. captured and re-injected by the
+        // proxy or anyone else who saw it on the wire - must now be
+        // rejected, even though decryption succeeds identically both times.
+        let wrapped: NoncedPayload = decrypt_with_keys(
+            &ciphertext,
+            &airr_session.inner_key,
+            &airr_session.outer_key,
+            &airr_session.inner_key_salt,
+            &airr_session.outer_key_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+        let (replayed_nonce, _) = wrapped.into_parts();
+        assert!(!airr_session
+            .replay_window
+            .check_and_record_optional(replayed_nonce));
     }
 
     #[tokio::test]

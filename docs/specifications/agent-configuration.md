@@ -159,8 +159,16 @@ Manage inbound peers (agents that connect to this one).
 ```
 
 `--add` generates fresh keys and writes an invite file
-(`invite_<name>_<zone>.toml`) to the current directory. Give this file to
-the remote agent operator to import.
+(`invite_<issuer>_<zone>.toml`) to the current directory, where `<issuer>` is
+**this agent's own service name** - the one it was given by `init --service`
+- and *not* the name of the client being added. Give this file to the remote
+agent operator to import.
+
+Because the filename depends only on the issuer, every invite an agent writes
+in the same directory and zone lands on the same path: issuing invites for
+several clients one after another overwrites the earlier files. Run each
+`client --add` in its own directory (or move the file away) before issuing
+the next.
 
 `--proxy <relay-name>` introduces a client that can only reach this agent
 through a blind relay proxy (`relay-name` must already be a known
@@ -172,7 +180,8 @@ up automatically. See [§3.11.1](#3111-connecting-two-real-agents-through-a-prox
 for a full worked example.
 
 `--rotate` generates new keys and writes a rotation invite file
-(`rotate_<name>_<zone>.toml`).
+(`rotate_<issuer>_<zone>.toml`), named after the issuing agent on the same
+convention as `--add`.
 
 ### `server`
 
@@ -1074,13 +1083,15 @@ op-bridge   init --service bridge   --url wss://portal-host:8044 \
 
 # 2. Wire portal → provider (portal is the client, provider is the server)
 op-provider client --add waldur  --ip <portal-ip>
-# → produces invite_waldur_default.toml
-op-portal   server --add invite_waldur_default.toml
+# → produces invite_provider_default.toml (named after the issuer,
+#   op-provider, not after the client "waldur" it admits)
+op-portal   server --add invite_provider_default.toml
 
 # 3. Wire bridge → portal (portal is the server, bridge is the client)
 op-portal  client --add bridge --ip <bridge-ip>
-# → produces invite_bridge_default.toml
-op-bridge  server --add invite_bridge_default.toml
+# → produces invite_waldur_default.toml (the portal was initialised as
+#   --service waldur in step 1)
+op-bridge  server --add invite_waldur_default.toml
 
 # 4. Write bridge API invite for portal software
 op-bridge bridge --config bridge-invite.toml

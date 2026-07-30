@@ -154,17 +154,87 @@ pub fn identifier_to_userid(user: &UserIdentifier) -> String {
     format!("{}.{}", user.username(), user.project())
 }
 
+/// The portal names that map a project to a *bare* Unix group name rather than
+/// the usual `{portal}.{project}`. These exist so that an operator can point
+/// this agent at pre-existing groups via configuration.
+const INTERNAL_PORTALS: [&str; 3] = ["openportal", "system", "instance"];
+
 ///
 /// Return the local Unix group name for a ProjectIdentifier.
 /// Format: "{portal}.{project}", except for internal portals
 /// (openportal, system, instance) which use just "{project}".
 ///
 fn identifier_to_projectid(project: &ProjectIdentifier) -> String {
-    let system_portals = ["openportal", "system", "instance"];
-    if system_portals.contains(&project.portal().as_str()) {
+    if INTERNAL_PORTALS.contains(&project.portal().as_str()) {
         project.project().to_string()
     } else {
         format!("{}.{}", project.portal(), project.project())
+    }
+}
+
+///
+/// Refuse an identifier that arrived from a peer and names an internal portal.
+///
+/// An internal portal maps to a *bare* group name (see
+/// `identifier_to_projectid`), so `bob.docker.system` resolves to the group
+/// `docker` - and the add path would then put the new account into the host's
+/// real `docker` group, which is root-equivalent on most hosts. `wheel`,
+/// `sudo`, `shadow` and `adm` behave identically. Only configuration should
+/// name these groups, never a Job. `op-freeipa` already refuses internal
+/// portals this way in `force_get_user`/`get_users`; this brings
+/// `op-localaccount` into line. See
+/// `docs/specifications/security-review-2.md` (finding R13).
+///
+fn assert_not_internal_portal(project: &ProjectIdentifier) -> Result<(), Error> {
+    if INTERNAL_PORTALS.contains(&project.portal().as_str()) {
+        tracing::warn!(
+            "Refusing to act on '{}': '{}' is an internal portal name, which \
+             maps to a bare Unix group and may only be named by configuration.",
+            project,
+            project.portal()
+        );
+
+        return Err(Error::Call(format!(
+            "Refusing to act on '{}' - '{}' is an internal portal name",
+            project,
+            project.portal()
+        )));
+    }
+
+    Ok(())
+}
+
+///
+/// Return true if `group_name` already exists with a system GID (below
+/// `MANAGED_GID_MIN`) - i.e. it is a pre-existing group this agent did not
+/// create and must not adopt. A group that does not exist is not a system
+/// group; an unparseable GID fails safe (treated as one).
+///
+/// Defence in depth behind `assert_not_internal_portal`: that stops the
+/// bare-name collision at its source, and this stops the add path adopting a
+/// pre-existing privileged group by any other route. See
+/// `docs/specifications/security-review-2.md` (finding R13).
+///
+async fn is_system_group(group_name: &str) -> Result<bool, Error> {
+    let cmds = get_commands()?;
+
+    let (exit_code, stdout, _) = run_command(&cmds.getent, &["group", group_name]).await?;
+
+    if exit_code != 0 {
+        // Does not exist - this agent will create it, so it is ours.
+        return Ok(false);
+    }
+
+    // getent group output: groupname:x:gid:member1,member2,...
+    match stdout
+        .trim()
+        .split(':')
+        .nth(2)
+        .and_then(|g| g.trim().parse::<u64>().ok())
+    {
+        Some(gid) => Ok(gid < MANAGED_GID_MIN),
+        // Could not parse the GID - fail safe.
+        None => Ok(true),
     }
 }
 
@@ -246,7 +316,27 @@ async fn sync_groups(
     let mut groups: Vec<String> = Vec::new();
 
     // 1. Project group — the group that represents this user's project.
-    groups.push(identifier_to_projectid(&user.project_identifier()));
+    //
+    // Checked against `is_system_group` because this is the one group in the
+    // list that is *derived from a peer-supplied identifier* rather than named
+    // by configuration - so it is the one that can collide with a pre-existing
+    // privileged group. See
+    // `docs/specifications/security-review-2.md` (finding R13).
+    let project_group = identifier_to_projectid(&user.project_identifier());
+
+    if is_system_group(&project_group).await? {
+        tracing::warn!(
+            "Refusing to add user '{}' to existing system group '{}'",
+            local_user,
+            project_group
+        );
+        return Err(Error::Call(format!(
+            "Refusing to add user '{}' to existing system group '{}'",
+            local_user, project_group
+        )));
+    }
+
+    groups.push(project_group);
 
     // 2. Managed group — marks the user as managed by this agent.
     groups.push(cmds.managed_group.clone());
@@ -296,8 +386,20 @@ pub async fn add_project(
     expires: &chrono::DateTime<Utc>,
 ) -> Result<ProjectMapping, Error> {
     assert_not_expired(expires)?;
+    assert_not_internal_portal(project)?;
 
     let group_name = identifier_to_projectid(project);
+
+    if is_system_group(&group_name).await? {
+        tracing::warn!(
+            "Refusing to adopt existing system group '{}' as a project group",
+            group_name
+        );
+        return Err(Error::Call(format!(
+            "Refusing to adopt existing system group '{}' as a project group",
+            group_name
+        )));
+    }
 
     tracing::info!("Adding project group: {}", group_name);
 
@@ -372,6 +474,7 @@ pub async fn add_user(
     expires: &chrono::DateTime<Utc>,
 ) -> Result<UserMapping, Error> {
     assert_not_expired(expires)?;
+    assert_not_internal_portal(&user.project_identifier())?;
 
     let local_user = identifier_to_userid(user);
     let local_group = get_primary_group_name(user);
@@ -389,6 +492,12 @@ pub async fn add_user(
 
     let default_home = format!("/home/{}", local_user);
     let homedir_str = homedir.as_deref().unwrap_or(&default_home);
+
+    // `useradd -m` creates this directory (and any missing parents) as root and
+    // chowns it to the new account, and on this path the value came back over
+    // the wire from the peer - so validate it before handing it over. See
+    // `docs/specifications/security-review-2.md` (finding R13).
+    check_homedir(homedir_str)?;
 
     tracing::info!("Adding user: {}", local_user);
 
@@ -488,15 +597,90 @@ pub async fn remove_user(
 ///
 /// Update the home directory for a user.
 ///
+///
+/// Check that `homedir` is a plausible home directory before it is handed to
+/// `usermod -d` or `useradd -d ... -m`.
+///
+/// The home directory is a bare `String` on the wire, and on the `AddUser` path
+/// it is supplied by the *peer* (via `get_home_dir`). `useradd -m` will create
+/// a non-existent directory - including missing parents - as root and chown it
+/// to the new account, so an unvalidated value lets a peer choose where that
+/// happens. `op-filesystem` applies an equivalent check
+/// (`clean_and_check_path`) to every path it touches; this brings the
+/// shadow-utils path into line. See
+/// `docs/specifications/security-review-2.md` (finding R13).
+///
+fn check_homedir(homedir: &str) -> Result<(), Error> {
+    let path = std::path::Path::new(homedir);
+
+    if homedir.trim().is_empty() {
+        return Err(Error::Call("Home directory cannot be empty".to_owned()));
+    }
+
+    if !path.is_absolute() {
+        return Err(Error::Call(format!(
+            "Home directory '{}' is not an absolute path",
+            homedir
+        )));
+    }
+
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(Error::Call(format!(
+            "Home directory '{}' contains a '..' component",
+            homedir
+        )));
+    }
+
+    // Same sensitive-location list `op-filesystem::clean_and_check_path` uses.
+    for sensitive in [
+        "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/root", "/dev",
+        "/proc", "/sys", "/run", "/tmp",
+    ] {
+        if path.starts_with(sensitive) {
+            return Err(Error::Call(format!(
+                "Home directory '{}' is in a sensitive location",
+                homedir
+            )));
+        }
+    }
+
+    if path == std::path::Path::new("/") {
+        return Err(Error::Call(
+            "Home directory cannot be the root directory".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn update_homedir(
     user: &UserIdentifier,
     homedir: &str,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<(), Error> {
     assert_not_expired(expires)?;
+    assert_not_internal_portal(&user.project_identifier())?;
+    check_homedir(homedir)?;
 
     let local_user = identifier_to_userid(user);
     let cmds = get_commands()?;
+
+    // Refuse to retarget an account this agent does not manage - the same guard
+    // `remove_user`/`block_user`/`unblock_user` already apply, and that
+    // `op-freeipa::update_homedir` applies. Its absence here was an
+    // inconsistency, not a design choice. See
+    // `docs/specifications/security-review-2.md` (finding R13).
+    if is_protected_user(user, expires).await? {
+        tracing::warn!(
+            "Ignoring request to update the home directory of {} as they are \
+             not managed by this agent",
+            local_user
+        );
+        return Ok(());
+    }
 
     tracing::info!("Updating home directory for {}: {}", local_user, homedir);
 
@@ -969,4 +1153,72 @@ pub async fn is_protected_user(
         .any(|m| m.trim() == local_user.as_str());
 
     Ok(!is_managed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_homedir_rejects_dangerous_paths() {
+        // Regression test for finding R13. The home directory is a bare
+        // `String` on the wire and, on the AddUser path, is supplied by the
+        // *peer* - then handed to `useradd -d ... -m`, which creates the
+        // directory (and missing parents) as root and chowns it to the new
+        // account.
+        assert!(check_homedir("/home/bob.proj").is_ok());
+        assert!(check_homedir("/data/projects/proj/bob").is_ok());
+
+        for bad in [
+            "",
+            "   ",
+            "home/bob",            // relative
+            "../../root",          // relative with traversal
+            "/home/../etc/cron.d", // traversal
+            "/etc",
+            "/etc/cron.d/x",
+            "/var/lib/x",
+            "/usr/bin",
+            "/root",
+            "/dev/shm/x",
+            "/proc/self",
+            "/sys/x",
+            "/run/x",
+            "/tmp/x",
+            "/boot/x",
+            "/",
+        ] {
+            assert!(
+                check_homedir(bad).is_err(),
+                "{:?} must be rejected as a home directory",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_internal_portal_identifiers_are_refused() {
+        // The bare-group-name collision finding R13 is really about:
+        // `bob.docker.system` resolves to the group `docker`, which is
+        // root-equivalent on most hosts. Only configuration may name these.
+        for portal in ["openportal", "system", "instance"] {
+            let project = ProjectIdentifier::parse(&format!("docker.{}", portal))
+                .unwrap_or_else(|e| unreachable!("project: {:?}", e));
+
+            assert!(
+                assert_not_internal_portal(&project).is_err(),
+                "portal {:?} must be refused when it arrives from a peer",
+                portal
+            );
+
+            // ...and it is exactly the identifier that maps to a bare group.
+            assert_eq!(identifier_to_projectid(&project), "docker");
+        }
+
+        // A normal portal is unaffected, and keeps the qualified group name.
+        let project = ProjectIdentifier::parse("proj.brics")
+            .unwrap_or_else(|e| unreachable!("project: {:?}", e));
+        assert!(assert_not_internal_portal(&project).is_ok());
+        assert_eq!(identifier_to_projectid(&project), "brics.proj");
+    }
 }

@@ -1028,7 +1028,7 @@ async fn get_account_from_slurm(
 
     let response = match call_get(
         "slurmdb",
-        &format!("account/{}", account),
+        &format!("account/{}", encode_path_segment(&account)),
         &vec![("with_assocs", "true")],
         expires,
     )
@@ -1234,14 +1234,20 @@ async fn get_user_from_slurm(
 
     let query_params = vec![("with_assocs", "true"), ("default_account", "true")];
 
-    let response =
-        match call_get("slurmdb", &format!("user/{}", user), &query_params, expires).await {
-            Ok(response) => response,
-            Err(e) => {
-                tracing::warn!("Could not get user {}: {}", user, e);
-                return Ok(None);
-            }
-        };
+    let response = match call_get(
+        "slurmdb",
+        &format!("user/{}", encode_path_segment(&user)),
+        &query_params,
+        expires,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("Could not get user {}: {}", user, e);
+            return Ok(None);
+        }
+    };
 
     // there should be a users list, with a single entry for this user
     let users = match response.get("users") {
@@ -1614,6 +1620,36 @@ pub async fn initialise_servers(
     }
 
     Ok(())
+}
+
+/// Percent-encode `segment` so it is safe to interpolate into a URL *path*.
+///
+/// Everything outside the RFC 3986 unreserved set (`A-Za-z0-9-._~`) is encoded,
+/// so a name containing `?`, `#`, `/`, `%`, `&` or `=` cannot inject a query
+/// parameter, an extra path segment, or a fragment into a slurmrestd request.
+/// `Url::parse_with_params` *appends* to whatever query the interpolated string
+/// introduces, so a name of `x?with_deleted=true` previously became a real
+/// query parameter.
+///
+/// Mapping targets are now restricted to `[A-Za-z0-9_.-]` upstream
+/// (`templemeads::validate::validate_mapping_target`), so nothing reaching here
+/// from a peer needs encoding - but account and user names also come back from
+/// Slurm itself, and this must not depend on that upstream guard staying
+/// exactly as it is. See `docs/specifications/security-review-2.md` (finding
+/// R14).
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+
+    encoded
 }
 
 pub fn clean_account_name(account: &str) -> Result<String, Error> {
@@ -3433,4 +3469,42 @@ pub async fn set_limit(
 
     // Call the sacctmgr version
     sacctmgr::set_limit(project, limit, expires).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_path_segment_blocks_url_injection() {
+        // Regression test for finding R14. An account or user name is
+        // interpolated into a slurmrestd *path*, and `Url::parse_with_params`
+        // appends to whatever query the interpolated string introduces - so an
+        // unencoded `?` became a real query parameter.
+        assert_eq!(encode_path_segment("proj.portal"), "proj.portal");
+        assert_eq!(encode_path_segment("a-b_c1~"), "a-b_c1~");
+
+        assert_eq!(
+            encode_path_segment("x?with_deleted=true"),
+            "x%3Fwith_deleted%3Dtrue"
+        );
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment("a#frag"), "a%23frag");
+        assert_eq!(encode_path_segment("a&b=c"), "a%26b%3Dc");
+        assert_eq!(encode_path_segment("a b"), "a%20b");
+        assert_eq!(encode_path_segment("100%"), "100%25");
+
+        // Nothing outside the unreserved set survives unencoded. `%` is
+        // excluded from this loop because it is the escape prefix itself - it
+        // is covered by the `100%` case above, which asserts it becomes `%25`.
+        for injected in ["?", "#", "/", "&", "=", " ", ";", ":", "@", "+"] {
+            let encoded = encode_path_segment(&format!("name{}x", injected));
+            assert!(
+                !encoded.contains(injected),
+                "{:?} must not survive encoding (got {:?})",
+                injected,
+                encoded
+            );
+        }
+    }
 }

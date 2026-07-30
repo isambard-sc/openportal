@@ -12,6 +12,16 @@ use crate::domain::Domain;
 use crate::error::Error;
 use crate::job::Job;
 
+/// Largest `version` a `Job` arriving from a peer may plausibly carry.
+///
+/// A real Job's version counts single increments from zero as it moves between
+/// agents, so it stays in the low tens; 2^60 is astronomically beyond anything
+/// reachable by legitimate use while still leaving `saturating_add` headroom.
+/// A value above this is a bug or a peer probing the version handling in
+/// `Board::add`, and is rejected and logged rather than acted on. See
+/// `docs/specifications/security-review-2.md` (finding R6).
+const MAX_PLAUSIBLE_JOB_VERSION: u64 = 1 << 60;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum JobAddState {
     /// The job was added to the board
@@ -247,6 +257,29 @@ impl<L: Domain> Board<L> {
 
         job.assert_is_for_board(&self.peer)?;
 
+        // `version` arrives from the wire with no validation, and a plausible
+        // Job's version counts single increments from zero. A value anywhere
+        // near this is not a real Job: it is either a bug or a peer probing the
+        // version handling below, and either way we want to see it in the logs
+        // rather than act on it. See
+        // `docs/specifications/security-review-2.md` (finding R6).
+        if job.version() > MAX_PLAUSIBLE_JOB_VERSION {
+            tracing::warn!(
+                "Rejecting job {} for board of agent {}: version {} is \
+                 implausibly large (limit {}) - this is a bug or an attack.",
+                job.id(),
+                self.peer,
+                job.version(),
+                MAX_PLAUSIBLE_JOB_VERSION
+            );
+
+            return Err(Error::InvalidState(format!(
+                "Job {} has an implausible version ({})",
+                job.id(),
+                job.version()
+            )));
+        }
+
         let mut state = JobAddState::Unchanged;
         let mut job = job.clone();
 
@@ -262,9 +295,17 @@ impl<L: Domain> Board<L> {
                     let newer_version = j.version();
                     *j = job.clone();
 
-                    while j.version() <= newer_version {
-                        *j = j.increment_version();
-                    }
+                    // Jump straight past the version we are superseding.
+                    //
+                    // This was a `while j.version() <= newer_version` loop
+                    // calling `increment_version()`, which deep-clones the Job
+                    // each time - so a peer sending version 2^40 and then a
+                    // lower version with a newer `changed` timestamp drove ~10^12
+                    // clones, synchronously, while holding this board's write
+                    // lock. With `version: u64::MAX` it never terminated at all,
+                    // because the increment wrapped. See
+                    // `docs/specifications/security-review-2.md` (finding R6).
+                    *j = j.with_version(newer_version.saturating_add(1));
 
                     job = j.clone();
                     state = JobAddState::Updated;

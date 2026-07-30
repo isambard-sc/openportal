@@ -32,6 +32,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   way: a char index used as a byte offset when splitting a Lustre quota
   expression, and `permissions`/`links` in a volume config being indexed with
   a `roots` index when those lists may be shorter.
+- **`op-slurm` applied no managed-object guard to any mutation** (finding R5).
+  `set_limit` never called the `is_managed()` that already existed, and both
+  `cancel_pending_*_jobs` took a bare account/user name with no lookup at all -
+  so a peer-chosen `local_group` could rewrite the `GrpTRESMins` of, or
+  `scancel` every pending job of, any account on the cluster. All three now
+  resolve their target and refuse anything outside the OpenPortal-managed
+  organization; a target that does not exist is a logged no-op, so removal stays
+  idempotent. (The create path's existing check validated a locally-constructed
+  object whose organization is a constant, so it could never fail.)
+- **A peer could drive an unbounded loop while holding a board's write lock**
+  (finding R6). `Board::add` incremented a Job's version one deep clone at a
+  time until it passed the stored version, so a stored version of 2^40 meant
+  ~10^12 clones - synchronously, under the lock - and `u64::MAX` never
+  terminated at all, because the increment wrapped in release builds. It now
+  jumps straight past with `saturating_add`, `increment_version` saturates, and
+  a Job arriving with a version above 2^60 is rejected and logged as a bug or an
+  attack rather than acted on.
+- **`op-localaccount` could add an account to a privileged system group**
+  (finding R13). The previous hardening covered only the *remove* paths, leaving
+  the exact bare-group-name collision it documented: `bob.docker.system`
+  resolves to the group `docker`, and the add path put the new account into it.
+  Identifiers naming an internal portal (`openportal`/`system`/`instance`) are
+  now refused when they arrive from a peer, groups that already exist with a
+  system GID are never adopted, `update_homedir` gained the managed-user guard
+  its siblings had, and the home directory - a bare string that on the add path
+  comes from the peer, and that `useradd -m` creates as root - is now validated
+  the way `op-filesystem` validates every path it touches.
+- **Mapping targets permitted whitespace and separators** (finding R14). Local
+  user and group names had a deny-list that still admitted spaces, `,`, `=`,
+  `%`, `?` and `#`. Because OpenPortal rebuilds its own instructions by
+  interpolating a mapping into a *space-delimited* string that is then re-parsed
+  positionally, a space shifted every later argument - letting a compromised
+  account agent choose the limit a scheduler applied. They now use an allow-list
+  (`[A-Za-z0-9_.-]`, no leading `-`, no leading/trailing `.`, length-capped),
+  keeping the interior `.` that a `user.project` account name needs. Account and
+  user names are also percent-encoded before being interpolated into slurmrestd
+  paths, so a `?` cannot introduce a query parameter.
+- **A relayed envelope's `zone` was unauthenticated but was half the peer
+  identity** (finding R15). `RelayEnvelope` is plaintext outside the AEAD; `to`
+  is checked and `from` is implicitly bound by which key decrypts, but `zone`
+  was bound to nothing and propagated into `Message::received_from` and the
+  synthesised `Connected` event - and templemeads keys boards, job routing and
+  the peer registry on `{name}@{zone}`. The receive side now uses the configured
+  `peer.zone` and logs any disagreement.
+- **The portal-ownership check silently did not apply to ten instructions**
+  (finding R17). `owning_portal` omitted the whole block/unblock family (user
+  and project), the storage-report family, and `GetAwards` - so a bridge client
+  of one portal could, for example, block every user of another portal's
+  project. All ten arms added, with a test that enumerates every
+  identifier-bearing variant so a new one cannot silently miss the check again.
+- **`PortalIdentifier` never received the identifier allow-list** (finding R18).
+  It checked only for emptiness, spaces and periods, despite being deserialised
+  straight off the wire as the sole argument of several instructions - and
+  despite its own `from_validated` documenting the invariant as established. The
+  validator has been lifted into a new shared `templemeads::validate` module
+  (it must live there because `PortalIdentifier` does) and is now used by both
+  templemeads and `greatwestern`, so there is one allow-list rather than two
+  that can drift.
+- **Date parsing and arithmetic were unbounded** (finding R25). `%Y` accepts a
+  signed, unbounded digit count, so the entire chrono range parsed and nothing
+  capped a range's span - a single `get_usage_report` could ask an agent to
+  build a 191-million-element vector, and the day-by-day arithmetic overflowed
+  at the edges. `Date::parse` now bounds the year to 1970-2200, `DateRange`
+  caps its span at ~5 years, every date addition is checked, and `months()`/
+  `years()` - which previously spun forever at the top of the range while
+  allocating on each iteration - now require forward progress.
 - **A routine restart locked an agent out of every long-running peer**
   (finding R10). The handshake/bootstrap anti-replay state kept the outgoing
   nonce counter and the incoming replay window in the same in-memory structure,
@@ -110,6 +176,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - `paddington::config::save` now takes `&Path` rather than `&PathBuf`, and no
   longer creates the parent directory separately (`write_secret_file` does it,
   owner-only). Callers passing a `&PathBuf` are unaffected.
+- Identifier-component validation now lives in a new `templemeads::validate`
+  module and is shared with `greatwestern`, rather than being defined privately
+  in `greatwestern::grammar`. `templemeads::validate::validate_mapping_target`
+  is the mapping-target variant (same allow-list, plus an interior `.`).
 
 ## [0.90.0] - 2026-07-24
 

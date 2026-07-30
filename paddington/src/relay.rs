@@ -845,6 +845,34 @@ async fn handle_start(
     Ok(())
 }
 
+/// Log when a relayed envelope's `zone` disagrees with the zone we have
+/// configured for that peer.
+///
+/// `RelayEnvelope` is plaintext JSON *outside* the AEAD - `Key::encrypt` passes
+/// no associated data - so `from`, `to` and `zone` are all unauthenticated.
+/// `to` is checked against our own name and `from` is implicitly bound (it
+/// selects which permanent key we decrypt with, so a wrong value simply fails),
+/// but `zone` was bound to nothing and propagated verbatim into
+/// `Message::received_from` and the synthesised `Connected` event. Since
+/// templemeads treats `{name}@{zone}` as the peer *identity* - boards, job
+/// routing and the peer registry all key on it - a malicious proxy, or the
+/// relayed peer itself, could choose which identity its traffic was filed
+/// under. The receive side now uses the configured `peer.zone` throughout and
+/// ignores the wire value; this records the disagreement so a genuine
+/// misconfiguration is still visible. See
+/// `docs/specifications/security-review-2.md` (finding R15).
+fn warn_on_zone_mismatch(envelope: &RelayEnvelope, peer: &RelayedPeer) {
+    if envelope.zone != peer.zone {
+        tracing::warn!(
+            "Relay envelope from '{}' declared zone '{}', but this peer is \
+             configured in zone '{}' - using the configured zone.",
+            envelope.from,
+            envelope.zone,
+            peer.zone
+        );
+    }
+}
+
 async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Message>, Error> {
     let my_name = my_name().await?;
 
@@ -881,7 +909,10 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
                         return Ok(None);
                     }
                 };
-                handle_start(&envelope.from, &envelope.zone, &peer, &relay, start).await?;
+                // The configured zone for this relayed peer, not the wire
+                // field - see `warn_on_zone_mismatch` (finding R15).
+                warn_on_zone_mismatch(&envelope, &peer);
+                handle_start(&envelope.from, &peer.zone, &peer, &relay, start).await?;
             }
             BootstrapMessage::Accepted(accepted) => {
                 let mut pending = PENDING_BOOTSTRAPS.lock().await;
@@ -1015,7 +1046,10 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
     // `process_message` rejects it: `MessageType::Message` payloads are
     // checked against `message.recipient()`, which `received_from` always
     // leaves blank.
-    let mut message = Message::received_from(&envelope.from, &envelope.zone, &payload);
+    // `peer.zone` (from our own configuration), not `envelope.zone` (from the
+    // wire) - see `warn_on_zone_mismatch` (finding R15).
+    warn_on_zone_mismatch(&envelope, &peer);
+    let mut message = Message::received_from(&envelope.from, &peer.zone, &payload);
     message.set_recipient(&my_name);
 
     Ok(Some(message))

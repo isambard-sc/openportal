@@ -6,6 +6,7 @@ use crate::usagereport::Usage;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::named::NamedType;
 use templemeads::portal_identifier::PortalIdentifier;
+use templemeads::validate::{validate_identifier_component, validate_mapping_target};
 use templemeads::Error;
 
 use anyhow::Context;
@@ -16,59 +17,6 @@ use std::{hash::Hash, sync::Arc};
 use ts_rs::TS;
 use url::Url;
 use wildmatch::WildMatch;
-
-/// Maximum length of any single identifier component (username, project, or
-/// portal). Generous enough for any real portal/project/user name while
-/// bounding the size of everything derived from it downstream (Unix account
-/// and group names, filesystem path components, Slurm account names, FreeIPA
-/// cn/uid values).
-const MAX_IDENTIFIER_COMPONENT_LEN: usize = 64;
-
-/// Validate a single identifier component against a strict allow-list.
-///
-/// Identifier components flow, unescaped, into privileged operations: Unix
-/// `useradd`/`groupadd` operands, filesystem paths, Slurm account names,
-/// FreeIPA RPC parameters, and (for `op-cloudaccount`) state-file names.
-/// Restricting them to `[A-Za-z0-9_-]`, forbidding a leading `-`, and capping
-/// the length closes argument-injection (a leading-dash name read as a flag by
-/// a spawned tool), path-traversal (a `/` or `.` in a name), and
-/// resource-exhaustion vectors at the point identifiers enter the system. See
-/// `docs/specifications/security-review.md` (finding F5).
-fn validate_identifier_component(value: &str, field: &str, identifier: &str) -> Result<(), Error> {
-    if value.is_empty() {
-        return Err(Error::Parse(format!(
-            "Invalid identifier - {} cannot be empty '{}'",
-            field, identifier
-        )));
-    }
-
-    if value.len() > MAX_IDENTIFIER_COMPONENT_LEN {
-        return Err(Error::Parse(format!(
-            "Invalid identifier - {} is longer than {} characters '{}'",
-            field, MAX_IDENTIFIER_COMPONENT_LEN, identifier
-        )));
-    }
-
-    if value.starts_with('-') {
-        return Err(Error::Parse(format!(
-            "Invalid identifier - {} cannot start with '-' '{}'",
-            field, identifier
-        )));
-    }
-
-    if let Some(bad) = value
-        .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-'))
-    {
-        return Err(Error::Parse(format!(
-            "Invalid identifier - {} contains an illegal character '{}' \
-             (allowed: A-Z, a-z, 0-9, '_', '-') '{}'",
-            field, bad, identifier
-        )));
-    }
-
-    Ok(())
-}
 
 ///
 /// A project identifier - this is a double of project.portal
@@ -271,24 +219,16 @@ impl ProjectMapping {
     pub fn new(project: &ProjectIdentifier, local_group: &str) -> Result<Self, Error> {
         let local_group = local_group.trim();
 
-        if local_group.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid ProjectMapping - local_group cannot be empty '{}'",
-                local_group
-            )));
-        };
-
-        if local_group.starts_with(".")
-            || local_group.ends_with(".")
-            || local_group.contains('/')
-            || local_group.starts_with('-')
-            || local_group.chars().any(|c| c.is_control())
-        {
-            return Err(Error::Parse(format!(
-                "Invalid ProjectMapping - local group contains invalid characters '{}'",
-                local_group
-            )));
-        };
+        // Allow-list, not a deny-list. The previous deny-list rejected only
+        // empty, leading/trailing `.`, `/`, a leading `-` and control
+        // characters - which still admitted whitespace, `,`, `=`, `%`, `?` and
+        // `#`. Those matter because a mapping target is not only a spawned
+        // tool's operand: it is interpolated into space-delimited OpenPortal
+        // instruction strings (a space shifts every later argument), into
+        // `sacctmgr` `key=value` arguments (a comma is a list separator), and
+        // into Slurm REST URLs (a `?` starts a query). See
+        // `docs/specifications/security-review-2.md` (finding R14).
+        validate_mapping_target(local_group, "local_group", local_group)?;
 
         Ok(Self {
             project: project.clone(),
@@ -377,43 +317,10 @@ impl UserMapping {
         let local_user = local_user.trim();
         let local_group = local_group.trim();
 
-        if local_user.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid UserMapping - local_user cannot be empty '{}'",
-                local_user
-            )));
-        };
-
-        if local_user.starts_with(".")
-            || local_user.ends_with(".")
-            || local_user.contains('/')
-            || local_user.starts_with('-')
-            || local_user.chars().any(|c| c.is_control())
-        {
-            return Err(Error::Parse(format!(
-                "Invalid UserMapping - local_user account contains invalid characters '{}'",
-                local_user
-            )));
-        };
-
-        if local_group.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid UserMapping - local_group cannot be empty '{}'",
-                local_group
-            )));
-        };
-
-        if local_group.starts_with(".")
-            || local_group.ends_with(".")
-            || local_group.contains('/')
-            || local_group.starts_with('-')
-            || local_group.chars().any(|c| c.is_control())
-        {
-            return Err(Error::Parse(format!(
-                "Invalid UserMapping - local_group contains invalid characters '{}'",
-                local_group
-            )));
-        };
+        // Allow-list rather than deny-list - see `ProjectMapping::new` and
+        // `docs/specifications/security-review-2.md` (finding R14).
+        validate_mapping_target(local_user, "local_user", local_user)?;
+        validate_mapping_target(local_group, "local_group", local_group)?;
 
         Ok(Self {
             user: user.clone(),
@@ -639,7 +546,11 @@ impl Hour {
 
     // the end time is exclusive, i.e. [start_time, end_time)
     pub fn end_time(&self) -> chrono::NaiveDateTime {
-        self.hour + chrono::Duration::hours(1)
+        // Checked, so a date at the very top of the representable range cannot
+        // panic here - see finding R25.
+        self.hour
+            .checked_add_signed(chrono::Duration::hours(1))
+            .unwrap_or(self.hour)
     }
 
     pub fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -702,6 +613,28 @@ impl NamedType for Date {
     }
 }
 
+/// Earliest and latest year a `Date` may name.
+///
+/// `chrono`'s `%Y` accepts an unbounded digit count when a sign is present, so
+/// `Date::parse` used to accept chrono's entire representable range - from
+/// `-262143-01-01` to `+262142-12-31`. Nothing rejected a `DateRange` spanning
+/// it either, and a span that wide is a resource bomb rather than a query:
+/// `DateRange::days()` would try to build a 191,491,529-element `Vec`, and the
+/// day-by-day arithmetic in `days`/`weeks`/`end_time` overflowed at the top of
+/// the range. Bounding the year at parse time closes that whole class in one
+/// check. See `docs/specifications/security-review-2.md` (finding R25).
+const MIN_YEAR: i32 = 1970;
+const MAX_YEAR: i32 = 2200;
+
+/// Longest span a single `DateRange` may cover, in days (~5 years).
+///
+/// Usage and storage reports are aggregated per day, per week or per month over
+/// a range, so the range's length directly bounds how much a single instruction
+/// can ask an agent to allocate and compute. Five years is far beyond any real
+/// reporting query while keeping the worst case at a few thousand elements. See
+/// `docs/specifications/security-review-2.md` (finding R25).
+const MAX_DATE_RANGE_DAYS: i64 = 5 * 366;
+
 impl Date {
     pub fn to_chrono(&self) -> chrono::NaiveDate {
         self.date
@@ -731,6 +664,18 @@ impl Date {
 
         let date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
             .with_context(|| format!("Invalid Date - date cannot be parsed from '{}'", date))?;
+
+        // `%Y` accepts a signed, unbounded digit count, so without this the
+        // whole chrono range parses - see `MIN_YEAR`/`MAX_YEAR` (finding R25).
+        if date.year() < MIN_YEAR || date.year() > MAX_YEAR {
+            return Err(Error::Parse(format!(
+                "Invalid Date - year {} is outside the supported range {}-{} '{}'",
+                date.year(),
+                MIN_YEAR,
+                MAX_YEAR,
+                date
+            )));
+        }
 
         Ok(Self { date })
     }
@@ -1110,9 +1055,31 @@ impl DateRange {
             }
         };
 
+        let start_date = Date::parse(start)?;
+        let end_date = Date::parse(end)?;
+
+        // Bound the *span*, not just the endpoints. `days()` builds one element
+        // per calendar day and the report types aggregate per day/week/month
+        // over it, so the span is what bounds how much work a single
+        // instruction can ask an agent to do. See `MAX_DATE_RANGE_DAYS` and
+        // `docs/specifications/security-review-2.md` (finding R25).
+        let span = end_date
+            .to_chrono()
+            .signed_duration_since(start_date.to_chrono())
+            .num_days();
+
+        if span.abs() > MAX_DATE_RANGE_DAYS {
+            return Err(Error::Parse(format!(
+                "Invalid DateRange - span of {} days exceeds the maximum of {} '{}'",
+                span.abs(),
+                MAX_DATE_RANGE_DAYS,
+                date_range
+            )));
+        }
+
         Ok(Self {
-            start_date: Date::parse(start)?,
-            end_date: Date::parse(end)?,
+            start_date,
+            end_date,
         })
     }
 
@@ -1142,13 +1109,41 @@ impl DateRange {
     pub fn end_time(&self) -> chrono::NaiveDateTime {
         // this will finish at midnight on the day after the end date,
         // as we have a half-open interval [start_time, end_time)
-        self.end_date.date.and_hms_opt(0, 0, 0).unwrap_or_else(|| {
+        let midnight = self.end_date.date.and_hms_opt(0, 0, 0).unwrap_or_else(|| {
             tracing::error!(
                 "Invalid end date '{}' - cannot convert to an end_time",
                 self.end_date
             );
             chrono::NaiveDateTime::default()
-        }) + chrono::Duration::days(1)
+        });
+
+        // Checked, so an end date at the top of the representable range cannot
+        // panic here - see finding R25.
+        midnight
+            .checked_add_signed(chrono::Duration::days(1))
+            .unwrap_or(midnight)
+    }
+
+    /// The day after `period_end`, or `None` if that cannot be represented or
+    /// would not move the iteration forward from `current`.
+    ///
+    /// The forward-progress check is what makes `months()`/`years()` terminate.
+    /// At the top of the representable range `from_ymd_opt(year + 1, 1, 1)`
+    /// returns `None`, the `unwrap_or(start_date)` fallback then produced a
+    /// `period_end` *earlier* than `current`, and `current = period_end + 1 day`
+    /// therefore never advanced - an infinite loop that also pushed a
+    /// `DateRange` into a `Vec` on every iteration. See
+    /// `docs/specifications/security-review-2.md` (finding R25).
+    fn advance_past(
+        current: chrono::NaiveDate,
+        period_end: chrono::NaiveDate,
+    ) -> Option<chrono::NaiveDate> {
+        let next = period_end.checked_add_signed(chrono::Duration::days(1))?;
+
+        match next > current {
+            true => Some(next),
+            false => None,
+        }
     }
 
     pub fn days(&self) -> Vec<Date> {
@@ -1157,7 +1152,15 @@ impl DateRange {
         let mut current = self.start_date.date;
         while current <= self.end_date.date {
             days.push(Date { date: current });
-            current += chrono::Duration::days(1);
+
+            // Checked: `current + 1 day` overflows at the top of chrono's
+            // representable range. `Date::parse` now bounds the year so this is
+            // unreachable from a parsed range, but `from_chrono` takes a
+            // `NaiveDate` directly. See finding R25.
+            match current.checked_add_signed(chrono::Duration::days(1)) {
+                Some(next) => current = next,
+                None => break,
+            }
         }
 
         days
@@ -1168,24 +1171,31 @@ impl DateRange {
 
         let mut current = self.start_date.date;
         while current <= self.end_date.date {
-            let start_date = match current.weekday() {
-                chrono::Weekday::Mon => current,
-                chrono::Weekday::Tue => current - chrono::Duration::days(1),
-                chrono::Weekday::Wed => current - chrono::Duration::days(2),
-                chrono::Weekday::Thu => current - chrono::Duration::days(3),
-                chrono::Weekday::Fri => current - chrono::Duration::days(4),
-                chrono::Weekday::Sat => current - chrono::Duration::days(5),
-                chrono::Weekday::Sun => current - chrono::Duration::days(6),
+            // Both the roll-back to Monday and the roll-forward to Sunday are
+            // checked: at the very edges of chrono's representable range either
+            // can overflow, which would abort the process under
+            // `panic = "abort"`. See finding R25.
+            let days_since_monday = current.weekday().num_days_from_monday() as i64;
+
+            let Some(start_date) =
+                current.checked_sub_signed(chrono::Duration::days(days_since_monday))
+            else {
+                break;
             };
 
-            let end_date = start_date + chrono::Duration::days(6);
+            let Some(end_date) = start_date.checked_add_signed(chrono::Duration::days(6)) else {
+                break;
+            };
 
             weeks.push(DateRange {
                 start_date: Date { date: start_date },
                 end_date: Date { date: end_date },
             });
 
-            current = end_date + chrono::Duration::days(1);
+            match Self::advance_past(current, end_date) {
+                Some(next) => current = next,
+                None => break,
+            }
         }
 
         weeks
@@ -1212,7 +1222,10 @@ impl DateRange {
                 end_date: Date { date: end_date },
             });
 
-            current = end_date + chrono::Duration::days(1);
+            match Self::advance_past(current, end_date) {
+                Some(next) => current = next,
+                None => break,
+            }
         }
 
         months
@@ -1239,7 +1252,10 @@ impl DateRange {
                 end_date: Date { date: end_date },
             });
 
-            current = end_date + chrono::Duration::days(1);
+            match Self::advance_past(current, end_date) {
+                Some(next) => current = next,
+                None => break,
+            }
         }
 
         years
@@ -4730,6 +4746,13 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
         Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
         Instruction::GetUserDirs(user) => Some(user),
         Instruction::GetLocalUserDirs(user) => Some(user.user().clone()),
+        // The block/unblock family was missing, so the portal-ownership check
+        // silently no-op'd for it - letting one portal's client block or
+        // unblock another portal's users. See
+        // `docs/specifications/security-review-2.md` (finding R17).
+        Instruction::BlockUser(user) => Some(user),
+        Instruction::UnblockUser(user) => Some(user),
+        Instruction::IsBlockedUser(user) => Some(user),
         _ => None,
     };
 
@@ -4765,6 +4788,12 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
         Instruction::SetLocalProjectQuota(project, _, _) => Some(project.project().clone()),
         Instruction::ClearLocalProjectQuota(project, _) => Some(project.project().clone()),
         Instruction::GetLocalProjectQuotas(project) => Some(project.project().clone()),
+        // As above, plus the storage-report family - see finding R17.
+        Instruction::BlockProject(project) => Some(project),
+        Instruction::UnblockProject(project) => Some(project),
+        Instruction::IsBlockedProject(project) => Some(project),
+        Instruction::GetStorageReport(project, _) => Some(project),
+        Instruction::GetLocalStorageReport(project, _) => Some(project.project().clone()),
         _ => None,
     };
 
@@ -4775,6 +4804,9 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
     match instruction.clone() {
         Instruction::GetProjects(portal) => Some(portal),
         Instruction::GetUsageReports(portal, _) => Some(portal),
+        // Also missing - see finding R17.
+        Instruction::GetAwards(portal) => Some(portal),
+        Instruction::GetStorageReports(portal, _) => Some(portal),
         _ => None,
     }
 }
@@ -4806,6 +4838,285 @@ mod tests {
             mapping.to_string(),
             "user.project.portal:local_user:local_group"
         );
+    }
+
+    #[test]
+    fn test_mapping_targets_reject_argument_injection_characters() {
+        // Regression test for finding R14. Mapping targets had a deny-list that
+        // still permitted whitespace, `,`, `=`, `%`, `?` and `#`. Those matter
+        // because a mapping is not only a spawned tool's operand: `cluster`
+        // rebuilds instructions by interpolating it into a *space-delimited*
+        // string, so a space shifts every later argument - letting a
+        // compromised account agent choose the limit the scheduler applies.
+        let project = ProjectIdentifier::parse("proj.portal")
+            .unwrap_or_else(|e| unreachable!("project: {:?}", e));
+        let user = UserIdentifier::parse("bob.proj.portal")
+            .unwrap_or_else(|e| unreachable!("user: {:?}", e));
+
+        // The legitimate shapes still work - a local account named after
+        // user.project, and a plain group name.
+        assert!(ProjectMapping::new(&project, "grp").is_ok());
+        assert!(ProjectMapping::new(&project, "portal.proj").is_ok());
+        assert!(UserMapping::new(&user, "bob.proj", "grp").is_ok());
+
+        for bad in [
+            "grp evil",            // shifts every later instruction argument
+            "grp\tevil",           // ditto
+            "a,b",                 // sacctmgr list separator
+            "a=b",                 // sacctmgr key=value
+            "a?with_deleted=true", // Slurm REST query injection
+            "a#b",
+            "a%2fb",
+            "a/b",
+            "-grp",
+            ".grp",
+            "grp.",
+            "a..b",
+            "",
+        ] {
+            assert!(
+                ProjectMapping::new(&project, bad).is_err(),
+                "ProjectMapping must reject local_group {:?}",
+                bad
+            );
+            assert!(
+                UserMapping::new(&user, bad, "grp").is_err(),
+                "UserMapping must reject local_user {:?}",
+                bad
+            );
+            assert!(
+                UserMapping::new(&user, "bob.proj", bad).is_err(),
+                "UserMapping must reject local_group {:?}",
+                bad
+            );
+        }
+
+        // A mapping is also length-capped, like every other component.
+        assert!(ProjectMapping::new(&project, &"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn test_mapping_round_trips_through_its_own_wire_form() {
+        // The concrete consequence of the above: a mapping is serialised into a
+        // space-delimited instruction and re-parsed positionally, so any
+        // accepted mapping must survive that round trip unchanged.
+        let project = ProjectIdentifier::parse("proj.portal")
+            .unwrap_or_else(|e| unreachable!("project: {:?}", e));
+        let mapping = ProjectMapping::new(&project, "portal.proj")
+            .unwrap_or_else(|e| unreachable!("mapping: {:?}", e));
+
+        let reparsed = ProjectMapping::parse(&mapping.to_string())
+            .unwrap_or_else(|e| unreachable!("reparse: {:?}", e));
+        assert_eq!(mapping, reparsed);
+
+        // And the interpolated-instruction form that `cluster` builds parses
+        // back to the same three arguments rather than a shifted set.
+        let command = format!("set_local_limit {} {}", mapping, 3600);
+        match Instruction::parse(&command) {
+            Ok(Instruction::SetLocalLimit(parsed, usage)) => {
+                assert_eq!(parsed, mapping);
+                assert_eq!(usage.seconds(), 3600);
+            }
+            other => unreachable!("expected SetLocalLimit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_date_parsing_is_bounded() {
+        // Regression test for finding R25. `%Y` accepts a signed, unbounded
+        // digit count, so the whole chrono range used to parse - and a range
+        // spanning it made `days()` try to build a 191-million-element Vec.
+        assert!(Date::parse("2026-07-30").is_ok());
+        assert!(Date::parse("1970-01-01").is_ok());
+        assert!(Date::parse("2200-12-31").is_ok());
+
+        for out_of_range in [
+            "+262142-12-31",
+            "-262143-01-01",
+            "0001-01-01",
+            "1969-12-31",
+            "2201-01-01",
+            "+10000-01-01",
+        ] {
+            assert!(
+                Date::parse(out_of_range).is_err(),
+                "{:?} must be rejected as out of range",
+                out_of_range
+            );
+        }
+    }
+
+    #[test]
+    fn test_date_range_span_is_capped() {
+        // A plausible reporting query still works...
+        assert!(DateRange::parse("2026-01-01:2026-12-31").is_ok());
+        assert!(DateRange::parse("2026-01-01").is_ok());
+
+        // ...while a span beyond the cap is refused rather than turned into a
+        // multi-hundred-megabyte allocation (finding R25).
+        assert!(DateRange::parse("1970-01-01:2200-12-31").is_err());
+        assert!(DateRange::parse("2026-01-01:2100-01-01").is_err());
+    }
+
+    #[test]
+    fn test_date_range_iteration_terminates_at_the_range_boundary() {
+        // `months()` and `years()` looped forever at the top of the
+        // representable range: `from_ymd_opt(year + 1, 1, 1)` returns `None`,
+        // the fallback produced an end date *earlier* than the cursor, and the
+        // cursor therefore never advanced - while pushing a `DateRange` per
+        // iteration. `Date::parse` now bounds the year, but `from_chrono`
+        // bypasses that, so the loops must terminate on their own (finding
+        // R25).
+        let top = chrono::NaiveDate::MAX;
+        let range = DateRange::from_chrono(&top, &top);
+
+        // Each of these must return, and must not grow without bound.
+        assert!(range.days().len() <= 1);
+        assert!(range.weeks().len() <= 1);
+        assert!(range.months().len() <= 1);
+        assert!(range.years().len() <= 1);
+
+        // ...and must not panic computing the exclusive end instant.
+        let _ = range.end_time();
+
+        // The same at the bottom of the range.
+        let bottom = chrono::NaiveDate::MIN;
+        let range = DateRange::from_chrono(&bottom, &bottom);
+        assert!(range.days().len() <= 1);
+        assert!(range.months().len() <= 1);
+        assert!(range.years().len() <= 1);
+        let _ = range.end_time();
+
+        // A normal range still iterates correctly - the guard must not have
+        // broken the ordinary case.
+        let range = DateRange::parse("2026-01-01:2026-03-31")
+            .unwrap_or_else(|e| unreachable!("range: {:?}", e));
+        assert_eq!(range.days().len(), 90);
+        assert_eq!(range.months().len(), 3);
+        assert_eq!(range.years().len(), 1);
+    }
+
+    #[test]
+    fn test_owning_portal_covers_every_identifier_bearing_instruction() {
+        // Regression test for finding R17. `Command::parse(.., check_portal =
+        // true)` enforces "an instruction naming portal X may only be issued
+        // via a destination whose first agent is X" - and it is silently
+        // skipped wherever `owning_portal` returns `None`. Ten
+        // identifier-bearing variants were missing, including the whole
+        // block/unblock family, so a bridge client of one portal could block
+        // another portal's projects.
+        //
+        // This test enumerates every variant explicitly rather than sampling,
+        // so adding a new identifier-bearing instruction without an
+        // `owning_portal` arm fails here instead of quietly losing the check.
+        let user = UserIdentifier::parse("bob.proj.brics")
+            .unwrap_or_else(|e| unreachable!("user: {:?}", e));
+        let project = ProjectIdentifier::parse("proj.brics")
+            .unwrap_or_else(|e| unreachable!("project: {:?}", e));
+        let portal =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+        let user_mapping = UserMapping::new(&user, "bob.proj", "grp")
+            .unwrap_or_else(|e| unreachable!("user mapping: {:?}", e));
+        let project_mapping = ProjectMapping::new(&project, "grp")
+            .unwrap_or_else(|e| unreachable!("project mapping: {:?}", e));
+        let dates = DateRange::parse("2026-01-01:2026-01-31")
+            .unwrap_or_else(|e| unreachable!("dates: {:?}", e));
+        let volume = Volume::parse("home").unwrap_or_else(|e| unreachable!("volume: {:?}", e));
+        let quota = QuotaLimit::parse("1 GB").unwrap_or_else(|e| unreachable!("quota: {:?}", e));
+        let usage = Usage::new(3600);
+        let details = ProjectDetails::default();
+        let homedir = "/home/bob.proj".to_string();
+
+        // Every variant that names a user, project or portal, with the portal
+        // each one should resolve to.
+        let identifier_bearing: Vec<Instruction> = vec![
+            Instruction::AddUser(user.clone()),
+            Instruction::RemoveUser(user.clone()),
+            Instruction::AddLocalUser(user_mapping.clone()),
+            Instruction::RemoveLocalUser(user_mapping.clone()),
+            Instruction::UpdateHomeDir(user.clone(), homedir.clone()),
+            Instruction::GetUserMapping(user.clone()),
+            Instruction::IsProtectedUser(user.clone()),
+            Instruction::IsExistingUser(user.clone()),
+            Instruction::GetHomeDir(user.clone()),
+            Instruction::GetLocalHomeDir(user_mapping.clone()),
+            Instruction::GetUserQuota(user.clone(), volume.clone()),
+            Instruction::SetUserQuota(user.clone(), volume.clone(), quota.clone()),
+            Instruction::ClearUserQuota(user.clone(), volume.clone()),
+            Instruction::GetUserQuotas(user.clone()),
+            Instruction::GetLocalUserQuota(user_mapping.clone(), volume.clone()),
+            Instruction::SetLocalUserQuota(user_mapping.clone(), volume.clone(), quota.clone()),
+            Instruction::ClearLocalUserQuota(user_mapping.clone(), volume.clone()),
+            Instruction::GetLocalUserQuotas(user_mapping.clone()),
+            Instruction::GetUserDirs(user.clone()),
+            Instruction::GetLocalUserDirs(user_mapping.clone()),
+            Instruction::BlockUser(user.clone()),
+            Instruction::UnblockUser(user.clone()),
+            Instruction::IsBlockedUser(user.clone()),
+            Instruction::CreateProject(project.clone(), details.clone()),
+            Instruction::UpdateProject(project.clone(), details.clone()),
+            Instruction::GetProject(project.clone()),
+            Instruction::GetAward(project.clone()),
+            Instruction::AddProject(project.clone()),
+            Instruction::AddLocalProject(project_mapping.clone()),
+            Instruction::RemoveLocalProject(project_mapping.clone()),
+            Instruction::IsExistingProject(project.clone()),
+            Instruction::GetUsers(project.clone()),
+            Instruction::RemoveProject(project.clone()),
+            Instruction::GetUsageReport(project.clone(), dates.clone()),
+            Instruction::GetLocalUsageReport(project_mapping.clone(), dates.clone()),
+            Instruction::GetProjectMapping(project.clone()),
+            Instruction::GetLocalLimit(project_mapping.clone()),
+            Instruction::SetLocalLimit(project_mapping.clone(), usage),
+            Instruction::GetLimit(project.clone()),
+            Instruction::SetLimit(project.clone(), usage),
+            Instruction::GetProjectDirs(project.clone()),
+            Instruction::GetLocalProjectDirs(project_mapping.clone()),
+            Instruction::GetProjectQuota(project.clone(), volume.clone()),
+            Instruction::SetProjectQuota(project.clone(), volume.clone(), quota.clone()),
+            Instruction::ClearProjectQuota(project.clone(), volume.clone()),
+            Instruction::GetProjectQuotas(project.clone()),
+            Instruction::GetLocalProjectQuota(project_mapping.clone(), volume.clone()),
+            Instruction::SetLocalProjectQuota(project_mapping.clone(), volume.clone(), quota),
+            Instruction::ClearLocalProjectQuota(project_mapping.clone(), volume),
+            Instruction::GetLocalProjectQuotas(project_mapping.clone()),
+            Instruction::BlockProject(project.clone()),
+            Instruction::UnblockProject(project.clone()),
+            Instruction::IsBlockedProject(project.clone()),
+            Instruction::GetStorageReport(project.clone(), dates.clone()),
+            Instruction::GetLocalStorageReport(project_mapping, dates.clone()),
+            Instruction::GetProjects(portal.clone()),
+            Instruction::GetUsageReports(portal.clone(), dates.clone()),
+            Instruction::GetAwards(portal.clone()),
+            Instruction::GetStorageReports(portal.clone(), dates),
+        ];
+
+        for instruction in identifier_bearing {
+            assert_eq!(
+                owning_portal(&instruction),
+                Some(portal.clone()),
+                "owning_portal must resolve '{}' to its portal, or the \
+                 portal-ownership check silently does not apply to it",
+                instruction.command()
+            );
+        }
+
+        // The variants that genuinely carry no identifier must stay `None` -
+        // `Submit` wraps another instruction (checked on its own when parsed),
+        // and the offerings family is addressed by destination, not by portal.
+        for instruction in [
+            Instruction::GetOfferings(),
+            Instruction::AddOfferings(Destinations::default()),
+            Instruction::RemoveOfferings(Destinations::default()),
+            Instruction::SyncOfferings(Destinations::default()),
+        ] {
+            assert_eq!(
+                owning_portal(&instruction),
+                None,
+                "'{}' carries no identifier and should have no owning portal",
+                instruction.command()
+            );
+        }
     }
 
     #[test]
@@ -4921,8 +5232,8 @@ mod tests {
         }
 
         // Over-length components are rejected; exactly at the limit is fine.
-        let at_limit = "a".repeat(MAX_IDENTIFIER_COMPONENT_LEN);
-        let over_limit = "a".repeat(MAX_IDENTIFIER_COMPONENT_LEN + 1);
+        let at_limit = "a".repeat(templemeads::validate::MAX_IDENTIFIER_COMPONENT_LEN);
+        let over_limit = "a".repeat(templemeads::validate::MAX_IDENTIFIER_COMPONENT_LEN + 1);
         assert!(ProjectIdentifier::parse(&format!("{at_limit}.portal")).is_ok());
         assert!(ProjectIdentifier::parse(&format!("{over_limit}.portal")).is_err());
     }

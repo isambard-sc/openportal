@@ -3,6 +3,7 @@
 
 use crate::error::Error;
 use crate::named::NamedType;
+use crate::validate::validate_identifier_component;
 
 use serde::{Deserialize, Serialize};
 
@@ -31,19 +32,16 @@ impl PortalIdentifier {
     pub fn parse(identifier: &str) -> Result<Self, Error> {
         let portal = identifier.trim();
 
-        if portal.is_empty() {
-            return Err(Error::Parse(format!(
-                "Invalid PortalIdentifier - portal cannot be empty '{}'",
-                identifier
-            )));
-        };
-
-        if portal.contains(' ') || portal.contains('.') {
-            return Err(Error::Parse(format!(
-                "Invalid PortalIdentifier - portal cannot contain spaces or periods '{}'",
-                identifier
-            )));
-        };
+        // Validated against the same allow-list every other identifier
+        // component uses. This previously checked only for emptiness, spaces
+        // and periods, which made `PortalIdentifier` the one identifier type
+        // that F5's charset hardening never reached - despite being
+        // deserialised straight off the wire as the sole argument of
+        // `GetProjects`/`GetAwards`/`GetUsageReports`/`GetStorageReports`, and
+        // despite `from_validated` below documenting the invariant as already
+        // established. See
+        // `docs/specifications/security-review-2.md` (finding R18).
+        validate_identifier_component(portal, "portal", identifier)?;
 
         Ok(Self {
             portal: portal.to_string(),
@@ -88,5 +86,60 @@ impl<'de> Deserialize<'de> for PortalIdentifier {
     {
         let s = String::deserialize(deserializer)?;
         Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_portal_identifier_applies_the_identifier_allow_list() {
+        // Regression test for finding R18. This type was the one identifier
+        // that F5's charset hardening never reached: it checked only for
+        // emptiness, spaces and periods, while being deserialised straight off
+        // the wire as the sole argument of `GetProjects`/`GetAwards`/
+        // `GetUsageReports`/`GetStorageReports`.
+        assert!(PortalIdentifier::parse("brics").is_ok());
+        assert!(PortalIdentifier::parse("a-b_c1").is_ok());
+        assert!(PortalIdentifier::parse("  brics  ").is_ok());
+
+        for bad in [
+            "",
+            "  ",
+            "../../etc",
+            "-rf",
+            "a/b",
+            "a b",
+            "a.b",
+            "a,b",
+            "a;b",
+            "a$b",
+            "a\0b",
+            "café",
+        ] {
+            assert!(
+                PortalIdentifier::parse(bad).is_err(),
+                "{:?} must be rejected",
+                bad
+            );
+        }
+
+        // ...and the length cap applies, so a 1 MB portal name cannot be used
+        // as an amplification vector.
+        assert!(PortalIdentifier::parse(&"x".repeat(65)).is_err());
+        assert!(PortalIdentifier::parse(&"x".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn test_portal_identifier_deserialize_routes_through_parse() {
+        // The wire path must be validated, not just the CLI path.
+        let good: Result<PortalIdentifier, _> = serde_json::from_str(r#""brics""#);
+        assert!(good.is_ok());
+
+        for bad in [r#""../../etc""#, r#""-rf""#, r#""a b""#, r#""""#] {
+            let result: Result<PortalIdentifier, _> = serde_json::from_str(bad);
+            assert!(result.is_err(), "{} must be rejected on deserialize", bad);
+        }
     }
 }

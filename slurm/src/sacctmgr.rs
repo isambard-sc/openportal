@@ -1687,6 +1687,29 @@ pub async fn set_limit(
 
     match get_account(account.name(), expires).await? {
         Some(account) => {
+            // Refuse to modify an account this agent does not manage.
+            //
+            // `SlurmAccount::from_mapping` hard-wires `organization` to the
+            // managed org, so the create path's existing check can never fail -
+            // it validates a locally-constructed object, not the one that
+            // actually exists in Slurm. Nothing checked the *fetched* account,
+            // so a peer-chosen `local_group` naming any real account on the
+            // cluster had its `GrpTRESMins` rewritten. See
+            // `docs/specifications/security-review-2.md` (finding R5).
+            if !account.is_managed() {
+                tracing::warn!(
+                    "Refusing to set a limit on Slurm account '{}': it is in \
+                     organization '{}', not the OpenPortal-managed '{}'.",
+                    account.name(),
+                    account.organization(),
+                    get_managed_organization()
+                );
+                return Err(Error::UnmanagedGroup(format!(
+                    "Cannot set a limit on Slurm account '{}' - it is not managed by OpenPortal",
+                    account.name()
+                )));
+            }
+
             let mut account = account.clone();
 
             account.set_limit(limit);
@@ -1766,6 +1789,46 @@ pub async fn cancel_pending_user_jobs(
     assert_not_expired(expires)?;
 
     let user = clean_user_name(user)?;
+
+    // As for `cancel_pending_project_jobs`: resolve the user and refuse unless
+    // they are associated with at least one OpenPortal-managed account.
+    // `SlurmUser` carries no organization of its own, so "managed" is defined
+    // by association. See
+    // `docs/specifications/security-review-2.md` (finding R5).
+    match get_user(&user, expires).await? {
+        Some(existing) => {
+            let mut manages_any = false;
+
+            for association in existing.associations() {
+                if let Some(account) = get_account(association.account(), expires).await? {
+                    if account.is_managed() {
+                        manages_any = true;
+                        break;
+                    }
+                }
+            }
+
+            if !manages_any {
+                tracing::warn!(
+                    "Refusing to cancel jobs for Slurm user '{}': they are not \
+                     associated with any OpenPortal-managed account.",
+                    user
+                );
+                return Err(Error::UnmanagedGroup(format!(
+                    "Cannot cancel jobs for Slurm user '{}' - they are not managed by OpenPortal",
+                    user
+                )));
+            }
+        }
+        None => {
+            tracing::warn!(
+                "Not cancelling jobs for Slurm user '{}' - they do not exist",
+                user
+            );
+            return Ok(());
+        }
+    }
+
     let cluster = cache::get_cluster().await?;
 
     tracing::info!(
@@ -1810,6 +1873,38 @@ pub async fn cancel_pending_project_jobs(
     assert_not_expired(expires)?;
 
     let account = clean_account_name(account)?;
+
+    // Resolve the account and refuse unless OpenPortal manages it. This took a
+    // bare string and cancelled against it with no lookup at all, so a
+    // peer-chosen `local_group` could `scancel` every pending job of any
+    // account on the cluster. See
+    // `docs/specifications/security-review-2.md` (finding R5).
+    match get_account(&account, expires).await? {
+        Some(existing) if existing.is_managed() => {}
+        Some(existing) => {
+            tracing::warn!(
+                "Refusing to cancel jobs for Slurm account '{}': it is in \
+                 organization '{}', not the OpenPortal-managed '{}'.",
+                account,
+                existing.organization(),
+                get_managed_organization()
+            );
+            return Err(Error::UnmanagedGroup(format!(
+                "Cannot cancel jobs for Slurm account '{}' - it is not managed by OpenPortal",
+                account
+            )));
+        }
+        None => {
+            // Nothing to cancel for an account that does not exist - and, as
+            // for removal generally, this stays idempotent rather than erroring.
+            tracing::warn!(
+                "Not cancelling jobs for Slurm account '{}' - it does not exist",
+                account
+            );
+            return Ok(());
+        }
+    }
+
     let cluster = cache::get_cluster().await?;
 
     tracing::info!(

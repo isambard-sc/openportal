@@ -372,13 +372,29 @@ impl<L: Domain> Job<L> {
         }
     }
 
+    /// A copy of this Job with `version` set to `version`, and `changed`
+    /// stamped now - the bulk equivalent of calling `increment_version()`
+    /// repeatedly, without the intermediate clones. See
+    /// `docs/specifications/security-review-2.md` (finding R6).
+    pub fn with_version(&self, version: u64) -> Self {
+        Self {
+            version,
+            changed: Utc::now(),
+            ..self.clone()
+        }
+    }
+
     pub fn increment_version(&self) -> Self {
         Self {
             id: self.id,
             created: self.created,
             changed: Utc::now(),
             expires: self.expires,
-            version: self.version + 1,
+            // Saturating: `version` is a wire field, and the release profile
+            // sets no `overflow-checks`, so `self.version + 1` at `u64::MAX`
+            // wrapped silently to zero. See
+            // `docs/specifications/security-review-2.md` (finding R6).
+            version: self.version.saturating_add(1),
             command: self.command.clone(),
             state: self.state.clone(),
             result: self.result.clone(),
@@ -1506,6 +1522,84 @@ mod tests {
 
     type Command = super::Command<TestDomain>;
     type Job = super::Job<TestDomain>;
+
+    #[test]
+    fn test_board_add_rejects_an_implausible_version() {
+        // Regression test for finding R6, part 1. `version` is a wire field
+        // with no validation; a value anywhere near this is a bug or an
+        // attacker, not a real Job.
+        use crate::agent::Peer;
+        use crate::board::Board;
+
+        let peer = Peer::new("cluster", "default");
+        let mut board = Board::<TestDomain>::new(&peer);
+
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("job: {:?}", e));
+        job.board = Some(peer.clone());
+
+        // A normal version is accepted...
+        job.version = 3;
+        assert!(board.add(&job).is_ok());
+
+        // ...and an implausible one is refused rather than acted on.
+        job.version = (1u64 << 60) + 1;
+        assert!(board.add(&job).is_err());
+
+        job.version = u64::MAX;
+        assert!(board.add(&job).is_err());
+    }
+
+    #[test]
+    fn test_board_add_supersedes_a_version_without_looping() {
+        // Regression test for finding R6, part 2. This branch used to
+        // `increment_version()` in a loop until it passed the stored version -
+        // deep-cloning the Job each time, synchronously, while holding the
+        // board's write lock. A stored version of 2^40 therefore drove ~10^12
+        // clones; `u64::MAX` never terminated at all, because the increment
+        // wrapped in release builds. It must now jump straight past.
+        use crate::agent::Peer;
+        use crate::board::Board;
+
+        let peer = Peer::new("cluster", "default");
+        let mut board = Board::<TestDomain>::new(&peer);
+
+        let mut stored = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("job: {:?}", e));
+        stored.board = Some(peer.clone());
+        stored.version = 1 << 40;
+        stored.changed = Utc::now();
+
+        assert!(board.add(&stored).is_ok());
+
+        // Same id, *lower* version but a newer `changed` - the branch that
+        // previously looped. It must return promptly with a version above the
+        // one it superseded.
+        let mut newer = stored.clone();
+        newer.version = 0;
+        newer.changed = stored.changed + chrono::Duration::seconds(10);
+
+        let (result, _) = board
+            .add(&newer)
+            .unwrap_or_else(|e| unreachable!("add: {:?}", e));
+
+        assert_eq!(result.version(), (1u64 << 40) + 1);
+    }
+
+    #[test]
+    fn test_increment_version_saturates() {
+        // The release profile sets no `overflow-checks`, so `version + 1` at
+        // `u64::MAX` used to wrap silently to zero (finding R6).
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("job: {:?}", e));
+
+        job.version = u64::MAX;
+        assert_eq!(job.increment_version().version(), u64::MAX);
+
+        job.version = 7;
+        assert_eq!(job.increment_version().version(), 8);
+        assert_eq!(job.with_version(100).version(), 100);
+    }
 
     #[test]
     fn test_command_new() {

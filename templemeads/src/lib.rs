@@ -45,6 +45,7 @@ pub mod runnable;
 pub mod state;
 #[cfg(test)]
 mod test_domain;
+pub mod validate;
 
 pub mod server {
     pub use crate::bridge_server::sign_api_call;

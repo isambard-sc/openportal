@@ -112,8 +112,12 @@ async fn run_command(parts: &[String], args: &[&str]) -> Result<(i32, String, St
 
     tracing::debug!("Running command: {} {}", parts.join(" "), args.join(" "));
 
-    let mut cmd = Command::new(&parts[0]);
-    for part in &parts[1..] {
+    let Some((program, extra_args)) = parts.split_first() else {
+        return Err(Error::Call("Empty command template".to_owned()));
+    };
+
+    let mut cmd = Command::new(program);
+    for part in extra_args {
         cmd.arg(part);
     }
     for arg in args {
@@ -540,11 +544,12 @@ pub async fn get_groups(
             None => continue,
         };
 
-        if !group_name.starts_with(&prefix) {
+        // `strip_prefix` rather than slicing at `prefix.len()` - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let Some(project_name) = group_name.strip_prefix(&prefix) else {
             continue;
-        }
+        };
 
-        let project_name = &group_name[prefix.len()..];
         if project_name.is_empty() {
             continue;
         }
@@ -614,10 +619,7 @@ pub async fn get_users(
         }
 
         // Unix username format: "{username}.{project}" (neither part contains dots)
-        if let Some(dot_pos) = member.find('.') {
-            let username_part = &member[..dot_pos];
-            let project_part = &member[dot_pos + 1..];
-
+        if let Some((username_part, project_part)) = member.split_once('.') {
             if project_part != project.project() {
                 // Belongs to a different project — skip.
                 continue;

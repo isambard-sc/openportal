@@ -335,7 +335,24 @@ async fn login(
 
         tracing::info!("Ping response: {:?}", ping_response);
         working_version = Some(test_version);
-        version_numbers[2] += 1;
+
+        // The patch component is supplied by the Slurm server (it is parsed
+        // out of `openapi.json`'s `info.version`), so a two-component or
+        // otherwise unexpected version string must not be able to abort this
+        // process - see docs/specifications/security-review-2.md (findings
+        // R1/R27).
+        match version_numbers.get_mut(2) {
+            Some(patch) => *patch += 1,
+            None => {
+                tracing::warn!(
+                    "Slurm reported version '{}', which does not have the \
+                     expected major.minor.patch form - not probing for a \
+                     higher version.",
+                    version
+                );
+                break;
+            }
+        }
     }
 
     let version = match working_version {
@@ -422,11 +439,17 @@ async fn login(
             return Err(Error::Login("Requested cluster not found".to_string()));
         }
     } else {
+        let Some(default_cluster) = clusters.first() else {
+            return Err(Error::Login(
+                "Slurm reported no clusters at all - cannot pick a default".to_string(),
+            ));
+        };
+
         tracing::info!(
             "Using the first cluster available by default: {}",
-            clusters[0]
+            default_cluster
         );
-        cache::set_cluster(&clusters[0]).await?;
+        cache::set_cluster(default_cluster).await?;
     }
 
     Ok(SlurmSession {
@@ -1575,9 +1598,12 @@ pub async fn initialise_servers(
             continue;
         }
 
-        let user = users[i].trim();
-        let token_command = token_commands[i].trim();
-        let token_lifespan = token_lifespans[i].max(10);
+        // The lengths were checked equal above; read via `get` so that a
+        // future change to that check cannot turn into a panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let user = users.get(i).map(|u| u.trim()).unwrap_or_default();
+        let token_command = token_commands.get(i).map(|c| c.trim()).unwrap_or_default();
+        let token_lifespan = token_lifespans.get(i).copied().unwrap_or(10).max(10);
 
         slurm_servers.push(Arc::new(Mutex::new(SlurmServer::new(
             server,
@@ -2679,7 +2705,7 @@ impl SlurmJob {
                     None => match state.as_array() {
                         Some(state) => {
                             if !state.is_empty() {
-                                match state[0].as_str() {
+                                match state.first().and_then(|s| s.as_str()) {
                                     Some(state) => state.to_string(),
                                     None => {
                                         tracing::warn!(

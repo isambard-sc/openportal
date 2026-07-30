@@ -57,8 +57,12 @@ async fn run_remote(prefix: &[String], args: &[&str]) -> Result<(i32, String, St
 
     tracing::debug!("Remote: {} {}", prefix.join(" "), args.join(" "));
 
-    let mut cmd = tokio::process::Command::new(&prefix[0]);
-    for p in &prefix[1..] {
+    let Some((program, extra_args)) = prefix.split_first() else {
+        return Err(Error::State("Empty exec-prefix".to_owned()));
+    };
+
+    let mut cmd = tokio::process::Command::new(program);
+    for p in extra_args {
         cmd.arg(p);
     }
     for a in args {

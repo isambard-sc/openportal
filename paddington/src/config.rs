@@ -41,52 +41,81 @@ pub fn load<T: serde::de::DeserializeOwned + serde::Serialize>(
 
 pub fn save<T: serde::de::DeserializeOwned + serde::Serialize>(
     config: &T,
-    config_file: &path::PathBuf,
+    config_file: &path::Path,
 ) -> Result<(), Error> {
-    // write the config to a json file
     // write the config to a toml file
     let config_toml =
         toml::to_string(&config).with_context(|| "Could not serialise config to toml")?;
 
     let config_file_string = config_file.to_string_lossy();
 
-    let prefix = config_file.parent().with_context(|| {
-        format!(
-            "Could not get parent directory for config file: {:?}",
-            config_file_string
-        )
-    })?;
-
-    std::fs::create_dir_all(prefix).with_context(|| {
-        format!(
-            "Could not create parent directory for config file: {:?}",
-            config_file_string
-        )
-    })?;
-
+    // `write_secret_file` creates the parent directory itself (owner-only),
+    // so there is no separate `create_dir_all` here - doing it separately
+    // created the directory at the process umask instead.
     write_secret_file(config_file, &config_toml)
         .with_context(|| format!("Could not write config file: {:?}", config_file_string))?;
 
     Ok(())
 }
 
-/// Write `contents` to `path`, then (on Unix) restrict the file to owner-only
-/// read/write (mode 0600).
+/// Write `contents` to `path` as an owner-only (mode 0600) file, creating the
+/// parent directory owner-only (mode 0700) if it does not exist.
 ///
-/// The service config and invite files both contain plaintext pre-shared key
-/// material. Written with a plain `std::fs::write` they land at the process
-/// umask, which is commonly group/world-readable (0644) - leaving long-term
-/// keys readable by any local user. This keeps them owner-only. See
-/// docs/specifications/security-review.md (finding F9).
-pub(crate) fn write_secret_file(path: &path::Path, contents: &str) -> Result<(), Error> {
-    std::fs::write(path, contents).with_context(|| format!("Could not write file: {:?}", path))?;
+/// **This is the only function that should ever write a file containing key
+/// material.** The service config, the paddington invite files, and the bridge
+/// invite all contain plaintext keys; written with a plain `std::fs::write`
+/// they land at the process umask, which is commonly group/world-readable
+/// (0644), leaving long-term keys readable by any local user. See
+/// docs/specifications/security-review.md (finding F9) and
+/// docs/specifications/security-review-2.md (finding R9 - the bridge invite,
+/// which is in `templemeads` and so could not previously call this).
+///
+/// The mode is set **at creation** rather than with a `set_permissions` call
+/// afterwards: the latter leaves a window in which the secret is already on
+/// disk at the umask, and does not lower the mode of a pre-existing file at
+/// all (`std::fs::write` preserves it).
+pub fn write_secret_file(path: &path::Path, contents: &str) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Could not create parent directory for file: {:?}", path)
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| {
+                        format!("Could not restrict permissions on directory: {:?}", parent)
+                    })?;
+            }
+        }
+    }
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Could not open file for writing: {:?}", path))?;
+
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("Could not write file: {:?}", path))?;
+
+        // A pre-existing file keeps its own mode when reopened, so lower it
+        // explicitly too - this is the case `mode()` above does not cover.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("Could not restrict permissions on file: {:?}", path))?;
     }
+
+    #[cfg(not(unix))]
+    std::fs::write(path, contents).with_context(|| format!("Could not write file: {:?}", path))?;
 
     Ok(())
 }
@@ -383,6 +412,15 @@ fn is_full_ipv6_range(range: &str) -> bool {
     }
 }
 
+/// Whether `range` is IPv6 CIDR notation rather than IPv4. A colon appears in
+/// every IPv6 form (including the IPv4-mapped `::ffff:a.b.c.d/96`) and in no
+/// IPv4 form, so this is an exact discriminator. Used by `IpOrRange::matches`
+/// to refuse to compare a range against an address of the other family - see
+/// `docs/specifications/security-review-2.md` (finding R8).
+fn range_is_ipv6(range: &str) -> bool {
+    range.contains(':')
+}
+
 /// Validates `range` as CIDR notation for either address family, trying
 /// IPv4 first so behaviour and error messages are unchanged for anything
 /// that already parses as an IPv4 range - see
@@ -418,7 +456,20 @@ impl<'de> Deserialize<'de> for IpOrRange {
         D: serde::de::Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(untagged)]
         enum Raw {
+            // A plain string - a single IP, a CIDR range, or a
+            // comma-separated list of either (e.g. "127.0.0.1" or
+            // "127.0.0.1,10.0.0.0/24") - parsed via `IpOrRange::new`, the
+            // same convenience parser used by the `--ip`/`set_trusted_proxy`
+            // CLI/API path, so config files and code accept identical
+            // syntax.
+            String(String),
+            Tagged(Tagged),
+        }
+
+        #[derive(Deserialize)]
+        enum Tagged {
             IP(IpAddr),
             Range(String),
             // Each element is deserialised (and so validated) via this
@@ -428,8 +479,9 @@ impl<'de> Deserialize<'de> for IpOrRange {
         }
 
         match Raw::deserialize(deserializer)? {
-            Raw::IP(ip) => Ok(IpOrRange::IP(ip)),
-            Raw::Range(range) => {
+            Raw::String(s) => IpOrRange::new(&s).map_err(serde::de::Error::custom),
+            Raw::Tagged(Tagged::IP(ip)) => Ok(IpOrRange::IP(ip)),
+            Raw::Tagged(Tagged::Range(range)) => {
                 validate_ip_range(&range).map_err(|err| {
                     serde::de::Error::custom(format!(
                         "Could not parse IP range: {}, error {}",
@@ -438,7 +490,7 @@ impl<'de> Deserialize<'de> for IpOrRange {
                 })?;
                 Ok(IpOrRange::Range(range))
             }
-            Raw::List(list) => Ok(IpOrRange::List(list)),
+            Raw::Tagged(Tagged::List(list)) => Ok(IpOrRange::List(list)),
         }
     }
 }
@@ -471,8 +523,8 @@ impl IpOrRange {
     pub fn new(ip: &str) -> Result<Self, Error> {
         let entries = ip.split(',').collect::<Vec<_>>();
 
-        if entries.len() == 1 {
-            return Self::new_single(entries[0].trim());
+        if let [single] = entries.as_slice() {
+            return Self::new_single(single.trim());
         }
 
         Ok(IpOrRange::List(
@@ -496,21 +548,46 @@ impl IpOrRange {
         }
     }
 
+    /// Whether `addr` is matched by this address, range, or list.
+    ///
+    /// An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is canonicalised to its
+    /// plain IPv4 form first: on a dual-stack listener an IPv4 peer arrives in
+    /// the mapped form, and an IPv4 allow-list entry should still match it.
+    ///
+    /// A range is then only ever matched against an address of its *own*
+    /// family. That check is load-bearing, not cosmetic: `iptools`'s IPv4
+    /// `IpRange::contains` parses an IPv6 argument into a `u128` and then
+    /// compares it as `addr as u32`, i.e. it silently truncates to the low 32
+    /// bits. Without the family check, any IPv6 address whose last 32 bits
+    /// happen to fall inside an IPv4 CIDR matched that CIDR - so a peer at
+    /// `2001:db8::7f00:1` satisfied a `127.0.0.0/8` rule, defeating both the
+    /// client IP allow-list and `trusted_proxy`. See
+    /// `docs/specifications/security-review-2.md` (finding R8).
     pub fn matches(&self, addr: &IpAddr) -> bool {
+        let addr = addr.to_canonical();
+
         match self {
-            IpOrRange::IP(ip) => ip == addr,
-            IpOrRange::List(entries) => entries.iter().any(|entry| entry.matches(addr)),
+            IpOrRange::IP(ip) => ip.to_canonical() == addr,
+            IpOrRange::List(entries) => entries.iter().any(|entry| entry.matches(&addr)),
             IpOrRange::Range(range) if is_full_ipv4_range(range) => addr.is_ipv4(),
             IpOrRange::Range(range) if is_full_ipv6_range(range) => addr.is_ipv6(),
-            IpOrRange::Range(range) => match IpRange::<iptools::iprange::IPv4>::new(range, "") {
-                Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
-                Err(_) => match IpRange::<iptools::iprange::IPv6>::new(range, "") {
-                    Ok(range) => range.contains(&addr.to_string()).unwrap_or(false),
+            IpOrRange::Range(range) => match (range_is_ipv6(range), addr) {
+                (false, IpAddr::V4(_)) => match IpRange::<iptools::iprange::IPv4>::new(range, "") {
+                    Ok(parsed) => parsed.contains(&addr.to_string()).unwrap_or(false),
                     Err(_) => {
-                        tracing::warn!("Could not parse IP range: {}", range);
+                        tracing::warn!("Could not parse IPv4 range: {}", range);
                         false
                     }
                 },
+                (true, IpAddr::V6(_)) => match IpRange::<iptools::iprange::IPv6>::new(range, "") {
+                    Ok(parsed) => parsed.contains(&addr.to_string()).unwrap_or(false),
+                    Err(_) => {
+                        tracing::warn!("Could not parse IPv6 range: {}", range);
+                        false
+                    }
+                },
+                // Range and address are of different families - never a match.
+                _ => false,
             },
         }
     }
@@ -1480,6 +1557,118 @@ mod tests {
         let good_toml = r#"Range = "10.0.0.0/24""#;
         let result: Result<IpOrRange, _> = toml::from_str(good_toml);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ip_or_range_accepts_plain_string_on_deserialize() {
+        // A hand-edited config may use the same plain, comma-separated
+        // syntax accepted by `IpOrRange::new`/`set_trusted_proxy`, not just
+        // the tagged `{ IP = ... }` / `{ Range = ... }` / `{ List = [...] }`
+        // form - so `trusted_proxy = "127.0.0.0/24"` works directly.
+        #[derive(Deserialize)]
+        struct Holder {
+            value: IpOrRange,
+        }
+
+        let holder: Holder = toml::from_str(r#"value = "127.0.0.0/24""#)
+            .unwrap_or_else(|e| unreachable!("Could not deserialise plain range string: {}", e));
+        assert_eq!(holder.value, IpOrRange::Range("127.0.0.0/24".to_string()));
+        assert!(holder.value.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(!holder.value.matches(&IpAddr::from([128, 0, 0, 1])));
+
+        let holder: Holder = toml::from_str(r#"value = "127.0.0.1""#)
+            .unwrap_or_else(|e| unreachable!("Could not deserialise plain IP string: {}", e));
+        assert_eq!(holder.value, IpOrRange::IP(IpAddr::from([127, 0, 0, 1])));
+
+        let holder: Holder = toml::from_str(r#"value = "127.0.0.1,10.0.0.0/24""#)
+            .unwrap_or_else(|e| unreachable!("Could not deserialise plain list string: {}", e));
+        assert!(holder.value.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(holder.value.matches(&IpAddr::from([10, 0, 0, 1])));
+        assert!(!holder.value.matches(&IpAddr::from([11, 0, 0, 1])));
+
+        // still rejected at load time, not just when first typed on the CLI
+        let result: Result<Holder, _> = toml::from_str(r#"value = "not-an-ip""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ip_range_never_matches_across_address_families() {
+        // Regression test for finding R8. `iptools`'s IPv4 `IpRange::contains`
+        // truncates an IPv6 argument to its low 32 bits, so before the
+        // address-family check in `matches` every one of these returned
+        // `true` - letting any IPv6 peer whose last 32 bits fell inside an
+        // IPv4 CIDR satisfy a client `ip` allow-list or `trusted_proxy` rule.
+        let v4_cases = [
+            ("127.0.0.0/8", "2001:db8::7f00:1"),
+            ("10.0.0.0/24", "2001:db8::a00:5"),
+            ("10.0.0.0/24", "::a00:5"),
+            ("192.168.0.0/16", "fe80::c0a8:1"),
+        ];
+
+        for (range, addr) in v4_cases {
+            let range_parsed = IpOrRange::new(range)
+                .unwrap_or_else(|e| unreachable!("Could not parse range {}: {}", range, e));
+            let addr_parsed: IpAddr = addr
+                .parse()
+                .unwrap_or_else(|e| unreachable!("Could not parse address {}: {}", addr, e));
+
+            assert!(
+                !range_parsed.matches(&addr_parsed),
+                "IPv4 range {} must not match IPv6 address {}",
+                range,
+                addr
+            );
+        }
+
+        // ...and the mirror image: an IPv6 range must not match an IPv4 peer.
+        let v6_range = IpOrRange::new("2001:db8::/32")
+            .unwrap_or_else(|e| unreachable!("Could not parse IPv6 range: {}", e));
+        assert!(!v6_range.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(!v6_range.matches(&IpAddr::from([10, 0, 0, 5])));
+
+        // A list is only as strict as its entries, so check it too.
+        let list = IpOrRange::new("127.0.0.0/8,10.0.0.0/24")
+            .unwrap_or_else(|e| unreachable!("Could not parse list: {}", e));
+        let v6: IpAddr = "2001:db8::7f00:1"
+            .parse()
+            .unwrap_or_else(|e| unreachable!("Could not parse address: {}", e));
+        assert!(!list.matches(&v6));
+
+        // Same-family matching must still work exactly as before.
+        let v4_range = IpOrRange::new("127.0.0.0/8")
+            .unwrap_or_else(|e| unreachable!("Could not parse range: {}", e));
+        assert!(v4_range.matches(&IpAddr::from([127, 0, 0, 1])));
+        assert!(!v4_range.matches(&IpAddr::from([128, 0, 0, 1])));
+        assert!(v6_range.matches(
+            &"2001:db8::1"
+                .parse::<IpAddr>()
+                .unwrap_or_else(|e| unreachable!("Could not parse address: {}", e))
+        ));
+    }
+
+    #[test]
+    fn test_ipv4_mapped_ipv6_address_matches_ipv4_rules() {
+        // On a dual-stack listener an IPv4 peer arrives as ::ffff:a.b.c.d, so
+        // canonicalising before matching is what keeps IPv4 allow-lists
+        // working there. This is the one cross-notation match that *should*
+        // succeed - it is the same host, written differently (finding R8).
+        let mapped: IpAddr = "::ffff:127.0.0.1"
+            .parse()
+            .unwrap_or_else(|e| unreachable!("Could not parse mapped address: {}", e));
+
+        let range = IpOrRange::new("127.0.0.0/8")
+            .unwrap_or_else(|e| unreachable!("Could not parse range: {}", e));
+        assert!(range.matches(&mapped));
+
+        let single = IpOrRange::new("127.0.0.1")
+            .unwrap_or_else(|e| unreachable!("Could not parse address: {}", e));
+        assert!(single.matches(&mapped));
+
+        // But a mapped address outside the range still must not match.
+        let elsewhere: IpAddr = "::ffff:203.0.113.9"
+            .parse()
+            .unwrap_or_else(|e| unreachable!("Could not parse mapped address: {}", e));
+        assert!(!range.matches(&elsewhere));
     }
 
     #[test]

@@ -524,6 +524,24 @@ relayed bootstrap, no backward compatibility was needed at all (`op-proxy`
 isn't deployed yet), so `nonce: u64` there is a plain, required field. See
 the design doc §10 for the full mechanism and its threat-model reasoning.
 
+**Per-incarnation windows.** Because the nonce *counter* is also only held in
+memory, a restarted process starts counting from zero again while its peer's
+window still remembers where the old incarnation had got to - which made every
+reconnect after a restart look exactly like a replay, and locked the link out
+for as long as it took the counter to climb back. Each message therefore also
+carries an `epoch`: a random 64-bit value identifying the sending *process
+incarnation*, inside the AEAD like the nonce. The receiver keeps **one window
+per epoch** (bounded, least-recently-used evicted), so a new incarnation is
+accepted at once while the superseded one's window is retained and its replays
+still fail. Retaining rather than discarding the old window is what keeps this
+no weaker than a single window, and per-epoch separation is also what allows
+client HA, where several processes deliberately share one peer identity
+([highavailability.md](highavailability.md) §2) and each contributes an epoch -
+which is why the epoch is random and unordered rather than clock-derived. Also
+`#[serde(default)] Option<u64>`, so a peer without the field keeps the previous
+behaviour. See the design doc §11 and
+[security-review-2.md](security-review-2.md) (finding R10).
+
 ---
 
 ## 10. Source File Reference

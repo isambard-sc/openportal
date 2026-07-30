@@ -797,7 +797,7 @@ pub async fn collect_diagnostics<L: Domain>(
         true
     } else if destination_parts.len() == 1 {
         // Extract just the name part (before any @zone) and check if it matches
-        let target_spec = destination_parts[0];
+        let target_spec = destination_parts.first().copied().unwrap_or_default();
         let target_name = if target_spec.contains('@') {
             target_spec.split('@').next().unwrap_or(target_spec)
         } else {
@@ -828,11 +828,17 @@ pub async fn collect_diagnostics<L: Domain>(
 
         // We need to forward the diagnostics request to the next peer in the path
         // Parse the next hop, which may include a zone specifier (name@zone)
-        let next_hop = destination_parts[0];
+        // `first()`/`get(1..)` rather than `[0]`/`[1..]`, so a malformed
+        // path is handled rather than aborting the process - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let next_hop = destination_parts.first().copied().unwrap_or_default();
         let (next_peer_name, zone_filter) = if next_hop.contains('@') {
             let parts: Vec<&str> = next_hop.split('@').collect();
             if parts.len() == 2 {
-                (parts[0], Some(parts[1]))
+                (
+                    parts.first().copied().unwrap_or_default(),
+                    parts.get(1).copied(),
+                )
             } else {
                 tracing::error!("Invalid format for agent specification: {}", next_hop);
                 return Err(anyhow::anyhow!(
@@ -844,7 +850,7 @@ pub async fn collect_diagnostics<L: Domain>(
             (next_hop, None)
         };
 
-        let remaining_path = destination_parts[1..].join(".");
+        let remaining_path = destination_parts.get(1..).unwrap_or_default().join(".");
 
         tracing::debug!(
             "Forwarding diagnostics request to {} (remaining path: {})",

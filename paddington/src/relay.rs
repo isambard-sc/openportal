@@ -78,6 +78,23 @@ struct StartRelayedConnection {
     /// compatibility needed here (unlike `supports_nonce` above): `op-proxy`
     /// isn't deployed yet, so this is a plain required field, not negotiated.
     nonce: u64,
+    /// Identifies the *sending process incarnation*, so the receiver can tell
+    /// a restart (whose in-memory nonce counter legitimately restarted at
+    /// zero) from a replay of an old bootstrap message. The receiver keeps one
+    /// replay window per epoch - see `anti_replay::HandshakeNonceState` and
+    /// `docs/specifications/security-review-2.md` (finding R10).
+    ///
+    /// This matters most here: §10.1 of the replay-protection design notes
+    /// that `Start` and `SessionUnknown` are the two bootstrap messages a
+    /// replay can actually disrupt (a replayed `Start` resets the receiver's
+    /// live session for that peer; a replayed `SessionUnknown` forces
+    /// re-bootstrap churn), so this is where losing replay protection to a
+    /// restart - or to a naive "reset the window when the epoch changes" -
+    /// would cost the most. `#[serde(default)]` so a peer built before this
+    /// field deserialises as `None`, which gets its own window and so behaves
+    /// exactly as it did before.
+    #[serde(default)]
+    epoch: Option<u64>,
 }
 
 /// airr → brics, via proxy. Same permanent pre-shared keys - the last
@@ -97,6 +114,9 @@ struct RelayedConnectionAccepted {
     /// (§10.1) but kept for uniformity across all three bootstrap message
     /// types.
     nonce: u64,
+    /// See `StartRelayedConnection::epoch` - same mechanism, other direction.
+    #[serde(default)]
+    epoch: Option<u64>,
 }
 
 /// Internally tagged so a successful permanent-key decryption can be
@@ -120,6 +140,9 @@ enum BootstrapMessage {
     /// `docs/plans/replay-protection-design.md` §10.1).
     SessionUnknown {
         nonce: u64,
+        /// See `StartRelayedConnection::epoch`.
+        #[serde(default)]
+        epoch: Option<u64>,
     },
 }
 
@@ -224,13 +247,13 @@ async fn take_bootstrap_nonce(peer_name: &str) -> u64 {
         .take_next_nonce()
 }
 
-async fn check_bootstrap_replay(peer_name: &str, nonce: u64) -> bool {
+async fn check_bootstrap_replay(peer_name: &str, epoch: Option<u64>, nonce: u64) -> bool {
     BOOTSTRAP_NONCE_STATE
         .write()
         .await
         .entry(peer_name.to_string())
         .or_default()
-        .check_replay(Some(nonce))
+        .check_replay(epoch, Some(nonce))
 }
 
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -241,9 +264,9 @@ const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 const RELAY_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long to wait before retrying a whole bootstrap attempt that failed
-/// or timed out (e.g. the relayed peer hadn't connected to the proxy yet)
-/// - matches `client::run`'s own reconnect cadence for direct connections,
-/// so a relayed peer is exactly as persistent as a direct one.
+/// or timed out (e.g. the relayed peer hadn't connected to the proxy yet) -
+/// matches `client::run`'s own reconnect cadence for direct connections, so
+/// a relayed peer is exactly as persistent as a direct one.
 const BOOTSTRAP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How often to check whether the real connection to the relay is still
@@ -492,6 +515,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         supports_nonce: true,
         nonce,
+        epoch: Some(crate::anti_replay::process_epoch()),
     };
 
     let bootstrap_salt = bootstrap_salt()?;
@@ -710,7 +734,10 @@ async fn notify_session_unknown(peer_name: &str, peer: &RelayedPeer) -> Result<(
     let nonce = take_bootstrap_nonce(peer_name).await;
     let bootstrap_salt = bootstrap_salt()?;
     let ciphertext = encrypt_with_keys(
-        &BootstrapMessage::SessionUnknown { nonce },
+        &BootstrapMessage::SessionUnknown {
+            nonce,
+            epoch: Some(crate::anti_replay::process_epoch()),
+        },
         &peer.inner_key,
         &peer.outer_key,
         &bootstrap_salt,
@@ -749,7 +776,7 @@ async fn handle_start(
     // docs/plans/replay-protection-design.md §10.1): this message alone
     // is sufficient to reset our live session for `from`, so a replayed
     // `Start` must never get this far.
-    if !check_bootstrap_replay(from, start.nonce).await {
+    if !check_bootstrap_replay(from, start.epoch, start.nonce).await {
         return Err(Error::InvalidPeer(format!(
             "Rejected replayed (or too-old) StartRelayedConnection from '{}' (nonce {})",
             from, start.nonce
@@ -766,6 +793,7 @@ async fn handle_start(
         version: env!("CARGO_PKG_VERSION").to_string(),
         supports_nonce: true,
         nonce,
+        epoch: Some(crate::anti_replay::process_epoch()),
     };
 
     let bootstrap_salt = bootstrap_salt()?;
@@ -862,7 +890,8 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
                     // protection (see docs/plans/replay-protection-design.md
                     // §10.1) - kept for uniformity across all three
                     // bootstrap message types.
-                    if check_bootstrap_replay(&envelope.from, accepted.nonce).await {
+                    if check_bootstrap_replay(&envelope.from, accepted.epoch, accepted.nonce).await
+                    {
                         let _ = tx.send(accepted);
                     } else {
                         tracing::warn!(
@@ -877,8 +906,8 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
                     );
                 }
             }
-            BootstrapMessage::SessionUnknown { nonce } => {
-                if !check_bootstrap_replay(&envelope.from, nonce).await {
+            BootstrapMessage::SessionUnknown { nonce, epoch } => {
+                if !check_bootstrap_replay(&envelope.from, epoch, nonce).await {
                     tracing::warn!(
                         "Rejected replayed (or too-old) SessionUnknown from '{}' (nonce {})",
                         envelope.from,
@@ -1248,15 +1277,32 @@ mod tests {
         let second = take_bootstrap_nonce(peer_name).await;
         assert_eq!(second, first + 1);
 
-        assert!(check_bootstrap_replay(peer_name, first).await);
-        assert!(check_bootstrap_replay(peer_name, second).await);
+        // Same epoch throughout - the same process incarnation
+        // re-bootstrapping, which must not reset the window.
+        let epoch = Some(crate::anti_replay::process_epoch());
+
+        assert!(check_bootstrap_replay(peer_name, epoch, first).await);
+        assert!(check_bootstrap_replay(peer_name, epoch, second).await);
 
         // simulates a captured Start/Accepted/SessionUnknown replayed
         // against a *later* bootstrap attempt for the same peer - must
         // still be rejected, proving the window survived rather than
         // resetting the way RelayedSession's does.
-        assert!(!check_bootstrap_replay(peer_name, first).await);
-        assert!(!check_bootstrap_replay(peer_name, second).await);
+        assert!(!check_bootstrap_replay(peer_name, epoch, first).await);
+        assert!(!check_bootstrap_replay(peer_name, epoch, second).await);
+
+        // A restarted relayed peer sends the same low nonces under a new
+        // epoch, and must be accepted - otherwise a restart deadlocks the
+        // bootstrap, and `SessionUnknown` (the message that exists to recover
+        // from exactly that restart) is itself rejected. See
+        // docs/specifications/security-review-2.md (finding R10).
+        let after_restart = Some(crate::anti_replay::process_epoch() ^ 0xFFFF);
+        assert!(check_bootstrap_replay(peer_name, after_restart, first).await);
+        assert!(check_bootstrap_replay(peer_name, after_restart, second).await);
+
+        // The superseded epoch's window is retained, so the old replay still
+        // fails.
+        assert!(!check_bootstrap_replay(peer_name, epoch, first).await);
     }
 
     #[test]
@@ -1275,6 +1321,7 @@ mod tests {
             version: "0.0.0".to_string(),
             supports_nonce: true,
             nonce: 0,
+            epoch: Some(1),
         };
 
         let ciphertext = encrypt_with_keys(
@@ -1298,6 +1345,80 @@ mod tests {
     }
 
     #[test]
+    fn test_bootstrap_messages_without_epoch_field_default_to_none() {
+        // A relayed peer built before the `epoch` field (finding R10) sends
+        // bootstrap messages without it. All three must deserialise with
+        // `epoch: None`, which gets its own replay window and so behaves
+        // exactly as before. This matters most for `Start` and
+        // `SessionUnknown`, the two the design doc (§10.1) identifies as
+        // actually disruptable by a replay.
+        let start = StartRelayedConnection {
+            session_outer_key: Key::generate(),
+            inner_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            outer_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 5,
+            epoch: Some(1),
+        };
+
+        let mut value =
+            serde_json::to_value(&start).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+        let start: StartRelayedConnection =
+            serde_json::from_value(value).unwrap_or_else(|e| unreachable!("deserialise: {:?}", e));
+        assert_eq!(start.epoch, None);
+        assert_eq!(start.nonce, 5);
+
+        let accepted = RelayedConnectionAccepted {
+            session_inner_key: Key::generate(),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 6,
+            epoch: Some(1),
+        };
+
+        let mut value =
+            serde_json::to_value(&accepted).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+        let accepted: RelayedConnectionAccepted =
+            serde_json::from_value(value).unwrap_or_else(|e| unreachable!("deserialise: {:?}", e));
+        assert_eq!(accepted.epoch, None);
+        assert_eq!(accepted.nonce, 6);
+
+        let unknown = BootstrapMessage::SessionUnknown {
+            nonce: 7,
+            epoch: Some(1),
+        };
+
+        let mut value =
+            serde_json::to_value(&unknown).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+        let unknown: BootstrapMessage =
+            serde_json::from_value(value).unwrap_or_else(|e| unreachable!("deserialise: {:?}", e));
+        match unknown {
+            BootstrapMessage::SessionUnknown { nonce, epoch } => {
+                assert_eq!(epoch, None);
+                assert_eq!(nonce, 7);
+            }
+            other => unreachable!("expected SessionUnknown, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_start_relayed_connection_without_supports_nonce_field_defaults_to_false() {
         // what a not-yet-upgraded peer's `StartRelayedConnection` looks
         // like on the wire - serialised before this field existed, so it's
@@ -1314,6 +1435,7 @@ mod tests {
             version: "0.0.0".to_string(),
             supports_nonce: true,
             nonce: 0,
+            epoch: Some(1),
         };
         let mut value = serde_json::to_value(&start).unwrap_or_else(|e| {
             unreachable!("serialise: {:?}", e);
@@ -1338,6 +1460,7 @@ mod tests {
             version: "0.0.0".to_string(),
             supports_nonce: true,
             nonce: 0,
+            epoch: Some(1),
         };
         let mut value = serde_json::to_value(&accepted).unwrap_or_else(|e| {
             unreachable!("serialise: {:?}", e);
@@ -1369,7 +1492,10 @@ mod tests {
         let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("bootstrap_salt: {:?}", e));
 
         let ciphertext = encrypt_with_keys(
-            &BootstrapMessage::SessionUnknown { nonce: 0 },
+            &BootstrapMessage::SessionUnknown {
+                nonce: 0,
+                epoch: Some(1),
+            },
             &peer.inner_key,
             &peer.outer_key,
             &salt,
@@ -1404,6 +1530,7 @@ mod tests {
             version: "0.0.0".to_string(),
             supports_nonce: true,
             nonce: 0,
+            epoch: Some(1),
         };
 
         let ciphertext = encrypt_with_keys(
@@ -1623,6 +1750,7 @@ mod tests {
             version: "0.0.0".to_string(),
             supports_nonce: true,
             nonce: 0,
+            epoch: Some(1),
         };
 
         let bootstrap_salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
@@ -1661,6 +1789,7 @@ mod tests {
             version: "0.0.0".to_string(),
             supports_nonce: true,
             nonce: 0,
+            epoch: Some(1),
         };
 
         let accepted_ciphertext = encrypt_with_keys(
@@ -1784,6 +1913,7 @@ mod tests {
                 version: "0.0.0".to_string(),
                 supports_nonce: true,
                 nonce: 0,
+                epoch: Some(1),
             };
 
             let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));

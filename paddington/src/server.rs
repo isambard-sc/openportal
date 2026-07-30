@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::ServiceConfig;
-use crate::connection::Connection;
+use crate::connection::{Connection, HANDSHAKE_TIMEOUT_SECS};
 use crate::error::Error;
 use crate::exchange;
 use crate::healthcheck;
@@ -41,10 +41,14 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     config: ServiceConfig,
     permit: OwnedSemaphorePermit,
+    authenticated: tokio::sync::oneshot::Sender<()>,
 ) -> Result<(), Error> {
     let mut connection = Connection::new(config);
 
-    match connection.handle_connection(stream, permit).await {
+    match connection
+        .handle_connection(stream, permit, authenticated)
+        .await
+    {
         Ok(_) => {
             tracing::debug!("Connection closed after successful handling");
         }
@@ -128,7 +132,38 @@ pub async fn run_once(config: ServiceConfig) -> Result<(), Error> {
                 // spawn a new task to handle the connection, and don't
                 // wait for it to finish - the function will handle all
                 // the processing and errors itself
-                tokio::spawn(handle_connection(stream, config.clone(), permit));
+                // Handshake watchdog (finding R21). The pre-authentication
+                // phase has no deadline of its own, so a peer that completes
+                // the TCP handshake and then sends nothing would hold its
+                // slot in the `MAX_UNAUTHENTICATED_CONNECTIONS` pool forever -
+                // 2048 idle sockets were enough to stop the listener accepting
+                // any new connection at all. `handle_connection` signals
+                // `authenticated` at the moment it releases the permit, so the
+                // deadline applies to the pre-authentication phase only and
+                // never to an established connection.
+                let (auth_tx, auth_rx) = tokio::sync::oneshot::channel::<()>();
+
+                let handle =
+                    tokio::spawn(handle_connection(stream, config.clone(), permit, auth_tx));
+
+                tokio::spawn(async move {
+                    tokio::select! {
+                        // Authenticated (or failed and dropped the sender)
+                        // before the deadline - nothing to do either way.
+                        _ = auth_rx => {}
+                        _ = tokio::time::sleep(
+                            std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+                        ) => {
+                            tracing::warn!(
+                                "Dropping connection from {}: handshake did not complete \
+                                 within {} seconds",
+                                addr,
+                                HANDSHAKE_TIMEOUT_SECS
+                            );
+                            handle.abort();
+                        }
+                    }
+                });
             }
             Err(e) => {
                 tracing::error!("Error accepting connection: {:?}", e);

@@ -6,6 +6,111 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **A second security review** ([docs/specifications/security-review-2.md](docs/specifications/security-review-2.md)),
+  auditing the whole workspace as seven independent areas. It re-tested and
+  confirmed the first review's cryptographic conclusions (including a
+  differential test of the anti-replay window against a reference model), and
+  found 33 further issues concentrated in the agent framework's authorization
+  logic - an area the first review had not substantially examined. The fixes
+  below are the subset reachable without holding a peer key; the remainder are
+  recorded in the document.
+
+### Fixed
+
+- **Remote process abort from any authenticated peer** (finding R1). Three arms
+  of `Instruction::parse` indexed their argument list without a length check,
+  and that parser runs inside `Command`'s `Deserialize` - so a `Job` whose
+  command was, for example, `"a.b submit"` aborted the receiving agent, and the
+  same payload was reachable through `POST /run` on the bridge. Every
+  panicking index and slice operation in the workspace's own code has been
+  replaced with a checked (`get`/`first`/`split_first`/`split_once`/slice
+  pattern) form, so no code we write can panic on malformed input from the
+  wire, from a spawned tool's output, from an external service's response, or
+  from a config file. Two latent panics of the same class were fixed on the
+  way: a char index used as a byte offset when splitting a Lustre quota
+  expression, and `permissions`/`links` in a volume config being indexed with
+  a `roots` index when those lists may be shorter.
+- **A routine restart locked an agent out of every long-running peer**
+  (finding R10). The handshake/bootstrap anti-replay state kept the outgoing
+  nonce counter and the incoming replay window in the same in-memory structure,
+  so a restart reset the counter while the peer's window remembered where it had
+  got to - and every reconnect was then rejected as a replay until the counter
+  climbed back past the old high-water mark, at 5 s per attempt (roughly ten
+  seconds of outage per prior reconnect, so hours for a long-lived link, and
+  worse on the relay path at 35 s per attempt). No attacker was needed; an
+  on-path attacker who could reset TCP connections could inflate the eventual
+  outage substantially, and it persisted after they stopped. Every handshake and
+  bootstrap message now carries a random per-process `epoch` alongside its
+  nonce, and the receiver keeps one replay window **per sender incarnation**
+  (bounded at 8, least-recently-used evicted) rather than one per peer. A
+  restart is therefore accepted immediately, while the superseded incarnation's
+  window is *retained* so replays still fail - and concurrent client-HA
+  replicas, which legitimately share one peer identity, no longer reset each
+  other's window. The field is `#[serde(default)]` on all five message types, so
+  a peer built without it keeps exactly the previous behaviour; nothing is
+  written to disk.
+- **IPv4/IPv6 truncation defeated every IP allow-list** (finding R8).
+  `IpOrRange::matches` delegated to `iptools`, whose IPv4 range check
+  truncates an IPv6 address to its low 32 bits, so a peer at
+  `2001:db8::7f00:1` satisfied a `127.0.0.0/8` rule - bypassing both the
+  client `ip` allow-list and `trusted_proxy`. A range is now only ever matched
+  against an address of its own family, and an IPv4-mapped IPv6 address
+  (`::ffff:a.b.c.d`, how an IPv4 peer arrives on a dual-stack listener) is
+  canonicalised first so IPv4 rules still match it.
+- **The bridge invite - which holds the HMAC API key - was written
+  world-readable** (finding R9). It used a plain `std::fs::write`, landing at
+  the process umask, so any local user could read the key and sign arbitrary
+  bridge requests. It now goes through `paddington::config::write_secret_file`,
+  which is exported for the purpose and is now the single writer for every file
+  containing key material. That helper also sets mode 0600 **at creation**
+  rather than with a later `chmod` (closing a window in which the secret was on
+  disk world-readable, and covering a pre-existing file, whose mode
+  `std::fs::write` preserves), and creates a missing parent directory 0700.
+- **The bridge's rate-limit bypass was still open** (finding R11). The client
+  IP was taken from the *left-most* `X-Forwarded-For` entry, which is the
+  client-supplied one behind every appending proxy - including the
+  loopback-tunnel deployment the first review recommends - so rotating a fake
+  address per request still bought a fresh rate-limit bucket. The header is now
+  walked from the right, skipping trusted-proxy hops, taking the first
+  untrusted address ("rightmost untrusted"). The unit test that asserted the
+  old behaviour has been replaced with one that asserts the spoof fails.
+- **A stalled handshake held its connection slot indefinitely** (finding R21).
+  The pre-authentication phase had no deadline, so a peer that completed the
+  TCP handshake and then sent nothing occupied one of the 2048
+  unauthenticated-connection slots for as long as it kept the socket open;
+  2048 idle sockets stopped the listener accepting any new connection,
+  including from legitimate peers. A 30-second watchdog now applies to the
+  pre-authentication phase only, standing down the moment a peer authenticates
+  so established connections are never affected.
+- **No WebSocket message size limit** (finding R22). Without an explicit
+  `WebSocketConfig`, tungstenite's 16 MiB frame / 64 MiB message defaults
+  applied, and a frame's declared length is *reserved* before any payload
+  arrives - so ~14 bytes bought a 16 MiB allocation, pre-authentication, per
+  connection. Both the client and the server now cap frames and messages at
+  2 MiB.
+- **The message-exchange overload recovery was dead code** (finding R23). All
+  five `signed_duration_since` comparisons in the event loop had their operands
+  reversed, making every expression negative and so every threshold
+  unreachable: the periodic worker-count log never fired, the "still
+  overloaded" warning never fired, and the `abort_all` recovery could never
+  run - leaving the reaping loop with no exit while the unbounded inbound
+  channel grew behind it.
+- `trusted_proxy` and client `ip` config fields now also accept the plain,
+  comma-separated string syntax documented in
+  `docs/specifications/agent-configuration.md` (e.g.
+  `trusted_proxy = "127.0.0.0/24"`), not just the tagged
+  `{ IP = ... } / { Range = ... } / { List = [...] }` form. Previously,
+  hand-editing a config file with a bare string for either field failed to
+  parse with a confusing `unknown variant` TOML error.
+
+### Changed
+
+- `paddington::config::save` now takes `&Path` rather than `&PathBuf`, and no
+  longer creates the parent directory separately (`write_secret_file` does it,
+  owner-only). Callers passing a `&PathBuf` are unaffected.
+
 ## [0.90.0] - 2026-07-24
 
 ### Added

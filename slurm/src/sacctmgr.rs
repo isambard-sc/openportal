@@ -123,8 +123,12 @@ impl LockedRunner {
         tracing::debug!("Running command: {:?}", cmd);
 
         let start_time = chrono::Utc::now();
-        let output = tokio::process::Command::new(&cmd[0])
-            .args(&cmd[1..])
+        let Some((program, program_args)) = cmd.split_first() else {
+            return Err(Error::Call("Empty command vector".to_string()));
+        };
+
+        let output = tokio::process::Command::new(program)
+            .args(program_args)
             .kill_on_drop(true)
             .output();
 
@@ -980,11 +984,17 @@ pub async fn find_cluster() -> Result<(), Error> {
             return Err(Error::Login("Requested cluster not found".to_string()));
         }
     } else {
+        let Some(default_cluster) = clusters.first() else {
+            return Err(Error::Login(
+                "sacctmgr reported no clusters at all - cannot pick a default".to_string(),
+            ));
+        };
+
         tracing::debug!(
             "Using the first cluster available by default: {}",
-            clusters[0]
+            default_cluster
         );
-        cache::set_cluster(&clusters[0]).await?;
+        cache::set_cluster(default_cluster).await?;
     }
 
     Ok(())

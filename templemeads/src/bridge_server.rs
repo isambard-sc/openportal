@@ -281,28 +281,21 @@ pub fn load(invite_file: &path::PathBuf) -> Result<Invite, Error> {
     Ok(invite)
 }
 
+/// Write a bridge invite to `invite_file`.
+///
+/// The invite holds the bridge's HMAC API key in cleartext hex, so it is
+/// written owner-only (mode 0600) via `paddington::config::write_secret_file` -
+/// the same helper the paddington service config and invites use. It was
+/// previously written with a plain `std::fs::write`, landing at the process
+/// umask (commonly 0644) and so readable by any local user, who could then sign
+/// arbitrary bridge API requests. See
+/// docs/specifications/security-review-2.md (finding R9).
 pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
     // serialise to toml
     let invite_toml =
         toml::to_string(invite).with_context(|| "Could not serialise invite to toml")?;
 
-    let invite_file_string = invite_file.to_string_lossy();
-
-    let prefix = invite_file.parent().with_context(|| {
-        format!(
-            "Could not get parent directory for invite file: {:?}",
-            invite_file_string
-        )
-    })?;
-
-    std::fs::create_dir_all(prefix).with_context(|| {
-        format!(
-            "Could not create parent directory for invite file: {:?}",
-            invite_file_string
-        )
-    })?;
-
-    std::fs::write(invite_file, invite_toml)
+    paddington::config::write_secret_file(invite_file, &invite_toml)
         .with_context(|| format!("Could not write invite file: {:?}", invite_file))?;
 
     Ok(())
@@ -325,23 +318,53 @@ const NONCE_TTL_SECONDS: i64 = 30;
 /// See docs/specifications/security-review.md (finding F11).
 const MAX_NONCE_ENTRIES: usize = 100_000;
 
-/// Parse a forwarded client IP from `X-Forwarded-For` (first entry) or
-/// `X-Real-IP`. Only consulted for a request whose TCP peer is a configured
-/// trusted proxy - never trusted on its own (finding F3).
-fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
+/// Parse the forwarded client IP from `X-Forwarded-For` or `X-Real-IP`. Only
+/// consulted for a request whose TCP peer is a configured trusted proxy - never
+/// trusted on its own (finding F3).
+///
+/// `X-Forwarded-For` is a list that each proxy *appends* to, so it reads
+/// `<client-supplied…>, <address the last proxy saw>`. The left-most entry is
+/// therefore whatever the client sent, i.e. fully attacker-controlled: reading
+/// it (as this function originally did) meant an attacker could rotate a fake
+/// address per request and get a fresh rate-limit bucket every time - exactly
+/// the attack finding F3 set out to close, still working in the very
+/// deployment F3 recommends (an appending nginx/ingress/Cloudflare tunnel on
+/// loopback).
+///
+/// So walk the list from the **right**, skipping entries that are themselves
+/// trusted proxies, and take the first untrusted one - the "rightmost
+/// untrusted" rule. That address was observed by a proxy we trust, rather than
+/// asserted by the client. See
+/// docs/specifications/security-review-2.md (finding R11).
+fn forwarded_ip(headers: &HeaderMap, trusted_proxy: Option<&IpOrRange>) -> Option<IpAddr> {
     if let Some(forwarded) = headers.get("X-Forwarded-For") {
         if let Ok(forwarded_str) = forwarded.to_str() {
-            if let Some(first_ip) = forwarded_str.split(',').next() {
-                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+            let entries: Vec<&str> = forwarded_str.split(',').collect();
+
+            for entry in entries.iter().rev() {
+                let Ok(ip) = entry.trim().parse::<IpAddr>() else {
+                    // An unparseable entry means we can no longer tell which
+                    // hop appended what, so stop rather than skip past it and
+                    // risk believing a client-supplied value further left.
+                    break;
+                };
+
+                let is_trusted_hop = trusted_proxy
+                    .map(|trusted| trusted.matches(&ip))
+                    .unwrap_or(false);
+
+                if !is_trusted_hop {
                     return Some(ip);
                 }
             }
         }
     }
 
+    // `X-Real-IP` is a single value set by the adjacent proxy rather than an
+    // appended list, so there is no left/right ambiguity to resolve.
     if let Some(real_ip) = headers.get("X-Real-IP") {
         if let Ok(ip_str) = real_ip.to_str() {
-            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+            if let Ok(ip) = ip_str.trim().parse::<IpAddr>() {
                 return Some(ip);
             }
         }
@@ -367,15 +390,14 @@ async fn resolve_client_ip_middleware(
 ) -> Response {
     let peer_ip = peer.ip();
 
-    let peer_is_trusted = state
-        .config
-        .trusted_proxy
-        .as_ref()
+    let trusted_proxy = state.config.trusted_proxy.as_ref();
+
+    let peer_is_trusted = trusted_proxy
         .map(|trusted| trusted.matches(&peer_ip))
         .unwrap_or(false);
 
     let client_ip = if peer_is_trusted {
-        forwarded_ip(request.headers()).unwrap_or(peer_ip)
+        forwarded_ip(request.headers(), trusted_proxy).unwrap_or(peer_ip)
     } else {
         peer_ip
     };
@@ -1369,19 +1391,94 @@ mod tests {
     }
 
     #[test]
-    fn test_forwarded_ip_parses_first_xff_then_xri() {
+    fn test_forwarded_ip_takes_rightmost_untrusted_xff_entry() {
+        // Regression test for finding R11. This test previously asserted the
+        // *first* X-Forwarded-For entry was used, which is the client-supplied
+        // one - locking in the very spoof finding F3 set out to close.
+        let trusted = IpOrRange::new("10.0.0.0/8")
+            .unwrap_or_else(|e| unreachable!("Could not parse trusted range: {:?}", e));
+
         let mut headers = HeaderMap::new();
-        assert_eq!(forwarded_ip(&headers), None);
+        assert_eq!(forwarded_ip(&headers, Some(&trusted)), None);
 
         headers.insert("X-Real-IP", HeaderValue::from_static("5.6.7.8"));
-        assert_eq!(forwarded_ip(&headers), "5.6.7.8".parse::<IpAddr>().ok());
+        assert_eq!(
+            forwarded_ip(&headers, Some(&trusted)),
+            "5.6.7.8".parse::<IpAddr>().ok()
+        );
 
-        // X-Forwarded-For takes precedence and uses the first entry.
+        // An appending proxy produces "<client-supplied>, <what the proxy
+        // saw>". The right-most entry is the one we must believe; the
+        // left-most is the attacker's.
         headers.insert(
             "X-Forwarded-For",
-            HeaderValue::from_static("1.2.3.4, 9.9.9.9"),
+            HeaderValue::from_static("1.2.3.4, 203.0.113.9"),
         );
-        assert_eq!(forwarded_ip(&headers), "1.2.3.4".parse::<IpAddr>().ok());
+        assert_eq!(
+            forwarded_ip(&headers, Some(&trusted)),
+            "203.0.113.9".parse::<IpAddr>().ok(),
+            "must take the right-most entry, not the client-supplied left-most one"
+        );
+
+        // A chain of trusted hops is skipped over to reach the real client.
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("1.2.3.4, 203.0.113.9, 10.1.2.3, 10.4.5.6"),
+        );
+        assert_eq!(
+            forwarded_ip(&headers, Some(&trusted)),
+            "203.0.113.9".parse::<IpAddr>().ok()
+        );
+
+        // With no trusted_proxy configured, nothing is skipped - the last hop
+        // is taken as-is. (The middleware only consults this function at all
+        // when the TCP peer is trusted, so this is the single-proxy case.)
+        assert_eq!(
+            forwarded_ip(&headers, None),
+            "10.4.5.6".parse::<IpAddr>().ok()
+        );
+
+        // An unparseable entry stops the walk rather than letting us slide
+        // left onto a client-supplied value.
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_static("1.2.3.4, not-an-ip"),
+        );
+        assert_eq!(
+            forwarded_ip(&headers, Some(&trusted)),
+            "5.6.7.8".parse::<IpAddr>().ok(),
+            "should fall back to X-Real-IP, never to the left-most XFF entry"
+        );
+    }
+
+    #[test]
+    fn test_forwarded_ip_cannot_be_spoofed_by_prepending_entries() {
+        // The concrete F3/R11 attack: the client seeds X-Forwarded-For with a
+        // different fake address on every request, hoping for a fresh
+        // rate-limit bucket each time. The resolved address must stay put.
+        let trusted = IpOrRange::new("127.0.0.0/8")
+            .unwrap_or_else(|e| unreachable!("Could not parse trusted range: {:?}", e));
+
+        let real_client = "198.51.100.7"
+            .parse::<IpAddr>()
+            .unwrap_or_else(|e| unreachable!("Could not parse IP: {:?}", e));
+
+        for spoofed in ["203.0.113.1", "203.0.113.2", "8.8.8.8", "1.1.1.1"] {
+            let mut headers = HeaderMap::new();
+            let value = format!("{}, {}", spoofed, real_client);
+            headers.insert(
+                "X-Forwarded-For",
+                HeaderValue::from_str(&value)
+                    .unwrap_or_else(|e| unreachable!("Could not build header: {:?}", e)),
+            );
+
+            assert_eq!(
+                forwarded_ip(&headers, Some(&trusted)),
+                Some(real_client),
+                "spoofed prefix {} must not change the resolved client IP",
+                spoofed
+            );
+        }
     }
 
     #[test]

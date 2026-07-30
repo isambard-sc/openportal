@@ -225,9 +225,9 @@ fn parse_offerings(s: &str) -> HashMap<String, String> {
             continue;
         }
 
-        if let Some(colon) = entry.find(':') {
-            let name = entry[..colon].trim().to_string();
-            let peer = entry[colon + 1..].trim().to_string();
+        if let Some((name, peer)) = entry.split_once(':') {
+            let name = name.trim().to_string();
+            let peer = peer.trim().to_string();
 
             if !name.is_empty() && !peer.is_empty() {
                 map.insert(name, peer);

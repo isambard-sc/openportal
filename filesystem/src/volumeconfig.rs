@@ -544,9 +544,17 @@ impl UserVolumeConfig {
             ));
         }
 
-        Ok(self.path_configs()[0]
-            .path(mapping.clone().into())?
-            .to_path_buf())
+        // A home volume with no configured root is a misconfiguration, not a
+        // reason to abort the process - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let path_configs = self.path_configs();
+        let Some(first) = path_configs.first() else {
+            return Err(Error::Misconfigured(
+                "Home user volume has no configured roots".to_string(),
+            ));
+        };
+
+        Ok(first.path(mapping.clone().into())?.to_path_buf())
     }
 
     /// Get the quota engine name
@@ -584,14 +592,29 @@ impl UserVolumeConfig {
         let num_roots = self.roots.len();
         let mut paths = Vec::with_capacity(num_roots);
 
-        for i in 0..num_roots {
+        // Iterate the roots directly and read `permissions` via `get`:
+        // `permissions` is independently configured and may be a shorter list
+        // than `roots`, in which case indexing it with a root's index would
+        // abort the process. See
+        // docs/specifications/security-review-2.md (finding R1).
+        for (i, root) in self.roots.iter().enumerate() {
             let permission = match &self.permissions {
                 StringOrVec::Single(s) => s.clone(),
-                StringOrVec::Vec(v) => v[i].clone(),
+                StringOrVec::Vec(v) => match v.get(i) {
+                    Some(p) => p.clone(),
+                    None => {
+                        tracing::warn!(
+                            "No permission configured for root {} ('{}') - skipping it",
+                            i,
+                            root
+                        );
+                        continue;
+                    }
+                },
             };
 
             paths.push(PathConfig::new(
-                self.roots[i].clone(),
+                root.clone(),
                 self.subpath.clone(),
                 permission,
                 None,
@@ -759,25 +782,35 @@ impl ProjectVolumeConfig {
         let num_roots = self.roots.len();
         let mut paths = Vec::with_capacity(num_roots);
 
-        for i in 0..num_roots {
+        // As above: `permissions` and `links` are independently configured
+        // lists that may be shorter than `roots`, so both are read via `get`
+        // rather than indexed. See
+        // docs/specifications/security-review-2.md (finding R1).
+        for (i, root) in self.roots.iter().enumerate() {
             let permission = match &self.permissions {
                 StringOrVec::Single(s) => s.clone(),
-                StringOrVec::Vec(v) => v[i].clone(),
+                StringOrVec::Vec(v) => match v.get(i) {
+                    Some(p) => p.clone(),
+                    None => {
+                        tracing::warn!(
+                            "No permission configured for root {} ('{}') - skipping it",
+                            i,
+                            root
+                        );
+                        continue;
+                    }
+                },
             };
 
-            let link = if !self.links.is_empty() {
-                let link_str = self.links[i].trim();
-                if link_str.is_empty() {
-                    None
-                } else {
-                    Some(link_str.to_string())
-                }
-            } else {
-                None
-            };
+            let link = self
+                .links
+                .get(i)
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string());
 
             paths.push(PathConfig::new(
-                self.roots[i].clone(),
+                root.clone(),
                 self.subpath.clone(),
                 permission,
                 link,

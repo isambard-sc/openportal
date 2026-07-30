@@ -112,32 +112,20 @@ impl Destination {
         }
     }
 
+    /// The agent one hop further along the path than `agent`, or `None` if
+    /// `agent` is not in the path or is already the last hop. Expressed with
+    /// `get`/`checked_sub` so it cannot panic - see
+    /// docs/specifications/security-review-2.md (finding R1).
     pub fn next(&self, agent: &str) -> Option<String> {
-        // find the index of the agent in the components
-        if let Some(index) = self.agents.iter().position(|c| c == agent) {
-            // if the index is not the last one
-            if index < self.agents.len() - 1 {
-                Some(self.agents[index + 1].clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        let index = self.agents.iter().position(|c| c == agent)?;
+        self.agents.get(index + 1).cloned()
     }
 
+    /// The agent one hop back along the path from `agent`, or `None` if
+    /// `agent` is not in the path or is already the first hop.
     pub fn previous(&self, agent: &str) -> Option<String> {
-        // find the index of the agent in the components
-        if let Some(index) = self.agents.iter().position(|c| c == agent) {
-            // if the index is not the first one
-            if index > 0 {
-                Some(self.agents[index - 1].clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        let index = self.agents.iter().position(|c| c == agent)?;
+        self.agents.get(index.checked_sub(1)?).cloned()
     }
 }
 
@@ -254,12 +242,11 @@ impl Destinations {
 
 impl std::fmt::Debug for Destinations {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self.destinations.len() {
-            0 => write!(f, "[]"),
-            1 => write!(f, "{}", self.destinations[0]),
-            _ => {
-                let dest_strings: Vec<String> =
-                    self.destinations.iter().map(|d| d.to_string()).collect();
+        match self.destinations.as_slice() {
+            [] => write!(f, "[]"),
+            [single] => write!(f, "{}", single),
+            many => {
+                let dest_strings: Vec<String> = many.iter().map(|d| d.to_string()).collect();
                 write!(f, "[{}]", dest_strings.join(", "))
             }
         }
@@ -268,12 +255,11 @@ impl std::fmt::Debug for Destinations {
 
 impl std::fmt::Display for Destinations {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self.destinations.len() {
-            0 => write!(f, "[]"),
-            1 => write!(f, "{}", self.destinations[0]),
-            _ => {
-                let dest_strings: Vec<String> =
-                    self.destinations.iter().map(|d| d.to_string()).collect();
+        match self.destinations.as_slice() {
+            [] => write!(f, "[]"),
+            [single] => write!(f, "{}", single),
+            many => {
+                let dest_strings: Vec<String> = many.iter().map(|d| d.to_string()).collect();
                 write!(f, "[{}]", dest_strings.join(", "))
             }
         }
@@ -321,13 +307,28 @@ impl std::ops::Deref for Destinations {
 }
 
 ///
-/// Implement traits so that we can look up a destination by index
+/// Implement traits so that we can look up a destination by index.
+///
+/// Note that `Index` is required by its `std` contract to panic on an
+/// out-of-range index, so this is the one indexing operation in the crate
+/// that can. Prefer [`Destinations::get`] anywhere the index is derived from
+/// data rather than known to be in range - the release profile sets
+/// `panic = "abort"`, so a panic here would terminate the agent. See
+/// `docs/specifications/security-review-2.md` (finding R1).
 ///
 impl std::ops::Index<usize> for Destinations {
     type Output = Destination;
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.destinations[index]
+    }
+}
+
+impl Destinations {
+    /// The destination at `index`, or `None` if `index` is out of range.
+    /// The non-panicking counterpart to indexing.
+    pub fn get(&self, index: usize) -> Option<&Destination> {
+        self.destinations.get(index)
     }
 }
 

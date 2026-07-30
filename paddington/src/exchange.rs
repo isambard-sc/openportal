@@ -276,9 +276,16 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
             *count = workers.len();
         }
 
+        // `now - then`, not `then - now`. All five comparisons in this loop
+        // had their operands reversed, making every expression negative and so
+        // every threshold unreachable: the periodic log never fired, the
+        // "still overloaded" warning never fired, and the `abort_all` recovery
+        // below was dead code - leaving the reaping loop with no exit and the
+        // unbounded inbound channel growing behind it. See
+        // docs/specifications/security-review-2.md (finding R23).
         if (last_logged_count - workers.len() as i64).abs() >= 10
-            || last_logged_update
-                .signed_duration_since(chrono::Utc::now())
+            || chrono::Utc::now()
+                .signed_duration_since(last_logged_update)
                 .num_seconds()
                 >= 60
         {
@@ -308,29 +315,33 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                     // log a message every 10 seconds
-                    if last_update
-                        .signed_duration_since(chrono::Utc::now())
+                    if chrono::Utc::now()
+                        .signed_duration_since(last_update)
                         .num_seconds()
                         >= 10
                     {
                         let count = workers.len();
                         tracing::warn!(
                             "It has been {} seconds and there are still a high number of workers: {}. Attempting to reduce...",
-                            start_reaping.signed_duration_since(last_update).num_seconds(),
+                            chrono::Utc::now()
+                                .signed_duration_since(start_reaping)
+                                .num_seconds(),
                             count
                         );
                         last_update = chrono::Utc::now();
                     }
                 }
 
-                if start_reaping
-                    .signed_duration_since(chrono::Utc::now())
+                if chrono::Utc::now()
+                    .signed_duration_since(start_reaping)
                     .num_seconds()
                     >= 300
                 {
                     tracing::error!(
                         "It has been {} seconds since the last log message and there are still a high number of workers: {}.",
-                        start_reaping.signed_duration_since(last_logged_update).num_seconds(),
+                        chrono::Utc::now()
+                            .signed_duration_since(start_reaping)
+                            .num_seconds(),
                         workers.len()
                     );
                     tracing::error!("Something has gone wrong, so we will now abort all tasks and restart event processing.");

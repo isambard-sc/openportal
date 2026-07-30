@@ -551,8 +551,8 @@ impl Quota {
         // Find if there's a "used" keyword
         if let Some(used_idx) = parts.iter().position(|&p| p.eq_ignore_ascii_case("used")) {
             // Format: "<limit> used <usage>"
-            let limit_str = parts[..used_idx].join("");
-            let usage_str = parts[used_idx + 1..].join("");
+            let limit_str = parts.get(..used_idx).unwrap_or_default().join("");
+            let usage_str = parts.get(used_idx + 1..).unwrap_or_default().join("");
 
             let limit = StorageSize::parse(&limit_str)?;
             let usage = StorageSize::parse(&usage_str)?;

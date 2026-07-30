@@ -483,13 +483,15 @@ impl ProjectStorageReport {
     /// the merge semantics: newest snapshot wins at the top level, older
     /// snapshots are retained in `daily_reports` (one per date, newest wins).
     pub fn combine(reports: &[ProjectStorageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        // Split rather than indexed, so an empty slice cannot panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let Some((first, rest)) = reports.split_first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = reports[0].clone();
+        let mut combined = first.clone();
 
-        for report in &reports[1..] {
+        for report in rest {
             if report.project != combined.project {
                 return Err(Error::Incompatible(format!(
                     "Cannot combine reports for different projects: {} and {}",
@@ -819,11 +821,11 @@ impl StorageReport {
     /// Combine a slice of `StorageReport`s for the same portal into a single
     /// report, merging per-project history.
     pub fn combine(reports: &[StorageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        let Some(first) = reports.first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = StorageReport::new(&reports[0].portal);
+        let mut combined = StorageReport::new(&first.portal);
 
         for report in reports.iter() {
             if report.portal() != combined.portal() {

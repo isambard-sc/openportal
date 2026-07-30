@@ -275,9 +275,9 @@ fn parse_instance_groups(s: &str) -> HashMap<String, Vec<String>> {
         if entry.is_empty() {
             continue;
         }
-        if let Some(colon) = entry.find(':') {
-            let instance = entry[..colon].trim().to_owned();
-            let group = entry[colon + 1..].trim().to_owned();
+        if let Some((instance, group)) = entry.split_once(':') {
+            let instance = instance.trim().to_owned();
+            let group = group.trim().to_owned();
             if !instance.is_empty() && !group.is_empty() {
                 map.entry(instance).or_default().push(group);
             }

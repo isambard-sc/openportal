@@ -74,11 +74,20 @@ pub fn get_stats() -> JobTimingStats {
             // Calculate median
             let mut sorted = times.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // Indexed via `get` so an unexpected length degrades to the mean
+            // rather than panicking - see
+            // docs/specifications/security-review-2.md (finding R1).
+            let mid = sorted.len() / 2;
             let median_ms = if sorted.len() % 2 == 0 {
-                let mid = sorted.len() / 2;
-                (sorted[mid - 1] + sorted[mid]) / 2.0
+                match (
+                    mid.checked_sub(1).and_then(|i| sorted.get(i)),
+                    sorted.get(mid),
+                ) {
+                    (Some(lower), Some(upper)) => (lower + upper) / 2.0,
+                    _ => mean_ms,
+                }
             } else {
-                sorted[sorted.len() / 2]
+                sorted.get(mid).copied().unwrap_or(mean_ms)
             };
 
             JobTimingStats {

@@ -1029,18 +1029,17 @@ impl IPAGroup {
             // this is a legacy group if the group name is "group.project"
             let parts: Vec<&str> = groupid.split('.').collect();
 
-            if parts.len() != 2 {
+            // Destructured rather than indexed - the group names come from
+            // FreeIPA, not from us. See
+            // docs/specifications/security-review-2.md (finding R1).
+            let ["group", project_part] = parts.as_slice() else {
                 continue;
-            }
+            };
 
-            if parts[0] != "group" {
-                continue;
-            }
-
-            let project = match ProjectIdentifier::parse(&format!("{}.{}", parts[1], portal)) {
+            let project = match ProjectIdentifier::parse(&format!("{}.{}", project_part, portal)) {
                 Ok(project) => project,
                 Err(e) => {
-                    tracing::warn!("Could not parse project: {}. Error: {}", parts[1], e);
+                    tracing::warn!("Could not parse project: {}. Error: {}", project_part, e);
                     continue;
                 }
             };
@@ -1187,12 +1186,12 @@ impl IPAGroup {
         for group in groups.split(',') {
             let parts: Vec<&str> = group.split(':').collect();
 
-            if parts.len() != 2 {
+            let [instance, group_name] = parts.as_slice() else {
                 errors.push(group);
                 continue;
-            }
+            };
 
-            let instance = parts[0].trim();
+            let instance = instance.trim();
 
             if instance.is_empty() {
                 errors.push(group);
@@ -1208,7 +1207,7 @@ impl IPAGroup {
                 }
             };
 
-            let group = parts[1].trim();
+            let group = group_name.trim();
 
             if group.is_empty() {
                 errors.push(group);

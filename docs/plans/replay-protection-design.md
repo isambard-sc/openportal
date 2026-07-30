@@ -9,7 +9,9 @@ Status: **implemented** (§7 steps 1-3; step 5's doc updates are this same
 edit), **plus §5 revised** (what was originally a coordinated flag-day
 rollout is now a negotiated one - see §5 and §9), **plus §10 added**
 (handshake/bootstrap message replay protection, §9's other former
-deferred item, now implemented).
+deferred item, now implemented), **plus §11 added** (per-incarnation
+windows - §10.6's dismissal of process-restart persistence was wrong and
+caused a real availability bug; see §11).
 
 `paddington::anti_replay` (`ReplayWindow`, `NoncedPayload`,
 `HandshakeNonceState`) exists exactly as designed below, wired into
@@ -573,14 +575,120 @@ warning and return `Err`/drop, no special handling.
 
 ### 10.6 What this still doesn't cover
 
-- **Process-restart persistence** - as already accepted for the ongoing-
+- ~~**Process-restart persistence** - as already accepted for the ongoing-
   traffic window (§9), this window is in-memory only. A process restart
   gets a fresh window for every peer, exactly as if it were a new peer
   relationship - no worse than today's behaviour, since there was no replay
-  protection here at all before this addendum.
+  protection here at all before this addendum.~~
+
+  **This reasoning was wrong, and the consequence was a real availability
+  bug** - see §11.
 - **A genuine authentication bypass via `Handshake`/`PeerDetails` replay**
   was never actually possible (§10.1) - this addendum closes a real
   disruption vector (`Start`/`SessionUnknown`) and adds defense-in-depth
   where the risk was already low, but it isn't "fixing a hole that let
   attackers impersonate a peer," since no such hole existed once the
   fresh-session-key behaviour was traced through properly.
+
+## 11. Addendum: per-incarnation windows (the epoch)
+
+Status: **implemented**. Corrects §10.6's "no worse than today's behaviour"
+claim, which was wrong.
+
+### 11.1 What §10.6 got wrong
+
+§10.6 reasoned about only *half* of `HandshakeNonceState`. The struct holds two
+things: the outgoing `next_nonce` counter and the incoming `ReplayWindow`. Both
+are in memory, so both are lost on restart - and that is fine for the window
+(an uninitialised window accepts whatever arrives first) but **not** for the
+counter, because the *peer's* window is not reset at the same time.
+
+Concretely, with a peer that has been up for a while:
+
+1. Each completed connection burns two nonces (`Handshake`, `PeerDetails`), so
+   after *C* connections the server's window for that client has
+   `highest ≈ 2C`, with every bit below it set.
+2. The client restarts. Its counter returns to 0; the server's window does not.
+3. The client sends `Handshake` with nonce 0. For `highest < 1024` the bit is
+   already set; for `highest >= 1024` the nonce is outside the window. Either
+   way it is rejected as a replay and the connection is closed.
+4. `client::run` retries every 5 s, burning one nonce per attempt, so the
+   client cannot connect until its counter climbs past `highest`.
+
+**Outage ≈ 5 s × (highest + 1)**, i.e. roughly 10 seconds per prior reconnect:
+a hundred prior reconnects is ~17 minutes, ten thousand is ~28 hours. It
+applies symmetrically (a server restart breaks the client's window instead),
+and it needs no attacker at all - just a deploy or a crash.
+
+An on-path attacker who can reset TCP connections makes it much worse: each
+forced reconnect advances `highest` by 2 at ~5 s intervals, so roughly a day of
+connection flapping buys about two days of outage *after the peer's next
+restart*, persisting long after the attacker stops. The relay path is worse
+still, at 35 s per failed bootstrap attempt (`BOOTSTRAP_TIMEOUT` +
+`BOOTSTRAP_RETRY_DELAY`) - and `SessionUnknown`, the message whose whole
+purpose is recovering from one side restarting, is sent with nonce 0 and so was
+itself guaranteed to be rejected after a restart.
+
+### 11.2 Why the obvious fixes don't work
+
+- **Persist the counter.** The orthodox IPsec/WireGuard answer, but agents
+  deliberately keep no on-disk state (§2), and several run from read-only
+  containers.
+- **A random per-process epoch, resetting the window when it changes.** Random
+  values cannot be ordered, so the receiver cannot distinguish "a newer
+  incarnation" from "a replay of an older one". An attacker replays a captured
+  message; its epoch differs from the stored one; the window resets and the
+  replay is accepted. Alternating a replay with genuine traffic re-arms it
+  every time - **weaker than a single window**, not stronger.
+- **A monotonic (clock-derived) epoch, requiring strictly-greater.** This does
+  give replay resistance, but it **breaks client HA**: several processes
+  legitimately present the same `name@zone`
+  ([highavailability.md](../specifications/highavailability.md) §2), so the
+  replica with the lower epoch is rejected as a replay and can never reach
+  standby. It also makes a backwards clock step across a restart re-create the
+  original lockout.
+
+### 11.3 What was implemented
+
+A random 64-bit `epoch` per process, sent alongside every handshake/bootstrap
+nonce, and **one replay window per epoch** on the receive side rather than one
+per peer - a most-recently-used-first list bounded at `MAX_TRACKED_EPOCHS` (8).
+
+That satisfies all three requirements at once:
+
+- **A restart no longer wedges the link**: an unseen epoch gets a fresh window,
+  so the restarted peer's nonce 0 is accepted immediately.
+- **Replays are still rejected**: the superseded epoch's window is *retained*,
+  so a captured message lands on the window that already recorded it. This is
+  the crucial difference from "reset on epoch change".
+- **Client HA keeps working**: concurrent replicas each get their own window
+  instead of continually resetting each other, and no ordering between their
+  epochs is required.
+
+The epoch rides inside the AEAD exactly like the nonce, so an on-path attacker
+can neither forge nor strip it. It is `#[serde(default)] Option<u64>` on all
+five message types, so a peer built before this field reads as `epoch: None`,
+gets its own window, and behaves exactly as it did before - no flag day.
+
+**The accepted residual**: evicting a window at the bound makes that
+incarnation's nonces replayable again. Reaching it takes 8 further
+restarts/replicas after the capture, and §10.1 already establishes that a
+replayed `Handshake`/`PeerDetails`/`Accepted` buys only wasted work. For
+`Start`/`SessionUnknown` - where a replay genuinely disrupts - the same bound
+applies, and 8 incarnations is far beyond what an attacker can force while a
+capture stays useful.
+
+Covered by `anti_replay`'s epoch tests (restart accepted, superseded-epoch
+replay still rejected including under interleaved genuine traffic, concurrent
+epochs not resetting each other, the eviction bound, and the `None` legacy
+slot), plus backward-compatibility tests asserting each of the five message
+types deserialises with `epoch: None` when the field is absent. See
+[security-review-2.md](../specifications/security-review-2.md) (finding R10).
+
+**Validated live** (2026-07-30) against real `op-portal`/`op-provider` agents,
+both directly connected and via a real `op-proxy`, across repeated
+disconnection and reconnection - the restart path this addendum exists to fix,
+and the one the unit tests above can only simulate. Reconnection was transparent
+to the user. The `epoch: None` compatibility path has still only been tested at
+the serialisation level, not against an actual pre-epoch binary (the same
+caveat §5's negotiation carries).

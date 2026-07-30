@@ -519,7 +519,8 @@ object (encrypted using the pre-shared keys with the exchanged salts):
   "session_key": "<hex-encoded-32-byte-key>",
   "engine":      "<engine-name-string>",
   "version":     "<engine-version-string>",
-  "nonce":       <integer>
+  "nonce":       <integer>,
+  "epoch":       <integer>
 }
 ```
 
@@ -531,7 +532,8 @@ inner key for the remainder of the connection):
   "session_key": "<hex-encoded-32-byte-key>",
   "engine":      "<engine-name-string>",
   "version":     "<engine-version-string>",
-  "nonce":       <integer>
+  "nonce":       <integer>,
+  "epoch":       <integer>
 }
 ```
 
@@ -548,6 +550,23 @@ skip the check, accept unconditionally. See
 [security-model.md](security-model.md) §9 and
 [replay-protection-design.md](../plans/replay-protection-design.md) §10.
 
+`epoch` identifies the *sending process incarnation*: a random 64-bit value
+generated once per process start. The nonce counter lives only in memory
+(agents deliberately keep no on-disk state), so it returns to zero when a
+process restarts - and a receiver holding a single persistent window would
+reject every reconnect as a replay until the counter climbed back past the old
+high-water mark. The receiver therefore keeps **one window per epoch**, bounded
+and evicted least-recently-used: a new epoch gets a fresh window (so a restart
+reconnects immediately), while the superseded epoch's window is *retained* (so
+a captured message replayed later is still rejected). Keeping the old window
+rather than clearing it is what makes this no weaker than a single window, and
+per-epoch separation is also what lets client HA work, since several processes
+legitimately share one peer identity and each contributes an epoch
+([highavailability.md](highavailability.md) §2). Also
+`#[serde(default)] Option<u64>`, so a pre-epoch peer reads as `epoch: None`
+and gets its own window, behaving exactly as before. See
+[security-review-2.md](security-review-2.md) (finding R10).
+
 ### 4.3 Peer Identity Exchange
 
 After key negotiation, both sides exchange `PeerDetails` objects (as regular
@@ -563,7 +582,8 @@ encrypted messages):
     "client_is_secondary": <boolean>
   },
   "supports_nonce": <boolean>,
-  "nonce": <integer>
+  "nonce": <integer>,
+  "epoch": <integer>
 }
 ```
 
@@ -575,6 +595,7 @@ encrypted messages):
 | `standby_status` | object | High-availability standby state (see §4.4) |
 | `supports_nonce` | boolean | Whether the sender understands the `{nonce, payload}` shape for ongoing traffic (§3.5) - `#[serde(default)]`, so a pre-upgrade peer's `PeerDetails` (which predates this field) is read as `false`. See [security-model.md](security-model.md) §9 and [replay-protection-design.md](../plans/replay-protection-design.md) §5. |
 | `nonce` | integer, optional | Replay-protection nonce for this `PeerDetails` message itself (distinct from `supports_nonce` above, which is about *ongoing* traffic) - `#[serde(default)] Option<u64>`, checked against the same persistent per-peer window `Handshake`'s nonce uses (§4.2). See [replay-protection-design.md](../plans/replay-protection-design.md) §10. |
+| `epoch` | integer, optional | Sending process incarnation, so the receiver can tell a restart from a replay - see §4.2. `#[serde(default)] Option<u64>`. See [security-review-2.md](security-review-2.md) (finding R10). |
 
 Once both `PeerDetails` have been exchanged successfully, the Templemeads layer
 is notified via a Paddington `Connected` control command and the `Register` /

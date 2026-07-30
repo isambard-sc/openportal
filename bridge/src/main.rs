@@ -733,17 +733,20 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
     // first, make sure that we have virtual agents for each
     // of the offerings
     for offering in offerings.iter() {
-        if offering.agents().len() != 3 {
+        // Destructured rather than length-checked then indexed - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let offering_agents = offering.agents();
+        let [offered_resource, local_portal, _remote_portal] = offering_agents.as_slice() else {
             tracing::error!(
                 "Invalid offering: {}. Offerings must have exactly three agents",
                 offering
             );
             continue;
-        }
+        };
 
         // The offering's destination should be of the form
         // offering-name.local-portal.remote-portal
-        if offering.agents()[1] != portal.name() {
+        if *local_portal != portal.name() {
             tracing::error!(
                 "Invalid offering: {}. The second agent in the offering must be the portal ({})",
                 offering,
@@ -754,7 +757,7 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
 
         // the offering-name should be the name of the virtual resource,
         // while the zone should the same as the portal's zone.
-        let peer = agent::Peer::new(offering.agents()[0].as_str(), portal.zone());
+        let peer = agent::Peer::new(offered_resource.as_str(), portal.zone());
 
         if !agent::has_virtual(&peer).await {
             tracing::info!(
@@ -800,7 +803,9 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
 
     // Now that virtual agents are registered, send any queued jobs to them
     for offering in synched_offerings.iter() {
-        let resource = offering.agents()[0].clone();
+        let Some(resource) = offering.agents().first().cloned() else {
+            continue;
+        };
         let peer = agent::Peer::new(&resource, portal.zone());
 
         tracing::debug!("Sending queued jobs to virtual agent {}", peer);

@@ -116,12 +116,14 @@ impl Peer {
     pub fn parse(name: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = name.split('@').collect();
 
-        if parts.len() != 2 {
+        // Destructured rather than indexed - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let [peer_name, peer_zone] = parts.as_slice() else {
             return Err(Error::InvalidPeer(name.to_string()));
-        }
+        };
 
-        let peer_name = parts[0].trim();
-        let peer_zone = parts[1].trim();
+        let peer_name = peer_name.trim();
+        let peer_zone = peer_zone.trim();
 
         if peer_name.is_empty() || peer_zone.is_empty() {
             return Err(Error::InvalidPeer(name.to_string()));
@@ -366,8 +368,8 @@ pub async fn peer_domain(peer: &Peer) -> Option<PeerDomain> {
 /// with this agent.
 ///
 /// This is opt-in: call it wherever your agent needs the guarantee (e.g.
-/// after `ControlCommand::Connected`, or from your own `Register` handling)
-/// - templemeads never calls this itself, since a `Domain` mismatch is
+/// after `ControlCommand::Connected`, or from your own `Register` handling) -
+/// templemeads never calls this itself, since a `Domain` mismatch is
 /// otherwise harmless to the framework (it just means the two agents will
 /// never usefully exchange Jobs/Notifications; nothing about the transport,
 /// board sync, or health checks depends on both sides matching).

@@ -142,7 +142,9 @@ impl Usage {
 
         let parts: Vec<&str> = duration.split_whitespace().collect();
 
-        if parts.is_empty() {
+        // Split rather than indexed, so a missing count cannot panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let Some((count_part, unit_parts)) = parts.split_first() else {
             tracing::error!(
                 "get_limit failed to parse '{}'. No duration found",
                 duration
@@ -151,10 +153,10 @@ impl Usage {
                 "get_limit failed to parse '{}'. No duration found",
                 duration
             )));
-        }
+        };
 
-        if parts.len() > 1 {
-            units = match parts[1].to_ascii_lowercase().as_str() {
+        if let Some(unit_part) = unit_parts.first() {
+            units = match unit_part.to_ascii_lowercase().as_str() {
                 "seconds" | "second" | "s" => 1,
                 "minutes" | "minute" | "m" => 60,
                 "hours" | "hour" | "h" => 3600,
@@ -162,17 +164,17 @@ impl Usage {
                 _ => {
                     tracing::error!(
                                 "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
-                                &parts[1..].join(" "),
+                                unit_parts.join(" "),
                             );
                     return Err(Error::Parse(format!(
                                 "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
-                                &parts[1..].join(" "),
+                                unit_parts.join(" "),
                             )));
                 }
             };
         }
 
-        let seconds = parts[0]
+        let seconds = count_part
             .parse::<u64>()
             .with_context(|| format!("Failed to parse seconds from '{}'", duration))?;
 
@@ -428,19 +430,27 @@ impl std::fmt::Display for DailyProjectUsageReport {
         users.sort();
 
         for user in users {
+            // `HashMap`'s `Index` panics on a missing key. `users` comes from
+            // this same map's keys, so it cannot miss - looked up via `get`
+            // anyway, since a panic in a `Display` impl would abort the
+            // process. See docs/specifications/security-review-2.md (R1).
+            let Some(report) = self.reports.get(user) else {
+                continue;
+            };
+
             let jobs = self.num_jobs_for_user(user);
             if jobs > 0 {
                 writeln!(
                     f,
                     "{}: {} | {} {} | Average wait: {}",
                     user,
-                    self.reports[user],
+                    report,
                     jobs,
                     if jobs == 1 { "job" } else { "jobs" },
                     Usage::new(self.average_wait_seconds_for_user(user))
                 )?;
             } else {
-                writeln!(f, "{}: {}", user, self.reports[user])?;
+                writeln!(f, "{}: {}", user, report)?;
             }
         }
 
@@ -480,19 +490,23 @@ impl std::fmt::Display for DailyProjectUsageReportHoursDisplay<'_> {
         users.sort();
 
         for user in users {
+            let Some(user_report) = report.reports.get(user) else {
+                continue;
+            };
+
             let jobs = report.num_jobs_for_user(user);
             if jobs > 0 {
                 writeln!(
                     f,
                     "{}: {} | {} {} | Average wait: {}",
                     user,
-                    report.reports[user].in_hours(),
+                    user_report.in_hours(),
                     jobs,
                     if jobs == 1 { "job" } else { "jobs" },
                     Usage::new(report.average_wait_seconds_for_user(user)).in_hours()
                 )?;
             } else {
-                writeln!(f, "{}: {}", user, report.reports[user].in_hours())?;
+                writeln!(f, "{}: {}", user, user_report.in_hours())?;
             }
         }
 
@@ -1435,11 +1449,11 @@ impl ProjectUsageReport {
     }
 
     pub fn combine(reports: &[ProjectUsageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        let Some(first) = reports.first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = ProjectUsageReport::new(&reports[0].project);
+        let mut combined = ProjectUsageReport::new(&first.project);
 
         for report in reports.iter() {
             if report.portal() != combined.portal() {
@@ -1872,11 +1886,11 @@ impl UsageReport {
     }
 
     pub fn combine(reports: &[UsageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        let Some(first) = reports.first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = UsageReport::new(&reports[0].portal);
+        let mut combined = UsageReport::new(&first.portal);
 
         for report in reports.iter() {
             if report.portal() != combined.portal() {

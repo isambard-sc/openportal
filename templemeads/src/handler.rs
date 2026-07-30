@@ -593,8 +593,11 @@ async fn process_command<L: Domain>(
                         if let Some(portal) = agent::portal(0).await {
                             let agents = notification.destination().agents();
                             let n = agents.len();
-                            let portal_is_last = n >= 1 && agents[n - 1] == portal.name();
-                            let portal_is_penultimate = n >= 2 && agents[n - 2] == portal.name();
+                            let portal_is_last = agents.last().is_some_and(|a| *a == portal.name());
+                            let portal_is_penultimate = n
+                                .checked_sub(2)
+                                .and_then(|i| agents.get(i))
+                                .is_some_and(|a| *a == portal.name());
 
                             if portal_is_last || portal_is_penultimate {
                                 tracing::debug!(

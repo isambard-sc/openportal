@@ -89,15 +89,18 @@ impl ProjectIdentifier {
     pub fn parse(identifier: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = identifier.split('.').collect();
 
-        if parts.len() != 2 {
+        // Destructured rather than indexed, so a wrong component count is a
+        // parse error by construction and cannot panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let [project, portal] = parts.as_slice() else {
             return Err(Error::Parse(format!(
                 "Invalid ProjectIdentifier: {}",
                 identifier
             )));
-        }
+        };
 
-        let project = parts[0].trim();
-        let portal = parts[1].trim();
+        let project = project.trim();
+        let portal = portal.trim();
 
         validate_identifier_component(project, "project", identifier)?;
         validate_identifier_component(portal, "portal", identifier)?;
@@ -175,16 +178,16 @@ impl UserIdentifier {
     pub fn parse(identifier: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = identifier.split('.').collect();
 
-        if parts.len() != 3 {
+        let [username, project, portal] = parts.as_slice() else {
             return Err(Error::Parse(format!(
                 "Invalid UserIdentifier: {}",
                 identifier
             )));
-        }
+        };
 
-        let username = parts[0].trim();
-        let project = parts[1].trim();
-        let portal = parts[2].trim();
+        let username = username.trim();
+        let project = project.trim();
+        let portal = portal.trim();
 
         validate_identifier_component(username, "username", identifier)?;
         validate_identifier_component(project, "project", identifier)?;
@@ -296,15 +299,15 @@ impl ProjectMapping {
     pub fn parse(identifier: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = identifier.split(':').collect();
 
-        if parts.len() != 2 {
+        let [project, local_group] = parts.as_slice() else {
             return Err(Error::Parse(format!(
                 "Invalid ProjectMapping: {}",
                 identifier
             )));
-        }
+        };
 
-        let project = ProjectIdentifier::parse(parts[0])?;
-        let local_group = parts[1].trim();
+        let project = ProjectIdentifier::parse(project)?;
+        let local_group = local_group.trim();
 
         Self::new(&project, local_group)
     }
@@ -422,13 +425,13 @@ impl UserMapping {
     pub fn parse(identifier: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = identifier.split(':').collect();
 
-        if parts.len() != 3 {
+        let [user, local_user, local_group] = parts.as_slice() else {
             return Err(Error::Parse(format!("Invalid UserMapping: {}", identifier)));
-        }
+        };
 
-        let user = UserIdentifier::parse(parts[0])?;
-        let local_user = parts[1].trim();
-        let local_group = parts[2].trim();
+        let user = UserIdentifier::parse(user)?;
+        let local_user = local_user.trim();
+        let local_group = local_group.trim();
 
         Self::new(&user, local_user, local_group)
     }
@@ -1093,12 +1096,12 @@ impl DateRange {
             _ => {}
         }
 
-        let mut parts: Vec<&str> = date_range.split(':').collect();
+        let parts: Vec<&str> = date_range.split(':').collect();
 
-        parts = match parts.len() {
-            // start and end date are the same
-            1 => vec![parts[0], parts[0]],
-            2 => parts,
+        let (start, end) = match parts.as_slice() {
+            // a single date means the start and end date are the same
+            [single] => (*single, *single),
+            [start, end] => (*start, *end),
             _ => {
                 return Err(Error::Parse(format!(
                     "Invalid DateRange - must contain two dates, separated by a colon '{}'",
@@ -1108,8 +1111,8 @@ impl DateRange {
         };
 
         Ok(Self {
-            start_date: Date::parse(parts[0])?,
-            end_date: Date::parse(parts[1])?,
+            start_date: Date::parse(start)?,
+            end_date: Date::parse(end)?,
         })
     }
 
@@ -1555,17 +1558,21 @@ impl Allocation {
 
         let parts: Vec<&str> = allocation.split_whitespace().collect();
 
-        if parts.is_empty() || parts.len() < 2 {
+        // Split rather than indexed, so "no size" and "no units" are parse
+        // errors by construction - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let Some((size_part, unit_parts)) = parts.split_first().filter(|(_, u)| !u.is_empty())
+        else {
             return Err(Error::Parse(format!(
                 "Invalid Allocation - must contain a size and units '{}'",
                 allocation
             )));
-        }
+        };
 
-        let size = parts[0].parse::<f64>().map_err(|_| {
+        let size = size_part.parse::<f64>().map_err(|_| {
             Error::Parse(format!(
                 "Invalid Allocation - size must be a number '{}'",
-                parts[0]
+                size_part
             ))
         })?;
 
@@ -1576,8 +1583,8 @@ impl Allocation {
             )));
         }
 
-        let units = if parts.len() > 1 {
-            let u = parts[1..].join(" ");
+        let units = {
+            let u = unit_parts.join(" ");
             let u = u.trim();
 
             if u.is_empty() {
@@ -1588,11 +1595,6 @@ impl Allocation {
             }
 
             u.to_string()
-        } else {
-            return Err(Error::Parse(format!(
-                "Invalid Allocation - must contain a size and units '{}'",
-                allocation
-            )));
         };
 
         Ok(Self {
@@ -2944,9 +2946,24 @@ pub enum Instruction {
 impl Instruction {
     pub fn parse(s: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = s.split(' ').collect();
-        match parts[0] {
-            "submit" => match Destination::parse(parts[1]) {
-                Ok(destination) => match Instruction::parse(&parts[2..].join(" ")) {
+
+        // Positional-argument accessors that cannot panic.
+        //
+        // Indexing `parts` directly panics whenever an instruction arrives
+        // with fewer arguments than its arm expects. That is reachable from
+        // the wire - `Command`'s `Deserialize` runs this parser on the
+        // `command` string of every incoming `Job` - and fatal rather than
+        // recoverable, because the release profile sets `panic = "abort"`.
+        // Returning an empty string for a missing argument instead lets each
+        // arm's existing error handling reject the instruction cleanly, since
+        // every sub-parser already rejects the empty string. See
+        // docs/specifications/security-review-2.md (finding R1).
+        let arg = |n: usize| -> &str { parts.get(n).copied().unwrap_or_default() };
+        let rest = |n: usize| -> String { parts.get(n..).unwrap_or_default().join(" ") };
+
+        match arg(0) {
+            "submit" => match Destination::parse(arg(1)) {
+                Ok(destination) => match Instruction::parse(&rest(2)) {
                     Ok(instruction) => Ok(Instruction::Submit(
                         destination,
                         Arc::<Instruction>::new(instruction),
@@ -2954,14 +2971,14 @@ impl Instruction {
                     Err(e) => {
                         tracing::error!(
                             "submit failed to parse the instruction for destination {}: {}. {}",
-                            parts[1],
-                            &parts[2..].join(" "),
+                            arg(1),
+                            &rest(2),
                             e
                         );
                         Err(Error::Parse(format!(
                             "submit failed to parse the instruction for destination {}: {}. {}",
-                            parts[1],
-                            &parts[2..].join(" "),
+                            arg(1),
+                            &rest(2),
                             e
                         )))
                     }
@@ -2969,334 +2986,304 @@ impl Instruction {
                 Err(e) => {
                     tracing::error!(
                         "submit failed to parse the destination for: {}. {}",
-                        &parts[1..].join(" "),
+                        &rest(1),
                         e
                     );
                     Err(Error::Parse(format!(
                         "submit failed to parse the destination for: {}. {}",
-                        &parts[1..].join(" "),
+                        &rest(1),
                         e
                     )))
                 }
             },
-            "create_project" | "create_award" => match ProjectIdentifier::parse(parts[1]) {
-                Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
+            "create_project" | "create_award" => match ProjectIdentifier::parse(arg(1)) {
+                Ok(project) => match ProjectDetails::parse(&rest(2)) {
                     Ok(details) => Ok(Instruction::CreateProject(project, details)),
                     Err(_) => {
-                        tracing::error!(
-                            "create_project failed to parse: {}",
-                            &parts[3..].join(" ")
-                        );
+                        tracing::error!("create_project failed to parse: {}", &rest(3));
                         Err(Error::Parse(format!(
                             "create_project failed to parse: {}",
-                            &parts[3..].join(" ")
+                            &rest(3)
                         )))
                     }
                 },
                 Err(_) => {
-                    tracing::error!("create_project failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("create_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "create_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "update_project" | "update_award" => match ProjectIdentifier::parse(parts[1]) {
-                Ok(project) => match ProjectDetails::parse(&parts[2..].join(" ")) {
+            "update_project" | "update_award" => match ProjectIdentifier::parse(arg(1)) {
+                Ok(project) => match ProjectDetails::parse(&rest(2)) {
                     Ok(details) => Ok(Instruction::UpdateProject(project, details)),
                     Err(_) => {
-                        tracing::error!(
-                            "update_project failed to parse: {}",
-                            &parts[2..].join(" ")
-                        );
+                        tracing::error!("update_project failed to parse: {}", &rest(2));
                         Err(Error::Parse(format!(
                             "update_project failed to parse: {}",
-                            &parts[2..].join(" ")
+                            &rest(2)
                         )))
                     }
                 },
                 Err(_) => {
-                    tracing::error!("update_project failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("update_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "update_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "get_project" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::GetProject(project)),
                 Err(_) => {
-                    tracing::error!("get_project failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_projects" => match PortalIdentifier::parse(&parts[1..].join(" ")) {
+            "get_projects" => match PortalIdentifier::parse(&rest(1)) {
                 Ok(portal) => Ok(Instruction::GetProjects(portal)),
                 Err(_) => {
-                    tracing::error!("get_projects failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_projects failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_projects failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_award" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "get_award" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::GetAward(project)),
                 Err(_) => {
-                    tracing::error!("get_award failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_award failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_award failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_awards" | "list_awards" => match PortalIdentifier::parse(&parts[1..].join(" ")) {
+            "get_awards" | "list_awards" => match PortalIdentifier::parse(&rest(1)) {
                 Ok(portal) => Ok(Instruction::GetAwards(portal)),
                 Err(_) => {
-                    tracing::error!("get_awards failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_awards failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_awards failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "add_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "add_project" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::AddProject(project)),
                 Err(_) => {
-                    tracing::error!("add_project failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("add_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "remove_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "remove_project" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::RemoveProject(project)),
                 Err(_) => {
-                    tracing::error!("remove_project failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("remove_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "add_local_project" => match ProjectMapping::parse(&parts[1..].join(" ")) {
+            "add_local_project" => match ProjectMapping::parse(&rest(1)) {
                 Ok(mapping) => Ok(Instruction::AddLocalProject(mapping)),
                 Err(_) => {
-                    tracing::error!(
-                        "add_local_project failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("add_local_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_local_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "remove_local_project" => match ProjectMapping::parse(&parts[1..].join(" ")) {
+            "remove_local_project" => match ProjectMapping::parse(&rest(1)) {
                 Ok(mapping) => Ok(Instruction::RemoveLocalProject(mapping)),
                 Err(_) => {
-                    tracing::error!(
-                        "remove_local_project failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("remove_local_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_local_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_users" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "get_users" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::GetUsers(project)),
                 Err(_) => {
-                    tracing::error!("get_users failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_users failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_users failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "add_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "add_user" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::AddUser(user)),
                 Err(_) => {
-                    tracing::error!("add_user failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("add_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "remove_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "remove_user" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::RemoveUser(user)),
                 Err(_) => {
-                    tracing::error!("remove_user failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("remove_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "block_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "block_user" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::BlockUser(user)),
                 Err(_) => {
-                    tracing::error!("block_user failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("block_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "block_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "unblock_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "unblock_user" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::UnblockUser(user)),
                 Err(_) => {
-                    tracing::error!("unblock_user failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("unblock_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "unblock_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "is_blocked_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "is_blocked_user" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::IsBlockedUser(user)),
                 Err(_) => {
-                    tracing::error!("is_blocked_user failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("is_blocked_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_blocked_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "block_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "block_project" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::BlockProject(project)),
                 Err(_) => {
-                    tracing::error!("block_project failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("block_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "block_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "unblock_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "unblock_project" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::UnblockProject(project)),
                 Err(_) => {
-                    tracing::error!("unblock_project failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("unblock_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "unblock_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "is_blocked_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "is_blocked_project" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::IsBlockedProject(project)),
                 Err(_) => {
-                    tracing::error!(
-                        "is_blocked_project failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("is_blocked_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_blocked_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_project_mapping" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "get_project_mapping" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::GetProjectMapping(project)),
                 Err(_) => {
-                    tracing::error!(
-                        "get_project_mapping failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_project_mapping failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_project_mapping failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_user_mapping" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "get_user_mapping" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::GetUserMapping(user)),
                 Err(_) => {
-                    tracing::error!(
-                        "get_user_mapping failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_user_mapping failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_user_mapping failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "add_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
+            "add_local_user" => match UserMapping::parse(&rest(1)) {
                 Ok(mapping) => Ok(Instruction::AddLocalUser(mapping)),
                 Err(_) => {
-                    tracing::error!("add_local_user failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("add_local_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_local_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "remove_local_user" => match UserMapping::parse(&parts[1..].join(" ")) {
+            "remove_local_user" => match UserMapping::parse(&rest(1)) {
                 Ok(mapping) => Ok(Instruction::RemoveLocalUser(mapping)),
                 Err(_) => {
-                    tracing::error!(
-                        "remove_local_user failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("remove_local_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_local_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
             "update_homedir" => {
                 if parts.len() < 3 {
-                    tracing::error!("update_homedir failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("update_homedir failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "update_homedir failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                let homedir = parts[2].trim().to_string();
+                let homedir = arg(2).trim().to_string();
 
                 if homedir.is_empty() {
-                    tracing::error!("update_homedir failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("update_homedir failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "update_homedir failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserIdentifier::parse(parts[1]) {
+                match UserIdentifier::parse(arg(1)) {
                     Ok(user) => Ok(Instruction::UpdateHomeDir(user, homedir)),
                     Err(_) => {
-                        tracing::error!(
-                            "update_homedir failed to parse: {}",
-                            &parts[1..].join(" ")
-                        );
+                        tracing::error!("update_homedir failed to parse: {}", &rest(1));
                         Err(Error::Parse(format!(
                             "update_homedir failed to parse: {}",
-                            &parts[1..].join(" ")
+                            &rest(1)
                         )))
                     }
                 }
             }
             "get_local_usage_report" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_local_usage_report failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_usage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_usage_report failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
+                match ProjectMapping::parse(arg(1)) {
                     Ok(mapping) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("this_week")) {
                             Ok(date_range) => {
@@ -3305,12 +3292,12 @@ impl Instruction {
                             Err(e) => {
                                 tracing::error!(
                                     "get_local_usage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "get_local_usage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 )))
                             }
@@ -3319,12 +3306,12 @@ impl Instruction {
                     Err(e) => {
                         tracing::error!(
                             "get_local_usage_report failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "get_local_usage_report failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3332,17 +3319,14 @@ impl Instruction {
             }
             "get_storage_report" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_storage_report failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_storage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_storage_report failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
+                match ProjectIdentifier::parse(arg(1)) {
                     Ok(project) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
                             Ok(date_range) => {
@@ -3351,26 +3335,22 @@ impl Instruction {
                             Err(e) => {
                                 tracing::error!(
                                     "get_storage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "get_storage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 )))
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "get_storage_report failed to parse '{}': {}",
-                            &parts[1..].join(" "),
-                            e
-                        );
+                        tracing::error!("get_storage_report failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_storage_report failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3378,17 +3358,14 @@ impl Instruction {
             }
             "get_storage_reports" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_storage_reports failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_storage_reports failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_storage_reports failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match PortalIdentifier::parse(parts[1]) {
+                match PortalIdentifier::parse(arg(1)) {
                     Ok(portal) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
                             Ok(date_range) => {
@@ -3397,12 +3374,12 @@ impl Instruction {
                             Err(e) => {
                                 tracing::error!(
                                     "get_storage_reports failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "get_storage_reports failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 )))
                             }
@@ -3411,12 +3388,12 @@ impl Instruction {
                     Err(e) => {
                         tracing::error!(
                             "get_storage_reports failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "get_storage_reports failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3424,43 +3401,36 @@ impl Instruction {
             }
             "get_usage_report" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_usage_report failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_usage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_usage_report failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
+                match ProjectIdentifier::parse(arg(1)) {
                     Ok(project) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("this_week")) {
                             Ok(date_range) => Ok(Instruction::GetUsageReport(project, date_range)),
                             Err(e) => {
                                 tracing::error!(
                                     "get_usage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "get_usage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 )))
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "get_usage_report failed to parse '{}': {}",
-                            &parts[1..].join(" "),
-                            e
-                        );
+                        tracing::error!("get_usage_report failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_usage_report failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3468,43 +3438,36 @@ impl Instruction {
             }
             "get_usage_reports" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_usage_reports failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_usage_reports failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_usage_reports failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match PortalIdentifier::parse(parts[1]) {
+                match PortalIdentifier::parse(arg(1)) {
                     Ok(portal) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("this_week")) {
                             Ok(date_range) => Ok(Instruction::GetUsageReports(portal, date_range)),
                             Err(e) => {
                                 tracing::error!(
                                     "get_usage_reports failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "get_usage_reports failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 )))
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "get_usage_reports failed to parse '{}': {}",
-                            &parts[1..].join(" "),
-                            e
-                        );
+                        tracing::error!("get_usage_reports failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_usage_reports failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3512,38 +3475,34 @@ impl Instruction {
             }
             "set_local_limit" => {
                 if parts.len() < 3 {
-                    tracing::error!("set_local_limit failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("set_local_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_local_limit failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
-                    Ok(mapping) => match Usage::parse(parts[2]) {
+                match ProjectMapping::parse(arg(1)) {
+                    Ok(mapping) => match Usage::parse(arg(2)) {
                         Ok(usage) => Ok(Instruction::SetLocalLimit(mapping, usage)),
                         Err(e) => {
                             tracing::error!(
                                 "set_local_limit failed to parse '{}': {}",
-                                &parts[1..].join(" "),
+                                &rest(1),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "set_local_limit failed to parse '{}': {}",
-                                &parts[1..].join(" "),
+                                &rest(1),
                                 e
                             )))
                         }
                     },
                     Err(e) => {
-                        tracing::error!(
-                            "set_local_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
-                            e
-                        );
+                        tracing::error!("set_local_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "set_local_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3551,24 +3510,20 @@ impl Instruction {
             }
             "get_local_limit" => {
                 if parts.len() < 2 {
-                    tracing::error!("get_local_limit failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_local_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_limit failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
+                match ProjectMapping::parse(arg(1)) {
                     Ok(mapping) => Ok(Instruction::GetLocalLimit(mapping)),
                     Err(e) => {
-                        tracing::error!(
-                            "get_local_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
-                            e
-                        );
+                        tracing::error!("get_local_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_local_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3576,38 +3531,30 @@ impl Instruction {
             }
             "set_limit" => {
                 if parts.len() < 3 {
-                    tracing::error!("set_limit failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("set_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_limit failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
-                    Ok(project) => match Usage::parse(&parts[2..].join(" ")) {
+                match ProjectIdentifier::parse(arg(1)) {
+                    Ok(project) => match Usage::parse(&rest(2)) {
                         Ok(usage) => Ok(Instruction::SetLimit(project, usage)),
                         Err(e) => {
-                            tracing::error!(
-                                "set_limit failed to parse '{}': {}",
-                                &parts[1..].join(" "),
-                                e
-                            );
+                            tracing::error!("set_limit failed to parse '{}': {}", &rest(1), e);
                             Err(Error::Parse(format!(
                                 "set_limit failed to parse '{}': {}",
-                                &parts[1..].join(" "),
+                                &rest(1),
                                 e
                             )))
                         }
                     },
                     Err(e) => {
-                        tracing::error!(
-                            "set_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
-                            e
-                        );
+                        tracing::error!("set_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "set_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3615,24 +3562,20 @@ impl Instruction {
             }
             "get_limit" => {
                 if parts.len() < 2 {
-                    tracing::error!("get_limit failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_limit failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
+                match ProjectIdentifier::parse(arg(1)) {
                     Ok(project) => Ok(Instruction::GetLimit(project)),
                     Err(e) => {
-                        tracing::error!(
-                            "get_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
-                            e
-                        );
+                        tracing::error!("get_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_limit failed to parse '{}': {}",
-                            &parts[1..].join(" "),
+                            &rest(1),
                             e
                         )))
                     }
@@ -3640,69 +3583,65 @@ impl Instruction {
             }
             "clear_project_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!(
-                        "clear_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("clear_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
-                    Ok(project) => match Volume::parse(parts[2]) {
+                match ProjectIdentifier::parse(arg(1)) {
+                    Ok(project) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::ClearProjectQuota(project, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "clear_project_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "clear_project_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "clear_project_quota failed to parse project '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "clear_project_quota failed to parse project '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "set_project_quota" => {
                 if parts.len() < 4 {
-                    tracing::error!(
-                        "set_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("set_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
-                    Ok(project) => match Volume::parse(parts[2]) {
-                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                match ProjectIdentifier::parse(arg(1)) {
+                    Ok(project) => match Volume::parse(arg(2)) {
+                        Ok(volume) => match QuotaLimit::parse(&rest(3)) {
                             Ok(limit) => Ok(Instruction::SetProjectQuota(project, volume, limit)),
                             Err(e) => {
                                 tracing::error!(
                                     "set_project_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "set_project_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 )))
                             }
@@ -3710,153 +3649,151 @@ impl Instruction {
                         Err(e) => {
                             tracing::error!(
                                 "set_project_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "set_project_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "set_project_quota failed to parse project '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "set_project_quota failed to parse project '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_project_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!(
-                        "get_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
-                    Ok(project) => match Volume::parse(parts[2]) {
+                match ProjectIdentifier::parse(arg(1)) {
+                    Ok(project) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::GetProjectQuota(project, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "get_project_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "get_project_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "get_project_quota failed to parse project '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "get_project_quota failed to parse project '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_project_quotas" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_project_quotas failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_project_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_project_quotas failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectIdentifier::parse(parts[1]) {
+                match ProjectIdentifier::parse(arg(1)) {
                     Ok(project) => Ok(Instruction::GetProjectQuotas(project)),
                     Err(e) => {
-                        tracing::error!("get_project_quotas failed to parse '{}': {}", parts[1], e);
+                        tracing::error!("get_project_quotas failed to parse '{}': {}", arg(1), e);
                         Err(Error::Parse(format!(
                             "get_project_quotas failed to parse '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "clear_user_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!(
-                        "clear_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("clear_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserIdentifier::parse(parts[1]) {
-                    Ok(user) => match Volume::parse(parts[2]) {
+                match UserIdentifier::parse(arg(1)) {
+                    Ok(user) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::ClearUserQuota(user, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "clear_user_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "clear_user_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "clear_user_quota failed to parse user '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "clear_user_quota failed to parse user '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "set_user_quota" => {
                 if parts.len() < 4 {
-                    tracing::error!("set_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("set_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserIdentifier::parse(parts[1]) {
-                    Ok(user) => match Volume::parse(parts[2]) {
-                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                match UserIdentifier::parse(arg(1)) {
+                    Ok(user) => match Volume::parse(arg(2)) {
+                        Ok(volume) => match QuotaLimit::parse(&rest(3)) {
                             Ok(limit) => Ok(Instruction::SetUserQuota(user, volume, limit)),
                             Err(e) => {
                                 tracing::error!(
                                     "set_user_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "set_user_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 )))
                             }
@@ -3864,152 +3801,145 @@ impl Instruction {
                         Err(e) => {
                             tracing::error!(
                                 "set_user_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "set_user_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
-                        tracing::error!(
-                            "set_user_quota failed to parse user '{}': {}",
-                            parts[1],
-                            e
-                        );
+                        tracing::error!("set_user_quota failed to parse user '{}': {}", arg(1), e);
                         Err(Error::Parse(format!(
                             "set_user_quota failed to parse user '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_user_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!("get_user_quota failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserIdentifier::parse(parts[1]) {
-                    Ok(user) => match Volume::parse(parts[2]) {
+                match UserIdentifier::parse(arg(1)) {
+                    Ok(user) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::GetUserQuota(user, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "get_user_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "get_user_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
-                        tracing::error!(
-                            "get_user_quota failed to parse user '{}': {}",
-                            parts[1],
-                            e
-                        );
+                        tracing::error!("get_user_quota failed to parse user '{}': {}", arg(1), e);
                         Err(Error::Parse(format!(
                             "get_user_quota failed to parse user '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_user_quotas" => {
                 if parts.len() < 2 {
-                    tracing::error!("get_user_quotas failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_user_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_user_quotas failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserIdentifier::parse(parts[1]) {
+                match UserIdentifier::parse(arg(1)) {
                     Ok(user) => Ok(Instruction::GetUserQuotas(user)),
                     Err(e) => {
-                        tracing::error!("get_user_quotas failed to parse '{}': {}", parts[1], e);
+                        tracing::error!("get_user_quotas failed to parse '{}': {}", arg(1), e);
                         Err(Error::Parse(format!(
                             "get_user_quotas failed to parse '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "clear_local_project_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!(
-                        "clear_local_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("clear_local_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_local_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
-                    Ok(mapping) => match Volume::parse(parts[2]) {
+                match ProjectMapping::parse(arg(1)) {
+                    Ok(mapping) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::ClearLocalProjectQuota(mapping, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "clear_local_project_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "clear_local_project_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "clear_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "clear_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "set_local_project_quota" => {
                 if parts.len() < 4 {
-                    tracing::error!(
-                        "set_local_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("set_local_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_local_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
-                    Ok(mapping) => match Volume::parse(parts[2]) {
-                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                match ProjectMapping::parse(arg(1)) {
+                    Ok(mapping) => match Volume::parse(arg(2)) {
+                        Ok(volume) => match QuotaLimit::parse(&rest(3)) {
                             Ok(limit) => {
                                 Ok(Instruction::SetLocalProjectQuota(mapping, volume, limit))
                             }
                             Err(e) => {
                                 tracing::error!(
                                     "set_local_project_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "set_local_project_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 )))
                             }
@@ -4017,160 +3947,155 @@ impl Instruction {
                         Err(e) => {
                             tracing::error!(
                                 "set_local_project_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "set_local_project_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "set_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "set_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_local_project_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!(
-                        "get_local_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_project_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
-                    Ok(mapping) => match Volume::parse(parts[2]) {
+                match ProjectMapping::parse(arg(1)) {
+                    Ok(mapping) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::GetLocalProjectQuota(mapping, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "get_local_project_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "get_local_project_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "get_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "get_local_project_quota failed to parse mapping '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_local_project_quotas" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_local_project_quotas failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_project_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_project_quotas failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
+                match ProjectMapping::parse(arg(1)) {
                     Ok(mapping) => Ok(Instruction::GetLocalProjectQuotas(mapping)),
                     Err(e) => {
                         tracing::error!(
                             "get_local_project_quotas failed to parse '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "get_local_project_quotas failed to parse '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "clear_local_user_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!(
-                        "clear_local_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("clear_local_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_local_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserMapping::parse(parts[1]) {
-                    Ok(mapping) => match Volume::parse(parts[2]) {
+                match UserMapping::parse(arg(1)) {
+                    Ok(mapping) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::ClearLocalUserQuota(mapping, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "clear_local_user_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "clear_local_user_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "clear_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "clear_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "set_local_user_quota" => {
                 if parts.len() < 4 {
-                    tracing::error!(
-                        "set_local_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("set_local_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_local_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserMapping::parse(parts[1]) {
-                    Ok(mapping) => match Volume::parse(parts[2]) {
-                        Ok(volume) => match QuotaLimit::parse(&parts[3..].join(" ")) {
+                match UserMapping::parse(arg(1)) {
+                    Ok(mapping) => match Volume::parse(arg(2)) {
+                        Ok(volume) => match QuotaLimit::parse(&rest(3)) {
                             Ok(limit) => Ok(Instruction::SetLocalUserQuota(mapping, volume, limit)),
                             Err(e) => {
                                 tracing::error!(
                                     "set_local_user_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "set_local_user_quota failed to parse quota '{}': {}",
-                                    &parts[3..].join(" "),
+                                    &rest(3),
                                     e
                                 )))
                             }
@@ -4178,193 +4103,174 @@ impl Instruction {
                         Err(e) => {
                             tracing::error!(
                                 "set_local_user_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "set_local_user_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "set_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "set_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_local_user_quota" => {
                 if parts.len() < 3 {
-                    tracing::error!(
-                        "get_local_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_user_quota failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserMapping::parse(parts[1]) {
-                    Ok(mapping) => match Volume::parse(parts[2]) {
+                match UserMapping::parse(arg(1)) {
+                    Ok(mapping) => match Volume::parse(arg(2)) {
                         Ok(volume) => Ok(Instruction::GetLocalUserQuota(mapping, volume)),
                         Err(e) => {
                             tracing::error!(
                                 "get_local_user_quota failed to parse volume '{}': {}",
-                                parts[2],
+                                arg(2),
                                 e
                             );
                             Err(Error::Parse(format!(
                                 "get_local_user_quota failed to parse volume '{}': {}",
-                                parts[2], e
+                                arg(2),
+                                e
                             )))
                         }
                     },
                     Err(e) => {
                         tracing::error!(
                             "get_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "get_local_user_quota failed to parse mapping '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
             "get_local_user_quotas" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_local_user_quotas failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_user_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_user_quotas failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match UserMapping::parse(parts[1]) {
+                match UserMapping::parse(arg(1)) {
                     Ok(mapping) => Ok(Instruction::GetLocalUserQuotas(mapping)),
                     Err(e) => {
                         tracing::error!(
                             "get_local_user_quotas failed to parse '{}': {}",
-                            parts[1],
+                            arg(1),
                             e
                         );
                         Err(Error::Parse(format!(
                             "get_local_user_quotas failed to parse '{}': {}",
-                            parts[1], e
+                            arg(1),
+                            e
                         )))
                     }
                 }
             }
-            "is_protected_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "is_protected_user" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::IsProtectedUser(user)),
                 Err(_) => {
-                    tracing::error!(
-                        "is_protected_user failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("is_protected_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_protected_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "is_existing_user" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "is_existing_user" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::IsExistingUser(user)),
                 Err(_) => {
-                    tracing::error!(
-                        "is_existing_user failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("is_existing_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_existing_user failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "is_existing_project" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "is_existing_project" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::IsExistingProject(project)),
                 Err(_) => {
-                    tracing::error!(
-                        "is_existing_project failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("is_existing_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_existing_project failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_home_dir" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "get_home_dir" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::GetHomeDir(user)),
                 Err(_) => {
-                    tracing::error!("get_home_dir failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_home_dir failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_home_dir failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_project_dirs" => match ProjectIdentifier::parse(&parts[1..].join(" ")) {
+            "get_project_dirs" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::GetProjectDirs(project)),
                 Err(_) => {
-                    tracing::error!(
-                        "get_project_dirs failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_project_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_project_dirs failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_user_dirs" => match UserIdentifier::parse(&parts[1..].join(" ")) {
+            "get_user_dirs" => match UserIdentifier::parse(&rest(1)) {
                 Ok(user) => Ok(Instruction::GetUserDirs(user)),
                 Err(_) => {
-                    tracing::error!("get_user_dirs failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("get_user_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_user_dirs failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_local_home_dir" => match UserMapping::parse(&parts[1..].join(" ")) {
+            "get_local_home_dir" => match UserMapping::parse(&rest(1)) {
                 Ok(mapping) => Ok(Instruction::GetLocalHomeDir(mapping)),
                 Err(_) => {
-                    tracing::error!(
-                        "get_local_home_dir failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_home_dir failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_local_home_dir failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
             "get_local_storage_report" => {
                 if parts.len() < 2 {
-                    tracing::error!(
-                        "get_local_storage_report failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_storage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_storage_report failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )));
                 }
 
-                match ProjectMapping::parse(parts[1]) {
+                match ProjectMapping::parse(arg(1)) {
                     Ok(mapping) => {
                         match DateRange::parse(parts.get(2).cloned().unwrap_or("today")) {
                             Ok(date_range) => {
@@ -4373,85 +4279,73 @@ impl Instruction {
                             Err(e) => {
                                 tracing::error!(
                                     "get_local_storage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 );
                                 Err(Error::Parse(format!(
                                     "get_local_storage_report failed to parse '{}': {}",
-                                    &parts[1..].join(" "),
+                                    &rest(1),
                                     e
                                 )))
                             }
                         }
                     }
                     Err(_) => {
-                        tracing::error!(
-                            "get_local_storage_report failed to parse: {}",
-                            &parts[1..].join(" ")
-                        );
+                        tracing::error!("get_local_storage_report failed to parse: {}", &rest(1));
                         Err(Error::Parse(format!(
                             "get_local_storage_report failed to parse: {}",
-                            &parts[1..].join(" ")
+                            &rest(1)
                         )))
                     }
                 }
             }
-            "get_local_project_dirs" => match ProjectMapping::parse(&parts[1..].join(" ")) {
+            "get_local_project_dirs" => match ProjectMapping::parse(&rest(1)) {
                 Ok(mapping) => Ok(Instruction::GetLocalProjectDirs(mapping)),
                 Err(_) => {
-                    tracing::error!(
-                        "get_local_project_dirs failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_project_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_local_project_dirs failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "get_local_user_dirs" => match UserMapping::parse(&parts[1..].join(" ")) {
+            "get_local_user_dirs" => match UserMapping::parse(&rest(1)) {
                 Ok(mapping) => Ok(Instruction::GetLocalUserDirs(mapping)),
                 Err(_) => {
-                    tracing::error!(
-                        "get_local_user_dirs failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("get_local_user_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_local_user_dirs failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "add_offerings" => match Destinations::parse(&parts[1..].join(" ")) {
+            "add_offerings" => match Destinations::parse(&rest(1)) {
                 Ok(offerings) => Ok(Instruction::AddOfferings(offerings)),
                 Err(_) => {
-                    tracing::error!("add_offerings failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("add_offerings failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_offerings failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "remove_offerings" => match Destinations::parse(&parts[1..].join(" ")) {
+            "remove_offerings" => match Destinations::parse(&rest(1)) {
                 Ok(offerings) => Ok(Instruction::RemoveOfferings(offerings)),
                 Err(_) => {
-                    tracing::error!(
-                        "remove_offerings failed to parse: {}",
-                        &parts[1..].join(" ")
-                    );
+                    tracing::error!("remove_offerings failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_offerings failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
-            "sync_offerings" => match Destinations::parse(&parts[1..].join(" ")) {
+            "sync_offerings" => match Destinations::parse(&rest(1)) {
                 Ok(offerings) => Ok(Instruction::SyncOfferings(offerings)),
                 Err(_) => {
-                    tracing::error!("sync_offerings failed to parse: {}", &parts[1..].join(" "));
+                    tracing::error!("sync_offerings failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "sync_offerings failed to parse: {}",
-                        &parts[1..].join(" ")
+                        &rest(1)
                     )))
                 }
             },
@@ -4912,6 +4806,93 @@ mod tests {
             mapping.to_string(),
             "user.project.portal:local_user:local_group"
         );
+    }
+
+    #[test]
+    fn test_instruction_parse_never_panics_on_missing_arguments() {
+        // Regression test for finding R1. Four arms of `Instruction::parse`
+        // indexed `parts` without a length guard, so an instruction keyword
+        // with fewer arguments than that arm expected panicked - and because
+        // `Command`'s `Deserialize` runs this parser on the `command` string of
+        // every incoming `Job`, and the release profile sets `panic = "abort"`,
+        // a ~200-byte message from any authenticated peer terminated the
+        // process. Every one of these must be a clean `Err`.
+        let truncated = [
+            "submit",
+            "create_project",
+            "create_award",
+            "update_project",
+            "update_award",
+            // two tokens: enough for `parts[1]` but not for `parts[2..]`/`[3..]`
+            "create_project proj.portal",
+            "update_project proj.portal",
+            "create_award proj.portal",
+            "submit a.b",
+        ];
+
+        for command in truncated {
+            assert!(
+                Instruction::parse(command).is_err(),
+                "'{}' must be a parse error, not a panic",
+                command
+            );
+        }
+
+        // Nor on an empty or whitespace-only instruction.
+        assert!(Instruction::parse("").is_err());
+        assert!(Instruction::parse(" ").is_err());
+        assert!(Instruction::parse("   ").is_err());
+
+        // Exhaustive sweep: every keyword the parser recognises, given 0, 1
+        // and 2 arguments, must either parse or error - never panic. This is
+        // what stops the same class of bug returning in a future arm.
+        let keywords = [
+            "submit",
+            "create_project",
+            "create_award",
+            "update_project",
+            "update_award",
+            "get_project",
+            "get_projects",
+            "get_award",
+            "get_awards",
+            "add_project",
+            "remove_project",
+            "add_local_project",
+            "remove_local_project",
+            "add_user",
+            "remove_user",
+            "add_local_user",
+            "remove_local_user",
+            "get_usage_report",
+            "get_local_usage_report",
+            "get_limit",
+            "set_limit",
+            "get_local_limit",
+            "set_local_limit",
+            "block_user",
+            "unblock_user",
+            "is_blocked_user",
+            "block_project",
+            "unblock_project",
+            "is_blocked_project",
+            "get_storage_report",
+            "get_home_dir",
+            "update_home_dir",
+            "get_offerings",
+            "add_offerings",
+            "remove_offerings",
+            "sync_offerings",
+            "not_a_real_instruction",
+        ];
+
+        for keyword in keywords {
+            for args in ["", " x", " x y", " x y z"] {
+                let command = format!("{}{}", keyword, args);
+                // The result is irrelevant - not panicking is the assertion.
+                let _ = Instruction::parse(&command);
+            }
+        }
     }
 
     #[test]

@@ -5,7 +5,6 @@ use crate::error::Error;
 use crate::named::NamedType;
 
 use serde::{Deserialize, Serialize};
-use std::cmp::{Ord, Ordering};
 
 impl NamedType for Destination {
     fn type_name() -> String {
@@ -60,27 +59,46 @@ impl Destination {
     }
 
     fn position_internal(&self, agent: &str, previous: &str) -> Position {
-        match self.agents.last() {
-            Some(last) => {
-                if last == agent {
-                    Position::Destination
-                } else {
-                    let agent_index = self.agents.iter().position(|c| c == agent);
-                    let previous_index = self.agents.iter().position(|c| c == previous);
+        let Some(agent_index) = self.agents.iter().position(|c| c == agent) else {
+            return Position::Error;
+        };
 
-                    match (agent_index, previous_index) {
-                        (Some(agent_index), Some(previous_index)) => {
-                            match Ord::cmp(&agent_index, &previous_index) {
-                                Ordering::Greater => Position::Downstream,
-                                Ordering::Less => Position::Upstream,
-                                Ordering::Equal => Position::Error,
-                            }
-                        }
-                        _ => Position::Error,
-                    }
-                }
-            }
-            None => Position::Error,
+        let Some(previous_index) = self.agents.iter().position(|c| c == previous) else {
+            return Position::Error;
+        };
+
+        // `previous` must be our *immediate* neighbour in the path, not merely
+        // present somewhere in it.
+        //
+        // This is the check that binds a Job's claimed route to the peer that
+        // actually delivered it. `previous` is the authenticated sender, stamped
+        // by paddington from the connection's own `ClientConfig`
+        // (`connection.rs`), so it cannot be forged without that link's
+        // pre-shared key - whereas the route is an unvalidated `Vec<String>`
+        // straight off the wire. Requiring adjacency therefore means an agent
+        // can only claim a position in the path for which it holds the key.
+        //
+        // Previously any sender appearing *anywhere* in the path was accepted,
+        // and reaching the last agent returned `Destination` without looking at
+        // the sender at all - so a peer could hand its neighbour a Job claiming
+        // to have come from the portal and have it forwarded onward bearing that
+        // neighbour's authority. See
+        // `docs/specifications/security-review-2.md` (finding R4).
+        let from_upstream = previous_index + 1 == agent_index;
+        let from_downstream = agent_index + 1 == previous_index;
+
+        match (from_upstream, from_downstream) {
+            // Travelling downstream, and we are the final hop: this Job is for
+            // us.
+            (true, _) if agent_index + 1 == self.agents.len() => Position::Destination,
+            // Travelling downstream, with further hops beyond us.
+            (true, _) => Position::Downstream,
+            // A result travelling back up the path.
+            (_, true) => Position::Upstream,
+            // The sender is not adjacent to us - either it named a position it
+            // does not occupy, or the route does not describe a path through
+            // both of us.
+            _ => Position::Error,
         }
     }
 
@@ -348,6 +366,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_position_requires_the_sender_to_be_adjacent() {
+        // Regression test for finding R4. `position` accepted any sender that
+        // appeared *anywhere* in the path, and returned `Destination` for the
+        // last agent without looking at the sender at all.
+        let d = Destination::parse("portal.provider.clusters.cluster")
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+
+        // The legitimate hop-by-hop flow, downstream.
+        assert_eq!(d.position("provider", "portal"), Position::Downstream);
+        assert_eq!(d.position("clusters", "provider"), Position::Downstream);
+        assert_eq!(d.position("cluster", "clusters"), Position::Destination);
+
+        // ...and the results coming back upstream.
+        assert_eq!(d.position("clusters", "cluster"), Position::Upstream);
+        assert_eq!(d.position("provider", "clusters"), Position::Upstream);
+        assert_eq!(d.position("portal", "provider"), Position::Upstream);
+
+        // Now the attack: a sender that is in the path but is *not* our
+        // neighbour. Previously `clusters` accepted this from `portal` (index 0
+        // < index 2, so "downstream") and forwarded it onward under its own
+        // authority.
+        assert_eq!(d.position("clusters", "portal"), Position::Error);
+        assert_eq!(d.position("cluster", "portal"), Position::Error);
+        assert_eq!(d.position("cluster", "provider"), Position::Error);
+        assert_eq!(d.position("portal", "cluster"), Position::Error);
+        assert_eq!(d.position("portal", "clusters"), Position::Error);
+
+        // A sender not in the path at all is still an error.
+        assert_eq!(d.position("cluster", "attacker"), Position::Error);
+        // ...as is a recipient not in the path.
+        assert_eq!(d.position("attacker", "clusters"), Position::Error);
+        // ...and a sender claiming to be us.
+        assert_eq!(d.position("clusters", "clusters"), Position::Error);
+    }
+
+    #[test]
+    fn test_position_accepts_every_real_flow_shape() {
+        // Adjacency must not break any destination shape the codebase actually
+        // builds. Each of these is taken from a real construction site.
+
+        // portal -> provider -> platform -> instance (portal/src/main.rs:250,
+        // via the Submit destination supplied by the bridge)
+        let d = Destination::parse("brics.isambard.aip2.cluster1")
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(d.position("isambard", "brics"), Position::Downstream);
+        assert_eq!(d.position("aip2", "isambard"), Position::Downstream);
+        assert_eq!(d.position("cluster1", "aip2"), Position::Destination);
+
+        // The minimal hierarchy: portal -> instance.
+        let d =
+            Destination::parse("portal.cluster").unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(d.position("cluster", "portal"), Position::Destination);
+        assert_eq!(d.position("portal", "cluster"), Position::Upstream);
+
+        // bridge -> portal (templemeads/src/bridge.rs:143)
+        let d =
+            Destination::parse("bridge.portal").unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(d.position("portal", "bridge"), Position::Destination);
+        assert_eq!(d.position("bridge", "portal"), Position::Upstream);
+
+        // instance -> account/filesystem/scheduler (cluster/src/main.rs:566ff)
+        let d = Destination::parse("cluster.freeipa")
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(d.position("freeipa", "cluster"), Position::Destination);
+        assert_eq!(d.position("cluster", "freeipa"), Position::Upstream);
+
+        // cloudportal -> cloudaccount (cloudportal/src/main.rs:381ff)
+        let d = Destination::parse("cloudportal.cloudaccount")
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(
+            d.position("cloudaccount", "cloudportal"),
+            Position::Destination
+        );
+
+        // the offering shape: resource.local-portal.remote-portal
+        let d = Destination::parse("resource.localportal.remoteportal")
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(d.position("localportal", "resource"), Position::Downstream);
+        assert_eq!(
+            d.position("remoteportal", "localportal"),
+            Position::Destination
+        );
+    }
+
+    #[test]
+    fn test_position_on_a_self_referential_path() {
+        // A path naming the same agent twice cannot be used to bounce a Job.
+        // Indices are first-occurrence, so the repeat is simply not adjacent.
+        let d = Destination::parse("a.b.b.c").unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(d.position("b", "b"), Position::Error);
+
+        let d = Destination::parse("a.b.a.b.c").unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        assert_eq!(d.position("b", "a"), Position::Downstream);
+        // `a` claiming to have received from the *second* `b` gets nothing new -
+        // it is still just the adjacent pair.
+        assert_eq!(d.position("a", "b"), Position::Upstream);
+        assert_eq!(d.position("c", "a"), Position::Error);
+    }
+
+    #[test]
     fn test_destination_new() {
         #[allow(clippy::unwrap_used)]
         let destination = Destination::parse("a.b.c").unwrap();
@@ -363,7 +481,12 @@ mod tests {
         assert_eq!(destination.position("c", "b"), Position::Destination);
         assert_eq!(destination.position("a", "b"), Position::Upstream);
         assert_eq!(destination.position("b", "c"), Position::Upstream);
-        assert_eq!(destination.position("c", "a"), Position::Destination);
+        // `c` accepting a Job from `a` used to be `Destination` - the last agent
+        // in the path was returned as the destination without the sender being
+        // checked at all. That is the behaviour finding R4 removes: `a` is not
+        // `c`'s neighbour, so `c` must refuse it. See
+        // `test_position_requires_the_sender_to_be_adjacent`.
+        assert_eq!(destination.position("c", "a"), Position::Error);
         assert_eq!(destination.position("c", "d"), Position::Error);
         assert_eq!(destination.position("d", "c"), Position::Error);
     }

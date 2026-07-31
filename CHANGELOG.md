@@ -32,6 +32,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   way: a char index used as a byte offset when splitting a Lustre quota
   expression, and `permissions`/`links` in a volume config being indexed with
   a `roots` index when those lists may be shorter.
+- **A Job's claimed route was not bound to the peer that delivered it**
+  (finding R4). `Destination::position` accepted any sender that appeared
+  *anywhere* in the route, and returned `Destination` for the last agent without
+  looking at the sender at all - so a peer could hand its neighbour a Job
+  claiming to have come from the portal and have it forwarded onward under that
+  neighbour's authority, reaching agents it holds no keys for. The sender must
+  now be the *immediate* neighbour in the route. Because the sender is stamped by
+  paddington from the authenticated connection while the route is unvalidated
+  wire data, this means an agent can only claim a position in the path for which
+  it holds the pre-shared key.
+- **The portal-ownership check never ran on the wire path** (finding R34).
+  `Command::parse`'s `check_portal` arm enforces "an instruction naming portal X
+  may only be issued via a destination rooted at X", but it is passed `true` only
+  at the two entry points to the system - the bridge, and the portal building its
+  southbound Job. Every Job arriving over paddington is deserialised with it
+  `false`, and no privileged agent re-checked it, so a Job injected directly at
+  an agent inside the estate could name any portal's project. Provider, Platform
+  and Instance agents now re-check it on receipt, using `Domain::owning_portal`
+  and their own locally-configured agent type. `op-cloudaccount` uses the new
+  `instance::run_delegated`, because its Jobs are handed to it by
+  `op-cloudportal` and are rooted there rather than at the portal that owns the
+  project - the property genuinely does not hold for that topology.
+- **A peer's agent type was taken entirely on trust** (finding R3). `Register`
+  carries the role a peer claims, and the framework makes real authorization
+  decisions from it - which peer a portal accepts a `Submit` from, which peer may
+  restart an agent or read its diagnostics, which peer an instance routes account
+  operations to. A `[[clients]]`/`[[servers]]` entry may now declare
+  `type = "bridge"` (or any other agent type), and a peer registering as anything
+  else is refused. The field is optional and unset means unchecked, so existing
+  configs keep working and the check can be adopted per peer; unset peers are
+  logged at debug level naming the value to add, and an unrecognised value is
+  logged as an error and treated as unset.
 - **`op-slurm` applied no managed-object guard to any mutation** (finding R5).
   `set_limit` never called the `is_managed()` that already existed, and both
   `cancel_pending_*_jobs` took a bare account/user name with no lookup at all -
@@ -173,6 +205,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- `templemeads::agent::instance::run` now re-checks portal ownership on receipt.
+  An Instance whose Jobs are delegated by another agent rather than routed down
+  from the owning portal should use the new `instance::run_delegated` instead -
+  `op-cloudaccount` does.
 - `paddington::config::save` now takes `&Path` rather than `&PathBuf`, and no
   longer creates the parent directory separately (`write_secret_file` does it,
   owner-only). Callers passing a `&PathBuf` are unaffected.

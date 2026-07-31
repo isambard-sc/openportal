@@ -74,6 +74,7 @@ zone      = "<zone>"
 inner_key = "<hex>"
 outer_key = "<hex>"
 proxy     = "<relay-agent-name>"    # optional
+type      = "<agent-type>"          # optional
 
 [[servers]]
 name      = "<peer-name>"
@@ -82,11 +83,32 @@ zone      = "<zone>"
 inner_key = "<hex>"
 outer_key = "<hex>"
 proxy     = "<relay-agent-name>"    # optional
+type      = "<agent-type>"          # optional
 ```
 
 Clients are **inbound** connections (agents that connect to this agent). Servers
 are **outbound** connections (agents that this agent connects to). These lists
 are managed via CLI commands — do not edit them by hand.
+
+`type` declares the agent type this peer is **expected** to present itself as -
+one of `portal`, `provider`, `platform`, `instance`, `bridge`, `account`,
+`filesystem`, `scheduler`, `virtual`. When set, a peer that registers claiming
+any other type is refused and the mismatch is logged as an error.
+
+This matters because a peer's role otherwise arrives entirely over the wire, and
+the framework makes real authorization decisions from it — which peer a portal
+will accept a `Submit` from, which peer may restart an agent or read its
+diagnostics, which peer an instance routes account operations to. Declaring the
+expectation out-of-band, alongside the keys, means a compromised peer cannot
+claim more authority than it was provisioned with. See
+[security-review-2.md](security-review-2.md) (finding R3).
+
+`type` is **optional and unset by default**, and an entry without it is not
+checked — so existing configs keep working unchanged and the check can be
+adopted one peer at a time. An unset peer's claimed type is logged at debug
+level, naming the value to add, so the remaining gaps are discoverable. An
+unrecognised value is logged as an error and treated as unset rather than
+rejecting the peer.
 
 `proxy` is set only when this peer can only be reached through a blind
 relay proxy (an `op-proxy` agent) rather than directly — see

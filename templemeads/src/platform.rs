@@ -6,7 +6,7 @@ use crate::agent_core::Config;
 use crate::domain::Domain;
 use crate::error::Error;
 
-use crate::handler::{run_with_relay, set_my_service_details};
+use crate::handler::{run_with_relay, set_my_service_details, set_verify_portal_ownership};
 use anyhow::Result;
 
 ///
@@ -25,6 +25,11 @@ pub async fn run<L: Domain>(config: Config) -> Result<(), Error> {
 
     // pass the service details onto the handler
     set_my_service_details::<L>(&config.service().name(), &config.agent(), None, true).await?;
+
+    // Sits on the portal-rooted path, so re-check on receipt that each Job's
+    // instruction is issued via the portal that owns the identifiers it names
+    // - see docs/specifications/security-review-2.md (finding R34).
+    set_verify_portal_ownership::<L>(true).await?;
 
     // run the Provider OpenPortal agent
     run_with_relay::<L>(config.service()).await?;

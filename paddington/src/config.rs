@@ -200,6 +200,22 @@ pub struct ServerConfig {
     proxy: Option<String>,
     #[serde(default = "default_zone")]
     zone: String,
+    /// The agent type this peer is *expected* to present itself as, if the
+    /// operator has declared one - e.g. `type = "bridge"`.
+    ///
+    /// `paddington` does not interpret this: it is a free-form string passed
+    /// through for the agent layer to compare against what the peer actually
+    /// claims when it registers. That matters because a peer's role arrives
+    /// over the wire and was previously taken entirely on trust, so any peer
+    /// could assert any role and pick up whatever authority that role carries.
+    /// Declaring it here makes the expectation local and out-of-band, like
+    /// every other property of a peer relationship.
+    ///
+    /// `None` (the field absent) means "do not check", so an existing config
+    /// keeps working unchanged and the check can be adopted per peer. See
+    /// `docs/specifications/security-review-2.md` (finding R3).
+    #[serde(default, rename = "type")]
+    agent_type: Option<String>,
     inner_key: SecretKey,
     outer_key: SecretKey,
 }
@@ -259,6 +275,7 @@ impl ServerConfig {
             }),
             proxy: None,
             zone: zone.to_string(),
+            agent_type: None,
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -270,6 +287,7 @@ impl ServerConfig {
             url: create_websocket_url(&invite.url())?,
             proxy: None,
             zone: invite.zone(),
+            agent_type: None,
             inner_key: invite.inner_key(),
             outer_key: invite.outer_key(),
         })
@@ -291,6 +309,7 @@ impl ServerConfig {
             url: "".to_string(),
             proxy: Some(relay.trim().to_string()),
             zone: invite.zone(),
+            agent_type: None,
             inner_key: invite.inner_key(),
             outer_key: invite.outer_key(),
         })
@@ -302,6 +321,7 @@ impl ServerConfig {
             url: "".to_string(),
             proxy: None,
             zone: "".to_string(),
+            agent_type: None,
             inner_key: Key::null(),
             outer_key: Key::null(),
         }
@@ -346,6 +366,14 @@ impl ServerConfig {
 
     pub fn zone(&self) -> String {
         self.zone.clone()
+    }
+
+    /// The agent type this peer is expected to present itself as, if the
+    /// operator declared one (`type = "..."`). `None` means "do not check" -
+    /// see the field's own documentation and
+    /// docs/specifications/security-review-2.md (finding R3).
+    pub fn agent_type(&self) -> Option<String> {
+        self.agent_type.clone()
     }
 
     pub fn inner_key(&self) -> SecretKey {
@@ -609,6 +637,22 @@ pub struct ClientConfig {
     proxy: Option<String>,
     #[serde(default = "default_zone")]
     zone: String,
+    /// The agent type this peer is *expected* to present itself as, if the
+    /// operator has declared one - e.g. `type = "bridge"`.
+    ///
+    /// `paddington` does not interpret this: it is a free-form string passed
+    /// through for the agent layer to compare against what the peer actually
+    /// claims when it registers. That matters because a peer's role arrives
+    /// over the wire and was previously taken entirely on trust, so any peer
+    /// could assert any role and pick up whatever authority that role carries.
+    /// Declaring it here makes the expectation local and out-of-band, like
+    /// every other property of a peer relationship.
+    ///
+    /// `None` (the field absent) means "do not check", so an existing config
+    /// keeps working unchanged and the check can be adopted per peer. See
+    /// `docs/specifications/security-review-2.md` (finding R3).
+    #[serde(default, rename = "type")]
+    agent_type: Option<String>,
     inner_key: SecretKey,
     outer_key: SecretKey,
 }
@@ -642,6 +686,7 @@ impl ClientConfig {
             ip: Some(ip.clone()),
             proxy: None,
             zone: zone.to_string(),
+            agent_type: None,
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -663,6 +708,7 @@ impl ClientConfig {
             ip: None,
             proxy: Some(relay.trim().to_string()),
             zone: zone.to_string(),
+            agent_type: None,
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         })
@@ -675,6 +721,7 @@ impl ClientConfig {
             ip: Some(IpOrRange::IP("127.0.0.1".parse().unwrap())),
             proxy: None,
             zone: "".to_string(),
+            agent_type: None,
             inner_key: Key::null(),
             outer_key: Key::null(),
         }
@@ -726,6 +773,14 @@ impl ClientConfig {
 
     pub fn zone(&self) -> String {
         self.zone.clone()
+    }
+
+    /// The agent type this peer is expected to present itself as, if the
+    /// operator declared one (`type = "..."`). `None` means "do not check" -
+    /// see the field's own documentation and
+    /// docs/specifications/security-review-2.md (finding R3).
+    pub fn agent_type(&self) -> Option<String> {
+        self.agent_type.clone()
     }
 
     pub fn inner_key(&self) -> SecretKey {

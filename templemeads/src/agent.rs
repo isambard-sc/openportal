@@ -25,6 +25,29 @@ pub enum Type {
     Virtual,
 }
 
+impl Type {
+    /// Parse an agent type from the string form used by config files and by
+    /// `Display` (e.g. `"bridge"`). Case- and whitespace-insensitive.
+    ///
+    /// Used to interpret a peer's declared `type = "..."` so it can be compared
+    /// against the type the peer actually claims when it registers - see
+    /// `docs/specifications/security-review-2.md` (finding R3).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "portal" => Some(Type::Portal),
+            "provider" => Some(Type::Provider),
+            "platform" => Some(Type::Platform),
+            "instance" => Some(Type::Instance),
+            "bridge" => Some(Type::Bridge),
+            "account" => Some(Type::Account),
+            "filesystem" => Some(Type::Filesystem),
+            "scheduler" => Some(Type::Scheduler),
+            "virtual" => Some(Type::Virtual),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -69,6 +92,7 @@ pub mod instance {
     pub use crate::agent_core::Config;
     pub use crate::agent_core::Defaults;
     pub use crate::instance::run;
+    pub use crate::instance::run_delegated;
 }
 
 pub mod platform {
@@ -157,6 +181,11 @@ struct Registrar {
     /// because it sent one, or because `Domain::assume_legacy_domain_version`
     /// resolved one on its behalf. Peers with neither are simply absent here.
     peer_domains: HashMap<Peer, PeerDomain>,
+    /// The agent type each peer was *declared* as in our own configuration
+    /// (`type = "..."` on a `clients`/`servers` entry). A peer absent from this
+    /// map was not declared, and is not checked - see `expected_peer_type` and
+    /// `docs/specifications/security-review-2.md` (finding R3).
+    expected_types: HashMap<Peer, Type>,
     name: String,
     typ: Type,
     zones: Vec<String>,
@@ -174,6 +203,7 @@ impl Registrar {
             peers: HashMap::new(),
             peers_by_type: HashMap::new(),
             peer_domains: HashMap::new(),
+            expected_types: HashMap::new(),
             name: String::new(),
             typ: Type::Portal,
             zones: Vec::new(),
@@ -585,6 +615,28 @@ pub async fn start_time() -> chrono::DateTime<chrono::Utc> {
 ///
 /// Return the agent type of this agent
 ///
+/// Record the agent types each peer was declared as in our own configuration.
+///
+/// Called once at startup from `handler::run_with_relay`, which has the
+/// `ServiceConfig` and so can read each `clients`/`servers` entry's optional
+/// `type = "..."`. Peers with no declared type are simply absent, and are not
+/// checked. See `docs/specifications/security-review-2.md` (finding R3).
+pub async fn set_expected_peer_types(expected: HashMap<Peer, Type>) {
+    let mut registrar = REGISTRAR.write().await;
+
+    for (peer, typ) in &expected {
+        tracing::info!("Peer {} is declared as agent type '{}'", peer, typ);
+    }
+
+    registrar.expected_types = expected;
+}
+
+/// The agent type `peer` was declared as in our own configuration, or `None` if
+/// the operator did not declare one.
+pub async fn expected_peer_type(peer: &Peer) -> Option<Type> {
+    REGISTRAR.read().await.expected_types.get(peer).cloned()
+}
+
 pub async fn my_agent_type() -> Type {
     REGISTRAR.read().await.typ.clone()
 }
@@ -865,6 +917,65 @@ pub async fn find(name: &str, wait: u64) -> Option<Peer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_agent_type_parse_round_trips_with_display() {
+        // The declared `type = "..."` in a peer's config is compared against the
+        // type the peer claims on the wire, so the string form the config uses
+        // must agree with the string form `Display` produces (finding R3).
+        for typ in [
+            Type::Portal,
+            Type::Provider,
+            Type::Platform,
+            Type::Instance,
+            Type::Bridge,
+            Type::Account,
+            Type::Filesystem,
+            Type::Scheduler,
+            Type::Virtual,
+        ] {
+            assert_eq!(
+                Type::parse(&typ.to_string()),
+                Some(typ.clone()),
+                "'{}' must parse back to itself",
+                typ
+            );
+        }
+
+        // Tolerant of case and surrounding whitespace, since these come from a
+        // hand-edited config file.
+        assert_eq!(Type::parse("Bridge"), Some(Type::Bridge));
+        assert_eq!(Type::parse("  portal  "), Some(Type::Portal));
+        assert_eq!(Type::parse("INSTANCE"), Some(Type::Instance));
+
+        // An unrecognised value is `None`, which the caller treats as "not
+        // declared" after logging loudly - never as a silently different type.
+        assert_eq!(Type::parse("bridg"), None);
+        assert_eq!(Type::parse(""), None);
+        assert_eq!(Type::parse("root"), None);
+    }
+
+    #[tokio::test]
+    async fn test_expected_peer_type_is_absent_until_declared() {
+        // An undeclared peer returns `None`, which is what preserves backwards
+        // compatibility: its claimed type is accepted unchecked (finding R3).
+        let undeclared = Peer::new("never-declared-in-any-test", "default");
+        assert_eq!(expected_peer_type(&undeclared).await, None);
+
+        let declared = Peer::new("declared-bridge", "default");
+        let mut expected = HashMap::new();
+        expected.insert(declared.clone(), Type::Bridge);
+        set_expected_peer_types(expected).await;
+
+        assert_eq!(expected_peer_type(&declared).await, Some(Type::Bridge));
+        // ...and declaring one peer does not invent entries for anyone else.
+        assert_eq!(expected_peer_type(&undeclared).await, None);
+
+        // Zone is part of the identity, so the same name in another zone is a
+        // different peer and remains undeclared.
+        let other_zone = Peer::new("declared-bridge", "other");
+        assert_eq!(expected_peer_type(&other_zone).await, None);
+    }
 
     ///
     /// Only used by testing to clear out the registry

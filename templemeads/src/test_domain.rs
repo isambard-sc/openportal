@@ -14,6 +14,7 @@ use crate::domain::Domain;
 use crate::error::Error;
 use crate::named::NamedType;
 use crate::notification::Notification;
+use crate::portal_identifier::PortalIdentifier;
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,22 @@ impl Domain for TestDomain {
 
     fn parse_instruction(s: &str) -> Result<Self::Instruction, Error> {
         Ok(TestInstruction(s.to_string()))
+    }
+
+    /// Treat the last dot-separated component of the last argument as the
+    /// owning portal, mirroring how a real domain's identifiers are shaped
+    /// (`user.project.portal`). Enough to exercise the framework's
+    /// portal-ownership re-check - see `handler::check_portal_ownership` and
+    /// `docs/specifications/security-review-2.md` (finding R34).
+    fn owning_portal(instruction: &Self::Instruction) -> Option<PortalIdentifier> {
+        let last = instruction.0.split_whitespace().last()?;
+        let portal = last.rsplit('.').next()?;
+
+        match portal == last {
+            // no dot at all, so this instruction names no portal
+            true => None,
+            false => PortalIdentifier::parse(portal).ok(),
+        }
     }
 
     fn parse_notification_event(s: &str) -> Result<Self::NotificationEvent, Error> {

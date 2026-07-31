@@ -14,7 +14,7 @@ use greatwestern::grammar::Instruction::{
 };
 use greatwestern::usagereport::UsageReport;
 use greatwestern::{Hpc, NotificationEvent};
-use templemeads::agent::instance::{process_args, run, Defaults};
+use templemeads::agent::instance::{process_args, run_delegated, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::notification::{self, default_notify_runner};
@@ -220,7 +220,13 @@ async fn main() -> Result<()> {
     }
 
     set_notify_runner::<Hpc>(default_notify_runner).await?;
-    run(config, cloudaccount_runner).await?;
+    // `run_delegated`, not `run`: this Instance is driven directly by
+    // `op-cloudportal`, so its Jobs arrive on a `cloudportal.cloudaccount`
+    // destination while naming the upstream portal that owns the project. The
+    // portal-ownership re-check `run` applies does not hold for that topology -
+    // see docs/specifications/security-review-2.md (finding R34) and
+    // `instance::run_delegated`.
+    run_delegated(config, cloudaccount_runner).await?;
 
     Ok(())
 }

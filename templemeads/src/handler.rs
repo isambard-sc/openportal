@@ -11,7 +11,7 @@ use crate::domain::Domain;
 use crate::domain_static;
 use crate::error::Error;
 use crate::health;
-use crate::job::{sync_from_peer, Envelope, Status};
+use crate::job::{sync_from_peer, Envelope, Job, Status};
 use crate::jobtiming;
 use crate::notification::{default_notify_runner, AsyncNotifyRunnable, NotificationEnvelope};
 use crate::restart;
@@ -22,7 +22,7 @@ use paddington::config::ServiceConfig;
 use paddington::message::{Message, MessageType};
 use std::any::Any;
 use std::boxed::Box;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -35,6 +35,12 @@ struct ServiceDetails<L: Domain> {
     runner: AsyncRunnable<L>,
     notify_runner: AsyncNotifyRunnable<L>,
     keepalives: Arc<Mutex<HashSet<String>>>,
+    /// Whether this agent expects the Jobs it receives to be *portal-rooted* -
+    /// i.e. for the first agent in a Job's destination to be the portal that
+    /// owns the identifiers the instruction names. See
+    /// `assert_portal_ownership` and
+    /// `docs/specifications/security-review-2.md` (finding R34).
+    verify_portal_ownership: bool,
 }
 
 impl<L: Domain> Default for ServiceDetails<L> {
@@ -45,6 +51,9 @@ impl<L: Domain> Default for ServiceDetails<L> {
             runner: default_runner,
             notify_runner: default_notify_runner,
             keepalives: Arc::new(Mutex::new(HashSet::new())),
+            // Off unless an agent opts in, so a new agent type cannot silently
+            // acquire a check its destinations were never designed for.
+            verify_portal_ownership: false,
         }
     }
 }
@@ -76,6 +85,83 @@ pub async fn set_my_service_details<L: Domain>(
     if let Some(runner) = runner {
         // only change this if a runner has been passed
         service_details.runner = runner;
+    }
+
+    Ok(())
+}
+
+/// Declare whether this agent expects portal-rooted Jobs (see
+/// `ServiceDetails::verify_portal_ownership`).
+///
+/// Called by `provider::run`, `platform::run` and `instance::run`, which sit on
+/// the portal-rooted path. `instance::run_delegated` sets it `false` for an
+/// Instance whose Jobs are delegated by another agent rather than routed down
+/// from the owning portal.
+pub async fn set_verify_portal_ownership<L: Domain>(verify: bool) -> Result<()> {
+    let mut service_details = service_details::<L>()?.write().await;
+    service_details.verify_portal_ownership = verify;
+    Ok(())
+}
+
+async fn verify_portal_ownership<L: Domain>() -> bool {
+    match service_details::<L>() {
+        Ok(details) => details.read().await.verify_portal_ownership,
+        Err(_) => false,
+    }
+}
+
+/// Re-check, on receipt, that a Job's instruction is being issued via the portal
+/// that owns the identifiers it names.
+///
+/// `Command::parse`'s `check_portal` arm enforces this, but it is only ever
+/// passed `true` at the two *entry* points to the system - where the bridge
+/// parses a client command, and where the portal builds the southbound Job. Every
+/// Job arriving over paddington is deserialised with `check_portal = false`
+/// (`job.rs`'s `impl Deserialize for Command<L>`), and no privileged agent
+/// re-checked it. So a Job injected directly at an agent inside the estate never
+/// passed the check at all, and could name any portal's project while claiming
+/// any first agent. See `docs/specifications/security-review-2.md` (finding
+/// R34).
+///
+/// The decision is made entirely from locally-trusted state: this agent's own
+/// declared expectation (from its own startup, not the wire) and
+/// `Domain::owning_portal`, which lets `templemeads` ask the question without
+/// knowing any domain vocabulary. An instruction that names no portal is not
+/// checked.
+async fn assert_portal_ownership<L: Domain>(job: &Job<L>) -> Result<(), Error> {
+    check_portal_ownership(job, verify_portal_ownership::<L>().await)
+}
+
+/// The decision `assert_portal_ownership` makes, with the policy passed in
+/// rather than read from global state - so it can be tested directly.
+fn check_portal_ownership<L: Domain>(job: &Job<L>, verify: bool) -> Result<(), Error> {
+    if !verify {
+        return Ok(());
+    }
+
+    let Some(portal) = L::owning_portal(&job.instruction()) else {
+        return Ok(());
+    };
+
+    let first = job.destination().first();
+
+    if portal.portal() != first {
+        tracing::warn!(
+            "Rejecting job {}: it names portal '{}' but arrived on a destination \
+             rooted at '{}'. Only '{}' may issue instructions naming '{}'.",
+            job.id(),
+            portal.portal(),
+            first,
+            portal.portal(),
+            portal.portal()
+        );
+
+        return Err(Error::InvalidInstruction(format!(
+            "Job {} names portal '{}' but was issued via '{}'",
+            job.id(),
+            portal.portal(),
+            first
+        )));
     }
 
     Ok(())
@@ -180,6 +266,42 @@ async fn process_command<L: Domain>(
                 domain.as_deref().unwrap_or("unknown"),
                 domain_version.as_deref().unwrap_or("unknown")
             );
+
+            // A peer's role arrives over the wire, and every type-based
+            // authorization decision in the framework is made from it - which
+            // portal accepts a `Submit`, which peer may restart us, which peer
+            // an instance routes account operations to. Nothing checked it, so
+            // any peer could claim any role. If our own config declares what
+            // this peer should be, hold it to that. See
+            // `docs/specifications/security-review-2.md` (finding R3).
+            let sender_peer = Peer::new(sender, zone);
+
+            if let Some(expected) = agent::expected_peer_type(&sender_peer).await {
+                if *agent != expected {
+                    tracing::error!(
+                        "Refusing to register {}: it presents as agent type '{}', but our \
+                         configuration declares it as '{}'. Ignoring this registration.",
+                        sender_peer,
+                        agent,
+                        expected
+                    );
+
+                    return Err(Error::InvalidPeer(format!(
+                        "Peer {} presented as '{}' but is declared as '{}'",
+                        sender_peer, agent, expected
+                    )));
+                }
+            } else {
+                tracing::debug!(
+                    "Peer {} has no declared agent type in our config, so its claimed \
+                     type '{}' is accepted unchecked. Add `type = \"{}\"` to its config \
+                     entry to have this verified.",
+                    sender_peer,
+                    agent,
+                    agent
+                );
+            }
+
             agent::register_peer(
                 &Peer::new(sender, zone),
                 agent,
@@ -199,6 +321,8 @@ async fn process_command<L: Domain>(
             let peer = Peer::new(sender, zone);
 
             tracing::debug!("Update job: {:?} to {} from {}", job, recipient, peer,);
+
+            assert_portal_ownership::<L>(job).await?;
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -240,6 +364,8 @@ async fn process_command<L: Domain>(
             let peer = Peer::new(sender, zone);
 
             tracing::debug!("Put job: {:?} to {} from {}", job, recipient, peer,);
+
+            assert_portal_ownership::<L>(job).await?;
 
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
@@ -786,7 +912,58 @@ pub fn process_message<L: Domain>(
 /// `paddington::run` below, since that's what actually dials the
 /// underlying connection to the relay in the first place.
 ///
+/// Read each peer's declared `type = "..."` out of the service config and hand
+/// the result to the agent registrar, so `Command::Register` can check what a
+/// peer claims against what we were told to expect.
+///
+/// A peer with no declared type is absent from the map and is not checked, so an
+/// existing config keeps working and the check can be adopted per peer. An
+/// unrecognised value is a misconfiguration: it is logged loudly and treated as
+/// "not declared" rather than silently rejecting the peer. See
+/// `docs/specifications/security-review-2.md` (finding R3).
+async fn register_expected_peer_types(config: &ServiceConfig) {
+    let mut expected: HashMap<Peer, AgentType> = HashMap::new();
+
+    let declared = config
+        .clients()
+        .into_iter()
+        .map(|c| (c.name(), c.zone(), c.agent_type()))
+        .chain(
+            config
+                .servers()
+                .into_iter()
+                .map(|s| (s.name(), s.zone(), s.agent_type())),
+        );
+
+    for (name, zone, agent_type) in declared {
+        let Some(agent_type) = agent_type else {
+            continue;
+        };
+
+        match AgentType::parse(&agent_type) {
+            Some(typ) => {
+                expected.insert(Peer::new(&name, &zone), typ);
+            }
+            None => {
+                tracing::error!(
+                    "Peer {}@{} declares an unrecognised agent type '{}' - ignoring it, so \
+                     this peer's claimed type will NOT be checked. Valid values are: \
+                     portal, provider, platform, instance, bridge, account, filesystem, \
+                     scheduler, virtual.",
+                    name,
+                    zone,
+                    agent_type
+                );
+            }
+        }
+    }
+
+    agent::set_expected_peer_types(expected).await;
+}
+
 pub async fn run_with_relay<L: Domain>(config: ServiceConfig) -> Result<(), paddington::Error> {
+    register_expected_peer_types(&config).await;
+
     paddington::relay::configure(&config).await?;
     paddington::relay::set_inner_handler(process_message::<L>).await?;
     paddington::set_handler(paddington::relay::relay_dispatch_handler).await?;
@@ -798,4 +975,79 @@ pub async fn run_with_relay<L: Domain>(config: ServiceConfig) -> Result<(), padd
     });
 
     paddington::run(config).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::job::Job;
+    use crate::test_domain::TestDomain;
+
+    fn job(command: &str) -> Job<TestDomain> {
+        Job::parse(command, false).unwrap_or_else(|e| unreachable!("job: {:?}", e))
+    }
+
+    #[test]
+    fn test_check_portal_ownership_rejects_a_foreign_portal_root() {
+        // Regression test for finding R34. `Command::parse`'s `check_portal` arm
+        // is only ever passed `true` at the two entry points to the system, and
+        // every Job arriving over paddington is deserialised with it `false` -
+        // so nothing re-checked that an instruction naming portal X had actually
+        // been issued via X. A Job injected directly at an agent inside the
+        // estate could therefore name any portal's project.
+
+        // The legitimate shape: the instruction names `brics`, and the Job
+        // arrived on a destination rooted at `brics`.
+        assert!(
+            check_portal_ownership(&job("brics.cluster add_user bob.proj.brics"), true).is_ok()
+        );
+        assert!(check_portal_ownership(
+            &job("brics.provider.clusters.cluster add_user bob.proj.brics"),
+            true
+        )
+        .is_ok());
+
+        // The attack: the same instruction, arriving on a destination rooted at
+        // something else. This is what an agent inside the estate could inject.
+        assert!(check_portal_ownership(
+            &job("attacker.clusters.cluster add_user bob.proj.brics"),
+            true
+        )
+        .is_err());
+
+        // ...including a route rooted at another real portal.
+        assert!(
+            check_portal_ownership(&job("otherportal.cluster add_user bob.proj.brics"), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_check_portal_ownership_is_skipped_when_not_enabled() {
+        // Account/Filesystem/Scheduler agents, and `instance::run_delegated`
+        // Instances such as `op-cloudaccount`, receive Jobs whose destination is
+        // rooted at the *delegating* agent rather than at the owning portal. For
+        // them the property does not hold and must not be enforced.
+        let delegated = job("cloudportal.cloudaccount add_user bob.proj.waldur");
+
+        assert!(check_portal_ownership(&delegated, false).is_ok());
+        // ...and it would indeed have been rejected had it been enabled, which
+        // is why the distinction has to be declared rather than inferred.
+        assert!(check_portal_ownership(&delegated, true).is_err());
+
+        // The transformed instructions an instance sends its backends are the
+        // same shape.
+        let local = job("cluster.freeipa add_local_user bob.proj.brics");
+        assert!(check_portal_ownership(&local, false).is_ok());
+    }
+
+    #[test]
+    fn test_check_portal_ownership_ignores_instructions_naming_no_portal() {
+        // An instruction that names no portal carries no ownership claim, so
+        // there is nothing to check and it must pass either way.
+        let no_portal = job("a.b something-with-no-identifier");
+
+        assert!(check_portal_ownership(&no_portal, true).is_ok());
+        assert!(check_portal_ownership(&no_portal, false).is_ok());
+    }
 }

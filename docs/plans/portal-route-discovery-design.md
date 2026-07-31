@@ -192,22 +192,71 @@ Exceeding either is logged and the advertisement rejected.
 
 ### 4.7 Where the check applies
 
-The route check is applied wherever the
-[R34](../specifications/security-review-2.md#r34) portal-ownership check is
-applied - i.e. where `verify_portal_ownership` is set, which is Provider,
-Platform and Instance agents, but *not* `instance::run_delegated` Instances such
-as `op-cloudaccount`, and not Account/Filesystem/Scheduler agents, whose Jobs are
-rooted at their delegating instance rather than at a portal.
+**Only the agent that acts on a portal-rooted instruction checks it** - the
+terminal agent for that Job, i.e. where `Destination::position` returns
+`Position::Destination`.
 
-Given a Job naming portal `P` arriving at agent `A`:
+An intermediate hop must *not* check. It adds nothing, because the terminal agent
+checks the same Job a moment later; and it turns any gap in its own route table
+into a silent outage several hops away from the agent that could diagnose it.
+(That is not hypothetical: an earlier build checked at every Provider, Platform
+and Instance agent, and blocked all traffic at the platform hop in a live test
+estate simply because no portal had been declared upstream yet.) Intermediates
+contribute the *collision* detection instead, which happens in
+`portalroutes::receive` regardless of this check.
 
-1. If `verify_portal_ownership` is off for `A`, no check (unchanged).
-2. If `A` holds no route for `P`, see [§5](#5-ordering).
-3. Otherwise the Job's destination must have the stored route as a **prefix**,
-   with `A` at the correct position.
+`Position::Destination` is the right test because it is local and
+wire-independent: it needs no configuration and cannot be influenced by the
+sender beyond the adjacency that [R4](../specifications/security-review-2.md#r4)
+already constrains.
+
+**And only in a zone that carries portal-rooted traffic**, which is exactly a
+zone the agent knows a portal route in. This needs no configuration of its own,
+because routes are already zone-scoped and only ever propagate away from a portal
+within one zone - so the route table already encodes which of an agent's zones is
+which.
+
+The distinction matters because an instance sits in two kinds of zone at once:
+
+- Its **upstream** zone carries instructions routed down from a portal. There the
+  portal rule holds.
+- Its **internal** zone holds the account, filesystem and scheduler agents it
+  delegates to. Those agents legitimately create Jobs that name a portal on a
+  destination rooted at *themselves*: `op-freeipa` builds
+  `freeipa.shared get_local_home_dir john.aiproject.brics` as part of adding a
+  user, and passes `check_portal = false` when doing so
+  ([freeipa/src/main.rs:218](../../freeipa/src/main.rs)) precisely because the
+  rule does not hold of it.
+
+That `false` is the load-bearing observation. The portal rule was never a global
+invariant to be enforced everywhere; it holds of *portal-originated* traffic, and
+trusted internal creators are deliberately exempt. An earlier build applied it
+unconditionally at the terminal agent and rejected `get_local_home_dir`, breaking
+user creation - see [§8](#8-security-properties) for what this means for the
+finding that prompted it.
+
+Given a Job naming portal `P` arriving at agent `A` from peer `S`:
+
+1. If `A` is not the Job's destination, no check - forward it.
+2. If `verify_portal_ownership` is off for `A`, no check. This is what keeps
+   Account/Filesystem/Scheduler agents and `instance::run_delegated` Instances
+   out even in a portal-rooted zone - `op-cloudaccount` would otherwise reject
+   `cloudportal.cloudaccount add_user bob.proj.waldur`, since it originates a
+   route for `cloudportal` and so marks that zone portal-rooted.
+3. If `A` knows no portal route in `S`'s zone, no check - this is an internal
+   zone.
+4. Otherwise the root check applies: `P` must equal `destination.first()`. This
+   is retained alongside the route check because it still catches an instruction
+   naming a portal `A` holds no route for, which the route check cannot.
+5. And if `A` holds a route for `P` specifically, the Job's destination must have
+   it as a **prefix**, with `A` at the correct position. If not, no route check -
+   see [§5](#5-ordering).
 
 Prefix-matching is strictly stronger than R34's root check, which compares only
 `destination.first()`.
+
+A refusal is reported back to the sender as an errored Job, not merely logged -
+otherwise the agent that submitted it waits for a result that never arrives.
 
 ## 5. Ordering
 
@@ -222,18 +271,38 @@ order. There is also a case where the push genuinely cannot precede the Job:
 an agent that connects last may receive a route push and a Job that was already
 queued for it at essentially the same moment.
 
-So the "no route yet" state must be handled explicitly rather than assumed
-away. It is handled as **fail hard with a bounded wait**:
+So the "no route yet" state must be handled explicitly rather than assumed away.
 
-- If a Job names portal `P` and no route for `P` is yet known from the peer
-  that delivered it, wait up to `ROUTE_WAIT_SECONDS` for one to arrive.
-- If a route arrives within that window, apply the check normally.
-- If none arrives, reject the Job.
+This was first implemented as *fail hard with a bounded wait* - wait for the
+route, then reject. **That was wrong, and it broke a live test estate.** The
+error was in assuming that a missing route means something is amiss. It usually
+means the opposite:
 
-Nothing is accepted without a route - this only distinguishes "not yet" from
-"wrong". It reuses an existing idiom: `agent::wait_for(&peer, 30)` already does
-exactly this in the Update and Delete paths, and the framework already waits for
-a peer to `Register` before routing to it.
+- No peer has been declared `type = "portal"` anywhere upstream. The anchor is
+  opt-in (R3's field is optional, so that adopting it is per-peer), which makes
+  "no routes at all" the *default state of every existing deployment*.
+- The upstream agent predates the feature.
+- The push has not landed yet on a connection established microseconds ago.
+
+Rejecting on absence turns all three into an outage, and the first is the state
+every fleet starts in. So the rule is:
+
+**Enforce only what is known.** If a route for `P` is held, the Job must match
+it. If not, the route check does not apply.
+
+The property is therefore *"a route, once known, is enforced"* rather than *"a
+route must be known"*. That is weaker, and it is an honest weakening: an agent
+that has not yet learned a route will accept a Job it would later refuse. The
+window is the interval between a connection being established and the route push
+being processed on it - both triggered by the same event, so milliseconds - and
+it recurs only on connection.
+
+Two things make that acceptable. The scheme activates by itself as soon as an
+operator declares their portals, with no separate enable step. And the
+**collision detection is entirely independent of this check** - it fires in
+`portalroutes::receive` when the advertisement arrives, not when a Job does, so
+the part that actually catches an impostor does not depend on enforcement having
+been reached at all.
 
 ## 6. Wire format
 
@@ -249,6 +318,13 @@ PortalRoutes {
     withdrawn: Vec<PortalIdentifier>,
 }
 ```
+
+Routes are per-zone and never cross one, which is what keeps an estate's
+internal zones invisible to a portal. In a deployment where `shared` sits in both
+`default` (upstream, toward the portal) and a dedicated downstream zone with its
+scheduler/account/filesystem agents, the route learned in `default` is never
+advertised into the downstream zone - so those agents never learn about the
+portal at all, matching the intent of separating the zones in the first place.
 
 with
 
@@ -334,6 +410,19 @@ discarded.
 **What it costs an attacker who is not detected.** Nothing changes: they must
 still satisfy adjacency (R4), portal-ownership (R34), and the declared peer type
 (R3).
+
+**A correction to [R34](../specifications/security-review-2.md#r34).** That
+finding described the portal-ownership check as "an entry-point validation, not an
+invariant enforced where the action happens", and treated the asymmetry as the
+defect. The description was accurate; the diagnosis was not. It is an entry-point
+validation *because the invariant genuinely does not hold internally* - trusted
+internal agents create Jobs that break it as a normal part of operating, and the
+receiver has no way to distinguish such a Job from an injected one.
+
+So the missing control was never "re-check the same rule at the receiver". It was
+"distinguish portal-originated from delegate-originated traffic" - and the zone is
+the mechanism this architecture already had for that. The gate in §4.7 is that
+re-framing, not a patch on top of the original one.
 
 ## 9. Phased implementation
 

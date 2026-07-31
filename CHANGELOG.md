@@ -49,6 +49,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   *that portal only* - deliberately not a global safe state, which would let an
   attacker who can add one peer take down everything downstream at will.
 
+  The check runs only at the agent that *acts* on a portal-rooted instruction -
+  the Job's terminal agent - not at intermediate hops, which contribute the
+  collision detection instead. And a route is enforced only once known: a missing
+  route means the anchor has not been declared upstream yet, which is the default
+  state of every existing deployment, so it must not be treated as an anomaly. A
+  refusal is reported back to the sender as an errored Job rather than only
+  logged.
+
+  The portal rule is also applied **only in a zone where a portal route is
+  known**. An instance's upstream zone carries portal-rooted traffic and the rule
+  holds there; its internal zone holds the account, filesystem and scheduler
+  agents it delegates to, and those legitimately create jobs naming a portal on a
+  destination rooted at themselves - `op-freeipa` builds
+  `freeipa.shared get_local_home_dir john.aiproject.brics` while adding a user,
+  and passes `check_portal = false` for exactly that reason. Since routes are
+  zone-scoped and never propagate into an internal zone, the route table already
+  encodes the distinction and no extra configuration is needed. Declaring
+  `type = "portal"` on a peer is therefore what activates portal-ownership
+  enforcement at all.
+
   This closes the case the positional checks below cannot: a correctly-*named*
   impostor portal introduced one hop away satisfies the portal-ownership check,
   because `destination.first()` really is the right name - only the route reveals

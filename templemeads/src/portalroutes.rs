@@ -35,16 +35,6 @@ const MAX_PORTALS_PER_PEER: usize = 16;
 /// `MAX_PORTALS_PER_PEER`.
 const MAX_ROUTE_DEPTH: usize = 16;
 
-/// How long a Job will wait for a route that is expected but has not arrived
-/// yet, before being rejected.
-///
-/// Needed because `paddington::exchange` spawns one task per inbound message,
-/// so ordered *delivery* on a connection does not give ordered *processing* -
-/// a Job can be handled before the route push that arrived ahead of it. This
-/// is not fail-open: nothing is accepted without a route, this only
-/// distinguishes "not yet" from "wrong".
-const ROUTE_WAIT_SECONDS: u64 = 10;
-
 static ROUTES: Lazy<RwLock<RouteTable>> = Lazy::new(|| RwLock::new(RouteTable::default()));
 
 /// A single portal and the route by which it reaches the agent advertising it.
@@ -332,6 +322,10 @@ impl RouteTable {
     fn is_collided(&self, zone: &str, portal: &str) -> bool {
         self.collided.contains(&key(zone, portal))
     }
+
+    fn zone_has_portal_route(&self, zone: &str) -> bool {
+        self.routes.keys().any(|(z, _)| z == zone)
+    }
 }
 
 fn describe(learned_from: &Option<Peer>) -> String {
@@ -393,25 +387,27 @@ pub async fn is_collided(zone: &str, portal: &str) -> bool {
 }
 
 ///
-/// Wait up to `ROUTE_WAIT_SECONDS` for a route to `portal` to arrive.
+/// Whether we know of *any* portal reachable in `zone` - i.e. whether this zone
+/// carries portal-rooted traffic at all.
 ///
-/// See `ROUTE_WAIT_SECONDS` for why this is needed: a Job can be processed
-/// before the route push that was delivered ahead of it.
+/// This is the signal that separates the two kinds of zone an agent can sit in,
+/// and it needs no configuration of its own because routes are already
+/// zone-scoped and only ever propagate away from a portal within one zone.
 ///
-pub async fn wait_for_route(zone: &str, portal: &str) -> Option<Destination> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(ROUTE_WAIT_SECONDS);
-
-    loop {
-        if let Some(route) = expected_route(zone, portal).await {
-            return Some(route);
-        }
-
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+/// - A zone with a portal route is where instructions arrive *from* a portal, so
+///   an instruction naming a portal must be properly rooted at it.
+/// - A zone with none is internal: an instance and the account, filesystem and
+///   scheduler agents it delegates to. Those agents legitimately create jobs
+///   that name a portal on a destination rooted at themselves -
+///   `freeipa.shared get_local_home_dir john.aiproject.brics` is the canonical
+///   example, and `op-freeipa` passes `check_portal = false` when building it
+///   for exactly that reason. Applying the portal rule there would reject
+///   ordinary traffic.
+///
+/// See `docs/plans/portal-route-discovery-design.md` §4.7.
+///
+pub async fn zone_has_portal_route(zone: &str) -> bool {
+    ROUTES.read().await.zone_has_portal_route(zone)
 }
 
 ///
@@ -663,6 +659,41 @@ mod tests {
         let deep = format!("{}.aip1", hops.join("."));
         assert!(!table.receive(&aip1, &[advert("brics", &deep)], &[], "clusters"));
         assert_eq!(table.expected_route("default", "brics"), None);
+    }
+
+    #[test]
+    fn test_zone_has_portal_route_separates_upstream_from_internal_zones() {
+        // The signal that decides whether the portal rule applies at all. An
+        // instance sits in two zones: an upstream one carrying portal-rooted
+        // traffic, and an internal one holding the agents it delegates to. Only
+        // the first should ever see the rule enforced.
+        let mut table = RouteTable::default();
+
+        assert!(!table.zone_has_portal_route("default"));
+        assert!(!table.zone_has_portal_route("aip1-clusters-shared"));
+
+        // A route learned upstream marks that zone, and only that zone.
+        let clusters = Peer::new("clusters", "default");
+        assert!(table.receive(
+            &clusters,
+            &[advert("brics", "brics.aip1.clusters")],
+            &[],
+            "shared"
+        ));
+
+        assert!(table.zone_has_portal_route("default"));
+        assert!(!table.zone_has_portal_route("aip1-clusters-shared"));
+
+        // ...and the route is never advertised into the internal zone, so it
+        // cannot mark it by accident. This is what keeps `freeipa`, `slurm` and
+        // `filesystem` unaware that a portal exists at all.
+        assert!(table
+            .routes_for_peer(&Peer::new("freeipa", "aip1-clusters-shared"))
+            .is_empty());
+
+        // Withdrawing the last route in a zone deactivates it again.
+        assert!(table.withdraw_all_from(&clusters));
+        assert!(!table.zone_has_portal_route("default"));
     }
 
     #[test]

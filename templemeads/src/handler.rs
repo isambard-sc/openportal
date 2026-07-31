@@ -238,16 +238,57 @@ pub(crate) async fn withdraw_routes_from<L: Domain>(peer: &Peer) {
 /// `Domain::owning_portal`, which lets `templemeads` ask the question without
 /// knowing any domain vocabulary. An instruction that names no portal is not
 /// checked.
-async fn assert_portal_ownership<L: Domain>(job: &Job<L>, sender: &Peer) -> Result<(), Error> {
-    let verify = verify_portal_ownership::<L>().await;
-
-    // The root check (finding R34) - cheap, needs no protocol, and is the only
-    // check available before any route has been learned.
-    check_portal_ownership(job, verify)?;
-
-    if !verify {
+async fn assert_portal_ownership<L: Domain>(
+    job: &Job<L>,
+    sender: &Peer,
+    recipient: &str,
+    sender_name: &str,
+) -> Result<(), Error> {
+    // Only the agent that *acts* on a portal-rooted instruction checks it.
+    //
+    // An intermediate hop (a provider or platform relaying a Job onward) must
+    // not: it adds nothing, since the terminal agent checks the same Job a
+    // moment later, and it turns any gap in the route table into a silent
+    // outage several hops away from the agent that could actually diagnose it.
+    // Intermediates contribute the *collision* detection instead, which happens
+    // in `portalroutes::receive` regardless of this check.
+    //
+    // "The agent that acts" is exactly `Position::Destination` - a local,
+    // wire-independent test. See
+    // `docs/plans/portal-route-discovery-design.md` §4.7.
+    if job.destination().position(recipient, sender_name) != Position::Destination {
         return Ok(());
     }
+
+    if !verify_portal_ownership::<L>().await {
+        return Ok(());
+    }
+
+    // Apply the portal rule only in a zone that actually carries portal-rooted
+    // traffic, which is exactly a zone we know a portal route in.
+    //
+    // This is what separates the two kinds of zone an agent sits in. An
+    // instance's upstream zone carries instructions routed down from a portal,
+    // and there the rule holds. Its downstream zone holds the account,
+    // filesystem and scheduler agents it delegates to, and those legitimately
+    // create jobs naming a portal on a destination rooted at *themselves* -
+    // `freeipa.shared get_local_home_dir john.aiproject.brics` is the canonical
+    // one, and `op-freeipa` passes `check_portal = false` when building it for
+    // precisely that reason.
+    //
+    // An earlier build applied the rule unconditionally and rejected that job,
+    // breaking user creation. The rule was never a global invariant: it holds of
+    // portal-originated traffic, and the zone is how this architecture already
+    // distinguishes that. See
+    // `docs/plans/portal-route-discovery-design.md` §4.7.
+    if !portalroutes::zone_has_portal_route(sender.zone()).await {
+        return Ok(());
+    }
+
+    // The root check (finding R34). Retained alongside the route check below
+    // because it still catches an instruction naming a portal we hold no route
+    // for, which the route check cannot.
+    check_portal_ownership(job, true)?;
 
     let Some(portal) = L::owning_portal(&job.instruction()) else {
         return Ok(());
@@ -292,39 +333,28 @@ async fn assert_portal_route<L: Domain>(
         )));
     }
 
-    let route = match portalroutes::expected_route(zone, &name).await {
-        Some(route) => route,
-        None => {
-            // A peer that cannot send routes could never have told us one, so
-            // holding their absence against it would break a mixed-version
-            // fleet. This is the "absent means unchecked" rule R3 uses too.
-            if !agent::is_route_capable(sender).await {
-                return Ok(());
-            }
-
-            // Otherwise the route is expected but has not arrived yet. Wait for
-            // it rather than rejecting: one task is spawned per inbound message,
-            // so a Job can be processed before the route push delivered ahead of
-            // it. This is not fail-open - nothing is accepted without a route.
-            match portalroutes::wait_for_route(zone, &name).await {
-                Some(route) => route,
-                None => {
-                    tracing::error!(
-                        "Rejecting job {}: it names portal '{}' in zone '{}', but no route \
-                         to that portal has been advertised to us.",
-                        job.id(),
-                        name,
-                        zone
-                    );
-
-                    return Err(Error::InvalidInstruction(format!(
-                        "No known route to portal '{}' - refusing job {}",
-                        name,
-                        job.id()
-                    )));
-                }
-            }
-        }
+    // Enforce only what we actually know.
+    //
+    // A route is absent for entirely legitimate reasons: no peer has been
+    // declared `type = "portal"` anywhere upstream (the anchor is opt-in, so an
+    // estate that has not adopted it yet has no routes at all), the upstream
+    // agent predates the feature, or the push has not landed yet on a
+    // just-established connection. Rejecting on absence turned all three into an
+    // outage - and the first is the default state of every existing deployment.
+    //
+    // So the property is "a route, once known, is enforced" rather than "a route
+    // must be known". The scheme activates by itself as soon as an operator
+    // declares their portals, and the collision detection - which is what
+    // actually catches an impostor - does not depend on this check at all. See
+    // `docs/plans/portal-route-discovery-design.md` §5.
+    let Some(route) = portalroutes::expected_route(zone, &name).await else {
+        tracing::debug!(
+            "No route known for portal '{}' in zone '{}' - not checking the route of job {}",
+            name,
+            zone,
+            job.id()
+        );
+        return Ok(());
     };
 
     if !portalroutes::destination_matches_route(&job.destination(), &route) {
@@ -549,7 +579,12 @@ async fn process_command<L: Domain>(
 
             tracing::debug!("Update job: {:?} to {} from {}", job, recipient, peer,);
 
-            assert_portal_ownership::<L>(job, &peer).await?;
+            if let Err(e) = assert_portal_ownership::<L>(job, &peer, recipient, sender).await {
+                tracing::error!("Refusing job update {}: {}", job.id(), e);
+                let job = job.errored(&e.to_string())?;
+                let _ = job.update(&Peer::new(sender, zone)).await?;
+                return Ok(());
+            }
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -592,7 +627,15 @@ async fn process_command<L: Domain>(
 
             tracing::debug!("Put job: {:?} to {} from {}", job, recipient, peer,);
 
-            assert_portal_ownership::<L>(job, &peer).await?;
+            // Report a refusal back to the sender rather than only logging it -
+            // otherwise the agent that submitted the job waits for a result that
+            // will never come.
+            if let Err(e) = assert_portal_ownership::<L>(job, &peer, recipient, sender).await {
+                tracing::error!("Refusing job {}: {}", job.id(), e);
+                let job = job.errored(&e.to_string())?;
+                let _ = job.update(&Peer::new(sender, zone)).await?;
+                return Ok(());
+            }
 
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
@@ -1336,23 +1379,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_assert_portal_route_skips_a_peer_that_cannot_send_routes() {
-        // Mixed-version fleet: a peer that never advertised support could not
-        // have told us a route, so holding its absence against it would break
-        // the rollout. Same "absent means unchecked" rule R3 uses.
+    async fn test_assert_portal_route_accepts_when_no_route_is_known() {
+        // The regression that broke a live test estate. A route is absent for
+        // entirely legitimate reasons - most importantly because no peer has been
+        // declared `type = "portal"` anywhere upstream, which is the default
+        // state of every existing deployment. Rejecting on absence turned that
+        // into a silent outage at an intermediate hop.
+        //
+        // The property is "a route, once known, is enforced" - not "a route must
+        // be known".
         use crate::portal_identifier::PortalIdentifier;
 
-        let zone = "handler-route-compat-test";
+        let zone = "handler-route-absent-test";
         let brics =
             PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
 
+        let job = job("brics.aip1.clusters add_user bob.proj.brics");
+
+        // A route-capable peer, but no route has been advertised for this zone.
+        let capable = Peer::new("aip1", zone);
+        agent::set_route_capable(&capable, true).await;
+        assert!(assert_portal_route(&job, &brics, &capable).await.is_ok());
+
+        // ...and equally for a peer that could never have sent one.
         let old_peer = Peer::new("old-aip1", zone);
         agent::set_route_capable(&old_peer, false).await;
-
-        // No route is known for this zone at all, and the peer is not capable -
-        // so the Job passes.
-        let job = job("brics.aip1.clusters add_user bob.proj.brics");
         assert!(assert_portal_route(&job, &brics, &old_peer).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_internal_zone_traffic_is_not_subject_to_the_portal_rule() {
+        // The regression this gate exists for. `op-freeipa` builds
+        // `freeipa.shared get_local_home_dir john.aiproject.brics` as part of
+        // adding a user - naming portal `brics` on a destination rooted at
+        // itself - and passes `check_portal = false` deliberately, because the
+        // portal rule does not hold of a job an internal delegate creates.
+        //
+        // An earlier build rejected it, breaking user creation. The rule now
+        // applies only in a zone that carries portal-rooted traffic.
+        use crate::destination::Destination;
+        use crate::portal_identifier::PortalIdentifier;
+        use crate::portalroutes;
+
+        let internal = "handler-internal-zone-test";
+        let upstream = "handler-upstream-zone-test";
+
+        // Nothing is known in the internal zone, so it is not portal-rooted.
+        assert!(!portalroutes::zone_has_portal_route(internal).await);
+
+        // ...whereas a route learned upstream marks that zone.
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+        let clusters = Peer::new("clusters", upstream);
+        let advert = portalroutes::PortalRoute::new(
+            &brics,
+            &Destination::parse("brics.aip1.clusters")
+                .unwrap_or_else(|e| unreachable!("dest: {:?}", e)),
+        );
+        assert!(portalroutes::receive(&clusters, &[advert], &[], "shared").await);
+        assert!(portalroutes::zone_has_portal_route(upstream).await);
+
+        // The delegate's job would fail the root check outright...
+        let delegated = job("freeipa.shared get_local_home_dir john.aiproject.brics");
+        assert!(check_portal_ownership(&delegated, true).is_err());
+
+        // ...but arriving from a peer in the internal zone, the rule does not
+        // apply and it passes.
+        let freeipa = Peer::new("freeipa", internal);
+        assert!(
+            assert_portal_ownership::<TestDomain>(&delegated, &freeipa, "shared", "freeipa")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_only_the_terminal_agent_checks_portal_ownership() {
+        // An intermediate hop must not check. It adds nothing - the terminal
+        // agent checks the same Job a moment later - and any gap in its route
+        // table becomes a silent outage several hops from where it can be
+        // diagnosed. `Position::Destination` is the local test for "I am the
+        // agent that acts on this".
+        let bad = job("attacker.aip1.clusters.shared add_user bob.proj.brics");
+
+        // At `clusters` the Job is merely passing through, so no check runs -
+        // even though its root is wrong.
+        let from_aip1 = Peer::new("aip1", "default");
+        assert_eq!(
+            bad.destination().position("clusters", "aip1"),
+            Position::Downstream
+        );
+        assert!(
+            assert_portal_ownership::<TestDomain>(&bad, &from_aip1, "clusters", "aip1")
+                .await
+                .is_ok()
+        );
+
+        // `shared` is where it is acted on, and so where it would be stopped -
+        // the root check itself is covered by
+        // `test_check_portal_ownership_rejects_a_foreign_portal_root`.
+        assert_eq!(
+            bad.destination().position("shared", "clusters"),
+            Position::Destination
+        );
     }
 
     #[tokio::test]

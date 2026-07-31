@@ -41,6 +41,7 @@ pub mod job;
 pub mod named;
 pub mod notification;
 pub mod portal_identifier;
+pub mod portalroutes;
 pub mod runnable;
 pub mod state;
 #[cfg(test)]

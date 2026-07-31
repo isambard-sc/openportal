@@ -32,6 +32,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   way: a char index used as a byte offset when splitting a Lustre quota
   expression, and `permissions`/`links` in a volume config being indexed with
   a `roots` index when those lists may be shorter.
+- **Portal route discovery** (closes the residual recorded in
+  `security-review-2.md` §4.1). Each agent now derives the route by which each
+  portal reaches it, and refuses instructions naming that portal which arrive by
+  any other route. An agent adjacent to a portal originates `<portal>.<me>` from
+  its own `type = "portal"` config entry - the only statement about a portal's
+  identity accepted without derivation - and every other agent learns its route
+  by being told one by an upstream peer and appending its own name. Routes are
+  pushed downstream on connection, so a downstream agent knows its route as soon
+  as it connects.
+
+  Because the topology is single-pathed and acyclic, two different routes to the
+  same portal name cannot legitimately occur, so a collision is an unambiguous
+  signal that an agent's config has been changed to introduce an impostor
+  portal. On collision the agent logs at error level and refuses to route for
+  *that portal only* - deliberately not a global safe state, which would let an
+  attacker who can add one peer take down everything downstream at will.
+
+  This closes the case the positional checks below cannot: a correctly-*named*
+  impostor portal introduced one hop away satisfies the portal-ownership check,
+  because `destination.first()` really is the right name - only the route reveals
+  it. It does not defend against a code-compromised agent, which simply reports
+  whichever route it likes; that boundary still belongs to command signing, which
+  remains designed but unbuilt. See
+  `docs/plans/portal-route-discovery-design.md`.
+
+  Backwards compatible in both directions: `Register` carries a new
+  `supports_portal_routes` flag (defaulting to `false`, so a peer that predates
+  it reads as incapable), routes are never pushed to a peer that would not
+  understand them, and a route is never enforced against a peer that could not
+  have sent one. Upgrade upstream agents before downstream ones; enforcement
+  switches itself on per peer as both ends become capable.
 - **A Job's claimed route was not bound to the peer that delivered it**
   (finding R4). `Destination::position` accepted any sender that appeared
   *anywhere* in the route, and returned `Destination` for the last agent without

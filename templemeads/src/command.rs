@@ -11,6 +11,8 @@ use crate::error::Error;
 use crate::health::HealthInfo;
 use crate::job::Job;
 use crate::notification::Notification;
+use crate::portal_identifier::PortalIdentifier;
+use crate::portalroutes::PortalRoute;
 use crate::virtual_agent::send as send_to_virtual;
 
 use anyhow::Result;
@@ -48,6 +50,17 @@ pub enum Command<L: Domain> {
         /// The sender's `Domain` version, alongside `domain` above.
         #[serde(default)]
         domain_version: Option<String>,
+        /// Whether the sender understands `Command::PortalRoutes` - see
+        /// `crate::portalroutes` and
+        /// `docs/plans/portal-route-discovery-design.md`.
+        ///
+        /// `#[serde(default)]`, so a peer that predates the field deserialises
+        /// as `false`, which is the correct answer for it. Used in both
+        /// directions: we do not push routes to a peer that would not
+        /// understand them, and we do not *enforce* a route against a peer that
+        /// could never have sent us one.
+        #[serde(default)]
+        supports_portal_routes: bool,
     },
     Sync {
         state: SyncState<L>,
@@ -79,6 +92,20 @@ pub enum Command<L: Domain> {
     Notify {
         notification: Notification<L>,
     },
+    /// Advertise (or retract) the routes by which portals reach the sender.
+    ///
+    /// Pushed downstream on connection and whenever the sender's own table
+    /// changes; never sent to a peer declared as a portal, and never back to the
+    /// peer a route was learned from. See `crate::portalroutes` and
+    /// `docs/plans/portal-route-discovery-design.md`.
+    PortalRoutes {
+        /// Each route already ends with the sender's own name, which is what the
+        /// receiver checks before accepting it.
+        routes: Vec<PortalRoute>,
+        /// Portals whose routes the sender is retracting, by name.
+        #[serde(default)]
+        withdrawn: Vec<PortalIdentifier>,
+    },
 }
 
 impl<L: Domain> std::fmt::Display for Command<L> {
@@ -94,6 +121,7 @@ impl<L: Domain> std::fmt::Display for Command<L> {
                 version,
                 domain,
                 domain_version,
+                supports_portal_routes: _,
             } => write!(
                 f,
                 "Register: {}, engine={} version={} domain={} domain_version={}",
@@ -123,6 +151,12 @@ impl<L: Domain> std::fmt::Display for Command<L> {
                 write!(f, "DiagnosticsResponse: {}", report)
             }
             Command::Notify { notification } => write!(f, "Notify: {}", notification),
+            Command::PortalRoutes { routes, withdrawn } => write!(
+                f,
+                "PortalRoutes: {} advertised, {} withdrawn",
+                routes.len(),
+                withdrawn.len()
+            ),
         }
     }
 }
@@ -159,6 +193,16 @@ impl<L: Domain> Command<L> {
             version: version.to_owned(),
             domain: Some(domain.to_owned()),
             domain_version: Some(domain_version.to_owned()),
+            // This build understands portal routes, so always advertise it.
+            supports_portal_routes: true,
+        }
+    }
+
+    /// Advertise the given portal routes, and retract the given portals.
+    pub fn portal_routes(routes: &[PortalRoute], withdrawn: &[PortalIdentifier]) -> Self {
+        Self::PortalRoutes {
+            routes: routes.to_vec(),
+            withdrawn: withdrawn.to_vec(),
         }
     }
 
@@ -258,6 +302,7 @@ impl<L: Domain> Command<L> {
                 version: _,
                 domain: _,
                 domain_version: _,
+                supports_portal_routes: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -269,6 +314,10 @@ impl<L: Domain> Command<L> {
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
             Command::Notify { notification: _ } => None,
+            Command::PortalRoutes {
+                routes: _,
+                withdrawn: _,
+            } => None,
         }
     }
 
@@ -284,6 +333,7 @@ impl<L: Domain> Command<L> {
                 version: _,
                 domain: _,
                 domain_version: _,
+                supports_portal_routes: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -295,6 +345,10 @@ impl<L: Domain> Command<L> {
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
             Command::Notify { notification: _ } => None,
+            Command::PortalRoutes {
+                routes: _,
+                withdrawn: _,
+            } => None,
         }
     }
 
@@ -310,6 +364,7 @@ impl<L: Domain> Command<L> {
                 version: _,
                 domain: _,
                 domain_version: _,
+                supports_portal_routes: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -321,6 +376,10 @@ impl<L: Domain> Command<L> {
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
             Command::Notify { notification } => Some(notification.destination().clone()),
+            Command::PortalRoutes {
+                routes: _,
+                withdrawn: _,
+            } => None,
         }
     }
 }
@@ -372,6 +431,7 @@ mod tests {
                 version: version.to_owned(),
                 domain: Some(domain.to_owned()),
                 domain_version: Some(domain_version.to_owned()),
+                supports_portal_routes: true,
             }
         );
     }
@@ -393,7 +453,39 @@ mod tests {
                 version: "0.32.2".to_owned(),
                 domain: None,
                 domain_version: None,
+                // Absent from the JSON, so it defaults to `false` - a peer that
+                // predates the field cannot understand portal routes, and must
+                // not have one enforced against it.
+                supports_portal_routes: false,
             }
         );
+    }
+
+    /// A `Register` that predates `supports_portal_routes` must deserialise with
+    /// it `false`, and one that carries it must round-trip. This is what makes
+    /// the portal-route rollout non-breaking in a mixed-version fleet - see
+    /// `docs/plans/portal-route-discovery-design.md` §7.
+    #[test]
+    fn test_command_register_portal_route_capability_defaults_to_false() {
+        let legacy = r#"{"Register":{"agent":"Portal","engine":"templemeads","version":"0.90.0","domain":"d","domain_version":"1"}}"#;
+        #[allow(clippy::expect_used)]
+        let command: Command = serde_json::from_str(legacy).expect("legacy Register should parse");
+
+        match command {
+            Command::Register {
+                supports_portal_routes,
+                ..
+            } => assert!(!supports_portal_routes),
+            other => unreachable!("expected Register, got {:?}", other),
+        }
+
+        // ...and this build advertises support.
+        match Command::register(&AgentType::Portal, "templemeads", "0.91.0", "d", "1") {
+            Command::Register {
+                supports_portal_routes,
+                ..
+            } => assert!(supports_portal_routes),
+            other => unreachable!("expected Register, got {:?}", other),
+        }
     }
 }

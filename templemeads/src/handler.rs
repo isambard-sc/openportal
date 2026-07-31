@@ -14,6 +14,8 @@ use crate::health;
 use crate::job::{sync_from_peer, Envelope, Job, Status};
 use crate::jobtiming;
 use crate::notification::{default_notify_runner, AsyncNotifyRunnable, NotificationEnvelope};
+use crate::portal_identifier::PortalIdentifier;
+use crate::portalroutes;
 use crate::restart;
 use crate::runnable::{default_runner, AsyncRunnable};
 
@@ -110,6 +112,114 @@ async fn verify_portal_ownership<L: Domain>() -> bool {
     }
 }
 
+///
+/// Push the portal routes we know to `peer`, if it is eligible to receive them.
+///
+/// A peer is eligible if it understands the message (advertised in its
+/// `Register`) and is not itself declared a portal - routes travel away from
+/// portals, never back toward them. `routes_for_peer` additionally withholds
+/// anything we learned from that same peer.
+///
+async fn advertise_routes_to<L: Domain>(peer: &Peer) {
+    if !agent::is_route_capable(peer).await {
+        tracing::debug!(
+            "Not advertising portal routes to {} - it does not support them",
+            peer
+        );
+        return;
+    }
+
+    if agent::expected_peer_type(peer).await == Some(AgentType::Portal) {
+        return;
+    }
+
+    let routes = portalroutes::routes_for_peer(peer).await;
+
+    if routes.is_empty() {
+        return;
+    }
+
+    tracing::debug!("Advertising {} portal route(s) to {}", routes.len(), peer);
+
+    if let Err(e) = Command::<L>::portal_routes(&routes, &[])
+        .send_to(peer)
+        .await
+    {
+        tracing::warn!("Could not advertise portal routes to {}: {}", peer, e);
+    }
+}
+
+/// Push our portal routes to every eligible peer, optionally skipping one
+/// (normally the peer we just learned from, though `routes_for_peer` would
+/// withhold its own routes anyway).
+async fn advertise_routes_to_all<L: Domain>(skip: Option<&Peer>) {
+    for peer in agent::all_peers().await {
+        if Some(&peer) == skip {
+            continue;
+        }
+
+        advertise_routes_to::<L>(&peer).await;
+    }
+}
+
+///
+/// Originate the routes for every peer our own config declares a portal, and
+/// advertise them. Called once at startup, after the declared types are known.
+///
+/// This is the trust anchor: an agent adjacent to a portal is the only one that
+/// asserts a portal's existence without having been told, and it does so purely
+/// from its own configuration.
+///
+pub(crate) async fn originate_portal_routes<L: Domain>() {
+    let me = agent::name().await;
+
+    if me.is_empty() {
+        return;
+    }
+
+    let mut originated = false;
+
+    for (peer, typ) in agent::expected_peer_types().await {
+        if typ != AgentType::Portal {
+            continue;
+        }
+
+        let portal = match PortalIdentifier::parse(peer.name()) {
+            Ok(portal) => portal,
+            Err(e) => {
+                tracing::error!(
+                    "Peer {} is declared a portal but its name is not a valid portal \
+                     identifier: {}",
+                    peer,
+                    e
+                );
+                continue;
+            }
+        };
+
+        match portalroutes::originate(&portal, peer.zone(), &me).await {
+            Ok(true) => originated = true,
+            Ok(false) => {}
+            Err(e) => tracing::error!("Could not originate a route for portal {}: {}", peer, e),
+        }
+    }
+
+    if originated {
+        advertise_routes_to_all::<L>(None).await;
+    }
+}
+
+///
+/// Tell our downstream peers that the routes we learned from `peer` are gone.
+/// Called when that peer disconnects and its routes have been withdrawn.
+///
+pub(crate) async fn withdraw_routes_from<L: Domain>(peer: &Peer) {
+    // The table has already dropped them, so re-advertising what remains is
+    // enough for a peer that is still connected to converge - and the explicit
+    // withdrawal below tells it which portals went away.
+    advertise_routes_to_all::<L>(Some(peer)).await;
+}
+
 /// Re-check, on receipt, that a Job's instruction is being issued via the portal
 /// that owns the identifiers it names.
 ///
@@ -128,8 +238,116 @@ async fn verify_portal_ownership<L: Domain>() -> bool {
 /// `Domain::owning_portal`, which lets `templemeads` ask the question without
 /// knowing any domain vocabulary. An instruction that names no portal is not
 /// checked.
-async fn assert_portal_ownership<L: Domain>(job: &Job<L>) -> Result<(), Error> {
-    check_portal_ownership(job, verify_portal_ownership::<L>().await)
+async fn assert_portal_ownership<L: Domain>(job: &Job<L>, sender: &Peer) -> Result<(), Error> {
+    let verify = verify_portal_ownership::<L>().await;
+
+    // The root check (finding R34) - cheap, needs no protocol, and is the only
+    // check available before any route has been learned.
+    check_portal_ownership(job, verify)?;
+
+    if !verify {
+        return Ok(());
+    }
+
+    let Some(portal) = L::owning_portal(&job.instruction()) else {
+        return Ok(());
+    };
+
+    assert_portal_route(job, &portal, sender).await
+}
+
+///
+/// Check that a Job naming `portal` arrived by the route we expect that portal's
+/// instructions to travel.
+///
+/// This is strictly stronger than the root check above, which compares only the
+/// first agent of the destination: a correctly-named impostor portal introduced
+/// one hop away satisfies the root check but produces a different route. See
+/// `crate::portalroutes` and `docs/plans/portal-route-discovery-design.md`.
+///
+async fn assert_portal_route<L: Domain>(
+    job: &Job<L>,
+    portal: &PortalIdentifier,
+    sender: &Peer,
+) -> Result<(), Error> {
+    let zone = sender.zone();
+    let name = portal.portal();
+
+    // Two conflicting routes have been advertised for this portal, so we cannot
+    // tell which is genuine and refuse to route for it at all.
+    if portalroutes::is_collided(zone, &name).await {
+        tracing::error!(
+            "Rejecting job {}: two conflicting routes have been advertised for portal '{}' \
+             in zone '{}', so instructions naming it are refused until an operator resolves \
+             it.",
+            job.id(),
+            name,
+            zone
+        );
+
+        return Err(Error::InvalidInstruction(format!(
+            "Portal '{}' has conflicting routes - refusing to route job {}",
+            name,
+            job.id()
+        )));
+    }
+
+    let route = match portalroutes::expected_route(zone, &name).await {
+        Some(route) => route,
+        None => {
+            // A peer that cannot send routes could never have told us one, so
+            // holding their absence against it would break a mixed-version
+            // fleet. This is the "absent means unchecked" rule R3 uses too.
+            if !agent::is_route_capable(sender).await {
+                return Ok(());
+            }
+
+            // Otherwise the route is expected but has not arrived yet. Wait for
+            // it rather than rejecting: one task is spawned per inbound message,
+            // so a Job can be processed before the route push delivered ahead of
+            // it. This is not fail-open - nothing is accepted without a route.
+            match portalroutes::wait_for_route(zone, &name).await {
+                Some(route) => route,
+                None => {
+                    tracing::error!(
+                        "Rejecting job {}: it names portal '{}' in zone '{}', but no route \
+                         to that portal has been advertised to us.",
+                        job.id(),
+                        name,
+                        zone
+                    );
+
+                    return Err(Error::InvalidInstruction(format!(
+                        "No known route to portal '{}' - refusing job {}",
+                        name,
+                        job.id()
+                    )));
+                }
+            }
+        }
+    };
+
+    if !portalroutes::destination_matches_route(&job.destination(), &route) {
+        tracing::error!(
+            "Rejecting job {}: it names portal '{}' and arrived on destination '{}', but \
+             that portal reaches us via '{}'. The route does not match, so this instruction \
+             did not come from where it claims to have come from.",
+            job.id(),
+            name,
+            job.destination(),
+            route
+        );
+
+        return Err(Error::InvalidInstruction(format!(
+            "Job {} names portal '{}' but arrived via '{}', not '{}'",
+            job.id(),
+            name,
+            job.destination(),
+            route
+        )));
+    }
+
+    Ok(())
 }
 
 /// The decision `assert_portal_ownership` makes, with the policy passed in
@@ -246,6 +464,7 @@ async fn process_command<L: Domain>(
             version,
             domain,
             domain_version,
+            supports_portal_routes,
         } => {
             // A peer that didn't send a domain at all (pre-0.33.0) may still
             // be one this Domain recognises by historical version alone -
@@ -302,6 +521,8 @@ async fn process_command<L: Domain>(
                 );
             }
 
+            agent::set_route_capable(&sender_peer, *supports_portal_routes).await;
+
             agent::register_peer(
                 &Peer::new(sender, zone),
                 agent,
@@ -311,6 +532,12 @@ async fn process_command<L: Domain>(
                 domain_version.as_deref(),
             )
             .await;
+
+            // Now that the peer is registered - so we know its declared type
+            // and whether it understands them - push it the portal routes we
+            // know. This is the point at which the guarantee "a downstream
+            // agent learns its route as soon as it connects" is established.
+            advertise_routes_to::<L>(&sender_peer).await;
         }
         Command::Update { job } => {
             if job.is_expired() {
@@ -322,7 +549,7 @@ async fn process_command<L: Domain>(
 
             tracing::debug!("Update job: {:?} to {} from {}", job, recipient, peer,);
 
-            assert_portal_ownership::<L>(job).await?;
+            assert_portal_ownership::<L>(job, &peer).await?;
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -365,7 +592,7 @@ async fn process_command<L: Domain>(
 
             tracing::debug!("Put job: {:?} to {} from {}", job, recipient, peer,);
 
-            assert_portal_ownership::<L>(job).await?;
+            assert_portal_ownership::<L>(job, &peer).await?;
 
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
@@ -660,6 +887,26 @@ async fn process_command<L: Domain>(
             // Send diagnostics response back to sender
             let response = Command::<L>::diagnostics_response(diagnostics_report);
             response.send_to(&sender_peer).await?;
+        }
+        Command::PortalRoutes { routes, withdrawn } => {
+            let peer = Peer::new(sender, zone);
+
+            tracing::debug!(
+                "Received {} portal route(s) and {} withdrawal(s) from {}",
+                routes.len(),
+                withdrawn.len(),
+                peer
+            );
+
+            let me = agent::name().await;
+
+            // If our own table changed, our downstream peers' routes changed
+            // too, so pass it on. In an acyclic topology this terminates:
+            // `routes_for_peer` never returns a route back to the peer it came
+            // from, so nothing loops.
+            if portalroutes::receive(&peer, routes, withdrawn, &me).await {
+                advertise_routes_to_all::<L>(Some(&peer)).await;
+            }
         }
         Command::DiagnosticsResponse { report } => {
             tracing::debug!("Received diagnostics response from {}", report.agent_name);
@@ -964,6 +1211,10 @@ async fn register_expected_peer_types(config: &ServiceConfig) {
 pub async fn run_with_relay<L: Domain>(config: ServiceConfig) -> Result<(), paddington::Error> {
     register_expected_peer_types(&config).await;
 
+    // Must follow the line above: origination reads the declared types to find
+    // which of our peers are portals.
+    originate_portal_routes::<L>().await;
+
     paddington::relay::configure(&config).await?;
     paddington::relay::set_inner_handler(process_message::<L>).await?;
     paddington::set_handler(paddington::relay::relay_dispatch_handler).await?;
@@ -1039,6 +1290,101 @@ mod tests {
         // same shape.
         let local = job("cluster.freeipa add_local_user bob.proj.brics");
         assert!(check_portal_ownership(&local, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assert_portal_route_enforces_the_discovered_route() {
+        // End-to-end for the enforcement half of portal route discovery. Uses a
+        // zone unique to this test, because the route table is a process-wide
+        // singleton shared with every other test in this binary.
+        use crate::portal_identifier::PortalIdentifier;
+        use crate::portalroutes;
+
+        let zone = "handler-route-enforcement-test";
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+
+        // `clusters` learns from `aip1` that brics reaches it via
+        // brics.aip1.clusters.
+        let aip1 = Peer::new("aip1", zone);
+        let advert = portalroutes::PortalRoute::new(
+            &brics,
+            &crate::destination::Destination::parse("brics.aip1")
+                .unwrap_or_else(|e| unreachable!("dest: {:?}", e)),
+        );
+        assert!(portalroutes::receive(&aip1, &[advert], &[], "clusters").await);
+
+        // A Job on the expected route is accepted.
+        let good = job("brics.aip1.clusters add_user bob.proj.brics");
+        assert!(assert_portal_route(&good, &brics, &aip1).await.is_ok());
+
+        // The same Job with further hops beyond us is also fine - we may be an
+        // intermediate.
+        let onward = job("brics.aip1.clusters.shared add_user bob.proj.brics");
+        assert!(assert_portal_route(&onward, &brics, &aip1).await.is_ok());
+
+        // The attack this scheme exists for: a correctly-*named* impostor portal
+        // introduced one hop away. The root check (R34) passes, because
+        // `first()` really is `brics` - only the route reveals it.
+        let impostor = job("brics.fake.clusters add_user bob.proj.brics");
+        assert!(check_portal_ownership(&impostor, true).is_ok());
+        assert!(assert_portal_route(&impostor, &brics, &aip1).await.is_err());
+
+        // A route that is a prefix of, but shorter than, the expected one.
+        let short = job("brics.clusters add_user bob.proj.brics");
+        assert!(assert_portal_route(&short, &brics, &aip1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_assert_portal_route_skips_a_peer_that_cannot_send_routes() {
+        // Mixed-version fleet: a peer that never advertised support could not
+        // have told us a route, so holding its absence against it would break
+        // the rollout. Same "absent means unchecked" rule R3 uses.
+        use crate::portal_identifier::PortalIdentifier;
+
+        let zone = "handler-route-compat-test";
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+
+        let old_peer = Peer::new("old-aip1", zone);
+        agent::set_route_capable(&old_peer, false).await;
+
+        // No route is known for this zone at all, and the peer is not capable -
+        // so the Job passes.
+        let job = job("brics.aip1.clusters add_user bob.proj.brics");
+        assert!(assert_portal_route(&job, &brics, &old_peer).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assert_portal_route_refuses_a_collided_portal() {
+        use crate::destination::Destination;
+        use crate::portal_identifier::PortalIdentifier;
+        use crate::portalroutes;
+
+        let zone = "handler-route-collision-test";
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+
+        let aip1 = Peer::new("aip1", zone);
+        let fake = Peer::new("fake", zone);
+
+        let route = |r: &str| {
+            portalroutes::PortalRoute::new(
+                &brics,
+                &Destination::parse(r).unwrap_or_else(|e| unreachable!("dest: {:?}", e)),
+            )
+        };
+
+        assert!(portalroutes::receive(&aip1, &[route("brics.aip1")], &[], "clusters").await);
+        // The impostor's advertisement collides rather than replacing.
+        assert!(!portalroutes::receive(&fake, &[route("brics.fake")], &[], "clusters").await);
+        assert!(portalroutes::is_collided(zone, "brics").await);
+
+        // With two conflicting routes we cannot tell which is genuine, so even a
+        // Job on the originally-correct route is refused until an operator
+        // resolves it.
+        let good = job("brics.aip1.clusters add_user bob.proj.brics");
+        assert!(assert_portal_route(&good, &brics, &aip1).await.is_err());
     }
 
     #[test]

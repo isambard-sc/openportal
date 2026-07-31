@@ -5,7 +5,19 @@ SPDX-License-Identifier: CC0-1.0
 
 # Portal route discovery: deriving the expected path from a portal
 
-Status: **proposed**. Nothing below is implemented yet.
+Status: **implemented**, with enforcement. `templemeads::portalroutes` exists as
+designed below, wired into `handler.rs` (origination at startup, advertisement
+on `Register`, receipt and re-advertisement, and the enforcement check),
+`control_message.rs` (withdrawal on disconnect), and `command.rs`
+(`Command::PortalRoutes` plus the `supports_portal_routes` capability flag on
+`Register`). Covered by 17 unit tests.
+
+The phased rollout of [§9](#9-phased-implementation) was **collapsed into a
+single step at the maintainer's direction**: the detect-only phase existed to
+validate the single-path assumption against a live estate, and two years of
+operation with no topology change is stronger evidence than a soak period would
+have produced. Any future change requires operator work, which carries its own
+testing.
 
 This closes the residual recorded in
 [security-review-2.md](../specifications/security-review-2.md) §4.1 - that an
@@ -270,13 +282,14 @@ deployment reality, and it happens to be the correct order for this feature:
   payload into `Command::Error` rather than failing the connection, so this
   degrades to a logged error per push - not fatal, but noisy.
 
-  **Preferred: gate the push on the peer's version.** `Register` already carries
-  the peer's `engine` and `version`, and is exchanged before the push, so the
-  sender can simply not send to a peer too old to understand it. This needs one
-  small prerequisite: `Registrar::register_peer` currently *discards* those
-  fields (`_engine`, `_version` at
-  [agent.rs:237](../../templemeads/src/agent.rs)), so they must be retained
-  first.
+  **What was built instead: an explicit capability flag.** `Register` carries
+  `supports_portal_routes: bool` (`#[serde(default)]`, so a peer that predates
+  the field reads as `false`), and it is exchanged before any push - so a peer
+  that would not understand the message is never sent one, and the
+  `Command::Error` degradation above never occurs in practice. This is both
+  simpler and more precise than parsing version strings, and it follows the
+  existing precedent of `supports_nonce` on `PeerDetails`
+  ([replay-protection-design.md](replay-protection-design.md) §5).
 
 - **Old upstream, new downstream.** The new agent never receives a route. It
   must therefore treat "no route table for this peer at all" as *unchecked*,
@@ -286,14 +299,15 @@ deployment reality, and it happens to be the correct order for this feature:
   rejects.
 
   Distinguishing the two requires knowing whether the peer is *capable* of
-  sending routes - which the retained version gives us. Without it the two
-  states are indistinguishable and the feature cannot fail hard safely.
+  sending routes, which the capability flag gives us directly. Without it the two
+  states are indistinguishable and the feature could not fail hard safely.
 
 - **Both new.** Full enforcement.
 
-**Rollout is therefore: retain peer versions → upgrade upstream → upgrade
-downstream → enable enforcement.** The same server-before-client shape as the
-salt-format rollout in round 1's F15.
+**Rollout is therefore: upgrade upstream → upgrade downstream.** Enforcement
+switches itself on per peer as both ends become capable, so there is no separate
+enable step. The same server-before-client shape as the salt-format rollout in
+round 1's F15.
 
 ## 8. Security properties
 
@@ -323,17 +337,18 @@ still satisfy adjacency (R4), portal-ownership (R34), and the declared peer type
 
 ## 9. Phased implementation
 
-1. **Retain peer engine/version** in the registrar (prerequisite for §7's
-   version gate).
-2. **Derive and report.** Origination, propagation, acceptance, collision
-   detection, bounds, withdrawal. Log the derived table and alarm on collision.
-   **No enforcement.** This carries no availability risk at all, and it
-   validates the single-path assumption against the real estate before anything
-   depends on it.
-3. **Enforce.** The prefix check of §4.7 and the bounded wait of §5.
+This was originally planned in three phases. In the event it was implemented in
+one, for the reason given in the status note at the top.
 
-Phase 2 is worth running for long enough to see a stable table across a planned
-topology change, since that is the case most likely to surprise.
+1. ~~**Retain peer engine/version** in the registrar.~~ **Not needed.** A
+   capability flag on `Register` (`supports_portal_routes`, `#[serde(default)]`)
+   turned out to be both simpler and more precise than comparing version
+   strings, and it follows the existing precedent of `supports_nonce` on
+   `PeerDetails`. See [§7](#7-backwards-compatibility-and-rollout).
+2. ~~**Derive and report**, with no enforcement.~~ Implemented, but not run as a
+   separate phase.
+3. ~~**Enforce.**~~ Implemented in the same change: the prefix check of §4.7 and
+   the bounded wait of §5.
 
 ## 10. Testing
 

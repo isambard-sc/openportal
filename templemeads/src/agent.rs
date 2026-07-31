@@ -3,7 +3,7 @@
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use tokio::sync::RwLock;
 use ts_rs::TS;
@@ -186,6 +186,12 @@ struct Registrar {
     /// map was not declared, and is not checked - see `expected_peer_type` and
     /// `docs/specifications/security-review-2.md` (finding R3).
     expected_types: HashMap<Peer, Type>,
+    /// Peers that advertised `supports_portal_routes` when they registered.
+    /// Used both to decide whether to push routes to them, and whether to
+    /// *enforce* a route against Jobs they deliver - a peer that could never
+    /// have sent us a route must not have one held against it. See
+    /// `crate::portalroutes`.
+    route_capable: HashSet<Peer>,
     name: String,
     typ: Type,
     zones: Vec<String>,
@@ -204,6 +210,7 @@ impl Registrar {
             peers_by_type: HashMap::new(),
             peer_domains: HashMap::new(),
             expected_types: HashMap::new(),
+            route_capable: HashSet::new(),
             name: String::new(),
             typ: Type::Portal,
             zones: Vec::new(),
@@ -631,10 +638,35 @@ pub async fn set_expected_peer_types(expected: HashMap<Peer, Type>) {
     registrar.expected_types = expected;
 }
 
+/// Every peer whose agent type our own configuration declares.
+pub async fn expected_peer_types() -> HashMap<Peer, Type> {
+    REGISTRAR.read().await.expected_types.clone()
+}
+
 /// The agent type `peer` was declared as in our own configuration, or `None` if
 /// the operator did not declare one.
 pub async fn expected_peer_type(peer: &Peer) -> Option<Type> {
     REGISTRAR.read().await.expected_types.get(peer).cloned()
+}
+
+/// Record whether `peer` understands `Command::PortalRoutes`, as advertised in
+/// its `Register`.
+pub async fn set_route_capable(peer: &Peer, capable: bool) {
+    let mut registrar = REGISTRAR.write().await;
+
+    match capable {
+        true => {
+            registrar.route_capable.insert(peer.clone());
+        }
+        false => {
+            registrar.route_capable.remove(peer);
+        }
+    }
+}
+
+/// Whether `peer` advertised support for `Command::PortalRoutes`.
+pub async fn is_route_capable(peer: &Peer) -> bool {
+    REGISTRAR.read().await.route_capable.contains(peer)
 }
 
 pub async fn my_agent_type() -> Type {

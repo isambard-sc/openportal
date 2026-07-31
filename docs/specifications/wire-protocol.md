@@ -128,7 +128,8 @@ identity, engine name and version, and (since templemeads 0.33.0) the
   "engine":         "<engine-name-string>",
   "version":        "<engine-semver-string>",
   "domain":         "<domain-name-string>" | null,
-  "domain_version": "<domain-semver-string>" | null
+  "domain_version": "<domain-semver-string>" | null,
+  "supports_portal_routes": <boolean>
 }
 ```
 
@@ -139,6 +140,41 @@ identity, engine name and version, and (since templemeads 0.33.0) the
 | `version` | string | The templemeads crate's own semver, e.g. `"0.33.0"` - **not** the wire protocol version (that's the unrelated integer `2` in `PeerDetails`, see §4.3) |
 | `domain` | string or null | The sender's `Domain::name()`, e.g. `"greatwestern"`. `null` (and absent from the JSON entirely) from a peer running templemeads <= 0.32.2, from before this field existed |
 | `domain_version` | string or null | The sender's `Domain::version()`, alongside `domain` |
+| `supports_portal_routes` | boolean | Whether the sender understands `PortalRoutes` (§below). `#[serde(default)]`, so a peer that predates the field reads as `false`. Used in both directions: routes are not pushed to a peer that would not understand them, and a route is not enforced against a peer that could never have sent one. See [portal-route-discovery-design.md](../plans/portal-route-discovery-design.md) §7 |
+
+#### `PortalRoutes`
+
+Advertises (or retracts) the routes by which portals reach the sender. Pushed
+*downstream* - away from portals - on connection, and again whenever the
+sender's own table changes.
+
+```json
+{
+  "routes": [
+    { "portal": "<portal-name>", "route": "<portal>.<hop>.<...>.<sender>" }
+  ],
+  "withdrawn": ["<portal-name>"]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `routes` | array | Each entry is a portal and the route by which it reaches **the sender**. Every route therefore ends with the sender's own name, which is what the receiver checks before accepting it |
+| `withdrawn` | array | Portals whose routes the sender is retracting, by name. `#[serde(default)]` |
+
+The receiver appends its own name to each accepted route to obtain its own, and
+propagates that onward to every peer except the one it learned from and any peer
+declared `type = "portal"`. Two different routes for the same portal name is a
+**collision** - impossible in a single-path topology, and therefore the signature
+of an agent whose config has been changed - after which that portal name is
+refused until an operator intervenes.
+
+Instructions naming a portal are then checked against the stored route by prefix
+match, which is strictly stronger than comparing only the first agent of the
+destination. Never sent to a peer that did not advertise
+`supports_portal_routes`. See
+[portal-route-discovery-design.md](../plans/portal-route-discovery-design.md) and
+[security-review-2.md](security-review-2.md) §4.1.
 
 **Backwards compatibility.** `domain`/`domain_version` are `#[serde(default)]`,
 so a `Register` from a pre-0.33.0 peer (which simply doesn't have these keys

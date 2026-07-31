@@ -49,6 +49,17 @@ pub async fn process_control_message<L: Domain>(
         ControlCommand::Disconnected { agent, zone } => {
             let peer = Peer::new(&agent, &zone);
             tracing::info!("Disconnected from agent: {}", peer);
+
+            // Drop the portal routes this peer told us about, so that a later
+            // topology change does not present as a collision against a stale
+            // route. Routes we originated from our own config are unaffected.
+            // See `crate::portalroutes` and
+            // `docs/plans/portal-route-discovery-design.md` §4.5.
+            if crate::portalroutes::withdraw_all_from(&peer).await {
+                crate::handler::withdraw_routes_from::<L>(&peer).await;
+            }
+
+            crate::agent::set_route_capable(&peer, false).await;
         }
         ControlCommand::Error { error } => {
             tracing::error!("Received error: {}", error);

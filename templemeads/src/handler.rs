@@ -238,6 +238,63 @@ pub(crate) async fn withdraw_routes_from<L: Domain>(peer: &Peer) {
 /// `Domain::owning_portal`, which lets `templemeads` ask the question without
 /// knowing any domain vocabulary. An instruction that names no portal is not
 /// checked.
+///
+/// Refuse to have anything to do with a portal for which two conflicting routes
+/// have been advertised.
+///
+/// Unlike the ownership and route checks, this runs at **every** hop, not only at
+/// a Job's terminal agent, and regardless of this agent's own
+/// `verify_portal_ownership` setting. A collision means an agent's configuration
+/// has been changed to introduce an impostor portal, and at that point we cannot
+/// tell which of the two routes is genuine - so no agent that has seen the
+/// collision should relay or act on an instruction naming that portal, not even
+/// to pass it along.
+///
+/// This is deliberately a denial of service for that portal, chosen over the
+/// alternative: if an attacker has got far enough to have a peer provisioned
+/// inside the estate, stopping is preferable to the risk of relaying commands
+/// they should not be able to run.
+///
+/// It stays scoped to the *affected portal name* rather than shutting the agent
+/// down altogether. That is not a weaker choice: an impostor of portal `P` can
+/// only usefully forge instructions naming `P`, and an instruction naming some
+/// other portal while arriving on a route rooted at `P` is caught by the root
+/// check at the terminal agent instead. Confining it keeps a compromise of one
+/// portal relationship from taking down every other portal an agent serves.
+///
+/// No gating is needed: a collision can only ever be recorded in a zone that
+/// carries portal routes, so this is inert in an internal zone.
+///
+async fn assert_no_portal_collision<L: Domain>(job: &Job<L>, sender: &Peer) -> Result<(), Error> {
+    let Some(portal) = L::owning_portal(&job.instruction()) else {
+        return Ok(());
+    };
+
+    let zone = sender.zone();
+    let name = portal.portal();
+
+    if portalroutes::is_collided(zone, &name).await {
+        tracing::error!(
+            "Refusing job {}: portal '{}' in zone '{}' has two conflicting routes, so an \
+             agent's configuration has been changed or an impostor portal introduced. \
+             Refusing to relay or act on any instruction naming '{}' until an operator \
+             resolves it.",
+            job.id(),
+            name,
+            zone,
+            name
+        );
+
+        return Err(Error::InvalidInstruction(format!(
+            "Portal '{}' has conflicting routes - refusing job {}",
+            name,
+            job.id()
+        )));
+    }
+
+    Ok(())
+}
+
 async fn assert_portal_ownership<L: Domain>(
     job: &Job<L>,
     sender: &Peer,
@@ -313,25 +370,6 @@ async fn assert_portal_route<L: Domain>(
 ) -> Result<(), Error> {
     let zone = sender.zone();
     let name = portal.portal();
-
-    // Two conflicting routes have been advertised for this portal, so we cannot
-    // tell which is genuine and refuse to route for it at all.
-    if portalroutes::is_collided(zone, &name).await {
-        tracing::error!(
-            "Rejecting job {}: two conflicting routes have been advertised for portal '{}' \
-             in zone '{}', so instructions naming it are refused until an operator resolves \
-             it.",
-            job.id(),
-            name,
-            zone
-        );
-
-        return Err(Error::InvalidInstruction(format!(
-            "Portal '{}' has conflicting routes - refusing to route job {}",
-            name,
-            job.id()
-        )));
-    }
 
     // Enforce only what we actually know.
     //
@@ -579,7 +617,10 @@ async fn process_command<L: Domain>(
 
             tracing::debug!("Update job: {:?} to {} from {}", job, recipient, peer,);
 
-            if let Err(e) = assert_portal_ownership::<L>(job, &peer, recipient, sender).await {
+            if let Err(e) = assert_no_portal_collision::<L>(job, &peer)
+                .await
+                .and(assert_portal_ownership::<L>(job, &peer, recipient, sender).await)
+            {
                 tracing::error!("Refusing job update {}: {}", job.id(), e);
                 let job = job.errored(&e.to_string())?;
                 let _ = job.update(&Peer::new(sender, zone)).await?;
@@ -630,7 +671,10 @@ async fn process_command<L: Domain>(
             // Report a refusal back to the sender rather than only logging it -
             // otherwise the agent that submitted the job waits for a result that
             // will never come.
-            if let Err(e) = assert_portal_ownership::<L>(job, &peer, recipient, sender).await {
+            if let Err(e) = assert_no_portal_collision::<L>(job, &peer)
+                .await
+                .and(assert_portal_ownership::<L>(job, &peer, recipient, sender).await)
+            {
                 tracing::error!("Refusing job {}: {}", job.id(), e);
                 let job = job.errored(&e.to_string())?;
                 let _ = job.update(&Peer::new(sender, zone)).await?;
@@ -1513,7 +1557,37 @@ mod tests {
         // Job on the originally-correct route is refused until an operator
         // resolves it.
         let good = job("brics.aip1.clusters add_user bob.proj.brics");
-        assert!(assert_portal_route(&good, &brics, &aip1).await.is_err());
+        assert!(assert_no_portal_collision::<TestDomain>(&good, &aip1)
+            .await
+            .is_err());
+
+        // ...and this refusal is *not* gated on being the Job's terminal agent.
+        // An intermediate that has seen the collision must not relay it either:
+        // once an impostor portal is in play we would rather stop than pass
+        // commands along. The Job below is merely passing through `clusters`.
+        let passing_through = job("brics.aip1.clusters.shared add_user bob.proj.brics");
+        assert_eq!(
+            passing_through.destination().position("clusters", "aip1"),
+            Position::Downstream
+        );
+        assert!(
+            assert_no_portal_collision::<TestDomain>(&passing_through, &aip1)
+                .await
+                .is_err()
+        );
+
+        // Nor is it gated on this agent's own `verify_portal_ownership`, which is
+        // off by default in these tests - so the refusal above already
+        // demonstrates that.
+
+        // But it stays confined to the affected portal: an impostor of `brics`
+        // cannot usefully forge instructions naming a different portal, and
+        // taking those down too would let one compromised relationship disable
+        // every other portal this agent serves.
+        let other = job("other.aip1.clusters add_user bob.proj.other");
+        assert!(assert_no_portal_collision::<TestDomain>(&other, &aip1)
+            .await
+            .is_ok());
     }
 
     #[test]

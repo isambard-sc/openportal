@@ -19,6 +19,26 @@ operation with no topology change is stronger evidence than a soak period would
 have produced. Any future change requires operator work, which carries its own
 testing.
 
+**Validated live** (2026-07-31) against a real estate of
+`brics`(op-portal) → `aip1`(op-provider) → `clusters`(op-clusters) →
+`shared`(op-cluster), with `shared` also connected to `op-localaccount`,
+`op-slurm` and `op-filesystem` over a dedicated `aip1-clusters-shared` zone.
+Confirmed in that order:
+
+1. With no peer declared `type = "portal"`, no routes exist and **no checks
+   apply anywhere** - the estate behaves exactly as it did before this feature.
+2. Setting `type = "portal"` on `aip1`'s entry for `brics` originates the route,
+   propagates it down the chain, and activates enforcement. Traffic flowed
+   normally, including the internal-zone job (`get_local_home_dir`) that §4.7
+   exempts.
+
+**Not yet validated live:** a collision (introducing a second peer advertising
+the same portal name, and confirming the resulting refusal reaches the
+submitter), and withdrawal on disconnect followed by a genuine topology change.
+Both are unit-tested; neither has been exercised against running agents. The
+collision path is worth exercising deliberately at some point, since its
+behaviour is a refusal rather than a warning.
+
 This closes the residual recorded in
 [security-review-2.md](../specifications/security-review-2.md) §4.1 - that an
 agent cannot tell a genuine portal from an impostor that has been provisioned
@@ -163,8 +183,24 @@ a single-path topology cannot legitimately happen. It is the signature of an
 agent whose config has been modified to introduce a second, impostor portal.
 
 **On collision**: log at error level, raise an operator-visible notification,
-and refuse to route instructions naming *that portal name* - and only that
-portal name.
+and refuse to relay or act on any instruction naming *that portal name* - and
+only that portal name.
+
+The refusal applies at **every** hop that has seen the collision, not only at a
+Job's terminal agent, and regardless of that agent's own
+`verify_portal_ownership` setting. This is a deliberate denial of service for
+that portal, chosen over the alternative: once an attacker has got far enough to
+have a peer provisioned inside the estate, stopping is preferable to the risk of
+relaying commands they should not be able to run. That is the maintainer's
+explicit preference, recorded here so the trade-off is not revisited by
+accident.
+
+It is nonetheless confined to the *affected portal name*, which is not a weaker
+choice. An impostor of portal `P` can only usefully forge instructions naming
+`P`; an instruction naming some other portal while arriving on a route rooted at
+`P` is caught by the root check at the terminal agent instead. Confining it keeps
+a compromise of one portal relationship from taking down every other portal an
+agent serves.
 
 This is deliberately narrower than "disconnect the peer and enter a safe
 state". A global safe state would let an attacker who can add one peer to one

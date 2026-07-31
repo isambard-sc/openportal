@@ -45,9 +45,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   Because the topology is single-pathed and acyclic, two different routes to the
   same portal name cannot legitimately occur, so a collision is an unambiguous
   signal that an agent's config has been changed to introduce an impostor
-  portal. On collision the agent logs at error level and refuses to route for
-  *that portal only* - deliberately not a global safe state, which would let an
-  attacker who can add one peer take down everything downstream at will.
+  portal. On collision the agent logs at error level and refuses to relay or act
+  on any instruction naming that portal - at every hop that has seen the
+  collision, not just the terminal agent. That is a deliberate denial of service
+  for that portal: once an attacker has a peer provisioned inside the estate,
+  stopping is preferable to relaying commands they should not be able to run. It
+  stays confined to the affected portal name, since an impostor of one portal
+  cannot usefully forge instructions naming another, and confining it stops one
+  compromised relationship disabling every other portal an agent serves.
 
   The check runs only at the agent that *acts* on a portal-rooted instruction -
   the Job's terminal agent - not at intermediate hops, which contribute the

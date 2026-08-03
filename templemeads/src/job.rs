@@ -18,6 +18,18 @@ use std::fmt::Display;
 use ts_rs::TS;
 use uuid::Uuid;
 
+/// Maximum lifetime of a Job, from creation to expiry.
+///
+/// `expires` is a wire field, and reaping expired Jobs is the only thing that
+/// bounds a board's size, so a peer-chosen far-future value meant a Job was never
+/// reaped. Real Jobs are created with a two-minute lifetime (`Job::new`) and
+/// occasionally extended, so an hour is generous. See
+/// `docs/specifications/security-review-2.md` (finding R31).
+const MAX_JOB_LIFETIME: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+
+/// Maximum number of Jobs accepted in a single `Command::Sync` payload.
+const MAX_SYNCED_JOBS: usize = 10_000;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Envelope<L: Domain> {
@@ -305,6 +317,51 @@ impl<L: Domain> Job<L> {
 
     pub fn expires(&self) -> &chrono::DateTime<Utc> {
         &self.expires
+    }
+
+    ///
+    /// Return this Job with its `expires` clamped to at most `MAX_JOB_LIFETIME`
+    /// after `created`, and to at most that far in the future.
+    ///
+    /// `expires` arrives from the wire as whatever the sending peer wrote, and
+    /// reaping is the only thing that bounds a board's size - so a Job claiming to
+    /// expire in the year 3000 stayed on the board for the life of the process. A
+    /// legitimate Job's lifetime is minutes. See
+    /// `docs/specifications/security-review-2.md` (finding R31).
+    ///
+    pub fn clamp_expires(&self) -> Self {
+        let now = Utc::now();
+
+        // `checked_add_signed` rather than `+`: `created` is a wire field, so it
+        // can sit near `DateTime::MAX` where the addition would panic - and with
+        // `panic = "abort"` that is a remote process kill (cf. finding R25).
+        let ceiling = match (
+            self.created.checked_add_signed(MAX_JOB_LIFETIME),
+            now.checked_add_signed(MAX_JOB_LIFETIME),
+        ) {
+            (Some(from_created), Some(from_now)) => std::cmp::min(from_created, from_now),
+            // `created` is absurd; fall back to a ceiling relative to now only.
+            (None, Some(from_now)) => from_now,
+            // Only reachable if the clock itself is near DateTime::MAX.
+            _ => now,
+        };
+
+        if self.expires <= ceiling {
+            return self.clone();
+        }
+
+        tracing::warn!(
+            "Job {} claims to expire at {}, which is beyond the {} minute maximum \
+             lifetime - clamping it to {}.",
+            self.id,
+            self.expires,
+            MAX_JOB_LIFETIME.num_minutes(),
+            ceiling
+        );
+
+        let mut clamped = self.clone();
+        clamped.expires = ceiling;
+        clamped
     }
 
     pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
@@ -1353,6 +1410,26 @@ pub async fn sync_from_peer<L: Domain>(
         return Ok(());
     }
 
+    // `Command::Sync` carries a peer-supplied `Vec<Job>` that is re-injected into
+    // the inbound channel, so an oversized one is both a large allocation and a
+    // large amount of downstream work. A real sync carries a board's worth of live
+    // Jobs. See `docs/specifications/security-review-2.md` (finding R31).
+    if jobs.len() > MAX_SYNCED_JOBS {
+        tracing::warn!(
+            "Refusing to sync {} jobs from peer {} - the limit is {}.",
+            jobs.len(),
+            peer,
+            MAX_SYNCED_JOBS
+        );
+
+        return Err(Error::Unavailable(format!(
+            "Peer {} tried to sync {} jobs, which is more than the {} allowed",
+            peer,
+            jobs.len(),
+            MAX_SYNCED_JOBS
+        )));
+    }
+
     let mut update_jobs = Vec::new();
     let mut put_jobs = Vec::new();
 
@@ -1518,10 +1595,45 @@ pub fn assert_not_expired(expiry: &chrono::DateTime<Utc>) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::test_domain::TestDomain;
 
     type Command = super::Command<TestDomain>;
     type Job = super::Job<TestDomain>;
+
+    #[test]
+    fn test_a_peer_supplied_expiry_is_clamped() {
+        // `expires` is a wire field, and reaping expired Jobs is the only thing that
+        // bounds a board's size - so a Job claiming to expire in the year 3000 sat
+        // on the board for the life of the process. See finding R31.
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true).unwrap();
+
+        // A normal Job is untouched.
+        assert_eq!(job.clamp_expires().expires(), job.expires());
+
+        // A far-future expiry is pulled back to the ceiling.
+        let far_future = job.set_lifetime(chrono::TimeDelta::days(365 * 1000));
+        let clamped = far_future.clamp_expires();
+
+        assert!(
+            clamped.expires() < far_future.expires(),
+            "a millennium-long lifetime must be clamped"
+        );
+        assert!(
+            *clamped.expires() <= Utc::now() + MAX_JOB_LIFETIME + chrono::TimeDelta::seconds(5),
+            "clamped expiry {} is still beyond the ceiling",
+            clamped.expires()
+        );
+
+        // Clamping never *extends* a short lifetime, and is idempotent.
+        let short = job.set_lifetime(chrono::TimeDelta::seconds(30));
+        assert_eq!(short.clamp_expires().expires(), short.expires());
+        assert_eq!(
+            clamped.clamp_expires().expires(),
+            clamped.expires(),
+            "clamping twice must be a no-op"
+        );
+    }
 
     #[test]
     fn test_board_add_rejects_an_implausible_version() {

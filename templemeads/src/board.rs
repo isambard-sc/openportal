@@ -22,6 +22,20 @@ use crate::job::Job;
 /// `docs/specifications/security-review-2.md` (finding R6).
 const MAX_PLAUSIBLE_JOB_VERSION: u64 = 1 << 60;
 
+/// Maximum number of Jobs a single board will hold.
+///
+/// A board is per-peer, and a peer can `Put` as many Jobs as it likes: nothing
+/// capped the map, and with a peer-chosen `expires` far in the future nothing
+/// reaped them either. A real board holds a handful of live Jobs plus recent
+/// history, so this is orders of magnitude above normal use while still being a
+/// bound. See `docs/specifications/security-review-2.md` (finding R31).
+const MAX_JOBS_PER_BOARD: usize = 10_000;
+
+/// Maximum number of queued commands held for a disconnected peer. These
+/// accumulate while a connection is down and are flushed on reconnect; an
+/// unbounded `Vec` meant a peer that never reconnects grows one forever.
+const MAX_QUEUED_COMMANDS: usize = 1_000;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum JobAddState {
     /// The job was added to the board
@@ -257,6 +271,26 @@ impl<L: Domain> Board<L> {
 
         job.assert_is_for_board(&self.peer)?;
 
+        // Refuse to grow an unbounded board. Only for Jobs we do not already hold -
+        // an update to an existing Job must always be allowed through, or a full
+        // board could never drain. See finding R31.
+        if self.jobs.len() >= MAX_JOBS_PER_BOARD && !self.jobs.contains_key(&job.id()) {
+            tracing::warn!(
+                "Refusing job {} for board of agent {}: the board already holds {} \
+                 jobs (the limit).",
+                job.id(),
+                self.peer,
+                self.jobs.len()
+            );
+
+            return Err(Error::Unavailable(format!(
+                "The board for agent {} is full ({} jobs) - refusing to add job {}",
+                self.peer,
+                self.jobs.len(),
+                job.id()
+            )));
+        }
+
         // `version` arrives from the wire with no validation, and a plausible
         // Job's version counts single increments from zero. A value anywhere
         // near this is not a real Job: it is either a bug or a peer probing the
@@ -281,7 +315,12 @@ impl<L: Domain> Board<L> {
         }
 
         let mut state = JobAddState::Unchanged;
-        let mut job = job.clone();
+
+        // Clamp the peer-supplied expiry here, at the single point every Job
+        // reaches before being stored. Reaping is what bounds a board's size, so a
+        // Job claiming to expire far in the future was never reaped. See
+        // `docs/specifications/security-review-2.md` (finding R31).
+        let mut job = job.clamp_expires();
 
         match self.jobs.get_mut(&job.id()) {
             Some(j) => {
@@ -326,8 +365,23 @@ impl<L: Domain> Board<L> {
             // do through all of the existing jobs to see if there are
             // any others that are pending and have the same destination
             // and command
-            for (id, existing_job) in &self.jobs.clone() {
-                if *id != job.id() && job.is_duplicate_of(existing_job) {
+            // Find the candidate first, *then* mutate. This used to iterate
+            // `&self.jobs.clone()` - a full deep clone of every Job on the board, on
+            // every new pending Job, under the write lock, making N inserts O(N)
+            // clones. The loop only ever acts on the first match, so finding it up
+            // front is equivalent and clones one Job instead of all of them. See
+            // finding R31.
+            let candidate = self
+                .jobs
+                .iter()
+                .find(|(id, existing)| **id != job.id() && job.is_duplicate_of(existing))
+                .map(|(id, existing)| (*id, existing.clone()));
+
+            // Iterated rather than `if let` so the error paths below keep their
+            // original `continue` semantics: give up on this candidate and fall
+            // through to the waiter handling, exactly as the loop did.
+            for (id, existing_job) in candidate.iter() {
+                {
                     // Check if the original job is too old (older than 10 minutes)
                     let age = chrono::Utc::now().signed_duration_since(existing_job.created());
                     if age.num_minutes() > 10 {
@@ -573,7 +627,16 @@ impl<L: Domain> Board<L> {
         // to the destination
         if let Some(job_id) = command.job_id() {
             self.jobs.remove(&job_id);
-            self.queued_commands.push(command);
+            if self.queued_commands.len() >= MAX_QUEUED_COMMANDS {
+                tracing::warn!(
+                    "Not queueing another command for agent {}: {} are already queued \
+                     (the limit). This peer has been unreachable for a long time.",
+                    self.peer,
+                    self.queued_commands.len()
+                );
+            } else {
+                self.queued_commands.push(command);
+            }
         } else {
             tracing::error!("Cannot queue command without a job id: {:?}", command);
         }

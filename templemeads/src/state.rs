@@ -9,6 +9,14 @@ use crate::domain::Domain;
 use crate::domain_static;
 use crate::error::Error;
 
+/// Maximum number of per-peer boards this process will hold.
+///
+/// Boards are created on demand from the peer name in a Job's destination and then
+/// never removed, so this is what stops a peer from leaving behind one board per
+/// invented name. A real agent has a handful of peers; this is far above that while
+/// still being a bound. See `docs/specifications/security-review-2.md` (finding R31).
+const MAX_BOARDS: usize = 1_000;
+
 use anyhow::Result;
 use std::any::Any;
 use std::collections::HashMap;
@@ -141,9 +149,30 @@ async fn clean_boards<L: Domain>() {
 }
 
 async fn _force_get<L: Domain>(peer: agent::Peer) -> Result<Arc<State<L>>, Error> {
-    Ok(states::<L>()?
-        .write()
-        .await
+    let states = states::<L>()?;
+    let mut states = states.write().await;
+
+    // A `State` (and its `Board`) is created on demand for whatever peer name a
+    // Job's destination happens to carry, and is then kept for the life of the
+    // process. Nothing bounded that, so an attacker-chosen sequence of names each
+    // left a permanent board behind. Real deployments have a handful of peers. See
+    // `docs/specifications/security-review-2.md` (finding R31).
+    if !states.states.contains_key(&peer) && states.states.len() >= MAX_BOARDS {
+        tracing::warn!(
+            "Refusing to create a board for '{}': {} boards already exist (the \
+             limit). Either this agent has far more peers than expected, or a peer \
+             is sending jobs naming agents that do not exist.",
+            peer,
+            states.states.len()
+        );
+
+        return Err(Error::Unavailable(format!(
+            "Cannot create a board for '{}' - the {} board limit has been reached",
+            peer, MAX_BOARDS
+        )));
+    }
+
+    Ok(states
         .states
         .entry(peer.clone())
         .or_insert(Arc::new(State::new(peer.clone())))

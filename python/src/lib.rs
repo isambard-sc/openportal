@@ -25,7 +25,7 @@ use templemeads::health as mod_health;
 use templemeads::job;
 use templemeads::notification as mod_notification;
 use templemeads::portal_identifier;
-use templemeads::server::sign_api_call;
+use templemeads::server::{sign_api_call, SignatureVersion, SIGNATURE_VERSION_HEADER};
 use templemeads::Error;
 use url::Url;
 
@@ -125,6 +125,13 @@ where
             .header("Authorization", auth_token)
             .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
             .header("X-Nonce", nonce)
+            // `sign_api_call` signs the V2 canonical string, so the server must be
+            // told to verify that form rather than the legacy V1 one. See
+            // docs/specifications/security-review-2.md (finding R29).
+            .header(
+                SIGNATURE_VERSION_HEADER,
+                SignatureVersion::V2.as_header_value(),
+            )
             .send()
             .with_context(|| format!("Could not call function: {}", function))?;
 
@@ -200,6 +207,10 @@ where
             .header("Authorization", auth_token)
             .header("Date", date.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
             .header("X-Nonce", nonce)
+            .header(
+                SIGNATURE_VERSION_HEADER,
+                SignatureVersion::V2.as_header_value(),
+            )
             .body(body_bytes.clone())
             .send()
             .with_context(|| format!("Could not call function: {}", function))?;

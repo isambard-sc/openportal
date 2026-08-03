@@ -45,14 +45,98 @@ use uuid::Uuid;
 type RateLimitMap = HashMap<IpAddr, (u32, DateTime<Utc>)>;
 type SharedRateLimitMap = Arc<Mutex<RateLimitMap>>;
 
+/// Header by which a client declares which canonical-string version its
+/// `Authorization` signature was computed over.
+///
+/// Absent means version 1 - the original, ambiguous form - so every existing
+/// client keeps working untouched. See [`SignatureVersion`] and
+/// `docs/specifications/security-review-2.md` (finding R29).
+pub const SIGNATURE_VERSION_HEADER: &str = "X-OpenPortal-Signature-Version";
+
+///
+/// Which canonical-string form a signature was computed over.
+///
+/// **V1** joins the fields with `\n` and nothing else: no length prefixes, no
+/// field count, and one of four un-tagged shapes chosen by whether the body is
+/// empty and whether a nonce is present. Those shapes are not distinguishable from
+/// one another by the signature, so for a POST
+///
+/// ```text
+/// …\n<function>\n<body>\n<nonce>   ==   …\n<function>\n<body ‖ "\n" ‖ nonce>
+/// ```
+///
+/// are the *same bytes* - meaning the *presence* of a nonce is not authenticated,
+/// and a request that supplied one cannot be told from a request that folded it
+/// into the body. See finding R29.
+///
+/// **V2** signs a fixed six-field string with every field length-prefixed, so no
+/// field's content can be reinterpreted as a field boundary, and begins with a
+/// version tag so a V2 string can never collide with a V1 one.
+///
+/// V1 is still accepted, and is the default when a client sends no
+/// [`SIGNATURE_VERSION_HEADER`], because the bridge's clients include portal
+/// software this project does not control. It should be refused once every client
+/// is known to send V2.
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureVersion {
+    /// The original form. Ambiguous - see above.
+    V1,
+    /// Length-prefixed, fixed-arity, version-tagged.
+    V2,
+}
+
+impl SignatureVersion {
+    /// The version a request declares, or `V1` if it declares none.
+    ///
+    /// An *unrecognised* value is an error rather than a silent fallback to V1:
+    /// falling back would let anything downgrade a V2 client to the weaker form by
+    /// mangling one header.
+    fn from_headers(headers: &HeaderMap) -> Result<Self, AppError> {
+        let Some(value) = headers.get(SIGNATURE_VERSION_HEADER) else {
+            return Ok(Self::V1);
+        };
+
+        match value.to_str() {
+            Ok("1") => Ok(Self::V1),
+            Ok("2") => Ok(Self::V2),
+            other => {
+                tracing::error!(
+                    "Unrecognised {} header: {:?}",
+                    SIGNATURE_VERSION_HEADER,
+                    other
+                );
+
+                Err(AppError(
+                    anyhow::anyhow!("Unrecognised signature version"),
+                    Some(StatusCode::BAD_REQUEST),
+                ))
+            }
+        }
+    }
+
+    /// The value to send in [`SIGNATURE_VERSION_HEADER`].
+    pub fn as_header_value(&self) -> &'static str {
+        match self {
+            Self::V1 => "1",
+            Self::V2 => "2",
+        }
+    }
+}
+
 ///
 /// Return the OpenPortal authorisation header for the passed datetime,
 /// protocol, function, (optional) body bytes, and nonce, signed with the passed
-/// key.
+/// key, using the current canonical form ([`SignatureVersion::V2`]).
 ///
 /// The body parameter should be the raw JSON bytes (empty slice for GET requests).
 /// This ensures the signature is computed over the exact bytes sent/received,
 /// avoiding any serialization fragility.
+///
+/// A caller using this **must** also send
+/// `X-OpenPortal-Signature-Version: 2` ([`SIGNATURE_VERSION_HEADER`]), or the
+/// server will verify against the V1 form and reject the request. Use
+/// [`sign_api_call_with_version`] to sign the legacy form deliberately.
 ///
 pub fn sign_api_call(
     key: &SecretKey,
@@ -62,9 +146,55 @@ pub fn sign_api_call(
     body: &[u8],
     nonce: Option<&str>,
 ) -> Result<String, anyhow::Error> {
+    sign_api_call_with_version(
+        key,
+        date,
+        protocol,
+        function,
+        body,
+        nonce,
+        SignatureVersion::V2,
+    )
+}
+
+///
+/// As [`sign_api_call`], but signing the canonical form of an explicit
+/// [`SignatureVersion`]. Needed by the server, which must reproduce whichever form
+/// the client declared, and by tests.
+///
+pub fn sign_api_call_with_version(
+    key: &SecretKey,
+    date: &DateTime<Utc>,
+    protocol: &str,
+    function: &str,
+    body: &[u8],
+    nonce: Option<&str>,
+    version: SignatureVersion,
+) -> Result<String, anyhow::Error> {
     let date = date.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
 
-    let call_string = if body.is_empty() {
+    let body_str =
+        std::str::from_utf8(body).with_context(|| "Could not parse body as UTF-8 for signing")?;
+
+    let call_string = match version {
+        SignatureVersion::V1 => v1_call_string(protocol, &date, function, body_str, nonce),
+        SignatureVersion::V2 => v2_call_string(protocol, &date, function, body_str, nonce),
+    };
+
+    let signature = key.expose_secret().sign(call_string)?;
+    Ok(format!("OpenPortal {}", signature))
+}
+
+/// The original canonical string. Retained verbatim, ambiguity included, so
+/// existing clients keep verifying - see [`SignatureVersion`].
+fn v1_call_string(
+    protocol: &str,
+    date: &str,
+    function: &str,
+    body: &str,
+    nonce: Option<&str>,
+) -> String {
+    if body.is_empty() {
         // GET request - no body
         match nonce {
             Some(n) => format!(
@@ -75,23 +205,58 @@ pub fn sign_api_call(
         }
     } else {
         // POST request - include raw body bytes
-        let body_str = std::str::from_utf8(body)
-            .with_context(|| "Could not parse body as UTF-8 for signing")?;
-
         match nonce {
             Some(n) => format!(
                 "{}\napplication/json\n{}\n{}\n{}\n{}",
-                protocol, date, function, body_str, n
+                protocol, date, function, body, n
             ),
             None => format!(
                 "{}\napplication/json\n{}\n{}\n{}",
-                protocol, date, function, body_str
+                protocol, date, function, body
             ),
         }
-    };
+    }
+}
 
-    let signature = key.expose_secret().sign(call_string)?;
-    Ok(format!("OpenPortal {}", signature))
+/// The unambiguous canonical string.
+///
+/// Every field is present exactly once and prefixed with its byte length, so no
+/// field's content can be read as a field boundary and the arity is fixed at six
+/// regardless of whether the body or nonce is empty. The leading version tag is
+/// itself length-prefixed, so a V2 string cannot collide with a V1 one.
+///
+/// ```text
+/// 17:openportal-sig-v2
+/// 4:post
+/// 16:application/json
+/// 29:Mon, 03 Aug 2026 12:00:00 GMT
+/// 3:run
+/// 42:{"command":"waldur.provider get_offerings"}
+/// 19:unique-nonce-abc123
+/// ```
+///
+/// An absent nonce is the empty string (`0:`), which is distinct from a nonce that
+/// is present and empty only in that both are rejected upstream - the point is that
+/// `0:` cannot be confused with any other field's content.
+fn v2_call_string(
+    protocol: &str,
+    date: &str,
+    function: &str,
+    body: &str,
+    nonce: Option<&str>,
+) -> String {
+    let field = |value: &str| format!("{}:{}", value.len(), value);
+
+    [
+        field("openportal-sig-v2"),
+        field(protocol),
+        field("application/json"),
+        field(date),
+        field(function),
+        field(body),
+        field(nonce.unwrap_or("")),
+    ]
+    .join("\n")
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -308,6 +473,89 @@ pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
 /// This is not part of the public API and clients must not send it.
 const RESOLVED_CLIENT_IP_HEADER: &str = "x-openportal-client-ip";
 
+/// Maximum request body the bridge will buffer.
+///
+/// axum's default is 2 MiB, and the `Bytes` extractor buffers the whole body
+/// *before* the handler runs - so `verify_headers` then computed an HMAC-SHA512
+/// over up to 2 MiB and `sign_api_call` formatted a second ~2 MiB `String` copy,
+/// all for a request that had not authenticated yet. At the rate limiter's
+/// (deliberately generous) 10,000 requests / 10 s per address, that is gigabytes
+/// of pre-authentication hashing and copying per source address.
+///
+/// 1 MiB is well above any legitimate call - the largest are a `send_result`
+/// carrying a completed Job - while halving the worst case. It is deliberately not
+/// tightened further without measuring real payloads, since a too-small limit
+/// would reject legitimate work. See
+/// docs/specifications/security-review-2.md (finding R24).
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of requests handled concurrently, mirroring paddington's
+/// `MAX_UNAUTHENTICATED_CONNECTIONS` (round 1 finding F11), which the bridge never
+/// got despite being the externally reachable surface. Excess requests are
+/// refused with 503 rather than queued, so the failure is fast and visible rather
+/// than an unbounded backlog. See finding R24.
+const MAX_CONCURRENT_REQUESTS: usize = 512;
+
+/// Deadline for handling one request, measured from the point axum has parsed the
+/// headers. This also bounds the slow-body half of a slowloris, because the `Bytes`
+/// extractor runs inside the handler and therefore inside this deadline.
+///
+/// A *pre-header* read timeout would have to be set on hyper's builder, which
+/// `axum::serve` does not expose; that half remains uncovered, and is why the
+/// bridge must stay on an internal network (see `docs/specifications/bridge-api.md`).
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Permits for [`limit_concurrency_middleware`].
+static REQUEST_PERMITS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_REQUESTS);
+
+///
+/// Refuse a request outright when `MAX_CONCURRENT_REQUESTS` are already in flight.
+///
+/// Fail-fast rather than queue, matching how paddington's listener treats its
+/// unauthenticated-connection pool. See finding R24.
+///
+async fn limit_concurrency_middleware(request: Request, next: Next) -> Response {
+    let Ok(_permit) = REQUEST_PERMITS.try_acquire() else {
+        tracing::warn!(
+            "Refusing a bridge request: {} are already in flight (the cap).",
+            MAX_CONCURRENT_REQUESTS
+        );
+
+        return AppError(
+            anyhow::anyhow!("Too many concurrent requests"),
+            Some(StatusCode::SERVICE_UNAVAILABLE),
+        )
+        .into_response();
+    };
+
+    next.run(request).await
+}
+
+///
+/// Abandon a request that takes longer than [`REQUEST_TIMEOUT`].
+///
+/// hyper 1.x adds no default timeout of any kind, so without this a request could
+/// occupy a connection - and, with the middleware above, a permit - indefinitely.
+///
+async fn timeout_middleware(request: Request, next: Next) -> Response {
+    match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            tracing::warn!(
+                "Abandoning a bridge request that exceeded {:?}.",
+                REQUEST_TIMEOUT
+            );
+
+            AppError(
+                anyhow::anyhow!("Request timed out"),
+                Some(StatusCode::REQUEST_TIMEOUT),
+            )
+            .into_response()
+        }
+    }
+}
+
 /// How long a nonce is remembered for replay detection.
 const NONCE_TTL_SECONDS: i64 = 30;
 
@@ -512,14 +760,29 @@ async fn verify_headers(
     // it without bound or probe it (finding F11). The nonce is part of the
     // signed material, so verifying the signature also binds the nonce.
 
+    // Reproduce whichever canonical form the client declared. Absent means V1, so
+    // existing clients are unaffected; an unrecognised value is rejected rather
+    // than silently downgraded to V1. See `SignatureVersion` (finding R29).
+    let signature_version = SignatureVersion::from_headers(headers)?;
+
+    if signature_version == SignatureVersion::V1 {
+        tracing::debug!(
+            "Request for '{}' is signed with the legacy (V1) canonical string, whose \
+             field boundaries are ambiguous. Send '{}: 2' once this client supports it.",
+            function,
+            SIGNATURE_VERSION_HEADER
+        );
+    }
+
     // Generate the expected signature from the raw body bytes
-    let expected_key = sign_api_call(
+    let expected_key = sign_api_call_with_version(
         &state.config.key,
         &date,
         protocol,
         function,
         body,
         nonce.as_deref(),
+        signature_version,
     )?;
 
     // Compare the provided and expected authorization headers in constant time,
@@ -1307,6 +1570,13 @@ pub async fn spawn<L: Domain>(config: Config) -> Result<(), Error> {
             state.clone(),
             resolve_client_ip_middleware,
         ))
+        // Bound what an unauthenticated caller can make us spend. Each `.layer`
+        // wraps the ones before it, so the concurrency cap is outermost and
+        // rejects before any body is buffered - see the constants above and
+        // finding R24.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn(timeout_middleware))
+        .layer(middleware::from_fn(limit_concurrency_middleware))
         .with_state(state);
 
     // create a TCP listener on the specified port
@@ -1342,6 +1612,8 @@ impl IntoResponse for AppError {
             StatusCode::SERVICE_UNAVAILABLE => "Service unavailable",
             StatusCode::BAD_REQUEST => "Bad request",
             StatusCode::NOT_FOUND => "Not found",
+            StatusCode::REQUEST_TIMEOUT => "Request timed out",
+            StatusCode::PAYLOAD_TOO_LARGE => "Payload too large",
             _ => "Internal server error",
         };
 
@@ -1482,6 +1754,126 @@ mod tests {
     }
 
     #[test]
+    fn test_v2_signing_removes_the_nonce_folding_ambiguity() {
+        // The R29 collision: under V1 a POST signed with body B and nonce N produces
+        // the *same bytes* as one signed with body `B \n N` and no nonce, because the
+        // fields are `\n`-joined with no length prefixes and no field count. So the
+        // presence of a nonce was not authenticated.
+        let key = Key::generate();
+        let date = Utc::now();
+        let body = br#"{"command":"waldur.provider get_offerings"}"#;
+        let nonce = "unique-nonce-abc123";
+
+        let folded = format!("{}\n{}", String::from_utf8_lossy(body), nonce);
+
+        let sign = |b: &[u8], n: Option<&str>, v| {
+            sign_api_call_with_version(&key, &date, "post", "run", b, n, v)
+                .unwrap_or_else(|e| unreachable!("sign: {:?}", e))
+        };
+
+        // V1: the two are indistinguishable - this is the finding.
+        assert_eq!(
+            sign(body, Some(nonce), SignatureVersion::V1),
+            sign(folded.as_bytes(), None, SignatureVersion::V1),
+            "V1 is expected to be ambiguous - if this fails the legacy form changed"
+        );
+
+        // V2: they are distinct.
+        assert_ne!(
+            sign(body, Some(nonce), SignatureVersion::V2),
+            sign(folded.as_bytes(), None, SignatureVersion::V2),
+            "V2 must distinguish a supplied nonce from one folded into the body"
+        );
+
+        // V2 must also not collide with V1 for the same inputs, so a signature can
+        // never be replayed across versions.
+        assert_ne!(
+            sign(body, Some(nonce), SignatureVersion::V1),
+            sign(body, Some(nonce), SignatureVersion::V2)
+        );
+
+        // And the GET/POST shapes can no longer collide either: under V1 an empty
+        // body meant the nonce took the body's slot.
+        assert_ne!(
+            sign(b"", Some(nonce), SignatureVersion::V2),
+            sign(nonce.as_bytes(), None, SignatureVersion::V2)
+        );
+    }
+
+    #[test]
+    fn test_v2_canonical_string_is_length_prefixed_and_fixed_arity() {
+        // Seven fields, always, each prefixed with its byte length - so no field's
+        // content can be read as a boundary, and an absent nonce still occupies a
+        // slot.
+        let with_nonce = v2_call_string(
+            "post",
+            "Mon, 03 Aug 2026 12:00:00 GMT",
+            "run",
+            "{}",
+            Some("abc"),
+        );
+        let without = v2_call_string("post", "Mon, 03 Aug 2026 12:00:00 GMT", "run", "{}", None);
+
+        assert_eq!(with_nonce.split('\n').count(), 7);
+        assert_eq!(without.split('\n').count(), 7);
+
+        assert!(with_nonce.starts_with("17:openportal-sig-v2\n"));
+        assert!(with_nonce.ends_with("\n3:abc"));
+        assert!(without.ends_with("\n0:"));
+
+        // A field containing the separator cannot shift the boundaries.
+        let sneaky = v2_call_string("post", "d", "run", "a\n3:xyz", Some("abc"));
+        assert_eq!(sneaky.split('\n').count(), 8); // the body itself contains one
+                                                   // "a" + "\n" + "3:xyz" is 7 bytes, so the prefix is 7 - a reader cannot be
+                                                   // fooled into treating the embedded "3:xyz" as a field of its own.
+        assert!(
+            sneaky.contains("7:a\n3:xyz"),
+            "body must carry its own length"
+        );
+    }
+
+    #[test]
+    fn test_signature_version_defaults_to_v1_and_rejects_anything_unknown() {
+        // Absent means V1, which is what keeps every existing client working.
+        let headers = HeaderMap::new();
+        assert_eq!(
+            SignatureVersion::from_headers(&headers).ok(),
+            Some(SignatureVersion::V1)
+        );
+
+        for (value, expected) in [("1", SignatureVersion::V1), ("2", SignatureVersion::V2)] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                SIGNATURE_VERSION_HEADER,
+                HeaderValue::from_static(match value {
+                    "1" => "1",
+                    _ => "2",
+                }),
+            );
+            assert_eq!(
+                SignatureVersion::from_headers(&headers).ok(),
+                Some(expected)
+            );
+        }
+
+        // An unrecognised value must be an error, not a silent fallback to V1 -
+        // otherwise mangling one header downgrades a V2 client to the weaker form.
+        for bad in ["0", "3", "", "2.0", "two", "v2"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                SIGNATURE_VERSION_HEADER,
+                HeaderValue::from_str(bad)
+                    .unwrap_or_else(|e| unreachable!("header {:?}: {:?}", bad, e)),
+            );
+            assert!(
+                SignatureVersion::from_headers(&headers).is_err(),
+                "{:?} must be rejected rather than treated as V1",
+                bad
+            );
+        }
+    }
+
+    #[test]
     fn test_sign_api_call() {
         let key = Key::generate();
         let date = Utc::now();
@@ -1490,8 +1882,18 @@ mod tests {
         let body = b""; // Empty body for GET request
         let nonce = None;
 
-        let signed =
-            sign_api_call(&key, &date, protocol, function, body, nonce).unwrap_or_default();
+        // explicitly V1: this test pins the *legacy* canonical string, which must
+        // keep verifying byte-for-byte so existing clients are unaffected (R29)
+        let signed = sign_api_call_with_version(
+            &key,
+            &date,
+            protocol,
+            function,
+            body,
+            nonce,
+            SignatureVersion::V1,
+        )
+        .unwrap_or_default();
 
         #[allow(clippy::unwrap_used)] // safe to do this in a test
         {
@@ -1520,8 +1922,16 @@ mod tests {
         let body = b"{\"command\":\"test\"}";
         let nonce = "test-nonce";
 
-        let signed =
-            sign_api_call(&key, &date, protocol, function, body, Some(nonce)).unwrap_or_default();
+        let signed = sign_api_call_with_version(
+            &key,
+            &date,
+            protocol,
+            function,
+            body,
+            Some(nonce),
+            SignatureVersion::V1,
+        )
+        .unwrap_or_default();
 
         #[allow(clippy::unwrap_used)] // safe to do this in a test
         {

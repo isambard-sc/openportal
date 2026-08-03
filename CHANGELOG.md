@@ -27,6 +27,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   service, and logs a prominent warning to that effect on every startup.
   `op-freeipa` is the production path.
 
+- **Bridge API signature version 2** (finding R29), selected with a new
+  `X-OpenPortal-Signature-Version: 2` header. The version 1 canonical string is
+  `\n`-joined with no length prefixes and no field count, so its four shapes are
+  indistinguishable by the signature: for a POST, `…\n<body>\n<nonce>` is
+  byte-identical to `…\n<body ‖ "\n" ‖ nonce>`, which means the *presence* of a
+  nonce was not authenticated. Version 2 signs a seven-field string with every field
+  length-prefixed and always present, led by a length-prefixed version tag.
+
+  **Backwards compatible:** an absent header means version 1, which is still
+  accepted and verified byte-for-byte as before, so existing clients need no change.
+  An *unrecognised* value is a 400 rather than a fallback to version 1, so a mangled
+  header cannot downgrade a version 2 client. `sign_api_call` now produces version 2
+  (Rust callers upgrade by recompiling) and `sign_api_call_with_version` signs an
+  explicit version; the Python client sends the header. Version 1 will be removed
+  once every client has migrated, and every version 1 verification is logged at
+  debug level so the remaining ones are discoverable.
 - `client --add --type <agent-type>` declares the agent type a client must
   present itself as (finding R3), validated against the nine known types at
   add-time so a typo is an error rather than a silently-unchecked peer. Omitting
@@ -70,6 +86,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   that refused to *forward* a restart would still kill *itself* on request from
   the very peer it would not relay for. Authorization now precedes the target
   decision, in a pure `decide_restart` with tests.
+
+- **Relay envelopes were not bound to the connection they arrived on** (finding
+  R16). `envelope.from` is a wire field, so any direct peer - a portal, a second
+  proxy - could inject an envelope for a relayed pair it had no part in, making the
+  receiver emit a genuine key-signed `SessionUnknown` to the far side and churn
+  their session. The receiver now requires the envelope to have arrived over the
+  connection to the relay its own config names for that peer. Note this is *not*
+  covered by the sender-adjacency check, which applies to a Job's destination
+  rather than to relay unwrapping.
+- **A hostile relay could amplify one injected packet into an unbounded number of
+  bootstrap tasks** (finding R28). `SessionUnknown` is now debounced to one per peer
+  per 5 seconds, the re-bootstrap it triggers is single-flight per peer rather than
+  one spawned task per message, and the pending-bootstrap map is capped.
+- **The bridge listener had no bounds at all** (finding R24). The request body limit
+  is down from axum's 2 MiB default to 1 MiB - which directly bounds the
+  pre-authentication HMAC-SHA512 over the whole body - plus a 512-request
+  concurrency cap (fail-fast with 503) and a 30 second request deadline. Added with
+  no new dependencies. A pre-header read timeout is still not possible via
+  `axum::serve`; this is now documented rather than implied.
+- **Boards and jobs could grow without bound** (finding R31). A Job's `expires` is a
+  wire field and reaping is the only thing that bounds a board, so a peer-chosen
+  far-future value meant a Job was never reaped: it is now clamped to at most an
+  hour after creation. Jobs per board, boards per process, queued commands per
+  board and `Command::Sync`'s job count are all capped, and a board is no longer
+  created for an arbitrary attacker-chosen destination name. Separately, the
+  duplicate scan deep-cloned every Job on the board on every new pending Job, under
+  the write lock - it now clones one.
+- **One mistyped cost report could exhaust `op-cloudaccount`'s memory** (finding
+  R26). A report window is clamped to ~5 years, day enumeration is independently
+  capped, files over 8 MiB are skipped, and directory entries are skipped unless
+  they are regular files (so a symlink to `/dev/zero` is not followed). A plausible
+  typo - `0001-01-01` for `2001-01-01` - previously produced ~739,000 daily reports,
+  which were then serialised into a Job result.
+- **`op-cloudaccount` answered usage and limit queries for projects never assigned
+  to it** (finding R30), so a peer authorised for one portal could read another
+  portal's cost history from that account. Both now require the project to be in the
+  assignment state first.
 
 ### Fixed
 
@@ -365,6 +418,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   Files containing key material must go through
   `paddington::config::write_secret_file`; two rounds of review found the same
   regression independently, so it is now checked structurally.
+- `docs/specifications/bridge-api.md` gains **§0 — Deployment requirement: the
+  bridge is not internet-facing** (finding R32), stating that `op-bridge` must run on
+  a trusted network (private Kubernetes/container network or loopback) or behind a
+  TLS-terminating reverse proxy. It records the design intent - `op-portal` holds the
+  single internet-facing WebSocket surface, `op-bridge` holds the HTTP control
+  surface on the private side, so the portal never needs both - and the three
+  consequences: bodies and responses are cleartext with the HMAC covering the request
+  direction only, there is no pre-header read timeout, and the API key authenticates
+  the portal software rather than individual users.
 - `ServiceConfig::add_client` and `add_relayed_client` take an extra
   `agent_type: &Option<String>` (the expected type of the client being added),
   and `ClientConfig::new`/`new_relayed` likewise. `Invite` gained

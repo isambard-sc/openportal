@@ -50,6 +50,9 @@ pub mod validate;
 
 pub mod server {
     pub use crate::bridge_server::sign_api_call;
+    pub use crate::bridge_server::sign_api_call_with_version;
+    pub use crate::bridge_server::SignatureVersion;
+    pub use crate::bridge_server::SIGNATURE_VERSION_HEADER;
     pub use crate::bridgestate::get as get_board;
     pub use crate::notificationstate::add as add_pending_notification;
     pub use crate::notificationstate::enqueue as enqueue_notification;

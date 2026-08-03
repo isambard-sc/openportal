@@ -20,6 +20,23 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tokio::sync::RwLock;
 
+/// Maximum number of calendar days a single cost-report window may span.
+///
+/// `time_period.start` is a plain `NaiveDate` deserialised from an operator-written
+/// file, and chrono accepts the full range - so `"start":"-262143-01-01"` yields
+/// ~191 million `NaiveDate`s and then a `DailyProjectUsageReport` (four `HashMap`s)
+/// for each. A plausible *typo* - `0001-01-01` for `2001-01-01` - already produces
+/// ~739,000 daily reports, which are then serialised into a Job result and pushed
+/// over the wire. Roughly five years is far beyond any real billing window. See
+/// `docs/specifications/security-review-2.md` (finding R26).
+const MAX_REPORT_WINDOW_DAYS: i64 = 5 * 366;
+
+/// Maximum size of a single cost-report file. `read_to_string` had no cap, and
+/// neither `read_dir` nor `read_to_string` checked for a regular file, so a
+/// multi-gigabyte file - or a symlink to `/dev/zero` - was read entirely into
+/// memory. See finding R26.
+const MAX_REPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
 use greatwestern::grammar::{Date, DateRange, ProjectIdentifier};
 use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use serde::Deserialize;
@@ -254,6 +271,39 @@ async fn load_sorted_reports(project: &ProjectIdentifier) -> Result<Vec<ParsedRe
             continue;
         }
 
+        // `symlink_metadata` rather than `metadata`, so a symlink is judged as a
+        // symlink rather than followed to whatever it points at - a link to
+        // `/dev/zero` is not a regular file and has no meaningful length. See
+        // finding R26.
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if !metadata.is_file() => {
+                tracing::warn!(
+                    "Skipping cost-report entry '{}': it is not a regular file.",
+                    path.display()
+                );
+                continue;
+            }
+            Ok(metadata) if metadata.len() > MAX_REPORT_FILE_BYTES => {
+                tracing::warn!(
+                    "Skipping cost-report file '{}': it is {} bytes, more than the \
+                     {} byte maximum.",
+                    path.display(),
+                    metadata.len(),
+                    MAX_REPORT_FILE_BYTES
+                );
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Could not stat cost-report file '{}': {}. Skipping.",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        }
+
         let contents = match tokio::fs::read_to_string(&path).await {
             Ok(contents) => contents,
             Err(e) => {
@@ -282,10 +332,26 @@ fn days_touched(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
     let mut current = start.min(end);
     let end = start.max(end);
 
+    // Hard cap as well as the window clamp in `clamp_window`, so this function is
+    // safe to call with any pair of dates - it allocates one `NaiveDate` plus one
+    // `DailyProjectUsageReport` per day, and both ends come from a file. See
+    // finding R26.
     loop {
         days.push(current);
 
         if current >= end {
+            break;
+        }
+
+        if days.len() as i64 >= MAX_REPORT_WINDOW_DAYS {
+            tracing::warn!(
+                "Cost-report window {} .. {} spans more than the {} day maximum - \
+                 truncating at {}.",
+                start,
+                end,
+                MAX_REPORT_WINDOW_DAYS,
+                current
+            );
             break;
         }
 
@@ -296,6 +362,33 @@ fn days_touched(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
     }
 
     days
+}
+
+/// Clamp a report window to at most [`MAX_REPORT_WINDOW_DAYS`] ending at `end`, and
+/// reject a window whose `end` is in the future.
+///
+/// Applied to the window *before* it reaches `days_touched`, so an absurd
+/// `period_start` produces a short window rather than a truncated giant one. See
+/// finding R26.
+fn clamp_window(start: NaiveDate, end: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let earliest = end
+        .checked_sub_days(Days::new(MAX_REPORT_WINDOW_DAYS as u64))
+        .unwrap_or(end);
+
+    if start < earliest {
+        tracing::warn!(
+            "Cost-report window starts at {}, more than {} days before {} - \
+             clamping the start to {}. Check the report's time_period.start.",
+            start,
+            MAX_REPORT_WINDOW_DAYS,
+            end,
+            earliest
+        );
+
+        return (earliest, end);
+    }
+
+    (start, end)
 }
 
 fn to_usage(amount: f64) -> Usage {
@@ -402,10 +495,13 @@ fn reconstruct(project: &ProjectIdentifier, reports: &[ParsedReport]) -> Project
             }
         };
 
+        let (window_start, window_end) =
+            clamp_window(window_start, report.generated_at.date_naive());
+
         spread_across_days(
             &mut daily,
             window_start,
-            report.generated_at.date_naive(),
+            window_end,
             total_delta,
             &component_deltas,
         );
@@ -434,10 +530,40 @@ fn reconstruct(project: &ProjectIdentifier, reports: &[ParsedReport]) -> Project
 
 /// Build the full `ProjectUsageReport` for `project` from whatever cost
 /// files are in the accounting directory, restricted to `dates`.
+/// Refuse to answer for a project that has not been assigned to this cloud
+/// account.
+///
+/// `GetProjects` filters by portal, but `GetUsageReport` and `GetLimit` took the
+/// project straight from the Job and scanned every report file for it - so a peer
+/// authorised for portal A could read the cost history of `someproject.portalB`
+/// from this account. Gated here rather than at the instruction handlers so no
+/// future caller can bypass it; `GetUsageReports` passes projects that already come
+/// from the assignment state, so it is unaffected. See
+/// `docs/specifications/security-review-2.md` (finding R30).
+async fn assert_project_is_assigned(project: &ProjectIdentifier) -> Result<(), Error> {
+    match crate::state::get_project_mapping(project).await {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            tracing::warn!(
+                "Refusing to report on project '{}': it has not been assigned to this \
+                 cloud account.",
+                project
+            );
+
+            Err(Error::NotFound(format!(
+                "Project '{}' has not been assigned to this cloud account",
+                project
+            )))
+        }
+    }
+}
+
 pub async fn get_usage_report(
     project: &ProjectIdentifier,
     dates: &DateRange,
 ) -> Result<ProjectUsageReport, Error> {
+    assert_project_is_assigned(project).await?;
+
     let dir = accounting_dir().await?;
     let fingerprint = list_fingerprint(&dir).await?;
 
@@ -476,6 +602,8 @@ pub async fn get_usage_report(
 /// The most recently reported `allocated_budget` for `project`, or a zero
 /// `Usage` if there are no cost reports for it yet.
 pub async fn get_limit(project: &ProjectIdentifier) -> Result<Usage, Error> {
+    assert_project_is_assigned(project).await?;
+
     let reports = load_sorted_reports(project).await?;
 
     Ok(reports
@@ -494,6 +622,41 @@ mod tests {
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_an_absurd_report_window_cannot_exhaust_memory() {
+        // `time_period.start` is a plain NaiveDate from an operator-written file and
+        // chrono accepts the full range. `days_touched` allocates a NaiveDate and
+        // then a DailyProjectUsageReport (four HashMaps) per day, so
+        // "-262143-01-01" meant ~191 million of each. A plausible *typo* -
+        // 0001-01-01 for 2001-01-01 - already meant ~739,000. See finding R26.
+        let end = nd("2026-08-03");
+
+        let (start, _) = clamp_window(NaiveDate::MIN, end);
+        assert!(
+            (end - start).num_days() <= MAX_REPORT_WINDOW_DAYS,
+            "an absurd start must be clamped, got a {} day window",
+            (end - start).num_days()
+        );
+
+        // the realistic typo case
+        let (start, _) = clamp_window(nd("0001-01-01"), end);
+        assert!((end - start).num_days() <= MAX_REPORT_WINDOW_DAYS);
+
+        // A normal window is untouched.
+        let (start, kept_end) = clamp_window(nd("2026-07-01"), end);
+        assert_eq!(start, nd("2026-07-01"));
+        assert_eq!(kept_end, end);
+
+        // ...and days_touched is independently capped, so it is safe for any input.
+        assert!(
+            days_touched(NaiveDate::MIN, NaiveDate::MAX).len() as i64 <= MAX_REPORT_WINDOW_DAYS
+        );
+
+        // Ordinary spans still enumerate exactly.
+        assert_eq!(days_touched(nd("2026-07-01"), nd("2026-07-03")).len(), 3);
+        assert_eq!(days_touched(nd("2026-07-01"), nd("2026-07-01")).len(), 1);
     }
 
     fn nd(s: &str) -> NaiveDate {

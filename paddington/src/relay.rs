@@ -21,7 +21,7 @@
 
 use anyhow::Context;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
@@ -180,6 +180,35 @@ struct RelayedPeer {
     outer_key: SecretKey,
 }
 
+impl RelayedPeer {
+    /// The relay/proxy this peer is reached through, whichever role we hold.
+    fn relay(&self) -> &str {
+        match &self.role {
+            RelayedRole::Client { relay } | RelayedRole::Server { relay } => relay,
+        }
+    }
+}
+
+///
+/// Whether a relay envelope claiming to come from `peer` actually arrived over the
+/// connection to the relay our own configuration names for that peer.
+///
+/// `envelope.from` is a wire field, so on its own it says nothing about who sent
+/// the envelope. `arrived_from`/`arrived_zone` are stamped by paddington from the
+/// authenticated connection. F7 bound `envelope.from` to the authenticated sender
+/// on the *proxy*; this is the receive-side counterpart, which was missing - so any
+/// direct peer of ours could inject an envelope for a relayed pair it has no part
+/// in, making us emit a genuine PSK-signed `SessionUnknown` to the far side. See
+/// `docs/specifications/security-review-2.md` (findings R16 and R28).
+///
+fn arrived_over_configured_relay(
+    peer: &RelayedPeer,
+    arrived_from: &str,
+    arrived_zone: &str,
+) -> bool {
+    arrived_from == peer.relay() && arrived_zone == peer.relay_zone
+}
+
 struct RelayConfig {
     my_name: String,
     peers: HashMap<String, RelayedPeer>,
@@ -220,6 +249,31 @@ static SESSIONS: Lazy<TokioRwLock<HashMap<String, RelayedSession>>> =
 static PENDING_BOOTSTRAPS: Lazy<
     TokioMutex<HashMap<String, oneshot::Sender<RelayedConnectionAccepted>>>,
 > = Lazy::new(|| TokioMutex::new(HashMap::new()));
+/// Last time we told each peer we had no session for it. Used to debounce
+/// `SessionUnknown`, which is otherwise emitted once per undecryptable envelope -
+/// see [`notify_session_unknown`] and finding R28.
+static LAST_SESSION_UNKNOWN: Lazy<TokioMutex<HashMap<String, tokio::time::Instant>>> =
+    Lazy::new(|| TokioMutex::new(HashMap::new()));
+/// Peers for which a re-bootstrap task is already in flight, so a burst of
+/// `SessionUnknown` messages produces one attempt rather than one per message -
+/// see finding R28.
+static BOOTSTRAPPING: Lazy<TokioMutex<HashSet<String>>> =
+    Lazy::new(|| TokioMutex::new(HashSet::new()));
+
+/// Minimum interval between two `SessionUnknown` notifications to the same peer.
+///
+/// A session-less peer emits one per inbound envelope it cannot decrypt. A
+/// malicious relay can drop every `Start` to keep us session-less and then inject
+/// junk envelopes at line rate, and each one made us sign a real, PSK-authenticated
+/// `SessionUnknown` - which the far side accepts (the nonces are genuinely fresh,
+/// so the replay window is no defence), dropping its session and re-bootstrapping.
+/// See `docs/specifications/security-review-2.md` (finding R28).
+const SESSION_UNKNOWN_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Upper bound on in-flight bootstrap handshakes. Each entry lives until the
+/// handshake completes or its 30 s timeout expires; without a cap, a peer that can
+/// induce bootstraps faster than they retire grows this map without limit.
+const MAX_PENDING_BOOTSTRAPS: usize = 256;
 static INNER_HANDLER: Lazy<StdRwLock<Option<MessageHandler>>> = Lazy::new(|| StdRwLock::new(None));
 static PROXY_POLICY: Lazy<TokioRwLock<RelayPolicy>> =
     Lazy::new(|| TokioRwLock::new(RelayPolicy::default()));
@@ -539,7 +593,29 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
         .map_err(Error::Any)?;
 
     let (tx, rx) = oneshot::channel();
-    PENDING_BOOTSTRAPS.lock().await.insert(magic.clone(), tx);
+
+    {
+        let mut pending = PENDING_BOOTSTRAPS.lock().await;
+
+        // Bound the map. Entries retire on completion or after the 30 s timeout, so
+        // this can only fill if bootstraps are being induced faster than they
+        // retire - which is the R28 shape. Refuse rather than grow without limit.
+        if pending.len() >= MAX_PENDING_BOOTSTRAPS {
+            tracing::warn!(
+                "Refusing to bootstrap '{}': {} handshakes are already in flight \
+                 (the cap). Something is inducing bootstraps faster than they complete.",
+                peer_name,
+                pending.len()
+            );
+
+            return Err(Error::InvalidPeer(format!(
+                "Too many relayed bootstraps in flight to start one for '{}'",
+                peer_name
+            )));
+        }
+
+        pending.insert(magic.clone(), tx);
+    }
 
     // the connection to the relay is normally still being dialled by
     // paddington's own event loop when a caller bootstraps at startup
@@ -731,6 +807,29 @@ async fn wait_while_relay_connected(peer_name: &str) {
 /// dropping every message the client sends until something else notices.
 ///
 async fn notify_session_unknown(peer_name: &str, peer: &RelayedPeer) -> Result<(), Error> {
+    // Debounce: one notification per peer per `SESSION_UNKNOWN_MIN_INTERVAL`. The
+    // legitimate case needs exactly one (the peer re-bootstraps immediately), so
+    // rate-limiting costs nothing there while removing the amplification a hostile
+    // relay could drive. See finding R28.
+    {
+        let mut last = LAST_SESSION_UNKNOWN.lock().await;
+        let now = tokio::time::Instant::now();
+
+        if let Some(previous) = last.get(peer_name) {
+            if now.duration_since(*previous) < SESSION_UNKNOWN_MIN_INTERVAL {
+                tracing::debug!(
+                    "Already told '{}' we have no session with it within the last {:?} \
+                     - not repeating it.",
+                    peer_name,
+                    SESSION_UNKNOWN_MIN_INTERVAL
+                );
+                return Ok(());
+            }
+        }
+
+        last.insert(peer_name.to_string(), now);
+    }
+
     let nonce = take_bootstrap_nonce(peer_name).await;
     let bootstrap_salt = bootstrap_salt()?;
     let ciphertext = encrypt_with_keys(
@@ -873,7 +972,11 @@ fn warn_on_zone_mismatch(envelope: &RelayEnvelope, peer: &RelayedPeer) {
     }
 }
 
-async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Message>, Error> {
+async fn handle_incoming_envelope(
+    envelope: RelayEnvelope,
+    arrived_from: &str,
+    arrived_zone: &str,
+) -> Result<Option<Message>, Error> {
     let my_name = my_name().await?;
 
     if envelope.to != my_name {
@@ -886,6 +989,33 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
     }
 
     let peer = get_peer(&envelope.from).await?;
+
+    // The peer named in `envelope.from` is a wire field. Require the envelope to
+    // have actually arrived over the connection to the relay our own config names
+    // for that peer - `arrived_from`/`arrived_zone` are stamped by paddington from
+    // the authenticated connection, not by the sender.
+    //
+    // F7 bound `envelope.from` to the authenticated sender on the *proxy*; this is
+    // the missing receive-side counterpart. Without it, any direct peer of ours -
+    // our portal, a second proxy - could inject `{from:"A",to:"us",...}` for a
+    // relayed pair it has no part in, and we would emit a genuine PSK-signed
+    // `SessionUnknown` to A for every such packet, churning their session and
+    // (per R28) spawning a bootstrap task each time. See
+    // `docs/specifications/security-review-2.md` (findings R16 and R28).
+    if !arrived_over_configured_relay(&peer, arrived_from, arrived_zone) {
+        tracing::warn!(
+            "Dropping a relay envelope claiming to be from '{}': it arrived over the \
+             connection to '{}@{}', but that peer is configured to be relayed through \
+             '{}@{}'.",
+            envelope.from,
+            arrived_from,
+            arrived_zone,
+            peer.relay(),
+            peer.relay_zone
+        );
+        return Ok(None);
+    }
+
     let bootstrap_salt = bootstrap_salt()?;
 
     // try the permanent pre-shared key first - only ever used for the two
@@ -961,16 +1091,32 @@ async fn handle_incoming_envelope(envelope: RelayEnvelope) -> Result<Option<Mess
                 // having just told us the same problem exists for it).
                 if matches!(peer.role, RelayedRole::Client { .. }) {
                     let peer_name = envelope.from.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = bootstrap(&peer_name).await {
-                            tracing::warn!(
-                                "Immediate re-bootstrap for '{}' after SessionUnknown failed: \
-                                 {:?} - the regular retry loop will keep trying.",
-                                peer_name,
-                                e
-                            );
-                        }
-                    });
+
+                    // Single-flight: one re-bootstrap attempt in flight per peer.
+                    // This used to spawn a task per `SessionUnknown`, so a burst
+                    // produced a task and a `PENDING_BOOTSTRAPS` entry each, every
+                    // one held for up to 30 s. See finding R28.
+                    let already_running = !BOOTSTRAPPING.lock().await.insert(peer_name.clone());
+
+                    if already_running {
+                        tracing::debug!(
+                            "A re-bootstrap for '{}' is already in flight - not starting another.",
+                            peer_name
+                        );
+                    } else {
+                        tokio::spawn(async move {
+                            if let Err(e) = bootstrap(&peer_name).await {
+                                tracing::warn!(
+                                    "Immediate re-bootstrap for '{}' after SessionUnknown failed: \
+                                     {:?} - the regular retry loop will keep trying.",
+                                    peer_name,
+                                    e
+                                );
+                            }
+
+                            BOOTSTRAPPING.lock().await.remove(&peer_name);
+                        });
+                    }
                 }
             }
         }
@@ -1068,14 +1214,16 @@ pub fn relay_dispatch_handler(
 ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
     Box::pin(async move {
         match serde_json::from_str::<RelayEnvelope>(message.payload()) {
-            Ok(envelope) => match handle_incoming_envelope(envelope).await {
-                Ok(Some(synthesised)) => call_inner_handler(synthesised).await,
-                Ok(None) => Ok(()),
-                Err(e) => {
-                    tracing::warn!("Error handling relay envelope: {:?}", e);
-                    Ok(())
+            Ok(envelope) => {
+                match handle_incoming_envelope(envelope, message.sender(), message.zone()).await {
+                    Ok(Some(synthesised)) => call_inner_handler(synthesised).await,
+                    Ok(None) => Ok(()),
+                    Err(e) => {
+                        tracing::warn!("Error handling relay envelope: {:?}", e);
+                        Ok(())
+                    }
                 }
-            },
+            }
             Err(_) => call_inner_handler(message).await,
         }
     })
@@ -1619,6 +1767,60 @@ mod tests {
         assert!(!wire_json.contains("add_user"));
         assert!(!wire_json.contains("alice"));
         assert!(!wire_json.contains("top secret"));
+    }
+
+    #[test]
+    fn test_a_relay_envelope_is_bound_to_the_connection_it_arrived_on() {
+        // `envelope.from` is a wire field. Without this check any direct peer of
+        // ours - our portal, a second proxy - could inject
+        // `{from:"A",to:"us",...}` for a relayed pair it has no part in, and we
+        // would emit a genuine PSK-signed `SessionUnknown` to A for each one,
+        // churning their session. See findings R16 and R28.
+        let peer = RelayedPeer {
+            zone: "ukri>brics".to_string(),
+            // the *direct* connection to the proxy is in a different zone to the
+            // relayed relationship - very often the case, and easy to conflate
+            relay_zone: "default".to_string(),
+            role: RelayedRole::Client {
+                relay: "proxy".to_string(),
+            },
+            inner_key: Key::generate(),
+            outer_key: Key::generate(),
+        };
+
+        // The real path: it arrived over our connection to the proxy.
+        assert!(arrived_over_configured_relay(&peer, "proxy", "default"));
+
+        // A different peer entirely - the injection this closes.
+        assert!(!arrived_over_configured_relay(
+            &peer,
+            "ourportal",
+            "default"
+        ));
+
+        // The right relay name, but not the connection we hold to it. This is the
+        // case that conflating `zone` and `relay_zone` would wave through.
+        assert!(!arrived_over_configured_relay(&peer, "proxy", "ukri>brics"));
+        assert!(!arrived_over_configured_relay(&peer, "proxy", ""));
+
+        // A second proxy we do use - but not for *this* peer.
+        assert!(!arrived_over_configured_relay(&peer, "proxy2", "default"));
+
+        // The same holds when we are the relayed server rather than the client.
+        let as_server = RelayedPeer {
+            role: RelayedRole::Server {
+                relay: "proxy".to_string(),
+            },
+            ..peer
+        };
+        assert!(arrived_over_configured_relay(
+            &as_server, "proxy", "default"
+        ));
+        assert!(!arrived_over_configured_relay(
+            &as_server,
+            "elsewhere",
+            "default"
+        ));
     }
 
     #[test]

@@ -32,6 +32,47 @@ The bridge handles two directions of communication:
 
 ---
 
+## 0. Deployment requirement: the bridge is not internet-facing
+
+> **The bridge MUST run on a trusted network — a private Kubernetes network, a
+> container network, or a loopback interface — or behind a TLS-terminating reverse
+> proxy. It must never be exposed outside that boundary.**
+
+This is a deliberate split of responsibilities, not an oversight:
+
+- **`op-portal`** holds the internet-facing surface, and it is a *single* WebSocket
+  endpoint speaking the authenticated, encrypted paddington protocol.
+- **`op-bridge`** holds the HTTP control surface, on the private side.
+
+Keeping the two in separate processes is what stops the portal from needing both an
+internet-facing endpoint *and* an HTTP control endpoint. In the reference deployment
+`op-portal` runs in a Kubernetes cluster behind a Cloudflare tunnel; the Waldur web
+application runs in that same cluster and talks to `op-bridge` over the cluster
+network with istio providing mTLS. There is no route by which anything external can
+reach the bridge.
+
+What follows from that, and is the reason this section exists:
+
+- **Request bodies and responses are cleartext.** The HMAC below authenticates the
+  *request* direction only. Responses carry no MAC and no encryption, so anything
+  on this hop can read a job's contents and tamper with a result travelling back to
+  the portal. See
+  [security-review-2.md](security-review-2.md#r32) (finding R32) and round 1's
+  [F12](security-review.md#f12), whose claim that "an on-path attacker cannot read
+  message content" applies to the paddington wire protocol, **not** to this API.
+- **There is no pre-header read timeout.** A request deadline, body size limit and
+  concurrency cap are all enforced (see §2.6 and finding R24), but a connection that
+  never completes its headers cannot be timed out through `axum::serve`. On a
+  trusted network that is a non-issue; on an exposed one it is a slowloris.
+- **The API key is a single shared secret** in the bridge invite file (§1.2). It
+  authenticates *the portal software*, not individual users, and grants the full
+  API.
+
+If you need the bridge reachable across an untrusted network, terminate TLS in front
+of it and authenticate at that layer — do not rely on this API's own protections.
+
+---
+
 ## 1. Configuration
 
 ### 1.1 Default Addresses
@@ -83,6 +124,7 @@ required header are rejected with HTTP 401.
 | Header | Description |
 |--------|-------------|
 | `X-Nonce` | Unique string per request; strongly recommended to prevent replay attacks |
+| `X-OpenPortal-Signature-Version` | `2` to use the unambiguous canonical string (§2.3.1). Absent means version 1, kept for backwards compatibility. New clients should send `2` |
 
 ### 2.3 Signature Calculation
 
@@ -132,15 +174,76 @@ The HMAC is computed using `orion::auth::authenticate` (HMAC-SHA512) and
 hex-encoded. The bridge verifies it using a **constant-time comparison** to
 prevent timing attacks.
 
-> **Known weakness.** The canonical string is `\n`-joined with no length prefixes
-> and no field count, so the four shapes above are not distinguishable from one
-> another by the signature alone. For a POST,
+> **The form above is version 1, and is ambiguous.** It is `\n`-joined with no
+> length prefixes and no field count, so its four shapes are not distinguishable
+> from one another by the signature alone. For a POST,
 > `…\n<function>\n<body>\n<nonce>` is byte-identical to
 > `…\n<function>\n<body ‖ "\n" ‖ nonce>`, which means the *presence* of a nonce
 > is not authenticated. See
-> [security-review-2.md](security-review-2.md#r29) (finding R29). Not yet fixed;
-> a fix would change the canonical form and so requires a coordinated client
-> update.
+> [security-review-2.md](security-review-2.md#r29) (finding R29).
+>
+> **Version 2 (below) fixes this and new clients should use it.** Version 1 remains
+> accepted so existing clients keep working, and will be removed once every client
+> is known to have moved.
+
+#### 2.3.1 Signature version 2 (recommended)
+
+Send the header:
+
+```
+X-OpenPortal-Signature-Version: 2
+```
+
+and sign a **seven-field, length-prefixed** string. Every field is present exactly
+once — an absent nonce is the empty string — and each is written as
+`<byte-length>:<value>`, joined with `\n`:
+
+```
+17:openportal-sig-v2
+4:post
+16:application/json
+29:Mon, 03 Aug 2026 12:00:00 GMT
+3:run
+43:{"command":"waldur.provider get_offerings"}
+19:unique-nonce-abc123
+```
+
+Because every field carries its own byte length, no field's content can be read as
+a field boundary, and the arity is fixed regardless of whether the body or nonce is
+empty. The leading `openportal-sig-v2` tag is itself length-prefixed, so a version 2
+string can never collide with a version 1 one.
+
+```python
+def canonical_v2(protocol, date_str, function, body, nonce):
+    def field(v):
+        b = v.encode() if isinstance(v, str) else v
+        return f"{len(b)}:".encode() + b
+    return b"\n".join([
+        field("openportal-sig-v2"),
+        field(protocol),
+        field("application/json"),
+        field(date_str),
+        field(function),
+        field(body or ""),
+        field(nonce or ""),
+    ])
+
+signature = hmac.new(key_bytes, canonical_v2(
+    "post", date_str, "run", body, nonce), hashlib.sha512).hexdigest()
+auth_header = f"OpenPortal {signature}"
+```
+
+**Version negotiation.** The header is how the server knows which form to verify:
+
+| `X-OpenPortal-Signature-Version` | Server verifies |
+|---|---|
+| absent | version 1 (§2.3) |
+| `1` | version 1 |
+| `2` | version 2 |
+| anything else | **HTTP 400** — never a silent fallback to version 1, since that would let a mangled header downgrade a version 2 client |
+
+A version 2 signature sent *without* the header will be verified against the
+version 1 form and rejected with 401.
 
 **Example signature (pseudocode):**
 

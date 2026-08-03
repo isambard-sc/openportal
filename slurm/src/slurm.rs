@@ -134,6 +134,43 @@ struct SlurmSession {
     start_time: u64,
 }
 
+/// Split a Slurm `openapi.json` `info.version` string (`"dbvX.Y.Z"`, sometimes
+/// with a trailing `"&…"`) into the bare version string and its numeric
+/// components.
+///
+/// Extracted from `login` so it can be tested without a server: the string is
+/// wholly attacker-controlled if `slurm-server` is `http://` or the
+/// `slurmrestd` is compromised, and it used to be indexed unconditionally at
+/// element 2. See docs/specifications/security-review-2.md (findings R1/R27).
+fn parse_api_version(version: &str) -> Result<(String, Vec<u32>), Error> {
+    let version = version
+        .split('v')
+        .nth(1)
+        .context("Could not split version")?;
+
+    // sometimes there is an additional '&something' afterwards - remove it
+    let version = version
+        .split('&')
+        .next()
+        .context("Could not split version")?
+        .to_string();
+
+    let version_numbers: Vec<u32> = version
+        .split('.')
+        .map(|x| x.parse::<u32>())
+        .collect::<Result<Vec<u32>, _>>()
+        .context("Could not parse version numbers")?;
+
+    if version_numbers.is_empty() {
+        return Err(Error::Login(format!(
+            "Slurm reported an empty version string: '{}'",
+            version
+        )));
+    }
+
+    Ok((version, version_numbers))
+}
+
 ///
 /// Login to the Slurm server using the passed passed command to generate
 /// the JWT token. This will return the valid JWT in a secret. This
@@ -267,23 +304,9 @@ async fn login(
     let version = version
         .as_str()
         .context("Could not convert version to string")?
-        .split('v')
-        .nth(1)
-        .context("Could not split version")?;
-
-    // sometimes there is an additional '&something' afterwards - remove it
-    let version = version
-        .split('&')
-        .next()
-        .context("Could not split version")?
         .to_string();
 
-    // extract the version string above into major.minor.patch numbers
-    let mut version_numbers: Vec<u32> = version
-        .split('.')
-        .map(|x| x.parse::<u32>())
-        .collect::<Result<Vec<u32>, _>>()
-        .context("Could not parse version numbers")?;
+    let (version, mut version_numbers) = parse_api_version(&version)?;
 
     let mut working_version = None;
 
@@ -341,8 +364,14 @@ async fn login(
         // otherwise unexpected version string must not be able to abort this
         // process - see docs/specifications/security-review-2.md (findings
         // R1/R27).
-        match version_numbers.get_mut(2) {
-            Some(patch) => *patch += 1,
+        match version_numbers.get_mut(2).and_then(|patch| {
+            // `checked_add` rather than `+=`: the patch component comes
+            // straight from the server, and release builds now check overflow,
+            // so a reported patch of u32::MAX would otherwise abort here.
+            *patch = patch.checked_add(1)?;
+            Some(())
+        }) {
+            Some(()) => {}
             None => {
                 tracing::warn!(
                     "Slurm reported version '{}', which does not have the \
@@ -3474,6 +3503,98 @@ pub async fn set_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_only_accounts_in_the_managed_organization_are_managed() {
+        // Every mutation path (`set_limit`, `cancel_pending_*_jobs`) gates on
+        // `is_managed()` applied to the account *fetched from Slurm*. Before
+        // finding R5 the only check was on a locally-constructed account whose
+        // organization was hard-wired to the managed one, so it could never
+        // fail, and a peer-chosen `local_group` naming any real account on the
+        // cluster had its limits rewritten.
+        let account_json = |org: &str| {
+            serde_json::json!({
+                "name": "someproject",
+                "description": "a project",
+                "organization": org,
+                "associations": [{"cluster": "cluster1"}],
+            })
+        };
+
+        let managed = match SlurmAccount::construct(&account_json(&get_managed_organization())) {
+            Ok(a) => a,
+            Err(e) => unreachable!("construct: {:?}", e),
+        };
+        assert!(managed.is_managed());
+
+        // A pre-existing site account - root's, another team's, anything not
+        // created by OpenPortal - must not be treated as ours.
+        for foreign in ["", "root", "physics", "OpenPortal", "openportal2"] {
+            let account = match SlurmAccount::construct(&account_json(foreign)) {
+                Ok(a) => a,
+                Err(e) => unreachable!("construct({:?}): {:?}", foreign, e),
+            };
+            assert!(
+                !account.is_managed(),
+                "account in organization {:?} must not be considered managed",
+                foreign
+            );
+        }
+    }
+
+    #[test]
+    fn test_api_version_parsing_tolerates_a_hostile_version_string() {
+        // The version comes from the server's openapi.json and used to be
+        // indexed at element 2 unconditionally, so a two-component version -
+        // legitimate or hostile - aborted the process. See findings R1/R27.
+        let ok = |s: &str| match parse_api_version(s) {
+            Ok(v) => v,
+            Err(e) => unreachable!("parse_api_version({:?}): {:?}", s, e),
+        };
+
+        assert_eq!(ok("dbv0.0.40"), ("0.0.40".to_string(), vec![0, 0, 40]));
+        // the trailing '&something' form the server sometimes uses
+        assert_eq!(
+            ok("dbv0.0.40&openapi/slurmdbd"),
+            ("0.0.40".to_string(), vec![0, 0, 40])
+        );
+        // two components: parses, and the caller must cope with no element 2
+        assert_eq!(ok("dbv1.2"), ("1.2".to_string(), vec![1, 2]));
+        assert!(ok("dbv1").1.get(2).is_none());
+
+        // malformed input is an error, never a panic
+        // (the leading tag is not itself validated - any "…v<numbers>" is
+        // accepted - but a non-numeric component never is)
+        for bad in [
+            "dbv",
+            "dbv1.x.3",
+            "dbv..",
+            "dbv-1.2.3",
+            "dbv4294967296.0.0",
+            "",
+        ] {
+            assert!(
+                parse_api_version(bad).is_err(),
+                "{:?} must be rejected, not parsed",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_clean_account_name_rejects_empty_and_normalises_separators() {
+        assert!(clean_account_name("").is_err());
+        assert!(clean_account_name("   ").is_err());
+        assert!(clean_user_name("").is_err());
+
+        assert_eq!(
+            match clean_account_name("  My/Project Name  ") {
+                Ok(n) => n,
+                Err(e) => unreachable!("clean: {:?}", e),
+            },
+            "my_project_name"
+        );
+    }
 
     #[test]
     fn test_encode_path_segment_blocks_url_injection() {

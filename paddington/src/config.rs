@@ -287,7 +287,11 @@ impl ServerConfig {
             url: create_websocket_url(&invite.url())?,
             proxy: None,
             zone: invite.zone(),
-            agent_type: None,
+            // The issuer declared its own type in the invite, so the expectation
+            // is picked up automatically - no hand-editing of the config needed.
+            // Absent for invites written by older versions, which then simply
+            // are not checked.
+            agent_type: invite.agent_type(),
             inner_key: invite.inner_key(),
             outer_key: invite.outer_key(),
         })
@@ -309,7 +313,7 @@ impl ServerConfig {
             url: "".to_string(),
             proxy: Some(relay.trim().to_string()),
             zone: invite.zone(),
-            agent_type: None,
+            agent_type: invite.agent_type(),
             inner_key: invite.inner_key(),
             outer_key: invite.outer_key(),
         })
@@ -680,13 +684,13 @@ impl Display for ClientConfig {
 }
 
 impl ClientConfig {
-    pub fn new(name: &str, ip: &IpOrRange, zone: &str) -> Self {
+    pub fn new(name: &str, ip: &IpOrRange, zone: &str, agent_type: &Option<String>) -> Self {
         ClientConfig {
             name: name.to_string(),
             ip: Some(ip.clone()),
             proxy: None,
             zone: zone.to_string(),
-            agent_type: None,
+            agent_type: agent_type.clone(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         }
@@ -698,7 +702,12 @@ impl ClientConfig {
     /// `relay` names an existing entry in this same service's `servers`
     /// list.
     ///
-    pub fn new_relayed(name: &str, relay: &str, zone: &str) -> Result<Self, Error> {
+    pub fn new_relayed(
+        name: &str,
+        relay: &str,
+        zone: &str,
+        agent_type: &Option<String>,
+    ) -> Result<Self, Error> {
         if relay.trim().is_empty() {
             return Err(Error::Peer("No relay name provided.".to_string()));
         }
@@ -708,7 +717,7 @@ impl ClientConfig {
             ip: None,
             proxy: Some(relay.trim().to_string()),
             zone: zone.to_string(),
-            agent_type: None,
+            agent_type: agent_type.clone(),
             inner_key: Key::generate(),
             outer_key: Key::generate(),
         })
@@ -1163,11 +1172,25 @@ impl ServiceConfig {
         Ok(zone.to_string())
     }
 
+    ///
+    /// Add a client that may connect in to this service, returning the `Invite`
+    /// it must import.
+    ///
+    /// `agent_type` is the type this client is *expected* to present itself as
+    /// (e.g. `Some("bridge")`), recorded locally so `Command::Register` can
+    /// check the peer's claim against it. It is deliberately not derived from
+    /// anything the client sends: the two operators exchange it out-of-band. Pass
+    /// `None` to not check this peer.
+    ///
+    /// The reverse expectation - what *this* service is - travels in the returned
+    /// invite; see [`Invite::with_agent_type`], which the agent layer applies.
+    ///
     pub fn add_client(
         &mut self,
         name: &str,
         ip: &str,
         zone: &Option<String>,
+        agent_type: &Option<String>,
     ) -> Result<Invite, Error> {
         let ip = IpOrRange::new(ip)
             .with_context(|| format!("Could not parse into an IP address or IP range: {}", ip))?;
@@ -1188,7 +1211,7 @@ impl ServiceConfig {
             }
         }
 
-        let client = ClientConfig::new(name, &ip, &zone);
+        let client = ClientConfig::new(name, &ip, &zone, agent_type);
 
         self.clients.push(client.clone());
 
@@ -1214,6 +1237,7 @@ impl ServiceConfig {
         name: &str,
         relay: &str,
         zone: &Option<String>,
+        agent_type: &Option<String>,
     ) -> Result<Invite, Error> {
         if name.is_empty() {
             return Err(Error::Peer("No client name provided.".to_string()));
@@ -1233,7 +1257,7 @@ impl ServiceConfig {
             }
         }
 
-        let client = ClientConfig::new_relayed(name, relay, &zone)?;
+        let client = ClientConfig::new_relayed(name, relay, &zone, agent_type)?;
 
         self.clients.push(client.clone());
 
@@ -1491,6 +1515,152 @@ impl ServiceConfig {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_agent_type_expectations_flow_the_right_way_through_an_invite() {
+        // The two directions are deliberately asymmetric:
+        //
+        //  * what the *client* must be is declared locally on the server, from
+        //    information the operators exchange out-of-band, and never travels;
+        //  * what the *server* is travels in the invite, because the invite is
+        //    the server describing itself and reaches the client by deliberate
+        //    operator action.
+        //
+        // See docs/specifications/security-review-2.md (finding R3).
+        let mut server = ServiceConfig::new(
+            "aip1",
+            "http://localhost:8000",
+            "127.0.0.1",
+            &8042,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service: {:?}", e));
+
+        let invite = server
+            .add_client("thebridge", "127.0.0.1", &None, &Some("bridge".to_string()))
+            .unwrap_or_else(|e| unreachable!("add_client: {:?}", e))
+            .with_agent_type(Some("portal".to_string()));
+
+        // The server remembers what the client must be...
+        let client_entry = server
+            .clients()
+            .into_iter()
+            .find(|c| c.name() == "thebridge")
+            .unwrap_or_else(|| unreachable!("client not added"));
+        assert_eq!(client_entry.agent_type(), Some("bridge".to_string()));
+
+        // ...and that expectation is *not* in the invite the client receives.
+        let toml = toml::to_string(&invite).unwrap_or_else(|e| unreachable!("toml: {:?}", e));
+        assert!(
+            !toml.contains("bridge"),
+            "the invite must not carry the client's expected type: {}",
+            toml
+        );
+        assert_eq!(invite.agent_type(), Some("portal".to_string()));
+
+        // The client picks the server's declared type up automatically.
+        let mut client = ServiceConfig::new(
+            "thebridge",
+            "http://localhost:8001",
+            "127.0.0.1",
+            &8043,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service: {:?}", e));
+
+        client
+            .add_server(&invite)
+            .unwrap_or_else(|e| unreachable!("add_server: {:?}", e));
+
+        let server_entry = client
+            .servers()
+            .into_iter()
+            .find(|s| s.name() == "aip1")
+            .unwrap_or_else(|| unreachable!("server not added"));
+        assert_eq!(server_entry.agent_type(), Some("portal".to_string()));
+    }
+
+    #[test]
+    fn test_an_invite_without_a_type_leaves_the_peer_unchecked() {
+        // Invites written by older versions have no `type` field, and must still
+        // import - yielding "not declared", which means "do not check".
+        let mut server = ServiceConfig::new(
+            "aip1",
+            "http://localhost:8000",
+            "127.0.0.1",
+            &8042,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service: {:?}", e));
+
+        // no --type on either side
+        let invite = server
+            .add_client("peer", "127.0.0.1", &None, &None)
+            .unwrap_or_else(|e| unreachable!("add_client: {:?}", e));
+
+        assert_eq!(invite.agent_type(), None);
+
+        let reparsed: Invite = toml::from_str(
+            &toml::to_string(&invite).unwrap_or_else(|e| unreachable!("toml: {:?}", e)),
+        )
+        .unwrap_or_else(|e| unreachable!("reparse: {:?}", e));
+        assert_eq!(reparsed.agent_type(), None);
+
+        let client_entry = server
+            .clients()
+            .into_iter()
+            .find(|c| c.name() == "peer")
+            .unwrap_or_else(|| unreachable!("client not added"));
+        assert_eq!(client_entry.agent_type(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_secret_file_is_owner_only_even_over_a_permissive_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "openportal-secret-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The parent directory does not exist yet, so this exercises the
+        // create-and-restrict path too.
+        let path = dir.join("nested").join("invite.toml");
+        write_secret_file(&path, "key = \"secret\"").expect("write");
+
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777
+        };
+
+        assert_eq!(mode(&path), 0o600, "secret must not be readable by others");
+        assert_eq!(
+            mode(&dir.join("nested")),
+            0o700,
+            "created parent must not be traversable by others"
+        );
+
+        // A pre-existing world-readable file must be *lowered*, not left as it
+        // is. `mode()` on OpenOptions only applies at creation, so this is the
+        // case the explicit set_permissions covers - and the case a naive
+        // implementation gets wrong.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        write_secret_file(&path, "key = \"rotated\"").expect("rewrite");
+
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "key = \"rotated\"",
+            "the rewrite must actually replace the contents"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn simple_config() -> ServiceConfig {
         let mut config = ServiceConfig::new(
             "test-service",
@@ -1559,7 +1729,7 @@ mod tests {
 
         // A configured client's IP may connect; other addresses may not.
         config
-            .add_client("peer", "10.0.0.5", &None)
+            .add_client("peer", "10.0.0.5", &None, &None)
             .unwrap_or_else(|e| unreachable!("Could not add client: {:?}", e));
         assert!(config.may_attempt_connection(&IpAddr::from([10, 0, 0, 5])));
         assert!(!config.may_attempt_connection(&IpAddr::from([10, 0, 0, 6])));
@@ -2004,7 +2174,7 @@ mod tests {
             unreachable!("Could not create IP address: {:?}", e);
         });
 
-        let client = ClientConfig::new("test", &ip, &default_zone());
+        let client = ClientConfig::new("test", &ip, &default_zone(), &None);
 
         assert_eq!(client.name, "test".to_string());
         assert_eq!(client.ip, Some(ip));
@@ -2028,7 +2198,7 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
 
         service
-            .add_client("brics", "127.0.0.1", &None)
+            .add_client("brics", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add client: {}", e));
 
         // wrong zone - must error, not silently no-op
@@ -2059,7 +2229,7 @@ mod tests {
         .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
 
         let invite = proxy
-            .add_client("airr", "127.0.0.1", &None)
+            .add_client("airr", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add client: {}", e));
         service
             .add_server(&invite)
@@ -2086,10 +2256,10 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
 
         service
-            .add_client("brics", "127.0.0.1", &None)
+            .add_client("brics", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add client: {}", e));
         service
-            .add_client("brics", "127.0.0.1", &Some("other-zone".to_string()))
+            .add_client("brics", "127.0.0.1", &Some("other-zone".to_string()), &None)
             .unwrap_or_else(|e| unreachable!("Cannot add client in second zone: {}", e));
 
         assert_eq!(service.clients().len(), 2);
@@ -2139,7 +2309,7 @@ mod tests {
 
         // introduce the secondary to the primary
         let invite = primary
-            .add_client(&secondary.name(), "127.0.0.1", &None)
+            .add_client(&secondary.name(), "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| {
                 unreachable!("Cannot add secondary to primary: {}", e);
             });
@@ -2163,7 +2333,9 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
 
         // "proxy" is not yet a known server - must be rejected
-        assert!(airr.add_relayed_client("brics", "proxy", &None).is_err());
+        assert!(airr
+            .add_relayed_client("brics", "proxy", &None, &None)
+            .is_err());
     }
 
     #[test]
@@ -2193,13 +2365,13 @@ mod tests {
         // both airr and brics have an ordinary, direct relationship with
         // the proxy - unaffected by anything relay-related
         let invite = proxy
-            .add_client("airr", "127.0.0.1", &None)
+            .add_client("airr", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add airr to proxy: {}", e));
         airr.add_server(&invite)
             .unwrap_or_else(|e| unreachable!("Cannot add proxy to airr: {}", e));
 
         let invite = proxy
-            .add_client("brics", "127.0.0.1", &None)
+            .add_client("brics", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add brics to proxy: {}", e));
         brics
             .add_server(&invite)
@@ -2208,7 +2380,7 @@ mod tests {
         // airr is the relayed "server" - it authorises brics to reach it
         // via the proxy
         let invite = airr
-            .add_relayed_client("brics", "proxy", &None)
+            .add_relayed_client("brics", "proxy", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add relayed brics to airr: {}", e));
 
         // brics is the relayed "client" - it reaches airr via the same
@@ -2279,21 +2451,21 @@ mod tests {
         .unwrap_or_else(|e| unreachable!("Cannot create service config: {}", e));
 
         let invite = proxy1
-            .add_client("airr", "127.0.0.1", &None)
+            .add_client("airr", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add airr to proxy1: {}", e));
         airr.add_server(&invite)
             .unwrap_or_else(|e| unreachable!("Cannot add proxy1 to airr: {}", e));
 
         let invite = proxy2
-            .add_client("airr", "127.0.0.1", &None)
+            .add_client("airr", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add airr to proxy2: {}", e));
         airr.add_server(&invite)
             .unwrap_or_else(|e| unreachable!("Cannot add proxy2 to airr: {}", e));
 
         // relayed clients via two *different* proxies must both succeed
-        airr.add_relayed_client("brics", "proxy1", &None)
+        airr.add_relayed_client("brics", "proxy1", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add relayed brics via proxy1: {}", e));
-        airr.add_relayed_client("someone_else", "proxy2", &None)
+        airr.add_relayed_client("someone_else", "proxy2", &None, &None)
             .unwrap_or_else(|e| unreachable!("Cannot add relayed peer via proxy2: {}", e));
 
         let brics = airr

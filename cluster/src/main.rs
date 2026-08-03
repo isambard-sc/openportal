@@ -2163,3 +2163,70 @@ async fn get_user_dirs(me: &str, mapping: &UserMapping) -> Result<Vec<String>, E
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use greatwestern::grammar::UserIdentifier;
+    use templemeads::job::Job;
+
+    /// Every delegation in this file builds its Job by formatting identifiers
+    /// into a space-separated command string - e.g.
+    /// `format!("{}.{} is_protected_user {}", me, account.name(), user)` - and
+    /// hands the result to `Job::parse`. That is only safe because an
+    /// identifier cannot contain whitespace or extra dots: if one could, a
+    /// peer-supplied user or project name would inject an extra argument, or
+    /// extend the destination path past the agent we meant to address.
+    ///
+    /// The identifier parsers enforce that, but they live in another crate, so
+    /// pin the composition here - this is the invariant `op-cluster` actually
+    /// depends on.
+    #[test]
+    fn test_delegated_commands_cannot_be_extended_by_a_peer_supplied_identifier() {
+        let job: Job<Hpc> =
+            match Job::parse("cluster1.freeipa is_protected_user bob.proj.brics", false) {
+                Ok(job) => job,
+                Err(e) => unreachable!("job: {:?}", e),
+            };
+
+        assert_eq!(job.destination().to_string(), "cluster1.freeipa");
+        assert_eq!(
+            job.instruction().to_string(),
+            "is_protected_user bob.proj.brics"
+        );
+
+        // An identifier that would break that command apart must not parse in
+        // the first place.
+        for bad in [
+            "bob.proj.brics extra_argument",
+            "bob.proj.brics is_protected_user carol.proj.brics",
+            "bob.proj.brics\tx",
+            "bob.proj.brics\nx",
+            "bob.proj.brics.extra",
+            "bob.proj",
+        ] {
+            assert!(
+                UserIdentifier::parse(bad).is_err(),
+                "{:?} must not parse as a user identifier - it would change \
+                 the meaning of every command built by formatting it in",
+                bad
+            );
+        }
+    }
+
+    /// The same property for the destination half: `me` is this agent's own
+    /// configured name, but the agent it delegates to is looked up at runtime,
+    /// and the two are joined with a `.`.
+    #[test]
+    fn test_delegation_addresses_exactly_one_hop() {
+        let job: Job<Hpc> = match Job::parse("cluster1.slurm get_limit proj.brics", false) {
+            Ok(job) => job,
+            Err(e) => unreachable!("job: {:?}", e),
+        };
+
+        let destination = job.destination();
+        assert_eq!(destination.agents().len(), 2);
+        assert_eq!(destination.first(), "cluster1");
+        assert_eq!(destination.last(), "slurm");
+    }
+}

@@ -53,7 +53,7 @@ pub struct Usage {
 impl std::iter::Sum for Usage {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::default(), |a, b| Self {
-            seconds: a.seconds + b.seconds,
+            seconds: a.seconds.saturating_add(b.seconds),
         })
     }
 }
@@ -179,7 +179,11 @@ impl Usage {
             .with_context(|| format!("Failed to parse seconds from '{}'", duration))?;
 
         Ok(Self {
-            seconds: seconds * units,
+            // Saturating: `seconds` is parsed from a peer-supplied string and
+            // `units` can be 86400, so the product overflows well inside the
+            // range `u64` accepts. See
+            // docs/specifications/security-review-2.md (finding R33).
+            seconds: seconds.saturating_mul(units),
         })
     }
 
@@ -287,14 +291,17 @@ impl Usage {
 // add the += operator for Usage
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
-        self.seconds += other.seconds;
+        self.seconds = self.seconds.saturating_add(other.seconds);
     }
 }
 
 // add the -= operator for Usage
 impl std::ops::SubAssign for Usage {
     fn sub_assign(&mut self, other: Self) {
-        self.seconds -= other.seconds;
+        // Saturating, matching `Sub` below, which already clamped at zero. This
+        // was a bare `-=`, so an underflow wrapped to near `u64::MAX` - silently
+        // in release, where `overflow-checks` used to be off.
+        self.seconds = self.seconds.saturating_sub(other.seconds);
     }
 }
 
@@ -323,7 +330,7 @@ impl std::ops::Add for Usage {
 
     fn add(self, other: Self) -> Self {
         Self {
-            seconds: self.seconds + other.seconds,
+            seconds: self.seconds.saturating_add(other.seconds),
         }
     }
 }
@@ -333,13 +340,11 @@ impl std::ops::Sub for Usage {
     type Output = Self;
 
     fn sub(self, other: Self) -> Self {
-        let mut seconds = self.seconds as i64 - other.seconds as i64;
-        if seconds < 0 {
-            seconds = 0;
-        }
-
         Self {
-            seconds: seconds as u64,
+            // `saturating_sub` clamps at zero directly. The previous form went
+            // via `i64`, which silently gave the wrong answer for any value
+            // above `i64::MAX`.
+            seconds: self.seconds.saturating_sub(other.seconds),
         }
     }
 }
@@ -593,7 +598,7 @@ impl DailyProjectUsageReport {
     /// per-user map and the scalar total.
     pub fn add_wait_seconds(&mut self, user: &str, seconds: u64) {
         *self.user_wait_seconds.entry(user.to_string()).or_default() += seconds;
-        self.total_wait_seconds += seconds;
+        self.total_wait_seconds = self.total_wait_seconds.saturating_add(seconds);
     }
 
     pub fn num_jobs_for_user(&self, user: &str) -> u64 {
@@ -805,7 +810,9 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             *self.user_wait_seconds.entry(user.clone()).or_default() += secs;
         }
         self.num_jobs += other.num_jobs;
-        self.total_wait_seconds += other.total_wait_seconds;
+        self.total_wait_seconds = self
+            .total_wait_seconds
+            .saturating_add(other.total_wait_seconds);
 
         self.is_complete = false; // combine reports are never complete
     }
@@ -2005,5 +2012,59 @@ impl Allocation {
 
     pub fn from_billing_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
         Allocation::from_size_and_units(usage.hours() / node.billing() as f64, "BHR")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usage_arithmetic_saturates_rather_than_wrapping() {
+        // Release builds now set `overflow-checks = true`, so an unchecked
+        // overflow would abort - and with `panic = "abort"` that is a remote
+        // process kill, since these values come from peer-supplied reports.
+        // Every operator must saturate. See
+        // docs/specifications/security-review-2.md (finding R33).
+        let max = Usage::new(u64::MAX);
+        let one = Usage::new(1);
+
+        assert_eq!((max + one).seconds(), u64::MAX);
+        assert_eq!([max, one].into_iter().sum::<Usage>().seconds(), u64::MAX);
+
+        let mut acc = max;
+        acc += one;
+        assert_eq!(acc.seconds(), u64::MAX);
+
+        // Underflow clamps at zero rather than wrapping to near u64::MAX. The
+        // `-=` form used to wrap while `-` already clamped, so the two
+        // disagreed.
+        assert_eq!((one - max).seconds(), 0);
+
+        let mut acc = one;
+        acc -= max;
+        assert_eq!(acc.seconds(), 0);
+
+        // Ordinary values are unaffected.
+        assert_eq!((Usage::new(60) + Usage::new(30)).seconds(), 90);
+        assert_eq!((Usage::new(60) - Usage::new(30)).seconds(), 30);
+    }
+
+    #[test]
+    fn test_usage_parse_saturates_on_a_huge_duration() {
+        // Multiplying this many days out by 86400 overflows u64 - and the
+        // string is short enough to arrive in any instruction.
+        let huge = match Usage::parse("184467440737095516 days") {
+            Ok(u) => u,
+            Err(e) => unreachable!("parse failed: {:?}", e),
+        };
+        assert_eq!(huge.seconds(), u64::MAX);
+
+        // ...while a normal duration still converts exactly.
+        let day = match Usage::parse("1 days") {
+            Ok(u) => u,
+            Err(e) => unreachable!("parse failed: {:?}", e),
+        };
+        assert_eq!(day.seconds(), 86400);
     }
 }

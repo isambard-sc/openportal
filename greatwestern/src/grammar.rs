@@ -1536,6 +1536,17 @@ impl Allocation {
     }
 
     pub fn from_size_and_units(size: f64, units: &str) -> Result<Self, Error> {
+        // `!is_finite()` rather than only `< 0.0`: the negative test is *false*
+        // for NaN, so `"NaN"` and `"inf"` both parsed cleanly and then
+        // saturated to `u64::MAX` on the way into a `Usage` or `StorageSize`.
+        // See docs/specifications/security-review-2.md (finding R33).
+        if !size.is_finite() {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - size must be a finite number '{}'",
+                size
+            )));
+        }
+
         if size < 0.0 {
             return Err(Error::Parse(format!(
                 "Invalid Allocation - size cannot be negative '{}'",
@@ -1591,6 +1602,17 @@ impl Allocation {
                 size_part
             ))
         })?;
+
+        // f64::from_str accepts "NaN", "inf" and "infinity", and the negative
+        // test below is *false* for NaN, so both used to parse cleanly and then
+        // saturate to u64::MAX downstream. See
+        // docs/specifications/security-review-2.md (finding R33).
+        if !size.is_finite() {
+            return Err(Error::Parse(format!(
+                "Invalid Allocation - size must be a finite number '{}'",
+                size_part
+            )));
+        }
 
         if size < 0.0 {
             return Err(Error::Parse(format!(
@@ -4919,6 +4941,24 @@ mod tests {
             }
             other => unreachable!("expected SetLocalLimit, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_allocation_rejects_non_finite_sizes() {
+        // `size < 0.0` is *false* for NaN, so "NaN" and "inf" both parsed
+        // cleanly and then saturated to u64::MAX downstream (finding R33).
+        assert!(Allocation::parse("10 GB").is_ok());
+        assert!(Allocation::parse("0 GB").is_ok());
+
+        for bad in ["NaN GB", "nan GB", "inf GB", "-inf GB", "infinity GB"] {
+            assert!(
+                Allocation::parse(bad).is_err(),
+                "{:?} must be rejected",
+                bad
+            );
+        }
+
+        assert!(Allocation::parse("-1 GB").is_err());
     }
 
     #[test]

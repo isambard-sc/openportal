@@ -105,14 +105,14 @@ impl std::ops::Add for StorageSize {
 
     fn add(self, other: Self) -> Self {
         Self {
-            bytes: self.bytes + other.bytes,
+            bytes: self.bytes.saturating_add(other.bytes),
         }
     }
 }
 
 impl std::ops::AddAssign for StorageSize {
     fn add_assign(&mut self, other: Self) {
-        self.bytes += other.bytes;
+        self.bytes = self.bytes.saturating_add(other.bytes);
     }
 }
 
@@ -137,14 +137,14 @@ impl std::ops::Mul<u64> for StorageSize {
 
     fn mul(self, rhs: u64) -> Self {
         Self {
-            bytes: self.bytes * rhs,
+            bytes: self.bytes.saturating_mul(rhs),
         }
     }
 }
 
 impl std::ops::MulAssign<u64> for StorageSize {
     fn mul_assign(&mut self, rhs: u64) {
-        self.bytes *= rhs;
+        self.bytes = self.bytes.saturating_mul(rhs);
     }
 }
 
@@ -153,21 +153,25 @@ impl std::ops::Div<u64> for StorageSize {
 
     fn div(self, rhs: u64) -> Self {
         Self {
-            bytes: self.bytes / rhs,
+            // Dividing by zero panics, and with `panic = "abort"` that ends the
+            // process. Zero is treated as "no divisor", yielding zero, which
+            // matches how `Usage`'s `DivAssign` already handles it. See
+            // docs/specifications/security-review-2.md (finding R33).
+            bytes: self.bytes.checked_div(rhs).unwrap_or(0),
         }
     }
 }
 
 impl std::ops::DivAssign<u64> for StorageSize {
     fn div_assign(&mut self, rhs: u64) {
-        self.bytes /= rhs;
+        self.bytes = self.bytes.checked_div(rhs).unwrap_or(0);
     }
 }
 
 impl std::iter::Sum for StorageSize {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::default(), |a, b| Self {
-            bytes: a.bytes + b.bytes,
+            bytes: a.bytes.saturating_add(b.bytes),
         })
     }
 }
@@ -655,5 +659,47 @@ impl Volume {
 impl std::fmt::Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_size_arithmetic_saturates_and_survives_a_zero_divisor() {
+        // As for `Usage` - see finding R33. Additionally, dividing by zero
+        // panics outright, which `panic = "abort"` turns into a process kill.
+        let max = StorageSize::from_bytes(u64::MAX);
+        let one = StorageSize::from_bytes(1);
+
+        assert_eq!((max + one).as_bytes(), u64::MAX);
+        assert_eq!((max * 2).as_bytes(), u64::MAX);
+        assert_eq!(
+            [max, one].into_iter().sum::<StorageSize>().as_bytes(),
+            u64::MAX
+        );
+
+        let mut acc = max;
+        acc += one;
+        assert_eq!(acc.as_bytes(), u64::MAX);
+
+        let mut acc = max;
+        acc *= 2;
+        assert_eq!(acc.as_bytes(), u64::MAX);
+
+        // Underflow clamps at zero rather than wrapping.
+        assert_eq!((one - max).as_bytes(), 0);
+
+        // Division by zero yields zero rather than aborting.
+        assert_eq!((max / 0).as_bytes(), 0);
+
+        let mut acc = max;
+        acc /= 0;
+        assert_eq!(acc.as_bytes(), 0);
+
+        // Ordinary values are unaffected.
+        assert_eq!((StorageSize::from_bytes(100) / 4).as_bytes(), 25);
+        assert_eq!((StorageSize::from_bytes(100) * 3).as_bytes(), 300);
     }
 }

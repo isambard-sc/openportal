@@ -16,6 +16,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   logic - an area the first review had not substantially examined. The fixes
   below are the subset reachable without holding a peer key; the remainder are
   recorded in the document.
+- `op-cloudaccount`, `op-cloudportal`, `op-localaccount` and `op-proxy` are now
+  published as release binaries, for both `x86_64` and `aarch64`, each with an
+  attested SBOM like every other agent. CI was already compiling them - they are
+  workspace default-members - but never uploaded them as artefacts, so they never
+  reached a release. No OCI image or Helm chart is built for them.
+
+  Note that `op-localaccount` is a **testing** agent: it manages Unix accounts
+  directly with `useradd`/`groupadd` rather than through a managed directory
+  service, and logs a prominent warning to that effect on every startup.
+  `op-freeipa` is the production path.
+
+- `client --add --type <agent-type>` declares the agent type a client must
+  present itself as (finding R3), validated against the nine known types at
+  add-time so a typo is an error rather than a silently-unchecked peer. Omitting
+  it still means "unchecked", and now warns. The reverse expectation no longer
+  needs hand-editing either: the invite gained an optional `type` field carrying
+  the *issuer's own* type, which `server --add` picks up automatically. The
+  invite never carries the client's expected type - that is exchanged
+  out-of-band between operators, which is the point of the check. Invites
+  written by older versions have no `type` field, import cleanly, and leave the
+  peer unchecked as before.
+- Seed unit tests for the privileged agents, which previously had almost none
+  between them: `op-slurm`'s managed-organization guard and API-version parsing
+  (findings R5 and R27), `op-freeipa`'s internal-portal group mapping and
+  membership parsing (R13), `op-cluster`'s command-composition invariant,
+  `op-portal`'s offering filter, and `write_secret_file`'s permissions including
+  the pre-existing-file case (R9). 273 tests now pass, and `make test` no longer
+  skips the binary crates.
 
 ### Fixed
 
@@ -258,6 +286,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `{ IP = ... } / { Range = ... } / { List = [...] }` form. Previously,
   hand-editing a config file with a bare string for either field failed to
   parse with a confusing `unknown variant` TOML error.
+- **Silent accounting corruption from unchecked arithmetic** (finding R33). The
+  release profile had `overflow-checks` off, so `u64` arithmetic on values that
+  arrive in peer-supplied usage and storage reports wrapped silently rather than
+  failing. Every operator on `Usage` and `StorageSize` now saturates
+  explicitly, `StorageSize`'s `Div`/`DivAssign` no longer panic on a zero
+  divisor, and `overflow-checks = true` is set for release builds. `Usage`'s `-`
+  and `-=` had also disagreed - one clamped at zero, the other wrapped to near
+  `u64::MAX` - and now behave identically.
+- `Allocation` accepted `"NaN"`, `"inf"` and `"infinity"` as sizes, because
+  `f64::from_str` parses them and the existing negative-size test is *false* for
+  NaN. Both then saturated to `u64::MAX` on the way into a report. Non-finite
+  sizes are now rejected.
+- `Destination::parse` accepted an agent name containing whitespace, which
+  silently changed the destination the command addressed: a destination is the
+  first whitespace-separated token of a command string, so
+  `"a b.aip1.brics get_projects"` addressed `a`. Such a name never worked, so
+  this only rejects input that was already broken.
+- `op-slurm`'s API-version probe incremented the server-supplied patch component
+  with `+=`, which aborts under the newly-enabled overflow checks if the server
+  reports `u32::MAX`. It now stops probing instead.
 
 ### Changed
 
@@ -272,6 +320,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   module and is shared with `greatwestern`, rather than being defined privately
   in `greatwestern::grammar`. `templemeads::validate::validate_mapping_target`
   is the mapping-target variant (same allow-list, plus an interior `.`).
+- Lints are now declared once in a `[workspace.lints]` table in the root
+  `Cargo.toml` and inherited by all 19 member crates, rather than repeated as
+  per-crate attributes. `clippy::indexing_slicing` and `clippy::dbg_macro` are
+  now denied alongside the existing `unwrap_used`/`expect_used`, plus
+  `unsafe_code = "forbid"` and `unused_crate_dependencies`. A new `clippy.toml`
+  exempts test code. Enabling `indexing_slicing` found one non-test violation:
+  `impl Index<usize> for Destinations`, which existed only to offer a panicking
+  accessor and had no callers - it has been removed, so use
+  `Destinations::get`.
+- `make test` no longer passes `--lib`, which had silently skipped every test in
+  the agent binary crates. It (and CI) now use `--all-targets`.
+- CI now runs `cargo audit --deny warnings` as a separate job, and its `clippy`
+  step is `--all-targets --all-features -- -D warnings` so new warnings fail the
+  build rather than being advisory. `make audit` runs the same scan locally.
+- `make lint` and CI also run the new `scripts/check-secret-writes.sh`, which
+  asserts that no bare `fs::write` appears outside a small annotated allow-list.
+  Files containing key material must go through
+  `paddington::config::write_secret_file`; two rounds of review found the same
+  regression independently, so it is now checked structurally.
+- `ServiceConfig::add_client` and `add_relayed_client` take an extra
+  `agent_type: &Option<String>` (the expected type of the client being added),
+  and `ClientConfig::new`/`new_relayed` likewise. `Invite` gained
+  `with_agent_type`/`agent_type`, and `ServerConfig::from_invite` populates the
+  expected type from it.
+- The `OPENPORTAL_ALLOW_INVALID_SSL_CERTS` rule is now implemented once, in
+  `templemeads::validate::allow_invalid_ssl_certs`, rather than duplicated in
+  `op-bridge` and `op-freeipa`. It fails closed on anything but the literal
+  `true`.
 
 ## [0.90.0] - 2026-07-24
 

@@ -45,6 +45,26 @@ jobs:
           ~/venv/bin/pip install python-kacl
       - name: Check changelog format
         run: ~/venv/bin/kacl-cli verify
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Check dependencies against the RustSec advisory database
+        # Nothing was watching the ~200-crate dependency tree for published
+        # advisories; a vulnerable transitive dependency could sit in a release
+        # indefinitely. See docs/specifications/security-review-2.md section 5.
+        run: cargo audit --deny warnings
+
   code-checks:
     name: Tests and lints
     runs-on: ubuntu-24.04
@@ -70,11 +90,19 @@ jobs:
       - name: Formatting
         run: cargo fmt --check
       - name: Linting
-        run: cargo clippy
+        # --all-targets so test code is linted too, and -D warnings so a lint
+        # actually fails the job - a bare `cargo clippy` only printed warnings,
+        # so the workspace lints (unwrap_used, indexing_slicing, ...) were
+        # advisory in CI and drifted.
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Secret-write guard
+        run: ./scripts/check-secret-writes.sh
       - name: Build
         run: cargo build
       - name: Test
-        run: cargo test
+        # --all-targets so the agent binary crates' tests run, not just the
+        # library crates'.
+        run: cargo test --all-targets
       - name: Integration tests (need to add)
         run: |
           oci/portal/build.sh

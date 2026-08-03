@@ -266,7 +266,7 @@ async fn run_portal(
     let mut service = ServiceConfig::new("portal", url, ip, port, &None, &None)?;
 
     // add the cluster to the portal, returning an invitation
-    let invite = service.add_client("cluster", range, &None)?;
+    let invite = service.add_client("cluster", range, &None, &None)?;
 
     // save the invitation to the requested file
     invite.save(invitation)?;

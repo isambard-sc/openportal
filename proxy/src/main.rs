@@ -244,7 +244,11 @@ fn add_client(
 
     let invite: Invite = config
         .service
-        .add_client(name, &ip, &zone)
+        // A proxy is a blind relay, not an agent: it has no `agent::Type` of its
+        // own to declare, and it never inspects the roles of the peers it
+        // relays between - its authorization is the explicit `allow` pair list.
+        // So no agent type is recorded here or written into the invite.
+        .add_client(name, &ip, &zone, &None)
         .with_context(|| format!("Could not add client '{}'", name))?;
 
     config::save(&config, &config_file)

@@ -32,6 +32,15 @@ Confirmed in that order:
    normally, including the internal-zone job (`get_local_home_dir`) that §4.7
    exempts.
 
+> **Note (2026-08-03):** step 2 needed `type = "portal"` to be added to the
+> config by hand, because at that point nothing populated it. That is no longer
+> the case - a `[[servers]]` entry's `type` now arrives in the invite (the issuer
+> declares its own type), and a `[[clients]]` entry's comes from
+> `client --add --type`. So in a newly-introduced estate the anchor exists from
+> the moment the peer is added, and enforcement is on from the start. Existing
+> configs are unaffected until re-introduced or hand-edited. See
+> [R3](../specifications/security-review-2.md#r3).
+
 **Not yet validated live:** a collision (introducing a second peer advertising
 the same portal name, and confirming the resulting refusal reaches the
 submitter), and withdrawal on disconnect followed by a genuine topology change.

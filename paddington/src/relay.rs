@@ -1657,10 +1657,15 @@ mod tests {
         .unwrap_or_else(|e| unreachable!("service config: {}", e));
 
         proxy
-            .add_client("ukri", "127.0.0.1", &None)
+            .add_client("ukri", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("add_client: {}", e));
         proxy
-            .add_client("cloud", "127.0.0.1", &Some("special-zone".to_string()))
+            .add_client(
+                "cloud",
+                "127.0.0.1",
+                &Some("special-zone".to_string()),
+                &None,
+            )
             .unwrap_or_else(|e| unreachable!("add_client: {}", e));
 
         configure_proxy(&proxy).await;
@@ -1697,13 +1702,13 @@ mod tests {
         .unwrap_or_else(|e| unreachable!("service config: {}", e));
 
         let invite = proxy
-            .add_client("airr", "127.0.0.1", &None)
+            .add_client("airr", "127.0.0.1", &None, &None)
             .unwrap_or_else(|e| unreachable!("add_client: {}", e));
         airr.add_server(&invite)
             .unwrap_or_else(|e| unreachable!("add_server: {}", e));
 
         let invite = airr
-            .add_relayed_client("brics", "proxy", &None)
+            .add_relayed_client("brics", "proxy", &None, &None)
             .unwrap_or_else(|e| unreachable!("add_relayed_client: {}", e));
         let _ = invite; // brics's side isn't configured in this test
 
@@ -1716,7 +1721,7 @@ mod tests {
         // that doesn't exist ("proxy@custom-zone" instead of
         // "proxy@default") and fails with `UnnamedConnection`, even though
         // the real connection to the proxy is up.
-        airr.add_relayed_client("ukri", "proxy", &Some("custom-zone".to_string()))
+        airr.add_relayed_client("ukri", "proxy", &Some("custom-zone".to_string()), &None)
             .unwrap_or_else(|e| unreachable!("add_relayed_client: {}", e));
 
         configure(&airr)

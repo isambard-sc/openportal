@@ -93,7 +93,10 @@ When writing or modifying code:
 - Follow existing patterns for agent implementation
 - Maintain the security model - agents should only have necessary permissions
 - Add tests to the appropriate crate's lib.rs or separate test files
-- After making changes, run `cargo fmt` to format the code and `cargo clippy` to check for warnings. Fix any warnings introduced by the changes before finishing.
+- After making changes, run `make style-check`, `make lint` and `make test` (or `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings` and `cargo test --all-targets`). Fix any warnings introduced by the changes before finishing. Note `--all-targets` on both: without it clippy skips test code and `cargo test` skips every test in the agent binary crates.
+- Lints are declared once in `[workspace.lints]` in the root `Cargo.toml`; member crates inherit them with `[lints] workspace = true`. `unwrap_used`, `expect_used`, `indexing_slicing` and `dbg_macro` are denied in production code (`clippy.toml` exempts tests), and `unsafe_code` is forbidden. Use `get`/`first`/`split_first`/slice patterns rather than indexing.
+- Release builds set `panic = "abort"` **and** `overflow-checks = true`, so any reachable panic or integer overflow is a remote process kill. Arithmetic on values that arrive from a peer must be explicitly saturating or checked - see `Usage` and `StorageSize` in `greatwestern`.
+- Any file containing key material must be written with `paddington::config::write_secret_file`, never a bare `fs::write`. `scripts/check-secret-writes.sh` (run by `make lint` and CI) enforces this.
 
 ## Examples
 

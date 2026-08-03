@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
+# `clippy::indexing_slicing` is denied workspace-wide (see `[workspace.lints]`
+# in Cargo.toml). Test code is exempt: a panicking index in a test is a failing
+# test, not a production abort, and requiring `get().unwrap()` everywhere would
+# make the tests noisier without making anything safer.
+allow-indexing-slicing-in-tests = true
+
+# Likewise for the `unwrap`/`expect` denials - a test that unwraps a `None` is
+# simply a test that failed.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true

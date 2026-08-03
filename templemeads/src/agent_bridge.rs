@@ -219,6 +219,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             remove,
             zone,
             rotate,
+            r#type,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -229,6 +230,8 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             }
 
             if let Some(client) = add {
+                let agent_type = crate::agent_core::validate_agent_type(r#type)?;
+
                 if ip.is_none() {
                     return Err(Error::PeerEdit(format!(
                         "No IP address or IP range provided for client {}.",
@@ -238,11 +241,17 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
                 let mut config = load_config::<Config>(&config_file)?;
 
-                let invite = config.service.add_client(
-                    client,
-                    &ip.clone().unwrap_or_else(|| "".to_string()),
-                    zone,
-                )?;
+                let invite = config
+                    .service
+                    .add_client(
+                        client,
+                        &ip.clone().unwrap_or_else(|| "".to_string()),
+                        zone,
+                        &agent_type,
+                    )?
+                    // A bridge is always a Bridge - tell the client so, so its
+                    // side of the expectation needs no hand-editing.
+                    .with_agent_type(Some(AgentType::Bridge.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -264,7 +273,10 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
             if let Some(client) = rotate {
                 let mut config = load_config::<Config>(&config_file)?;
-                let invite = config.service.rotate_client_keys(client, zone)?;
+                let invite = config
+                    .service
+                    .rotate_client_keys(client, zone)?
+                    .with_agent_type(Some(AgentType::Bridge.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -423,6 +435,17 @@ enum Commands {
             help = "Name of the client whose keys are being rotated"
         )]
         rotate: Option<String>,
+
+        #[arg(
+            long,
+            short = 't',
+            help = "The agent type this client must present itself as, e.g. 'portal'. \
+                    Communicated out-of-band by the operator of that agent - it is never \
+                    taken from anything the client sends. If omitted, the client's claimed \
+                    type is not checked. One of: portal, provider, platform, instance, \
+                    bridge, account, filesystem, scheduler, virtual"
+        )]
+        r#type: Option<String>,
     },
 
     /// Adding and removing servers

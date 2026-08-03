@@ -121,9 +121,54 @@ fn validate_component(
     Ok(())
 }
 
+///
+/// Whether TLS certificate verification should be disabled for outbound HTTPS
+/// calls, per the `OPENPORTAL_ALLOW_INVALID_SSL_CERTS` environment variable.
+///
+/// This is a development escape hatch: `op-freeipa` and `op-bridge` both build
+/// `reqwest` clients with `danger_accept_invalid_certs`, and turning it on
+/// makes those connections trivially interceptable. It lives here so there is
+/// exactly one implementation of the rule (and one test of it) rather than a
+/// copy per agent that can drift into being more permissive.
+///
+/// Fails closed: only the literal string `true` (in any case) enables it.
+///
+pub fn allow_invalid_ssl_certs() -> bool {
+    parse_allow_invalid_ssl_certs(std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS").ok())
+}
+
+/// The pure part of [`allow_invalid_ssl_certs`], so the rule can be tested
+/// without mutating process-global environment state.
+pub fn parse_allow_invalid_ssl_certs(value: Option<String>) -> bool {
+    match value {
+        Some(value) => value.trim().to_lowercase() == "true",
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_disabling_tls_verification_requires_an_exact_opt_in() {
+        // Fail closed: anything other than "true" leaves certificate
+        // verification on. A typo'd or partially-set value must not silently
+        // disable TLS checking for op-freeipa's and op-bridge's outbound calls.
+        assert!(parse_allow_invalid_ssl_certs(Some("true".to_string())));
+        assert!(parse_allow_invalid_ssl_certs(Some("TRUE".to_string())));
+        assert!(parse_allow_invalid_ssl_certs(Some(" True \n".to_string())));
+
+        for off in ["", " ", "false", "1", "yes", "on", "truthy", "0"] {
+            assert!(
+                !parse_allow_invalid_ssl_certs(Some(off.to_string())),
+                "{:?} must not disable certificate verification",
+                off
+            );
+        }
+
+        assert!(!parse_allow_invalid_ssl_certs(None));
+    }
 
     #[test]
     fn test_validate_identifier_component_allow_list() {

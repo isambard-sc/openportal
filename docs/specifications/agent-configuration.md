@@ -95,6 +95,11 @@ one of `portal`, `provider`, `platform`, `instance`, `bridge`, `account`,
 `filesystem`, `scheduler`, `virtual`. When set, a peer that registers claiming
 any other type is refused and the mismatch is logged as an error.
 
+Both lists' `type` is populated by the CLI, from opposite ends: a `[[clients]]`
+entry's comes from `client --add --type` (§3), and a `[[servers]]` entry's comes
+from the `type` the issuing agent wrote into the invite. Neither needs
+hand-editing.
+
 This matters because a peer's role otherwise arrives entirely over the wire, and
 the framework makes real authorization decisions from it — which peer a portal
 will accept a `Submit` from, which peer may restart an agent or read its
@@ -173,8 +178,8 @@ Create and write a new configuration file.
 Manage inbound peers (agents that connect to this one).
 
 ```
-<agent> client --add <name> --ip <ip-or-cidr> [--zone <zone>]
-<agent> client --add <name> --proxy <relay-name> [--zone <zone>]
+<agent> client --add <name> --ip <ip-or-cidr> [--zone <zone>] [--type <agent-type>]
+<agent> client --add <name> --proxy <relay-name> [--zone <zone>] [--type <agent-type>]
 <agent> client --remove <name> [--zone <zone>]
 <agent> client --list
 <agent> client --rotate <name> [--zone <zone>]
@@ -183,6 +188,19 @@ Manage inbound peers (agents that connect to this one).
 `--add` generates fresh keys and writes an invite file
 (`invite_<name>_<zone>.toml`) to the current directory. Give this file to
 the remote agent operator to import.
+
+`--type <agent-type>` records the `type` this client must present itself as
+(§1.2) - e.g. `--type bridge`. You get this value by **asking the operator of
+that agent**; it is deliberately never derived from anything the client sends,
+since the whole purpose of the check is to have a local, out-of-band statement of
+what the peer is meant to be. The value is validated when you run the command, so
+a typo fails immediately rather than being written to the config and then ignored
+at startup. If omitted, this peer's claimed type is not checked, and a warning
+says so.
+
+The generated invite also declares **this** agent's own type, so the importing
+side's expectation of *you* needs no manual step. Note the asymmetry: the invite
+carries what the issuer is, never what the client is expected to be.
 
 `--proxy <relay-name>` introduces a client that can only reach this agent
 through a blind relay proxy (`relay-name` must already be a known
@@ -212,6 +230,12 @@ command. No separate flag is needed for a relayed peer - if the invite was
 created with `client --add --proxy`, it already names the relay, and this
 agent picks it up automatically (as long as that same relay is already a
 known `servers` entry here too).
+
+The same applies to `type`: the invite declares the issuing agent's own type, so
+the resulting `[[servers]]` entry is populated with it and the check is active
+immediately. There is no `--type` flag here, and none is needed. An invite
+written by a version before this was added simply has no `type`, imports
+normally, and leaves that peer unchecked.
 
 ### `encryption`
 
@@ -976,6 +1000,12 @@ op-proxy allow <a> <b> [--config-file <path>]
 # Run the proxy
 op-proxy run [--config-file <path>]
 ```
+
+`op-proxy` has no `--type` flag, and records no agent type in either
+direction. A blind relay is not an agent in the framework's sense: it has no
+`agent::Type` of its own to declare in the invites it issues, and it never
+inspects the roles of the peers it relays between - its authorization is the
+explicit `allow` pair list below, not anything about what those peers are.
 
 `client --add` writes an invite file the same way any other agent's
 `client --add` does - give it to the introduced agent's operator so they

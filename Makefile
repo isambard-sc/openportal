@@ -14,8 +14,10 @@ clean:
 	@cargo clean
 
 TESTS = ""
+# No --lib: that silently skipped every test in the agent binary crates, which
+# is where most of the privileged logic lives.
 test:
-	@cargo test $(TESTS) --offline --lib -- --color=always --nocapture
+	@cargo test $(TESTS) --offline --all-targets -- --color=always --nocapture
 
 docs: build
 	@cargo doc --no-deps
@@ -27,6 +29,11 @@ style-check:
 lint:
 	@rustup component add clippy 2> /dev/null
 	cargo clippy --all-targets --all-features -- -D warnings
+	@./scripts/check-secret-writes.sh
+
+audit:
+	@cargo audit --version > /dev/null 2>&1 || cargo install cargo-audit --locked
+	cargo audit
 
 dev-portal:
 	cargo run --bin portal-svc
@@ -34,4 +41,4 @@ dev-portal:
 dev-provider:
 	cargo run --bin provider-svc
 
-.PHONY: build python test docs style-check lint
+.PHONY: build python test docs style-check lint audit

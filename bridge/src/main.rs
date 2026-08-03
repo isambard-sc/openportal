@@ -702,10 +702,9 @@ async fn deliver_notification(notification_url: &Option<Url>, notification: &Not
 }
 
 fn should_allow_invalid_certs() -> bool {
-    match std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS") {
-        Ok(value) => value.to_lowercase() == "true",
-        Err(_) => false,
-    }
+    // One shared implementation of the rule, so a copy here cannot drift into
+    // being more permissive than the other agent's.
+    templemeads::validate::allow_invalid_ssl_certs()
 }
 
 const PORTAL_WAIT_TIME: u64 = 5;

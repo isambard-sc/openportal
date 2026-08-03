@@ -486,10 +486,9 @@ async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedI
 }
 
 fn should_allow_invalid_certs() -> bool {
-    match std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS") {
-        Ok(value) => value.to_lowercase() == "true",
-        Err(_) => false,
-    }
+    // One shared implementation of the rule, so a copy here cannot drift into
+    // being more permissive than the other agent's.
+    templemeads::validate::allow_invalid_ssl_certs()
 }
 
 ///
@@ -3321,4 +3320,84 @@ pub async fn unblock_user(
     tracing::info!("Unblocked user: {}", user.identifier());
 
     Ok(user)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_internal_portals_map_to_bare_group_names() {
+        // These three portal names map to a *bare* group name rather than the
+        // usual `{portal}.{project}`, so `bob.docker.system` resolves to the
+        // host's real `docker` group. That is why `force_get_user`/`get_users`
+        // refuse them when they arrive from a peer, and why
+        // `op-localaccount` had to be brought into line - see
+        // docs/specifications/security-review-2.md (finding R13).
+        let projectid = |s: &str| {
+            let project = match ProjectIdentifier::parse(s) {
+                Ok(p) => p,
+                Err(e) => unreachable!("project {:?}: {:?}", s, e),
+            };
+            match identifier_to_projectid(&project, false) {
+                Ok(id) => id,
+                Err(e) => unreachable!("projectid {:?}: {:?}", s, e),
+            }
+        };
+
+        for portal in ["openportal", "system", "instance"] {
+            assert!(is_internal_portal(portal));
+            assert_eq!(projectid(&format!("docker.{}", portal)), "docker");
+        }
+
+        // Anything else is namespaced by its portal, so it can never collide
+        // with a pre-existing host group.
+        assert!(!is_internal_portal("brics"));
+        assert!(!is_internal_portal("Système"));
+        assert!(!is_internal_portal(""));
+        assert_eq!(projectid("proj.brics"), "brics.proj");
+    }
+
+    #[test]
+    fn test_legacy_project_ids_keep_the_group_prefix() {
+        let project = match ProjectIdentifier::parse("proj.brics") {
+            Ok(p) => p,
+            Err(e) => unreachable!("project: {:?}", e),
+        };
+
+        assert_eq!(
+            match identifier_to_projectid(&project, true) {
+                Ok(id) => id,
+                Err(e) => unreachable!("legacy: {:?}", e),
+            },
+            "group.proj"
+        );
+    }
+
+    #[test]
+    fn test_group_member_uids_come_from_member_user() {
+        // FreeIPA's JSON-RPC returns group members as `member_user` (with the
+        // underscore), not `memberuser`. Reading the wrong key silently yields
+        // an empty set, which makes every membership test succeed vacuously -
+        // so pin the key name.
+        let group = serde_json::json!({
+            "cn": ["brics.proj"],
+            "member_user": ["alice", "bob"],
+        });
+
+        let uids = raw_group_member_uids(&group);
+        assert_eq!(uids.len(), 2);
+        assert!(uids.contains("alice"));
+        assert!(uids.contains("bob"));
+
+        // Absent, wrong-typed and non-string entries degrade to "no members"
+        // rather than panicking on a hostile or unexpected response.
+        assert!(raw_group_member_uids(&serde_json::json!({})).is_empty());
+        assert!(raw_group_member_uids(&serde_json::json!({"memberuser": ["alice"]})).is_empty());
+        assert!(raw_group_member_uids(&serde_json::json!({"member_user": "alice"})).is_empty());
+        assert_eq!(
+            raw_group_member_uids(&serde_json::json!({"member_user": ["alice", 42, null]})).len(),
+            1
+        );
+    }
 }

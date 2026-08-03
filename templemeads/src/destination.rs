@@ -41,6 +41,19 @@ impl Destination {
             })
             .collect();
 
+        // A destination is round-tripped through a whitespace-separated command
+        // string (`Job::parse` takes the first token as the destination), so an
+        // agent name containing whitespace would silently truncate the path -
+        // `"a b.aip1.brics get_projects"` addresses `a`, not `a b.aip1.brics`.
+        // Such a name has never worked; reject it here rather than let it
+        // produce a destination that means something else downstream.
+        if let Some(agent) = agents.iter().find(|a| a.chars().any(char::is_whitespace)) {
+            return Err(Error::Parse(format!(
+                "Invalid destination '{}' - agent name '{}' contains whitespace",
+                destination, agent
+            )));
+        }
+
         match agents.len() {
             0 => Err(Error::Parse(format!(
                 "Invalid empty destination '{}'",
@@ -324,27 +337,16 @@ impl std::ops::Deref for Destinations {
     }
 }
 
-///
-/// Implement traits so that we can look up a destination by index.
-///
-/// Note that `Index` is required by its `std` contract to panic on an
-/// out-of-range index, so this is the one indexing operation in the crate
-/// that can. Prefer [`Destinations::get`] anywhere the index is derived from
-/// data rather than known to be in range - the release profile sets
-/// `panic = "abort"`, so a panic here would terminate the agent. See
-/// `docs/specifications/security-review-2.md` (finding R1).
-///
-impl std::ops::Index<usize> for Destinations {
-    type Output = Destination;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.destinations[index]
-    }
-}
-
 impl Destinations {
     /// The destination at `index`, or `None` if `index` is out of range.
-    /// The non-panicking counterpart to indexing.
+    ///
+    /// This replaces an `impl Index<usize> for Destinations`, which had no
+    /// callers anywhere in the workspace and was the only remaining operation
+    /// that could panic on an out-of-range index. `Index` is required by its
+    /// `std` contract to panic, so it could not be made safe - only exempted
+    /// from `clippy::indexing_slicing`. Removing it leaves that deny with no
+    /// exceptions in non-test code. See
+    /// `docs/specifications/security-review-2.md` (finding R1).
     pub fn get(&self, index: usize) -> Option<&Destination> {
         self.destinations.get(index)
     }
@@ -364,6 +366,28 @@ impl std::ops::Index<std::ops::RangeFull> for Destinations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_destination_agent_names_cannot_contain_whitespace() {
+        // A destination is the first whitespace-separated token of a command
+        // string, so whitespace inside an agent name would make the parsed
+        // destination differ from the written one.
+        assert!(Destination::parse("portal.provider.cluster").is_ok());
+
+        for bad in [
+            "a b.aip1.brics",
+            "aip1.a b.brics",
+            "aip1.brics extra",
+            "aip1.brics\tx",
+            "aip1.brics\nx",
+        ] {
+            assert!(
+                Destination::parse(bad).is_err(),
+                "{:?} must be rejected as a destination",
+                bad
+            );
+        }
+    }
 
     #[test]
     fn test_position_requires_the_sender_to_be_adjacent() {

@@ -513,6 +513,33 @@ const BRIDGE_WAIT_TIME: u64 = 5;
 ///
 /// Return all of the currently configured offerings
 ///
+/// Recover the offering [`Destination`] a virtual agent stands for, or `None`
+/// if it does not describe one belonging to `me`.
+///
+/// A virtual agent's zone encodes the relationship as `remote>local`, so the
+/// destination is `{name}.{local}.{remote}`. Returning `None` rather than an
+/// error is deliberate - the agent registry holds every virtual agent this
+/// process knows about, and only those in the middle of which *this* portal
+/// sits are ours to offer.
+///
+/// Split out from `get_offerings` so the filter can be tested without a live
+/// agent registry: it is what stops another portal's relationship from being
+/// advertised as one of ours.
+fn offering_for_virtual_agent(name: &str, zone: &str, me: &str) -> Option<Destination> {
+    let zone = zone.split('>').collect::<Vec<&str>>();
+
+    let [remote, local] = zone.as_slice() else {
+        return None;
+    };
+
+    let destination = Destination::parse(&format!("{}.{}.{}", name, local, remote)).ok()?;
+
+    match destination.agents().as_slice() {
+        [_, local_portal, _] if *local_portal == me => Some(destination),
+        _ => None,
+    }
+}
+
 pub async fn get_offerings() -> Result<Destinations, Error> {
     let me = agent::name().await;
 
@@ -520,26 +547,7 @@ pub async fn get_offerings() -> Result<Destinations, Error> {
         .await
         .iter()
         .filter_map(|virtual_agent| {
-            // convert this back to a destination
-            let zone = virtual_agent.zone().split('>').collect::<Vec<&str>>();
-
-            if let [remote, local] = zone.as_slice() {
-                Some(Destination::parse(&format!(
-                    "{}.{}.{}",
-                    virtual_agent.name(),
-                    local,
-                    remote
-                )))
-            } else {
-                None
-            }
-        })
-        .filter_map(|result| match result {
-            Ok(destination) => match destination.agents().as_slice() {
-                [_, local_portal, _] if *local_portal == me => Some(destination),
-                _ => None,
-            },
-            Err(_) => None,
+            offering_for_virtual_agent(virtual_agent.name(), virtual_agent.zone(), &me)
         })
         .collect();
 
@@ -1401,5 +1409,39 @@ pub async fn get_usage_reports(
                 "Cannot run the job because there is no bridge agent".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_only_this_portals_relationships_are_offered() {
+        // A virtual agent's zone is `remote>local`, so the offering it stands
+        // for is `{name}.{local}.{remote}` - and it is only ours if *this*
+        // portal is the local hop in the middle.
+        let offering = offering_for_virtual_agent("resource1", "brics>aip1", "aip1");
+        assert_eq!(
+            offering.map(|d| d.to_string()),
+            Some("resource1.aip1.brics".to_string())
+        );
+
+        // Another portal's relationship must not be advertised as ours, even
+        // though it is a perfectly well-formed destination.
+        assert!(offering_for_virtual_agent("resource1", "brics>other", "aip1").is_none());
+
+        // Neither must a zone that does not encode a relationship at all.
+        for zone in ["aip1", "", "a>b>c", ">", "brics>"] {
+            assert!(
+                offering_for_virtual_agent("resource1", zone, "aip1").is_none(),
+                "zone {:?} must not yield an offering",
+                zone
+            );
+        }
+
+        // ...nor one whose parts cannot form a destination.
+        assert!(offering_for_virtual_agent("", "brics>aip1", "aip1").is_none());
+        assert!(offering_for_virtual_agent("a b", "brics>aip1", "aip1").is_none());
     }
 }

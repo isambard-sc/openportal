@@ -175,6 +175,30 @@ fn version() -> &'static str {
 /// if this is requested. If nothing is returned then the program can
 /// cleanly exit.
 ///
+///
+/// Validate a `--type` argument, returning the canonical string form to store in
+/// the config (or `None` if the operator did not pass one).
+///
+/// A typo would otherwise be recorded silently and then discarded at startup as
+/// unrecognised, leaving the operator believing a peer was being checked when it
+/// was not - so this fails at add-time, when there is someone there to read the
+/// error. See `docs/specifications/security-review-2.md` (finding R3).
+///
+pub(crate) fn validate_agent_type(agent_type: &Option<String>) -> Result<Option<String>, Error> {
+    let Some(agent_type) = agent_type else {
+        return Ok(None);
+    };
+
+    match AgentType::parse(agent_type) {
+        Some(typ) => Ok(Some(typ.to_string())),
+        None => Err(Error::PeerEdit(format!(
+            "'{}' is not a recognised agent type. Valid values are: portal, provider, \
+             platform, instance, bridge, account, filesystem, scheduler, virtual.",
+            agent_type
+        ))),
+    }
+}
+
 pub async fn process_args<T>(defaults: &Defaults<T>) -> Result<Option<Config<T>>, Error>
 where
     T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
@@ -261,6 +285,7 @@ where
             zone,
             rotate,
             proxy,
+            r#type,
         }) => {
             if *list {
                 let config = load_config::<Config<T>>(&config_file)?;
@@ -271,10 +296,16 @@ where
             }
 
             if let Some(client) = add {
+                let agent_type = validate_agent_type(r#type)?;
+
                 let mut config = load_config::<Config<T>>(&config_file)?;
 
                 let invite = match proxy {
-                    Some(relay) => config.service.add_relayed_client(client, relay, zone)?,
+                    Some(relay) => {
+                        config
+                            .service
+                            .add_relayed_client(client, relay, zone, &agent_type)?
+                    }
                     None => {
                         if ip.is_none() {
                             return Err(Error::PeerEdit(format!(
@@ -287,9 +318,15 @@ where
                             client,
                             &ip.clone().unwrap_or_else(|| "".to_string()),
                             zone,
+                            &agent_type,
                         )?
                     }
                 };
+
+                // ...and tell the client what *we* are, so its side of the
+                // expectation needs no hand-editing. We know our own type for
+                // certain, so this is always declared.
+                let invite = invite.with_agent_type(Some(defaults.agent.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -297,7 +334,18 @@ where
                     &PathBuf::from(format!("./invite_{}_{}.toml", invite.name(), invite.zone())),
                 )?;
 
-                tracing::info!("Client '{}' added.", client);
+                match &agent_type {
+                    Some(t) => tracing::info!(
+                        "Client '{}' added, and must present itself as a '{}' agent.",
+                        client,
+                        t
+                    ),
+                    None => tracing::warn!(
+                        "Client '{}' added with no expected agent type, so whatever role it \
+                         claims will be accepted. Pass --type to check it.",
+                        client
+                    ),
+                }
                 return Ok(None);
             }
 
@@ -311,7 +359,10 @@ where
 
             if let Some(client) = rotate {
                 let mut config = load_config::<Config<T>>(&config_file)?;
-                let invite = config.service.rotate_client_keys(client, zone)?;
+                let invite = config
+                    .service
+                    .rotate_client_keys(client, zone)?
+                    .with_agent_type(Some(defaults.agent.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -512,6 +563,17 @@ enum Commands {
                     required and is ignored"
         )]
         proxy: Option<String>,
+
+        #[arg(
+            long,
+            short = 't',
+            help = "The agent type this client must present itself as, e.g. 'bridge'. \
+                    Communicated out-of-band by the operator of that agent - it is never \
+                    taken from anything the client sends. If omitted, the client's claimed \
+                    type is not checked. One of: portal, provider, platform, instance, \
+                    bridge, account, filesystem, scheduler, virtual"
+        )]
+        r#type: Option<String>,
     },
 
     /// Adding and removing servers
@@ -663,4 +725,39 @@ enum Commands {
         )]
         zone: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_type_typos_are_rejected_at_add_time() {
+        // A misspelled --type would otherwise be written into the config and
+        // then discarded at startup as unrecognised, leaving the operator
+        // believing the peer was checked when it was not. Fail while there is
+        // someone there to read the error. See finding R3.
+        assert_eq!(
+            validate_agent_type(&Some("bridge".to_string())).ok(),
+            Some(Some("bridge".to_string()))
+        );
+
+        // ...and normalise, so `--type BRIDGE` and `--type " bridge "` record
+        // the same canonical value the startup check parses.
+        assert_eq!(
+            validate_agent_type(&Some("  BRIDGE ".to_string())).ok(),
+            Some(Some("bridge".to_string()))
+        );
+
+        for bad in ["bridges", "brigde", "portal ninja", "", "Portal!"] {
+            assert!(
+                validate_agent_type(&Some(bad.to_string())).is_err(),
+                "{:?} must be rejected",
+                bad
+            );
+        }
+
+        // Omitting it entirely is legitimate - it means "do not check".
+        assert_eq!(validate_agent_type(&None).ok(), Some(None));
+    }
 }

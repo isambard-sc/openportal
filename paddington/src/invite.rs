@@ -22,6 +22,23 @@ pub struct Invite {
     /// which relay to use: it reads everything it needs from this file.
     #[serde(default)]
     proxy: Option<String>,
+    /// The agent type of the *issuing* service, i.e. the type the importing
+    /// side should expect this peer to present itself as.
+    ///
+    /// This is the issuer describing **itself**, not the client it is inviting.
+    /// The client's own expected type is never carried here: it is declared on
+    /// the issuing side with `client --add --type`, from information the two
+    /// operators exchange out-of-band. Trusting this field is sound for the same
+    /// reason trusting `name` and the keys is - the invite file reaches the
+    /// importing side by deliberate operator action, not over the wire. What
+    /// finding R3 distrusts is the role a peer *claims at registration*, which
+    /// is then checked against this.
+    ///
+    /// `None` (the field absent) means the issuer did not declare one, so the
+    /// importing side does not check - which is how invites written by older
+    /// versions keep working.
+    #[serde(default, rename = "type")]
+    agent_type: Option<String>,
 }
 
 impl Invite {
@@ -40,6 +57,7 @@ impl Invite {
             inner_key: inner_key.clone(),
             outer_key: outer_key.clone(),
             proxy: proxy.clone(),
+            agent_type: None,
         }
     }
 
@@ -67,6 +85,27 @@ impl Invite {
     /// `None` for an ordinary, directly-dialled peer.
     pub fn proxy(&self) -> Option<String> {
         self.proxy.clone()
+    }
+
+    ///
+    /// Declare the issuing service's own agent type, so the importing side can
+    /// check what this peer claims at registration against what it was invited
+    /// as.
+    ///
+    /// Set by the agent layer (`templemeads`) rather than by `paddington`, which
+    /// has no notion of agent types - it only carries the string through.
+    ///
+    pub fn with_agent_type(mut self, agent_type: Option<String>) -> Self {
+        self.agent_type = agent_type;
+        self
+    }
+
+    ///
+    /// The agent type the issuing service declared for itself, if any. `None`
+    /// means "not declared, do not check" - see the field's documentation.
+    ///
+    pub fn agent_type(&self) -> Option<String> {
+        self.agent_type.clone()
     }
 
     pub fn assert_valid(&self) -> Result<(), Error> {

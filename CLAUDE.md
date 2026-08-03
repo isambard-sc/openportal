@@ -6,62 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OpenPortal is a distributed infrastructure management protocol implementation written in Rust. It provides secure communication between user portals (e.g., Waldur) and digital research infrastructure (e.g., supercomputers). The system uses a peer-to-peer agent-based architecture where each agent handles specific infrastructure management tasks without requiring centralized "god keys."
 
-## Build Commands
-
-```bash
-# Development build
-make
-# or
-cargo build
-
-# Release build (optimized, stripped binaries)
-make release
-# or
-cargo build --release
-
-# Run tests
-make test
-# or
-cargo test --offline --lib -- --color=always --nocapture
-
-# Run specific test(s) - set TESTS variable
-make test TESTS="test_name"
-
-# Build Python bindings
-make python
-# or
-maturin develop -m python/Cargo.toml
-
-# Generate documentation
-make docs
-# or
-cargo doc --no-deps
-
-# Code quality checks
-make style-check    # Check formatting with rustfmt
-make lint           # Run clippy with strict warnings
-```
-
-## Development Commands
-
-```bash
-# Run portal service locally
-make dev-portal
-# or
-cargo run --bin portal-svc
-
-# Run provider service locally
-make dev-provider
-# or
-cargo run --bin provider-svc
-
-# Run specific binary
-cargo run --bin <binary-name>
-# Available binaries: portal-svc, provider-svc, op-bridge, op-cluster,
-# op-clusters, op-filesystem, op-freeipa, op-slurm, op-cloudaccount,
-# op-cloudportal, op-proxy, and example binaries in docs/
-```
-
 ## Workspace Structure
 
 This is a Cargo workspace with multiple crates. The workspace is organized into:
@@ -143,13 +87,6 @@ Agents use TOML configuration files (typically in ~/.config/openportal/ or speci
 - Service-specific settings (e.g., FreeIPA connection details)
 
 ## Code Standards
-
-The codebase enforces strict Rust safety standards via lints in Cargo.toml files:
-
-- **unsafe_code = "forbid"**: No unsafe code allowed
-- **dbg_macro = "deny"**: No debug macros in production code
-- **unwrap_used = "deny"**: Must handle errors explicitly, no .unwrap()
-- **expect_used = "deny"**: Must handle errors explicitly, no .expect()
 
 When writing or modifying code:
 - Use proper error handling with Result types and the anyhow crate

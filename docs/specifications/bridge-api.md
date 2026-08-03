@@ -90,9 +90,11 @@ The `Authorization` header value is `OpenPortal <signature>`, where
 `<signature>` is an HMAC-SHA512 tag (hex-encoded) computed using the bridge
 invite key over a canonical call string.
 
-The canonical call string is built differently for GET and POST requests:
+The canonical call string is built differently depending on whether the body is
+**empty**, not on the HTTP method. This matters for a `POST` with an empty body:
+it signs with the four-field form below, *not* the five-field one.
 
-**GET (empty body):**
+**Empty body (all GETs, and any POST with no body):**
 
 Without nonce:
 ```
@@ -104,7 +106,7 @@ With nonce:
 <protocol>\napplication/json\n<date>\n<function>\n<nonce>
 ```
 
-**POST (with body):**
+**Non-empty body:**
 
 Without nonce:
 ```
@@ -129,6 +131,16 @@ Where:
 The HMAC is computed using `orion::auth::authenticate` (HMAC-SHA512) and
 hex-encoded. The bridge verifies it using a **constant-time comparison** to
 prevent timing attacks.
+
+> **Known weakness.** The canonical string is `\n`-joined with no length prefixes
+> and no field count, so the four shapes above are not distinguishable from one
+> another by the signature alone. For a POST,
+> `…\n<function>\n<body>\n<nonce>` is byte-identical to
+> `…\n<function>\n<body ‖ "\n" ‖ nonce>`, which means the *presence* of a nonce
+> is not authenticated. See
+> [security-review-2.md](security-review-2.md#r29) (finding R29). Not yet fixed;
+> a fix would change the canonical form and so requires a coordinated client
+> update.
 
 **Example signature (pseudocode):**
 
@@ -160,18 +172,45 @@ A request reusing a nonce within that window is rejected with HTTP 401
 Requests are rate-limited per client IP address at **10,000 requests per
 10-second window**. Exceeding the limit returns HTTP 429.
 
-Client IP is extracted from `X-Forwarded-For` (first value) or `X-Real-IP`
-headers if present, falling back to the TCP peer address.
+Client IP is resolved as follows, and **never** read directly from a
+client-supplied header:
+
+1. The TCP peer address is authoritative **unless** that peer matches the
+   service's configured `trusted_proxy` range. With no `trusted_proxy` set,
+   forwarded headers are ignored entirely.
+2. When the peer *is* a trusted proxy, `X-Forwarded-For` is walked
+   **right-to-left** and the first entry that is *not* itself a trusted proxy is
+   taken. An unparseable entry stops the walk rather than being skipped, because
+   past it there is no way to tell which hop appended what.
+3. `X-Real-IP` is consulted only if `X-Forwarded-For` yields nothing; it is a
+   single value set by the adjacent proxy, so there is no left/right ambiguity.
+
+Taking the **left-most** `X-Forwarded-For` entry - which earlier versions of this
+document described - lets a client choose its own value, since the list is
+appended to by each hop and the left end is whatever the client sent. See
+[security-review-2.md](security-review-2.md#r11) (finding R11).
 
 ---
 
 ## 3. Common Response Format
 
-**Error responses** return a JSON object with a `message` field:
+**Error responses** return a JSON object with a `message` field containing a
+**generic, status-appropriate string** — never internal error detail, which aided
+reconnaissance (round 1 finding F15). The full error chain is logged server-side
+only.
 
 ```json
-{"message": "Something went wrong: <error detail>"}
+{"message": "Unauthorized"}
 ```
+
+| Status | `message` |
+|---|---|
+| 401 | `Unauthorized` |
+| 429 | `Too many requests` |
+| 503 | `Service unavailable` |
+| 400 | `Bad request` |
+| 404 | `Not found` |
+| any other | `Internal server error` |
 
 HTTP status codes used:
 
@@ -182,6 +221,7 @@ HTTP status codes used:
 | 404 | Resource not found |
 | 429 | Rate limit exceeded |
 | 500 | Internal server error |
+| 503 | Service unavailable (e.g. during a soft restart) |
 
 ---
 
@@ -594,7 +634,8 @@ The flow is:
 1. OpenPortal sends create_project (or similar) to the bridge agent.
 2. Bridge adds the Job to the bridge board.
 3. Bridge calls GET <signal_url>?job_id=<uuid> to notify the portal.
-4. Portal receives the signal; calls POST /fetch_job {"job": "<uuid>"} or GET /fetch_jobs.
+4. Portal receives the signal; calls POST /fetch_job with a bare JSON UUID
+   string as the body (see §4), or GET /fetch_jobs.
 5. Portal processes the job (e.g. creates the project in its own system).
 6. Portal calls POST /send_result with the completed Job.
 7. Bridge unblocks and returns the result to OpenPortal.

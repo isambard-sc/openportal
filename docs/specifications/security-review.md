@@ -11,6 +11,12 @@ this document *evaluates* it: how strong the design and its implementation
 actually are, what an attacker can and cannot do, and where the genuine gaps
 are.
 
+> **This document has been superseded in places.** A second review
+> ([security-review-2.md](security-review-2.md), 2026-07-30) re-tested this one's
+> conclusions and falsified several of them. Every affected claim below carries an
+> inline **Round 2 correction** note; the full list is in round 2 §2. The threat
+> model (§1) and most of the strengths (§3) stand, and round 2 reuses them.
+
 ## Executive summary
 
 **OpenPortal has a strong, deliberately minimal security architecture, and this
@@ -177,6 +183,14 @@ neighbours ([security-model.md](security-model.md) §7). Compromise of one link'
 keys does not expose any other link's, and there is no master credential.
 This is the system's central security property and it holds.
 
+> **Round 2 correction.** It holds for *key material*, but not for *authority*:
+> holding one link's keys used to let a peer assert a topology position, a role
+> and a portal it had no claim to. See round 2's
+> [R3](security-review-2.md#r3), [R4](security-review-2.md#r4) and
+> [R12](security-review-2.md#r12); the first two are fixed by sender adjacency
+> and declared peer types, and round 2 §4.1 records what remains as an accepted
+> trade-off.
+
 ### 3.2 Sound transport cryptography, no nonce reuse
 Message content is sealed with **XChaCha20-Poly1305** (`orion aead::seal`,
 `crypto.rs:259`), whose 192-bit nonce is drawn from the CSPRNG per call — so
@@ -195,7 +209,14 @@ shift-by-≥64 and `u64::MAX`-jump edge cases that are easy to get wrong. The
 nonce lives *inside* the AEAD-authenticated ciphertext, so it cannot be forged
 or stripped by a proxy/attacker. Handshake/bootstrap nonces correctly persist
 across reconnects (keyed under the permanent PSK), while ongoing-traffic windows
-correctly reset per session. See [replay-protection-design.md](../plans/replay-protection-design.md).
+correctly reset per session.
+
+> **Round 2 correction.** Only half of that state persisted. The receive *window*
+> survived a reconnect but the send *counter* did not, so a restarted agent
+> re-sent nonces its peer had already recorded and every handshake was rejected
+> as a replay until the peer restarted too - a live availability bug that any
+> deploy triggered. See [R10](security-review-2.md#r10), fixed by keying one
+> window per sender incarnation via a random per-process epoch. See [replay-protection-design.md](../plans/replay-protection-design.md).
 
 ### 3.4 Authentication order: key possession before identity
 On connection, the server selects a peer only if one of the IP-matched
@@ -224,9 +245,28 @@ request bodies, so identifiers cannot break out into other parameters. FreeIPA
 and Slurm additionally refuse to act on objects not in the OpenPortal-managed
 org/group, limiting what a rogue peer can do to pre-existing accounts.
 
+> **Round 2 correction.** False for Slurm. That was true only on the *create*
+> path, and even there the check ran against a locally-constructed object whose
+> organization is a hard-coded constant, so it could never fail. No mutation path
+> checked the organization of the account that actually existed in Slurm. See
+> [R5](security-review-2.md#r5), now fixed on `set_limit` and both
+> `cancel_pending_*_jobs`.
+
 ### 3.7 Memory-safety and secret hygiene
 `unsafe_code = "forbid"`, `unwrap_used`/`expect_used = "deny"` are enforced
-crate-wide; no payload-reachable panic was found in the agents. Key material is
+crate-wide; no payload-reachable panic was found in the agents.
+
+> **Round 2 correction.** There were several, and the lint list was the reason
+> they were missed: with `unwrap`/`expect` denied, the entire remaining panic
+> class was *slice indexing*, which nothing checked. `Instruction::parse` indexed
+> its argument list unguarded, and that parser runs inside `Command`'s
+> `Deserialize`, so a Job whose command was `"a.b submit"` aborted the receiving
+> agent - reachable from any authenticated peer and through `POST /run` on the
+> bridge. See [R1](security-review-2.md#r1) (any Job payload),
+> [R27](security-review-2.md#r27) (an external service's response) and
+> [R25](security-review-2.md#r25) (date arguments). All are fixed, and
+> `clippy::indexing_slicing` is now denied workspace-wide so the class is closed
+> structurally. Key material is
 held in `secrecy::SecretBox`, zeroised on drop, and redacted from `Debug`
 output; `Display` impls for configs/invites deliberately omit key fields.
 
@@ -303,6 +343,17 @@ to both — it just cannot compensate for a public password under `Simple`.
 <a name="f3"></a>
 ### F3 — Bridge rate limiter keyed on spoofable client IP · High · **Fixed**
 
+> **Round 2 correction — the bypass remains in the deployment this fix
+> recommends.** `trusted_proxy` correctly stops an *untrusted* source from
+> supplying a forwarded address, but once the TCP peer *is* the trusted proxy, the
+> code took the **left-most** `X-Forwarded-For` entry - which is client-supplied
+> and appended to by every hop. A client sending `X-Forwarded-For: 1.2.3.4`
+> through the Cloudflare tunnel this fix is written for therefore still chose its
+> own rate-limit bucket and its own IP allow-list identity. See
+> [R11](security-review-2.md#r11), fixed by taking the right-most entry not
+> attributable to a trusted proxy. A round-1 test had locked in the old behaviour
+> and was replaced.
+
 **Location:** `templemeads/src/bridge_server.rs` (`resolve_client_ip_middleware`,
 `forwarded_ip`, `extract_client_ip`, `Config::trusted_proxy`).
 
@@ -356,6 +407,18 @@ Legitimate frames are pure ASCII hex, so real traffic is unaffected.
 
 <a name="f5"></a>
 ### F5 — No charset allow-list on identifiers → argument injection · Medium · **Fixed**
+
+> **Round 2 correction — two gaps.** The allow-list covers identifier
+> *components*, but (1) mapping targets (`local_user`, `local_group`,
+> `local_project`) got a *deny*-list that still permitted whitespace, commas and
+> other separators ([R14](security-review-2.md#r14)), and (2) `PortalIdentifier`
+> got no validation at all ([R18](security-review-2.md#r18)). Both are now fixed,
+> with the validator lifted into a shared `templemeads::validate` module.
+>
+> This finding's note that the fix "neutralises the URL-path-injection concern for
+> Slurm REST calls (such characters can no longer appear in an identifier)" was
+> also **inaccurate for mapping fields**, which are interpolated unencoded into
+> REST paths. Those are now percent-encoded at the point of use as well.
 
 **Location:** `greatwestern/src/grammar.rs` (`ProjectIdentifier::parse`,
 `UserIdentifier::parse`, `ProjectMapping::new`, `UserMapping::new`).
@@ -434,6 +497,14 @@ rests on attacker-supplied labels.
 <a name="f8"></a>
 ### F8 — Bridge nonce is optional (backward compatibility) · Low · **By design**
 
+> **Round 2 correction.** The reasoning here - that a supplied nonce is safe
+> because it is covered by the signature - does not hold, because the nonce's
+> *presence* is not bound. The signed string is `\n`-joined with no length
+> prefixes and no field count, so for a POST
+> `…\n<function>\n<body>\n<nonce>` is byte-identical to
+> `…\n<function>\n<body ‖ "\n" ‖ nonce>`, and the server cannot tell which
+> request produced it. See [R29](security-review-2.md#r29), still open.
+
 **Location:** `templemeads/src/bridge_server.rs` (`verify_headers`);
 `python/src/lib.rs` (client).
 
@@ -458,6 +529,15 @@ counterpart already makes.
 
 <a name="f9"></a>
 ### F9 — Config/invite files written world-readable · Low–Medium · **Fixed**
+
+> **Round 2 correction — one writer was missed.** The shared helper this fix
+> introduced was `pub(crate)` to `paddington`, so the *bridge* invite - which
+> carries the HMAC API key - could not reach it and kept using a bare
+> `std::fs::write`, landing at the process umask. See
+> [R9](security-review-2.md#r9). The helper is now public, sets the mode at
+> creation rather than afterwards, creates its parent directory `0700`, and
+> lowers the mode of a pre-existing file. `scripts/check-secret-writes.sh` (run by
+> `make lint` and CI) now asserts structurally that no new bare write appears.
 
 **Location:** `paddington/src/config.rs` (`save`), `paddington/src/invite.rs`
 (`save` ×2).
@@ -488,6 +568,13 @@ value.
 
 <a name="f11"></a>
 ### F11 — No pre-auth connection/rate limiting; pre-auth state mutation · Medium · **Fixed**
+
+> **Round 2 correction.** This finding's residual - an attacker "could still deny
+> *new* connections **until slots free**" - understated the position: **slots never
+> freed**, because there was no handshake timeout anywhere, so a permit was held
+> for as long as the attacker kept a socket open without completing the handshake.
+> See [R21](security-review-2.md#r21), fixed with a 30 s pre-authentication
+> deadline.
 
 **Location:** `paddington/src/server.rs` (accept loop),
 `paddington/src/config.rs` (`may_attempt_connection`),
@@ -542,6 +629,22 @@ are in place.
 <a name="f12"></a>
 ### F12 — Transport TLS is an external concern (by design) · Info · **By design**
 
+> **Round 2 correction — not true of the bridge hop.** This finding's claim that
+> "an on-path attacker cannot read message content, forge or tamper with a
+> message" holds for the paddington wire protocol but not for the bridge's HTTP
+> API, which this document treats as part of the same story. Bridge request and
+> response bodies are **cleartext** - actual content, not just metadata - and the
+> HMAC covers the *request* direction only, so responses are neither
+> authenticated nor encrypted. A `POST /run` body and the job results returned to
+> the portal software are both readable and, in the response direction,
+> tamperable by anything on that hop. See
+> [R32](security-review-2.md#r32).
+>
+> In the reference deployment that hop is inside a single Kubernetes cluster with
+> istio mTLS and no external route, which is why this is rated Info rather than
+> higher - but the documentation should say so rather than implying the AEAD
+> covers it.
+
 **Location:** `templemeads/src/bridge_server.rs` (bare `TcpListener`);
 `paddington/src/server.rs` (raw `ws`).
 
@@ -582,6 +685,14 @@ required for a secure deployment. See §5 and
 
 <a name="f13"></a>
 ### F13 — `op-localaccount` lacks a managed-object guard · Medium · **Fixed**
+
+> **Round 2 correction — only the remove paths were guarded.** The *add* path
+> still had the exact `docker.system` → group `docker` collision this finding
+> documents: `identifier_to_projectid` returns the bare project component for the
+> internal portals, and `ensure_group_exists` returned `Ok(())` whenever
+> `getent group` succeeded, without checking who owned the group. See
+> [R13](security-review-2.md#r13), now fixed on the add path and in
+> `update_homedir`, including validation of the peer-supplied home directory.
 
 **Location:** `localaccount/src/localaccount.rs` (`remove_user`,
 `remove_project`, `is_protected_user`, `is_protected_project`).
@@ -663,6 +774,12 @@ rotation.
 
 <a name="f15"></a>
 ### F15 — Lower-severity hardening cluster · Low · **Resolved**
+
+> **Round 2 correction.** The claim that "both handshake paths now reject an
+> all-zero session key" is true of the two *direct* paths but not of the three
+> *relay* bootstrap key-transport points, which have no `is_null()` check -
+> `Key::derive` HKDFs happily from all-zero input material, so it silently works.
+> See [R33](security-review-2.md#r33), still open.
 
 Individually minor; listed for completeness with location and status. All were
 addressed in this pass — most fixed in code; two left as-is with rationale (the

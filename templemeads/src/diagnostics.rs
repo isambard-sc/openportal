@@ -691,8 +691,33 @@ pub async fn clear_diagnostics() {
 /// The key is the agent name that generated the report
 /// This allows intermediate agents to retrieve and forward responses back through the network
 ///
-static DIAGNOSTICS_CACHE: Lazy<RwLock<HashMap<String, DiagnosticsReport>>> =
+static DIAGNOSTICS_CACHE: Lazy<RwLock<HashMap<String, CachedReport>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+
+///
+/// A cached report, paired with the time *we* received it.
+///
+/// Freshness must be judged against `cached_at`, never against the report's own
+/// `generated_at`: that field is stamped by the agent that produced the report,
+/// on that host's clock. Comparing it to a locally-taken baseline made the
+/// wait loop sensitive to clock skew between hosts - a peer running even slightly
+/// behind never appears to have answered, while one running ahead satisfies a
+/// baseline it predates. `HealthInfo` already did this correctly, stamping
+/// `last_updated` locally on receipt. See
+/// `docs/specifications/security-review-2.md` (finding R20).
+///
+#[derive(Clone, Debug)]
+struct CachedReport {
+    cached_at: DateTime<Utc>,
+    report: DiagnosticsReport,
+}
+
+/// Upper bound on the number of agents held in the diagnostics cache.
+///
+/// The cache is keyed on the name carried inside the report - which it has to be,
+/// since a report legitimately describes an agent several hops away and is
+/// relayed back hop by hop - so its size is not bounded by our own peer count.
+const MAX_CACHED_REPORTS: usize = 256;
 
 ///
 /// Store a diagnostics response in the global cache
@@ -703,7 +728,33 @@ static DIAGNOSTICS_CACHE: Lazy<RwLock<HashMap<String, DiagnosticsReport>>> =
 ///
 pub async fn cache_diagnostics_response(agent_name: String, report: DiagnosticsReport) {
     let mut cache = DIAGNOSTICS_CACHE.write().await;
-    cache.insert(agent_name.clone(), report);
+
+    if cache.len() >= MAX_CACHED_REPORTS && !cache.contains_key(&agent_name) {
+        // Evict the least recently received entry rather than growing forever.
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, c)| c.cached_at)
+            .map(|(k, _)| k.clone());
+
+        if let Some(oldest) = oldest {
+            tracing::warn!(
+                "Diagnostics cache is full ({} entries) - evicting the oldest ('{}') \
+                 to make room for '{}'.",
+                MAX_CACHED_REPORTS,
+                oldest,
+                agent_name
+            );
+            cache.remove(&oldest);
+        }
+    }
+
+    cache.insert(
+        agent_name.clone(),
+        CachedReport {
+            cached_at: Utc::now(),
+            report,
+        },
+    );
 
     tracing::debug!("Cached diagnostics response for agent: {}", agent_name);
 }
@@ -712,14 +763,30 @@ pub async fn cache_diagnostics_response(agent_name: String, report: DiagnosticsR
 /// Get a cached diagnostics report for a specific agent
 ///
 pub async fn get_cached_diagnostics(agent_name: &str) -> Option<DiagnosticsReport> {
-    DIAGNOSTICS_CACHE.read().await.get(agent_name).cloned()
+    DIAGNOSTICS_CACHE
+        .read()
+        .await
+        .get(agent_name)
+        .map(|c| c.report.clone())
+}
+
+///
+/// When we received the cached report for `agent_name`, on our own clock.
+///
+async fn cached_diagnostics_age(agent_name: &str) -> Option<chrono::Duration> {
+    DIAGNOSTICS_CACHE
+        .read()
+        .await
+        .get(agent_name)
+        .map(|c| Utc::now().signed_duration_since(c.cached_at))
 }
 
 ///
 /// Wait for a diagnostics response from a specific agent
 ///
-/// Polls the cache until the agent has an updated diagnostics report since baseline_time,
-/// or until the timeout expires.
+/// Polls the cache until the agent has a report we *received* after baseline_time,
+/// or until the timeout expires. Judged on our own clock, not the report's
+/// `generated_at` - see `CachedReport`.
 ///
 /// Parameters:
 /// - `agent_name`: The name of the agent we're waiting for a response from
@@ -739,14 +806,15 @@ async fn wait_for_diagnostics_response(
     loop {
         // Check if we have an updated diagnostics report since baseline
         let cache = DIAGNOSTICS_CACHE.read().await;
-        if let Some(report) = cache.get(agent_name) {
-            if report.generated_at > baseline_time {
+        if let Some(cached) = cache.get(agent_name) {
+            // `cached_at`, not the report's own `generated_at` - see `CachedReport`.
+            if cached.cached_at > baseline_time {
                 tracing::debug!(
                     "Diagnostics response received from {} in {:?}",
                     agent_name,
                     start.elapsed()
                 );
-                let result = report.clone();
+                let result = cached.report.clone();
                 drop(cache);
                 return Some(result);
             }
@@ -944,7 +1012,10 @@ pub async fn collect_diagnostics<L: Domain>(
                     tracing::warn!(
                         "Timeout waiting for fresh diagnostics from {}, returning cached response (age: {}s)",
                         ultimate_target_name,
-                        Utc::now().signed_duration_since(cached_report.generated_at).num_seconds(),
+                        cached_diagnostics_age(ultimate_target_name)
+                            .await
+                            .map(|d| d.num_seconds())
+                            .unwrap_or(0),
                     );
                     Ok(cached_report)
                 } else {

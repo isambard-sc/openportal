@@ -45,6 +45,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   the pre-existing-file case (R9). 273 tests now pass, and `make test` no longer
   skips the binary crates.
 
+- Remote diagnostics judged a report's freshness using the *generating* agent's
+  `generated_at` timestamp against a locally-taken baseline, so ordinary clock
+  skew between hosts broke the wait: a peer running slightly behind never appeared
+  to have answered, and one running ahead satisfied a baseline it predated.
+  Reports are now stamped with a local `cached_at` on receipt and judged on that,
+  matching what health already did. The "age" log line could also print a
+  negative age.
+- The health and diagnostics response caches were unbounded with no eviction.
+  Both are now capped, with least-recently-received eviction and a warning when it
+  fires.
+- The resource monitor fanned a **fleet-wide** health check out to every peer in
+  every direction - including upstream - whenever an agent crossed 90% CPU or 80%
+  memory, then discarded the aggregate into a local log line. The comment said
+  "without cascading"; `collect_health` cascades whenever the agent is not a leaf,
+  and an empty requester filtered nothing out. There is now a `collect_own_health`
+  that genuinely does not cascade.
+- A `Restart` with an empty destination meant "restart whoever received this", so
+  one message from a remote peer killed the agent that received it. A remote sender
+  must now name its target explicitly; a locally-originated request (the bridge's
+  `POST /restart` with no destination, which arrives via `send_to(self)`) still
+  works.
+- The leaf-node check on `Restart` ran *after* the target decision, so an agent
+  that refused to *forward* a restart would still kill *itself* on request from
+  the very peer it would not relay for. Authorization now precedes the target
+  decision, in a pure `decide_restart` with tests.
+
 ### Fixed
 
 - **Remote process abort from any authenticated peer** (finding R1). Three arms

@@ -169,6 +169,69 @@ async fn perform_soft_restart<L: Domain>() -> Result<(), anyhow::Error> {
 /// - `restart_type`: Type of restart ("soft", "hard", etc.)
 /// - `destination`: Dot-separated path (e.g., "brics.aip2.clusters"), empty means restart self
 ///
+/// What to do with an inbound `Restart`.
+#[derive(Debug, PartialEq, Eq)]
+enum RestartDecision {
+    /// This agent is the target - restart ourselves.
+    RestartSelf,
+    /// Relay it to the next hop in the destination path.
+    Forward,
+    /// Refuse it, with a reason for the log and the error returned to the sender.
+    Refuse(&'static str),
+}
+
+/// Decide what an inbound `Restart` means, given who sent it, our own name, the
+/// destination path, and whether this agent relays at all.
+///
+/// Split out from `handle_restart_request` so the two orderings that mattered can
+/// be tested. Both were bugs, see
+/// `docs/specifications/security-review-2.md` (finding R2):
+///
+///  * An **empty destination** meant "restart whoever received this", so a single
+///    message with no destination killed the agent that received it, repeatably.
+///    It is still legitimate when locally originated - the bridge's
+///    `POST /restart` with an empty destination injects the command into its own
+///    queue via `send_to(self)`, so `sender` is our own name - but a remote peer
+///    must name us explicitly.
+///  * The **leaf-node check ran after** the target check, so an agent that
+///    refused to *forward* a restart would still kill *itself* on request from
+///    the very peer it would not relay for. Authorization now precedes the
+///    target decision.
+fn decide_restart(
+    sender: &str,
+    my_name: &str,
+    destination_parts: &[&str],
+    may_cascade: bool,
+) -> RestartDecision {
+    let locally_originated = sender == my_name;
+
+    let Some((target_spec, rest)) = destination_parts.split_first() else {
+        return match locally_originated {
+            true => RestartDecision::RestartSelf,
+            false => RestartDecision::Refuse(
+                "a restart request from a remote peer must name its target agent explicitly",
+            ),
+        };
+    };
+
+    // A hop may be written `name@zone`; only the name identifies the agent.
+    let target_name = match target_spec.split_once('@') {
+        Some((name, _zone)) => name,
+        None => target_spec,
+    };
+
+    if rest.is_empty() && target_name == my_name {
+        return RestartDecision::RestartSelf;
+    }
+
+    match may_cascade {
+        true => RestartDecision::Forward,
+        false => {
+            RestartDecision::Refuse("this agent is a leaf node and cannot relay restart requests")
+        }
+    }
+}
+
 pub async fn handle_restart_request<L: Domain>(
     sender: &str,
     restart_type: &str,
@@ -195,28 +258,24 @@ pub async fn handle_restart_request<L: Domain>(
         }
     }
 
-    // Parse the destination path
     let destination_parts: Vec<&str> = if destination.is_empty() {
         vec![]
     } else {
         destination.split('.').collect()
     };
 
-    // Check if we are the target for this restart
-    let is_target = if destination_parts.is_empty() {
-        // Empty destination means restart the agent that received the request
-        true
-    } else if destination_parts.len() == 1 {
-        // Extract just the name part (before any @zone) and check if it matches
-        let target_spec = destination_parts.first().copied().unwrap_or_default();
-        let target_name = if target_spec.contains('@') {
-            target_spec.split('@').next().unwrap_or(target_spec)
-        } else {
-            target_spec
-        };
-        target_name == my_name
-    } else {
-        false
+    let is_target = match decide_restart(
+        sender,
+        &my_name,
+        &destination_parts,
+        agent::should_cascade_health().await,
+    ) {
+        RestartDecision::RestartSelf => true,
+        RestartDecision::Forward => false,
+        RestartDecision::Refuse(reason) => {
+            tracing::warn!("Ignoring restart request from {}: {}", sender, reason);
+            return Err(anyhow::anyhow!("{}", reason));
+        }
     };
 
     if is_target {
@@ -259,16 +318,7 @@ pub async fn handle_restart_request<L: Domain>(
             }
         }
     } else {
-        // Check if this agent is allowed to forward restart requests
-        // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false and should not forward
-        if !agent::should_cascade_health().await {
-            tracing::warn!(
-                "Cannot forward restart request - this agent is a leaf node (cascade disabled)"
-            );
-            return Err(anyhow::anyhow!(
-                "Leaf node agents cannot forward restart requests"
-            ));
-        }
+        // (the leaf-node check happened before `is_target` above)
 
         // We need to forward the restart to the next peer in the path
         // Parse the next hop, which may include a zone specifier (name@zone)
@@ -354,5 +404,78 @@ pub async fn handle_restart_request<L: Domain>(
             tracing::error!("{}", error_msg);
             Err(anyhow::anyhow!("{}", error_msg))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_a_remote_peer_cannot_restart_us_with_an_empty_destination() {
+        // One message, no destination, and the receiving agent died - repeatably,
+        // defeating a supervisor. See finding R2.
+        assert_eq!(
+            decide_restart("aip1", "clusters", &[], true),
+            RestartDecision::Refuse(
+                "a restart request from a remote peer must name its target agent explicitly"
+            )
+        );
+
+        // ...and a leaf is refused for the same reason, not the cascade one.
+        assert!(matches!(
+            decide_restart("shared", "freeipa", &[], false),
+            RestartDecision::Refuse(_)
+        ));
+
+        // The bridge's own `POST /restart` with no destination arrives via
+        // `send_to(self)`, so the sender is us. That must still work.
+        assert_eq!(
+            decide_restart("thebridge", "thebridge", &[], true),
+            RestartDecision::RestartSelf
+        );
+    }
+
+    #[test]
+    fn test_a_leaf_is_not_made_to_kill_itself_by_a_peer_it_will_not_relay_for() {
+        // The leaf check used to run *after* the target check, so an agent that
+        // refused to forward still honoured a restart aimed at itself. Naming us
+        // explicitly is now the only way, and authorization comes first.
+        assert_eq!(
+            decide_restart("shared", "freeipa", &["freeipa"], false),
+            RestartDecision::RestartSelf
+        );
+
+        // But it must not relay onwards...
+        assert_eq!(
+            decide_restart("shared", "freeipa", &["somewhere", "else"], false),
+            RestartDecision::Refuse("this agent is a leaf node and cannot relay restart requests")
+        );
+
+        // ...whereas a cascading agent does.
+        assert_eq!(
+            decide_restart("aip1", "clusters", &["shared", "freeipa"], true),
+            RestartDecision::Forward
+        );
+    }
+
+    #[test]
+    fn test_the_target_hop_may_carry_a_zone_suffix() {
+        assert_eq!(
+            decide_restart("aip1", "shared", &["shared@aip1-clusters-shared"], true),
+            RestartDecision::RestartSelf
+        );
+
+        // A zone suffix on someone else's name is still someone else.
+        assert_eq!(
+            decide_restart("aip1", "shared", &["other@somezone"], true),
+            RestartDecision::Forward
+        );
+
+        // A name that merely starts the same is not a match.
+        assert_eq!(
+            decide_restart("aip1", "shared", &["shared2"], true),
+            RestartDecision::Forward
+        );
     }
 }

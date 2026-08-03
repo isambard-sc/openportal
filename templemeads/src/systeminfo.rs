@@ -146,7 +146,7 @@ pub fn spawn_monitor<L: Domain>() {
                 tracing::warn!("High CPU usage: {:.1}%", info.cpu_percent);
 
                 // Fetch health info (without cascading) for troubleshooting
-                match crate::health::collect_health::<L>("", vec![]).await {
+                match crate::health::collect_own_health::<L>().await {
                     Ok(health) => {
                         tracing::warn!("Health info at high CPU: {}", health);
                     }
@@ -170,7 +170,7 @@ pub fn spawn_monitor<L: Domain>() {
                     );
 
                     // Fetch health info (without cascading) for troubleshooting
-                    match crate::health::collect_health::<L>("", vec![]).await {
+                    match crate::health::collect_own_health::<L>().await {
                         Ok(health) => {
                             tracing::warn!("Health info at high memory: {}", health);
                         }

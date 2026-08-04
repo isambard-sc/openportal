@@ -313,7 +313,7 @@ impl IPAServer {
 
     fn is_logged_in(&self) -> bool {
         // check if the jar has a session cookie for this server
-        let url = format!("{}/ipa", &self.server);
+        let url = format!("{}/ipa", self.server);
 
         match url.parse() {
             Ok(url) => {

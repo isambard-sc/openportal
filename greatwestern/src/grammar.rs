@@ -3057,7 +3057,7 @@ impl Instruction {
                         Err(Error::Parse(format!(
                             "submit failed to parse the instruction for destination {}: {}. {}",
                             arg(1),
-                            &rest(2),
+                            rest(2),
                             e
                         )))
                     }
@@ -3070,7 +3070,7 @@ impl Instruction {
                     );
                     Err(Error::Parse(format!(
                         "submit failed to parse the destination for: {}. {}",
-                        &rest(1),
+                        rest(1),
                         e
                     )))
                 }
@@ -3082,7 +3082,7 @@ impl Instruction {
                         tracing::error!("create_project failed to parse: {}", &rest(3));
                         Err(Error::Parse(format!(
                             "create_project failed to parse: {}",
-                            &rest(3)
+                            rest(3)
                         )))
                     }
                 },
@@ -3090,7 +3090,7 @@ impl Instruction {
                     tracing::error!("create_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "create_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3101,7 +3101,7 @@ impl Instruction {
                         tracing::error!("update_project failed to parse: {}", &rest(2));
                         Err(Error::Parse(format!(
                             "update_project failed to parse: {}",
-                            &rest(2)
+                            rest(2)
                         )))
                     }
                 },
@@ -3109,7 +3109,7 @@ impl Instruction {
                     tracing::error!("update_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "update_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3119,7 +3119,7 @@ impl Instruction {
                     tracing::error!("get_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3129,7 +3129,7 @@ impl Instruction {
                     tracing::error!("get_projects failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_projects failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3139,7 +3139,7 @@ impl Instruction {
                     tracing::error!("get_award failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_award failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3149,7 +3149,7 @@ impl Instruction {
                     tracing::error!("get_awards failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_awards failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3159,7 +3159,7 @@ impl Instruction {
                     tracing::error!("add_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3169,7 +3169,7 @@ impl Instruction {
                     tracing::error!("remove_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3179,7 +3179,7 @@ impl Instruction {
                     tracing::error!("add_local_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_local_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3189,7 +3189,7 @@ impl Instruction {
                     tracing::error!("remove_local_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_local_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3199,7 +3199,7 @@ impl Instruction {
                     tracing::error!("get_users failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_users failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3209,7 +3209,7 @@ impl Instruction {
                     tracing::error!("add_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3219,7 +3219,7 @@ impl Instruction {
                     tracing::error!("remove_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3229,7 +3229,7 @@ impl Instruction {
                     tracing::error!("block_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "block_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3239,7 +3239,7 @@ impl Instruction {
                     tracing::error!("unblock_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "unblock_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3249,7 +3249,7 @@ impl Instruction {
                     tracing::error!("is_blocked_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_blocked_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3259,7 +3259,7 @@ impl Instruction {
                     tracing::error!("block_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "block_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3269,7 +3269,7 @@ impl Instruction {
                     tracing::error!("unblock_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "unblock_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3279,7 +3279,7 @@ impl Instruction {
                     tracing::error!("is_blocked_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_blocked_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3289,7 +3289,7 @@ impl Instruction {
                     tracing::error!("get_project_mapping failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_project_mapping failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3299,7 +3299,7 @@ impl Instruction {
                     tracing::error!("get_user_mapping failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_user_mapping failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3309,7 +3309,7 @@ impl Instruction {
                     tracing::error!("add_local_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_local_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3319,7 +3319,7 @@ impl Instruction {
                     tracing::error!("remove_local_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_local_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -3328,7 +3328,7 @@ impl Instruction {
                     tracing::error!("update_homedir failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "update_homedir failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3338,7 +3338,7 @@ impl Instruction {
                     tracing::error!("update_homedir failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "update_homedir failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3348,7 +3348,7 @@ impl Instruction {
                         tracing::error!("update_homedir failed to parse: {}", &rest(1));
                         Err(Error::Parse(format!(
                             "update_homedir failed to parse: {}",
-                            &rest(1)
+                            rest(1)
                         )))
                     }
                 }
@@ -3358,7 +3358,7 @@ impl Instruction {
                     tracing::error!("get_local_usage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_usage_report failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3376,7 +3376,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "get_local_usage_report failed to parse '{}': {}",
-                                    &rest(1),
+                                    rest(1),
                                     e
                                 )))
                             }
@@ -3390,7 +3390,7 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_local_usage_report failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3401,7 +3401,7 @@ impl Instruction {
                     tracing::error!("get_storage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_storage_report failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3419,7 +3419,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "get_storage_report failed to parse '{}': {}",
-                                    &rest(1),
+                                    rest(1),
                                     e
                                 )))
                             }
@@ -3429,7 +3429,7 @@ impl Instruction {
                         tracing::error!("get_storage_report failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_storage_report failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3440,7 +3440,7 @@ impl Instruction {
                     tracing::error!("get_storage_reports failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_storage_reports failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3458,7 +3458,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "get_storage_reports failed to parse '{}': {}",
-                                    &rest(1),
+                                    rest(1),
                                     e
                                 )))
                             }
@@ -3472,7 +3472,7 @@ impl Instruction {
                         );
                         Err(Error::Parse(format!(
                             "get_storage_reports failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3483,7 +3483,7 @@ impl Instruction {
                     tracing::error!("get_usage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_usage_report failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3499,7 +3499,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "get_usage_report failed to parse '{}': {}",
-                                    &rest(1),
+                                    rest(1),
                                     e
                                 )))
                             }
@@ -3509,7 +3509,7 @@ impl Instruction {
                         tracing::error!("get_usage_report failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_usage_report failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3520,7 +3520,7 @@ impl Instruction {
                     tracing::error!("get_usage_reports failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_usage_reports failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3536,7 +3536,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "get_usage_reports failed to parse '{}': {}",
-                                    &rest(1),
+                                    rest(1),
                                     e
                                 )))
                             }
@@ -3546,7 +3546,7 @@ impl Instruction {
                         tracing::error!("get_usage_reports failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_usage_reports failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3557,7 +3557,7 @@ impl Instruction {
                     tracing::error!("set_local_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_local_limit failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3572,7 +3572,7 @@ impl Instruction {
                             );
                             Err(Error::Parse(format!(
                                 "set_local_limit failed to parse '{}': {}",
-                                &rest(1),
+                                rest(1),
                                 e
                             )))
                         }
@@ -3581,7 +3581,7 @@ impl Instruction {
                         tracing::error!("set_local_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "set_local_limit failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3592,7 +3592,7 @@ impl Instruction {
                     tracing::error!("get_local_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_limit failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3602,7 +3602,7 @@ impl Instruction {
                         tracing::error!("get_local_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_local_limit failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3613,7 +3613,7 @@ impl Instruction {
                     tracing::error!("set_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_limit failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3624,7 +3624,7 @@ impl Instruction {
                             tracing::error!("set_limit failed to parse '{}': {}", &rest(1), e);
                             Err(Error::Parse(format!(
                                 "set_limit failed to parse '{}': {}",
-                                &rest(1),
+                                rest(1),
                                 e
                             )))
                         }
@@ -3633,7 +3633,7 @@ impl Instruction {
                         tracing::error!("set_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "set_limit failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3644,7 +3644,7 @@ impl Instruction {
                     tracing::error!("get_limit failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_limit failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3654,7 +3654,7 @@ impl Instruction {
                         tracing::error!("get_limit failed to parse '{}': {}", &rest(1), e);
                         Err(Error::Parse(format!(
                             "get_limit failed to parse '{}': {}",
-                            &rest(1),
+                            rest(1),
                             e
                         )))
                     }
@@ -3665,7 +3665,7 @@ impl Instruction {
                     tracing::error!("clear_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_project_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3704,7 +3704,7 @@ impl Instruction {
                     tracing::error!("set_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_project_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3720,7 +3720,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "set_project_quota failed to parse quota '{}': {}",
-                                    &rest(3),
+                                    rest(3),
                                     e
                                 )))
                             }
@@ -3757,7 +3757,7 @@ impl Instruction {
                     tracing::error!("get_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_project_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3796,7 +3796,7 @@ impl Instruction {
                     tracing::error!("get_project_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_project_quotas failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3817,7 +3817,7 @@ impl Instruction {
                     tracing::error!("clear_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_user_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3856,7 +3856,7 @@ impl Instruction {
                     tracing::error!("set_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_user_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3872,7 +3872,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "set_user_quota failed to parse quota '{}': {}",
-                                    &rest(3),
+                                    rest(3),
                                     e
                                 )))
                             }
@@ -3905,7 +3905,7 @@ impl Instruction {
                     tracing::error!("get_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_user_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3940,7 +3940,7 @@ impl Instruction {
                     tracing::error!("get_user_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_user_quotas failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -3961,7 +3961,7 @@ impl Instruction {
                     tracing::error!("clear_local_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_local_project_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4000,7 +4000,7 @@ impl Instruction {
                     tracing::error!("set_local_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_local_project_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4018,7 +4018,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "set_local_project_quota failed to parse quota '{}': {}",
-                                    &rest(3),
+                                    rest(3),
                                     e
                                 )))
                             }
@@ -4055,7 +4055,7 @@ impl Instruction {
                     tracing::error!("get_local_project_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_project_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4094,7 +4094,7 @@ impl Instruction {
                     tracing::error!("get_local_project_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_project_quotas failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4119,7 +4119,7 @@ impl Instruction {
                     tracing::error!("clear_local_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "clear_local_user_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4158,7 +4158,7 @@ impl Instruction {
                     tracing::error!("set_local_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "set_local_user_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4174,7 +4174,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "set_local_user_quota failed to parse quota '{}': {}",
-                                    &rest(3),
+                                    rest(3),
                                     e
                                 )))
                             }
@@ -4211,7 +4211,7 @@ impl Instruction {
                     tracing::error!("get_local_user_quota failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_user_quota failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4250,7 +4250,7 @@ impl Instruction {
                     tracing::error!("get_local_user_quotas failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_user_quotas failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4276,7 +4276,7 @@ impl Instruction {
                     tracing::error!("is_protected_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_protected_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4286,7 +4286,7 @@ impl Instruction {
                     tracing::error!("is_existing_user failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_existing_user failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4296,7 +4296,7 @@ impl Instruction {
                     tracing::error!("is_existing_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_existing_project failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4306,7 +4306,7 @@ impl Instruction {
                     tracing::error!("get_home_dir failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_home_dir failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4316,7 +4316,7 @@ impl Instruction {
                     tracing::error!("get_project_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_project_dirs failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4326,7 +4326,7 @@ impl Instruction {
                     tracing::error!("get_user_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_user_dirs failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4336,7 +4336,7 @@ impl Instruction {
                     tracing::error!("get_local_home_dir failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_local_home_dir failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4345,7 +4345,7 @@ impl Instruction {
                     tracing::error!("get_local_storage_report failed to parse: {}", &rest(1));
                     return Err(Error::Parse(format!(
                         "get_local_storage_report failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )));
                 }
 
@@ -4363,7 +4363,7 @@ impl Instruction {
                                 );
                                 Err(Error::Parse(format!(
                                     "get_local_storage_report failed to parse '{}': {}",
-                                    &rest(1),
+                                    rest(1),
                                     e
                                 )))
                             }
@@ -4373,7 +4373,7 @@ impl Instruction {
                         tracing::error!("get_local_storage_report failed to parse: {}", &rest(1));
                         Err(Error::Parse(format!(
                             "get_local_storage_report failed to parse: {}",
-                            &rest(1)
+                            rest(1)
                         )))
                     }
                 }
@@ -4384,7 +4384,7 @@ impl Instruction {
                     tracing::error!("get_local_project_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_local_project_dirs failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4394,7 +4394,7 @@ impl Instruction {
                     tracing::error!("get_local_user_dirs failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "get_local_user_dirs failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4404,7 +4404,7 @@ impl Instruction {
                     tracing::error!("add_offerings failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "add_offerings failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4414,7 +4414,7 @@ impl Instruction {
                     tracing::error!("remove_offerings failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "remove_offerings failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },
@@ -4424,7 +4424,7 @@ impl Instruction {
                     tracing::error!("sync_offerings failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "sync_offerings failed to parse: {}",
-                        &rest(1)
+                        rest(1)
                     )))
                 }
             },

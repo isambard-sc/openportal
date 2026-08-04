@@ -102,6 +102,59 @@ async fn remote_is_symlink(prefix: &[String], path: &Path) -> Result<bool, Error
     Ok(exit_code == 0)
 }
 
+/// Fully resolve `path` on the remote system, following every symlink.
+///
+/// `readlink -m` rather than `-f`: `-f` requires all but the final component to exist
+/// and exits non-zero otherwise, which would reject a legitimate create whose parent
+/// has not been made yet. `-m` resolves symlinks wherever they appear and tolerates
+/// missing components, matching what `resolve_deepest_existing` does locally. Both are
+/// coreutils, so this is available anywhere the `chown`/`mkdir` this module already
+/// runs remotely are.
+///
+/// Note `readlink -m` *succeeds* for a path that does not exist at all, so it cannot
+/// itself tell us whether a configured root is present - hence `must_exist`, which
+/// adds an explicit directory test. That is the check that catches an unmounted or
+/// mistyped volume root.
+async fn remote_canonicalize(
+    prefix: &[String],
+    path: &Path,
+    must_exist: bool,
+) -> Result<PathBuf, Error> {
+    let path_str = path.to_string_lossy();
+
+    let (exit_code, stdout, stderr) =
+        run_remote(prefix, &["readlink", "-m", "--", &path_str]).await?;
+
+    let resolved = stdout.trim();
+
+    if exit_code != 0 || resolved.is_empty() {
+        return Err(Error::State(format!(
+            "Could not resolve '{}' on the remote system: exit code {}, stderr: {}",
+            path_str, exit_code, stderr
+        )));
+    }
+
+    if must_exist {
+        // No `--`: not every `test` accepts it (the one in the reference test
+        // container reports "binary operator expected"), and the existing
+        // `remote_is_symlink` does not use it either. `run_remote` builds an argv
+        // array with no shell, and these paths come from validated configuration, so
+        // there is nothing to quote around.
+        let (exists, _, _) = run_remote(prefix, &["test", "-d", resolved]).await?;
+
+        if exists != 0 {
+            return Err(Error::State(format!(
+                "The configured volume root '{}' (which resolves to '{}') is not a \
+                 directory on the remote system. The volume must exist and be mounted \
+                 before directories can be managed inside it.",
+                path_str, resolved
+            )));
+        }
+    }
+
+    Ok(PathBuf::from(resolved))
+}
+
 /// Read a symlink target on the remote system (`readlink`).
 async fn remote_readlink(prefix: &[String], path: &Path) -> Result<String, Error> {
     let path_str = path.to_string_lossy();
@@ -220,16 +273,30 @@ fn resolve_deepest_existing(path: &Path) -> Result<PathBuf, Error> {
 /// between this check and the operation. Neither alone is sufficient. See
 /// `docs/specifications/security-review-2.md` (finding R33).
 async fn assert_within_root(path: &Path, root: &Path) -> Result<PathBuf, Error> {
-    let canonical_root = root.canonicalize().map_err(|e| {
-        Error::State(format!(
-            "Could not resolve the configured volume root '{}': {}. The volume must \
-             exist and be mounted before directories can be managed inside it.",
-            root.to_string_lossy(),
-            e
-        ))
-    })?;
-
-    let resolved = resolve_deepest_existing(path)?;
+    // Resolve on whichever system actually owns these paths. With an `exec-prefix`
+    // configured, op-filesystem runs somewhere else entirely - the paths exist only on
+    // the target - so canonicalising locally would fail on every path, or worse,
+    // resolve against an unrelated local filesystem. Every other filesystem operation
+    // in this module already routes through `run_remote` for exactly this reason; this
+    // check has to as well.
+    let (canonical_root, resolved) = match get_exec_prefix() {
+        Some(prefix) => (
+            remote_canonicalize(prefix, root, true).await?,
+            remote_canonicalize(prefix, path, false).await?,
+        ),
+        None => (
+            root.canonicalize().map_err(|e| {
+                Error::State(format!(
+                    "Could not resolve the configured volume root '{}': {}. The volume \
+                     must exist and be mounted before directories can be managed \
+                     inside it.",
+                    root.to_string_lossy(),
+                    e
+                ))
+            })?,
+            resolve_deepest_existing(path)?,
+        ),
+    };
 
     if !resolved.starts_with(&canonical_root) {
         tracing::error!(
@@ -1065,4 +1132,78 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_deepest_existing_resolves_symlinks_in_the_prefix() {
+        // The path being created does not exist yet, so it cannot be canonicalised
+        // directly - resolve the deepest existing ancestor and re-append the rest. Any
+        // symlink in that existing prefix is therefore resolved, which is what lets
+        // `assert_within_root` see where the operation would really land. See
+        // docs/specifications/security-review-2.md (finding R33).
+        let base = std::env::temp_dir().join(format!("op-r33-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("proj")).expect("mkdir root/proj");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+
+        // A leaf that does not exist yet still resolves.
+        let target = root.join("proj").join("newuser");
+        let resolved = resolve_deepest_existing(&target).expect("resolve");
+        assert!(resolved.ends_with("proj/newuser"));
+        assert!(resolved.starts_with(root.canonicalize().expect("canonicalize root")));
+
+        // Now make the *parent* a symlink pointing outside the root - the shape of the
+        // escalation. The resolved path must reveal that.
+        std::fs::remove_dir(root.join("proj")).expect("rmdir");
+        std::os::unix::fs::symlink(&outside, root.join("proj")).expect("symlink");
+
+        let resolved = resolve_deepest_existing(&target).expect("resolve via symlink");
+        assert!(
+            resolved.starts_with(outside.canonicalize().expect("canonicalize outside")),
+            "a symlinked parent must resolve to its target, got {:?}",
+            resolved
+        );
+        assert!(
+            !resolved.starts_with(root.canonicalize().expect("canonicalize root")),
+            "the resolved path must no longer look like it is inside the root"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_assert_within_root_refuses_a_path_that_escapes_via_a_symlink() {
+        let base = std::env::temp_dir().join(format!("op-r33-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+
+        // An ordinary path inside the root is fine.
+        assert!(assert_within_root(&root.join("proj"), &root).await.is_ok());
+
+        // A symlinked component pointing out of the tree is refused.
+        std::os::unix::fs::symlink(&outside, root.join("escape")).expect("symlink");
+        assert!(assert_within_root(&root.join("escape").join("dir"), &root)
+            .await
+            .is_err());
+
+        // A missing root is reported rather than silently passing.
+        assert!(
+            assert_within_root(&root.join("proj"), &base.join("nosuchroot"))
+                .await
+                .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

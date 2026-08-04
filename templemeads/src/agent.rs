@@ -294,7 +294,7 @@ impl Registrar {
             // there are better ways to do it ;-)
             self.zones.clear();
 
-            for (peer, _) in self.peers.iter() {
+            for peer in self.peers.keys() {
                 if !self.zones.contains(&peer.zone) {
                     self.zones.push(peer.zone.clone());
                 }
@@ -927,7 +927,7 @@ pub async fn find(name: &str, wait: u64) -> Option<Peer> {
     loop {
         let registrar = REGISTRAR.read().await;
 
-        for (peer, _) in registrar.peers.iter() {
+        for peer in registrar.peers.keys() {
             if peer.name() == name {
                 return Some(peer.clone());
             }

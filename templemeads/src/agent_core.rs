@@ -321,10 +321,10 @@ where
                     std::fs::remove_file(&config_file)
                         .context("Could not remove existing config file.")?;
                 } else {
-                    tracing::warn!("Config file already exists: {}", &config_file.display());
+                    tracing::warn!("Config file already exists: {}", config_file.display());
                     return Err(Error::ConfigExists(format!(
                         "Config file already exists: {}",
-                        &config_file.display()
+                        config_file.display()
                     )));
                 }
             }

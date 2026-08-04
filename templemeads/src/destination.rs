@@ -238,10 +238,7 @@ impl Destinations {
         let mut destination_vec: Vec<Destination> = Vec::new();
 
         for dest_str in destination_strings {
-            match Destination::parse(dest_str) {
-                Ok(dest) => destination_vec.push(dest),
-                Err(e) => return Err(e),
-            }
+            destination_vec.push(Destination::parse(dest_str)?);
         }
         Ok(Destinations::new(&destination_vec))
     }

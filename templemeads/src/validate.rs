@@ -134,7 +134,36 @@ fn validate_component(
 /// Fails closed: only the literal string `true` (in any case) enables it.
 ///
 pub fn allow_invalid_ssl_certs() -> bool {
-    parse_allow_invalid_ssl_certs(std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS").ok())
+    let allowed =
+        parse_allow_invalid_ssl_certs(std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS").ok());
+
+    // Announce it **once** per process, not per call.
+    //
+    // This is read every time an HTTPS client is built - so on every FreeIPA call -
+    // and logging each time would bury the rest of the log. `Once` gives the operator
+    // one clear statement of the process's TLS posture at the point it first matters.
+    //
+    // Note this is a legitimate operator decision, not a misconfiguration: FreeIPA is
+    // commonly deployed with a local-only CA, and whether to trust such a certificate
+    // is the operator's call - TLS is outside OpenPortal's control. It is stated
+    // plainly rather than warned about because it was previously silent, and an
+    // operator who set it in a development shell had no way to see it was still set.
+    // See `docs/specifications/security-review-2.md` (finding R33).
+    if allowed {
+        static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+
+        ANNOUNCED.call_once(|| {
+            tracing::info!(
+                "OPENPORTAL_ALLOW_INVALID_SSL_CERTS is set, so TLS certificate \
+                 verification is disabled for this process's outbound HTTPS calls. \
+                 This is expected if your FreeIPA servers use a local-only CA. Note it \
+                 applies process-wide, including the connection carrying the FreeIPA \
+                 bind password, so the network path to those servers must be trusted."
+            );
+        });
+    }
+
+    allowed
 }
 
 /// The pure part of [`allow_invalid_ssl_certs`], so the rule can be tested

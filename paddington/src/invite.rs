@@ -4,6 +4,7 @@
 use crate::crypto::SecretKey;
 use crate::error::Error;
 use anyhow::Context;
+use secrecy::zeroize::Zeroizing;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
@@ -157,8 +158,16 @@ impl Invite {
     }
 
     pub fn load(filename: &path::Path) -> Result<Self, Error> {
-        let invite = std::fs::read_to_string(filename)
-            .with_context(|| format!("Could not read invite file: {:?}", filename))?;
+        // `Zeroizing` so the plaintext TOML - which contains both peer keys in hex -
+        // is wiped from the heap when this scope ends, rather than left for a core dump
+        // or swap. `SecretBox` zeroizes the parsed `Key`s, but the buffer they were
+        // parsed *from* was a plain `String`. Destroying the file itself remains the
+        // operator's job (round 1 §5.1). See
+        // docs/specifications/security-review-2.md (finding R33).
+        let invite = Zeroizing::new(
+            std::fs::read_to_string(filename)
+                .with_context(|| format!("Could not read invite file: {:?}", filename))?,
+        );
 
         let invite: Invite = toml::from_str(&invite)
             .with_context(|| format!("Could not parse invite file from toml: {:?}", filename))?;
@@ -171,8 +180,10 @@ impl Invite {
     pub fn save(&self, filename: &path::Path) -> Result<(), Error> {
         self.assert_valid()?;
 
-        let invite_toml =
-            toml::to_string(&self).with_context(|| "Could not serialise invite to toml")?;
+        // As `load`: the serialised form carries both keys in the clear.
+        let invite_toml = Zeroizing::new(
+            toml::to_string(&self).with_context(|| "Could not serialise invite to toml")?,
+        );
 
         let invite_file_string = filename.to_string_lossy();
 
@@ -215,9 +226,12 @@ impl Display for Invite {
 }
 
 pub fn load(invite_file: &path::PathBuf) -> Result<Invite, Error> {
-    // read the invite file
-    let invite = std::fs::read_to_string(invite_file)
-        .with_context(|| format!("Could not read invite file: {:?}", invite_file))?;
+    // read the invite file - `Zeroizing`, as `Invite::load`, since the plaintext
+    // carries both peer keys in hex (finding R33)
+    let invite = Zeroizing::new(
+        std::fs::read_to_string(invite_file)
+            .with_context(|| format!("Could not read invite file: {:?}", invite_file))?,
+    );
 
     // parse the invite file
     let invite: Invite = toml::from_str(&invite)

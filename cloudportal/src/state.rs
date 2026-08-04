@@ -77,6 +77,8 @@ pub async fn initialise(state_dir: &Path) -> Result<(), Error> {
         ))
     })?;
 
+    restrict_to_owner(state_dir).await?;
+
     *STATE_DIR.write().await = Some(state_dir.to_path_buf());
 
     Ok(())
@@ -121,6 +123,45 @@ async fn read_record(project: &ProjectIdentifier) -> Result<Option<AwardRecord>,
     }
 }
 
+///
+/// Restrict `path` to owner-only access (0600 for a file, 0700 for a directory).
+///
+/// These records hold project identifiers, member email addresses, allocations and -
+/// most importantly - the award's **approval status**, which is trusted completely on
+/// read. They were written at the process umask, commonly world-readable. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+///
+async fn restrict_to_owner(path: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|e| Error::Failed(format!("Cannot stat '{}': {}", path.display(), e)))?;
+
+        let mode = match metadata.is_dir() {
+            true => 0o700,
+            false => 0o600,
+        };
+
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .await
+            .map_err(|e| {
+                Error::Failed(format!(
+                    "Cannot restrict permissions on '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
 async fn write_record(record: &AwardRecord) -> Result<(), Error> {
     let dir = state_dir().await?;
     let path = record_path(&dir, &record.project)?;
@@ -135,6 +176,8 @@ async fn write_record(record: &AwardRecord) -> Result<(), Error> {
             e
         ))
     })?;
+
+    restrict_to_owner(&tmp_path).await?;
 
     tokio::fs::rename(&tmp_path, &path).await.map_err(|e| {
         Error::Failed(format!(

@@ -15,7 +15,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Configuration
 
@@ -184,6 +184,67 @@ fn version() -> &'static str {
 /// was not - so this fails at add-time, when there is someone there to read the
 /// error. See `docs/specifications/security-review-2.md` (finding R3).
 ///
+///
+/// Obtain the secret to store, from `--value`, `--value-file`, or stdin.
+///
+/// `--value` puts the secret in this process's argv, where it is visible in `ps` to
+/// every local user for as long as the command runs. It is kept for compatibility with
+/// existing scripts but warns, and the file/stdin routes exist so a secret need never
+/// be exposed that way. See `docs/specifications/security-review-2.md` (finding R33).
+///
+fn read_secret_value(value: Option<&str>, value_file: Option<&Path>) -> Result<String, Error> {
+    match (value, value_file) {
+        (Some(_), Some(_)) => Err(Error::PeerEdit(
+            "Pass either --value or --value-file, not both".to_string(),
+        )),
+
+        (Some(value), None) => {
+            tracing::warn!(
+                "The secret was passed on the command line, so it was visible in `ps` \
+                 to any local user while this command ran. Consider --value-file (or \
+                 piping it to stdin) instead, and check your shell history."
+            );
+            Ok(value.to_string())
+        }
+
+        (None, Some(path)) => {
+            let contents = match path == Path::new("-") {
+                true => {
+                    let mut buffer = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                        .with_context(|| "Could not read the secret from stdin")?;
+                    buffer
+                }
+                false => std::fs::read_to_string(path)
+                    .with_context(|| format!("Could not read the secret from {:?}", path))?,
+            };
+
+            // A trailing newline is almost always an artefact of how the file was
+            // written rather than part of the secret.
+            Ok(contents.trim_end_matches(['\n', '\r']).to_string())
+        }
+
+        (None, None) => {
+            // No secret given at all - read stdin, so `echo -n s | op-x secret -k k`
+            // works and an interactive operator can paste it.
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .with_context(|| "Could not read the secret from stdin")?;
+
+            let secret = buffer.trim_end_matches(['\n', '\r']).to_string();
+
+            if secret.is_empty() {
+                return Err(Error::PeerEdit(
+                    "No secret supplied - pass --value-file, or pipe the secret to stdin"
+                        .to_string(),
+                ));
+            }
+
+            Ok(secret)
+        }
+    }
+}
+
 pub(crate) fn validate_agent_type(agent_type: &Option<String>) -> Result<Option<String>, Error> {
     let Some(agent_type) = agent_type else {
         return Ok(None);
@@ -449,6 +510,18 @@ where
         }) => {
             let mut config = load_config::<Config<T>>(&config_file)?;
 
+            // Changing the scheme changes the key every stored secret was encrypted
+            // under, and nothing re-encrypts them - so they silently stop decrypting
+            // until each `secret` command is re-run. Say so, naming the keys, rather
+            // than letting the operator discover it at the next startup. See
+            // docs/specifications/security-review-2.md (finding R33).
+            let stored_secrets: Vec<String> = config
+                .extras
+                .iter()
+                .filter(|(_, value)| value.starts_with("op-secret-v1:"))
+                .map(|(key, _)| key.clone())
+                .collect();
+
             match environment {
                 Some(env) => {
                     config.service.set_environment_encryption(env)?;
@@ -459,12 +532,30 @@ where
                     }
                 }
             }
+
+            if !stored_secrets.is_empty() {
+                tracing::warn!(
+                    "The encryption scheme has changed, but the {} secret(s) already \
+                     stored in this config were encrypted under the old one and are NOT \
+                     re-encrypted. They will fail to decrypt until you re-run \
+                     `secret --key <key>` for each of: {}",
+                    stored_secrets.len(),
+                    stored_secrets.join(", ")
+                );
+            }
+
             save_config(&config, &config_file)?;
             return Ok(None);
         }
-        Some(Commands::Secret { key, value }) => {
+        Some(Commands::Secret {
+            key,
+            value,
+            value_file,
+        }) => {
+            let secret = read_secret_value(value.as_deref(), value_file.as_deref())?;
+
             let mut config = load_config::<Config<T>>(&config_file)?;
-            let value = config.service().encrypt(value)?;
+            let value = config.service().encrypt(&secret)?;
             config.extras.insert(key.clone(), value.clone());
             save_config(&config, &config_file)?;
             return Ok(None);
@@ -677,8 +768,22 @@ enum Commands {
         #[arg(long, short = 'k', help = "Key for the secret configuration option")]
         key: String,
 
-        #[arg(long, short = 'v', help = "Value for the secret configuration option")]
-        value: String,
+        #[arg(
+            long,
+            short = 'v',
+            help = "Value for the secret configuration option. AVOID: this appears in \
+                    `ps` output for every local user while the command runs. Prefer \
+                    --value-file, or omit both to be prompted on stdin"
+        )]
+        value: Option<String>,
+
+        #[arg(
+            long,
+            short = 'f',
+            help = "Read the secret from this file instead of the command line (use '-' \
+                    for stdin). Unlike --value, the secret never appears in `ps`"
+        )]
+        value_file: Option<PathBuf>,
     },
 
     /// Add commands to control encryption of the config file and secrets

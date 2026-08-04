@@ -79,6 +79,44 @@ fn state_path(state_dir: &Path, project: &ProjectIdentifier) -> Result<PathBuf, 
     }
 }
 
+///
+/// Restrict `path` to owner-only access (0600 for a file, 0700 for a directory).
+///
+/// The state files hold project identifiers, member email addresses and allocations,
+/// and were written at the process umask - commonly world-readable. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+///
+async fn restrict_to_owner(path: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|e| Error::Failed(format!("Cannot stat '{}': {}", path.display(), e)))?;
+
+        let mode = match metadata.is_dir() {
+            true => 0o700,
+            false => 0o600,
+        };
+
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .await
+            .map_err(|e| {
+                Error::Failed(format!(
+                    "Cannot restrict permissions on '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
 /// Point the state store at `state_dir` and load any project state files
 /// already there (e.g. from before an agent restart).
 pub async fn initialise(state_dir: &Path) -> Result<(), Error> {
@@ -89,6 +127,8 @@ pub async fn initialise(state_dir: &Path) -> Result<(), Error> {
             e
         ))
     })?;
+
+    restrict_to_owner(state_dir).await?;
 
     let mut projects = HashMap::new();
 
@@ -110,7 +150,37 @@ pub async fn initialise(state_dir: &Path) -> Result<(), Error> {
         match tokio::fs::read_to_string(&path).await {
             Ok(contents) => match serde_json::from_str::<ProjectState>(&contents) {
                 Ok(state) => {
-                    projects.insert(state.mapping.project().clone(), state);
+                    // The cache is keyed on the project read *out of the file*, while
+                    // the file is *written* as `{project}.json`. Nothing tied the two
+                    // together, so `a.json` could supply the state for project `b`, and
+                    // two files could shadow each other with whichever `read_dir`
+                    // happened to return last winning. Require them to agree. See
+                    // `docs/specifications/security-review-2.md` (finding R33).
+                    let expected = format!("{}.json", state.mapping.project());
+
+                    match path.file_name().and_then(|n| n.to_str()) {
+                        Some(name) if name == expected => {
+                            projects.insert(state.mapping.project().clone(), state);
+                        }
+                        Some(name) => {
+                            tracing::warn!(
+                                "Ignoring cloudaccount state file '{}': it declares \
+                                 project '{}', which this agent writes as '{}'. A file \
+                                 whose name disagrees with its contents cannot be \
+                                 trusted to be the state for either.",
+                                name,
+                                state.mapping.project(),
+                                expected
+                            );
+                        }
+                        None => {
+                            tracing::warn!(
+                                "Ignoring cloudaccount state file '{}': its name is not \
+                                 valid UTF-8.",
+                                path.display()
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -150,6 +220,12 @@ async fn write_state(state_dir: &Path, state: &ProjectState) -> Result<(), Error
             e
         ))
     })?;
+
+    // Owner-only: these files hold project identifiers, member email addresses and
+    // allocations, and were written at the process umask - commonly world-readable.
+    // Set before the rename so the file is never visible to others even briefly. See
+    // `docs/specifications/security-review-2.md` (finding R33).
+    restrict_to_owner(&tmp_path).await?;
 
     tokio::fs::rename(&tmp_path, &path).await.map_err(|e| {
         Error::Failed(format!(

@@ -62,6 +62,15 @@ struct Args {
 enum Commands {
     /// Initialise the proxy service
     Init {
+        #[arg(
+            long,
+            short = 'n',
+            help = "Name of this proxy service. Must be unique among the agents that \
+                    connect to it, and is how they address it in their `proxy` config \
+                    field. Defaults to 'proxy'"
+        )]
+        name: Option<String>,
+
         #[arg(long, short = 'u', help = "URL of the proxy, including port and route")]
         url: Option<String>,
 
@@ -137,12 +146,17 @@ async fn main() -> Result<()> {
 
     match &args.command {
         Some(Commands::Init {
+            name,
             url,
             ip,
             port,
             config_file,
         }) => {
+            // The name was hardcoded to "proxy", so an agent could not add two proxies
+            // in one zone - both would be called the same thing. See
+            // docs/specifications/security-review-2.md (finding R33).
             init(
+                name.as_deref().unwrap_or("proxy"),
                 url.clone().unwrap_or("http://localhost:8060".to_string()),
                 ip.clone().unwrap_or("127.0.0.1".to_string()),
                 port.unwrap_or(8060),
@@ -204,7 +218,7 @@ fn initialise_tracing() {
     }
 }
 
-fn init(url: String, ip: String, port: u16, config_file: PathBuf) -> Result<()> {
+fn init(name: &str, url: String, ip: String, port: u16, config_file: PathBuf) -> Result<()> {
     if config_file.try_exists()? {
         return Err(anyhow::anyhow!(
             "Config file already exists: {:?}",
@@ -212,7 +226,7 @@ fn init(url: String, ip: String, port: u16, config_file: PathBuf) -> Result<()> 
         ));
     }
 
-    let service = ServiceConfig::new("proxy", &url, &ip, &port, &None, &None)
+    let service = ServiceConfig::new(name, &url, &ip, &port, &None, &None)
         .with_context(|| "Could not create proxy service config")?;
 
     let config = ProxyConfig {

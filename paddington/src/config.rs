@@ -7,6 +7,7 @@ use crate::invite::Invite;
 
 use anyhow::Context;
 use iptools::iprange::IpRange;
+use secrecy::zeroize::Zeroizing;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -534,43 +535,92 @@ impl<'de> Deserialize<'de> for IpOrRange {
     where
         D: serde::de::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            // A plain string - a single IP, a CIDR range, or a
-            // comma-separated list of either (e.g. "127.0.0.1" or
-            // "127.0.0.1,10.0.0.0/24") - parsed via `IpOrRange::new`, the
-            // same convenience parser used by the `--ip`/`set_trusted_proxy`
-            // CLI/API path, so config files and code accept identical
-            // syntax.
-            String(String),
-            Tagged(Tagged),
-        }
+        // A hand-written visitor rather than `#[serde(untagged)]`.
+        //
+        // `untagged` works by *trying* each variant and taking the first that fits, so
+        // when a nested value failed - a bad CIDR inside a `List`, say - the specific
+        // error was discarded and the operator got "data did not match any variant of
+        // untagged enum Raw" instead of being told which entry was wrong and why. The
+        // value was still rejected, so this is a diagnostics fix, not a correctness one.
+        //
+        // Dispatching on the input's *shape* means each form is entered
+        // deterministically and its errors propagate verbatim. See
+        // docs/specifications/security-review-2.md (finding R33).
+        struct IpOrRangeVisitor;
 
-        #[derive(Deserialize)]
-        enum Tagged {
-            IP(IpAddr),
-            Range(String),
-            // Each element is deserialised (and so validated) via this
-            // same `Deserialize` impl, recursively - no separate
-            // validation needed here.
-            List(Vec<IpOrRange>),
-        }
+        impl<'de> serde::de::Visitor<'de> for IpOrRangeVisitor {
+            type Value = IpOrRange;
 
-        match Raw::deserialize(deserializer)? {
-            Raw::String(s) => IpOrRange::new(&s).map_err(serde::de::Error::custom),
-            Raw::Tagged(Tagged::IP(ip)) => Ok(IpOrRange::IP(ip)),
-            Raw::Tagged(Tagged::Range(range)) => {
-                validate_ip_range(&range).map_err(|err| {
-                    serde::de::Error::custom(format!(
-                        "Could not parse IP range: {}, error {}",
-                        range, err
-                    ))
-                })?;
-                Ok(IpOrRange::Range(range))
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(
+                    f,
+                    "an IP address, a CIDR range, a comma-separated list of either, or \
+                     one of {{ IP = ... }}, {{ Range = \"...\" }}, {{ List = [...] }}"
+                )
             }
-            Raw::Tagged(Tagged::List(list)) => Ok(IpOrRange::List(list)),
+
+            /// A plain string - a single IP, a CIDR range, or a comma-separated list of
+            /// either (e.g. "127.0.0.1" or "127.0.0.1,10.0.0.0/24") - parsed via
+            /// `IpOrRange::new`, the same convenience parser the `--ip` /
+            /// `set_trusted_proxy` CLI and API path uses, so config files and code
+            /// accept identical syntax.
+            fn visit_str<E>(self, value: &str) -> Result<IpOrRange, E>
+            where
+                E: serde::de::Error,
+            {
+                IpOrRange::new(value).map_err(serde::de::Error::custom)
+            }
+
+            /// The externally-tagged forms: a map with exactly one of `IP`, `Range` or
+            /// `List`.
+            fn visit_map<A>(self, mut map: A) -> Result<IpOrRange, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let Some(tag) = map.next_key::<String>()? else {
+                    return Err(serde::de::Error::custom(
+                        "expected one of IP, Range or List, but the table was empty",
+                    ));
+                };
+
+                let value = match tag.as_str() {
+                    "IP" => IpOrRange::IP(map.next_value::<IpAddr>()?),
+                    "Range" => {
+                        let range = map.next_value::<String>()?;
+                        validate_ip_range(&range).map_err(|err| {
+                            serde::de::Error::custom(format!(
+                                "Could not parse IP range: {}, error {}",
+                                range, err
+                            ))
+                        })?;
+                        IpOrRange::Range(range)
+                    }
+                    // Each element is deserialised - and so validated - through this
+                    // same impl, recursively, and now reports its own error rather than
+                    // being swallowed by an untagged fallback.
+                    "List" => IpOrRange::List(map.next_value::<Vec<IpOrRange>>()?),
+                    other => {
+                        return Err(serde::de::Error::custom(format!(
+                            "unknown IP specification '{}' - expected one of IP, Range \
+                             or List",
+                            other
+                        )))
+                    }
+                };
+
+                if let Some(extra) = map.next_key::<String>()? {
+                    return Err(serde::de::Error::custom(format!(
+                        "an IP specification must have exactly one of IP, Range or List \
+                         - found both '{}' and '{}'",
+                        tag, extra
+                    )));
+                }
+
+                Ok(value)
+            }
         }
+
+        deserializer.deserialize_any(IpOrRangeVisitor)
     }
 }
 
@@ -1029,7 +1079,14 @@ impl ServiceConfig {
     /// from. The returned value is a secret (the environment variable's
     /// contents under `Environment`) and must never be logged or interpolated
     /// into error messages.
-    fn get_password(&self) -> Result<String, Error> {
+    /// The at-rest encryption password.
+    ///
+    /// Returns `Zeroizing<String>` so the buffer is wiped when it goes out of scope.
+    /// It used to be a bare `String`, so the operator-supplied password (under
+    /// `Environment`) was left in un-zeroized heap for a core dump or swap to pick up -
+    /// `SecretBox` zeroizes the canonical copies, but this one never went through it.
+    /// See docs/specifications/security-review-2.md (finding R33).
+    fn get_password(&self) -> Result<Zeroizing<String>, Error> {
         match self.encryption.clone() {
             Some(EncryptionScheme::Environment { key }) => {
                 // `key` is the *name* of the environment variable; the value it
@@ -1037,12 +1094,12 @@ impl ServiceConfig {
                 // error contexts - the value would leak the secret to logs.
                 let value = std::env::var(&key)
                     .with_context(|| format!("Could not get environment variable: {}", key))?;
-                Ok(value)
+                Ok(Zeroizing::new(value))
             }
             Some(EncryptionScheme::Simple {}) => {
                 // The service name is not secret; `Simple` is obfuscation only
                 // (see `EncryptionScheme::Simple`).
-                Ok(self.name.clone())
+                Ok(Zeroizing::new(self.name.clone()))
             }
             None => Err(Error::Null(
                 "No encryption in use. Please choose a scheme from the options provided."
@@ -1105,6 +1162,25 @@ impl ServiceConfig {
             key.expose_secret().decrypt::<T>(ciphertext)
         } else {
             // Legacy (v0) secret: fixed-salt, minimal-Argon2 derivation.
+            //
+            // Say so, once per process. A prefix-less secret stays on the weak
+            // derivation indefinitely with nothing prompting the operator to re-run the
+            // `secret` command, and there is no automatic upgrade because decrypting
+            // does not know the plaintext's field name. No downgrade is possible - a v0
+            // ciphertext is pure hex and can never carry the v1 prefix - so this is
+            // operational rather than a live weakness. See
+            // docs/specifications/security-review-2.md (finding R33).
+            static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+
+            ANNOUNCED.call_once(|| {
+                tracing::warn!(
+                    "This config contains at least one secret in the legacy (v0) \
+                     format, which uses a fixed salt and minimal Argon2 parameters. \
+                     Re-run the `secret` command for each stored secret to re-encrypt \
+                     it with the current (v1) scheme."
+                );
+            });
+
             let key = Key::from_password(&password)?;
             key.expose_secret().decrypt::<T>(data)
         }
@@ -2169,6 +2245,50 @@ mod tests {
         assert!(ip.matches(&IpAddr::from([127, 0, 0, 1])));
         assert!(ip.matches(&IpAddr::from([10, 0, 0, 1])));
         assert!(!ip.matches(&IpAddr::from([8, 8, 8, 8])));
+    }
+
+    #[test]
+    fn test_a_malformed_ip_specification_reports_what_is_actually_wrong() {
+        // `#[serde(untagged)]` worked by trying each variant, so a nested failure - a
+        // bad CIDR inside a `List` - discarded the real error and reported "data did
+        // not match any variant of untagged enum Raw". The value was still rejected, so
+        // this is about diagnostics. See finding R33.
+        let err = |toml_str: &str| -> String {
+            match toml::from_str::<IpOrRange>(toml_str) {
+                Ok(parsed) => unreachable!("{:?} should not have parsed: {:?}", toml_str, parsed),
+                Err(e) => e.to_string(),
+            }
+        };
+
+        // A bad entry inside a List must name the offending range.
+        let message = err(r#"List = ["127.0.0.1", "10.0.0.0/99"]"#);
+        assert!(
+            message.contains("10.0.0.0/99"),
+            "the error must name the bad entry, got: {}",
+            message
+        );
+        assert!(
+            !message.contains("untagged"),
+            "the untagged fallback must no longer swallow it, got: {}",
+            message
+        );
+
+        // A bad tagged Range likewise.
+        let message = err(r#"Range = "10.0.0.0/99""#);
+        assert!(message.contains("10.0.0.0/99"), "got: {}", message);
+
+        // An unknown tag says which tags are valid.
+        let message = err(r#"Nonsense = "x""#);
+        assert!(message.contains("Nonsense"), "got: {}", message);
+
+        // Two tags at once is refused rather than silently taking the first.
+        let message = err("IP = \"127.0.0.1\"\nRange = \"10.0.0.0/8\"");
+        assert!(message.contains("exactly one"), "got: {}", message);
+
+        // ...and the valid forms still parse.
+        assert!(toml::from_str::<IpOrRange>(r#"IP = "127.0.0.1""#).is_ok());
+        assert!(toml::from_str::<IpOrRange>(r#"Range = "10.0.0.0/8""#).is_ok());
+        assert!(toml::from_str::<IpOrRange>(r#"List = ["127.0.0.1", "10.0.0.0/8"]"#).is_ok());
     }
 
     #[test]

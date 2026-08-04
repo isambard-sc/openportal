@@ -244,13 +244,26 @@ async fn login(
     // we expect the output to be something like "JWT: SLURM_JWT={TOKEN}"
     // We will split with spaces, then find the work that is '{something}={token}",
     // then split this with '=' and take the second part.
+    //
+    // The raw output must never appear in the error: it is the one place
+    // credential-bearing output could escape to the requesting peer, since a `Result`
+    // from here is returned up the Job chain. F15 fixed the *logging* of the token
+    // command; this is the argv/stdout counterpart. See
+    // `docs/specifications/security-review-2.md` (finding R33).
     let jwt = jwt
         .split_whitespace()
         .find(|x| x.contains("="))
-        .context(format!("Could not find JWT token from '{}'", jwt))?
+        .context(
+            "Could not find a '<name>=<token>' field in the token command's output. \
+             The output is not reported here because it may contain a credential - \
+             run the configured token command by hand to see it.",
+        )?
         .split('=')
         .nth(1)
-        .context(format!("Could not extract JWT token from '{}'", jwt))?
+        .context(
+            "Could not extract the token from the token command's output (the output \
+             is not reported here because it may contain a credential).",
+        )?
         .to_string();
 
     assert_not_expired(expires)?;
@@ -1145,7 +1158,7 @@ async fn get_account(
             Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
-                cache::clear().await?;
+                cache::remove_account(cached_account.name()).await?;
                 return Ok(None);
             }
         };
@@ -1162,8 +1175,8 @@ async fn get_account(
                     cached_account
                 );
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this account is known to be stale - see cache::remove_account
+                cache::remove_account(cached_account.name()).await?;
 
                 // store the new account
                 cache::add_account(&existing_account).await?;
@@ -1178,7 +1191,7 @@ async fn get_account(
                 "Account {} does not exist - it has been removed from slurm.",
                 cached_account.name()
             );
-            cache::clear().await?;
+            cache::remove_account(cached_account.name()).await?;
             return Ok(None);
         }
     }
@@ -1328,7 +1341,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
             Ok(user) => user,
             Err(e) => {
                 tracing::warn!("Could not get user {}: {}", cached_user.name(), e);
-                cache::clear().await?;
+                cache::remove_user(cached_user.name()).await?;
                 return Ok(None);
             }
         };
@@ -1341,8 +1354,8 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 );
                 tracing::warn!("Existing: {:?}, new: {:?}", existing_user, cached_user);
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this user is known to be stale - see cache::remove_user
+                cache::remove_user(cached_user.name()).await?;
 
                 // store the new user
                 cache::add_user(&existing_user).await?;
@@ -1357,7 +1370,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 "User {} does not exist - it has been removed from slurm.",
                 cached_user.name()
             );
-            cache::clear().await?;
+            cache::remove_user(cached_user.name()).await?;
             return Ok(None);
         }
     }

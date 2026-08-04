@@ -27,6 +27,70 @@ struct Database {
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
 
+/// Upper bounds on the cache maps - keyed on peer-supplied identifiers and previously
+/// never pruned or capped. See `docs/specifications/security-review-2.md` (finding R33).
+const MAX_CACHED_USERS: usize = 10_000;
+const MAX_CACHED_GROUPS: usize = 10_000;
+const MAX_CACHED_INSTANCE_GROUPS: usize = 1_000;
+const MAX_CACHED_MUTEXES: usize = 10_000;
+
+///
+/// Keep the cache maps bounded. Called on every write, which is O(1) per map.
+///
+/// The data maps are pure caches, so they are flushed wholesale when they exceed their
+/// cap - a miss just re-queries FreeIPA. The caps are far above any real directory.
+///
+/// The **mutex** map is handled differently: it is the identity of a lock, not a
+/// cache, so clearing it while a task holds its `Arc` would give the next caller a
+/// different mutex for the same user and silently lose mutual exclusion. Only entries
+/// nobody holds are dropped (`strong_count == 1` means the map is the sole owner).
+///
+fn enforce_cache_bounds(cache: &mut Database) {
+    if cache.users.len() > MAX_CACHED_USERS {
+        tracing::warn!(
+            "FreeIPA user cache exceeded {} entries - flushing it.",
+            MAX_CACHED_USERS
+        );
+        cache.users.clear();
+    }
+
+    if cache.groups.len() > MAX_CACHED_GROUPS {
+        tracing::warn!(
+            "FreeIPA group cache exceeded {} entries - flushing it.",
+            MAX_CACHED_GROUPS
+        );
+        cache.groups.clear();
+    }
+
+    if cache.users_in_group.len() > MAX_CACHED_GROUPS {
+        tracing::warn!(
+            "FreeIPA group-membership cache exceeded {} entries - flushing it.",
+            MAX_CACHED_GROUPS
+        );
+        cache.users_in_group.clear();
+    }
+
+    if cache.instance_groups.len() > MAX_CACHED_INSTANCE_GROUPS {
+        tracing::warn!(
+            "FreeIPA instance-group cache exceeded {} peers - flushing it.",
+            MAX_CACHED_INSTANCE_GROUPS
+        );
+        cache.instance_groups.clear();
+    }
+
+    if cache.user_mutexes.len() > MAX_CACHED_MUTEXES {
+        let before = cache.user_mutexes.len();
+        cache
+            .user_mutexes
+            .retain(|_, mutex| std::sync::Arc::strong_count(mutex) > 1);
+        tracing::warn!(
+            "User mutex map exceeded {} entries - dropped {} that nobody was holding.",
+            MAX_CACHED_MUTEXES,
+            before - cache.user_mutexes.len()
+        );
+    }
+}
+
 ///
 /// Return the IPAUser for the passed UserIdentifier, if this
 /// user exists in the system. Returns None if the user does not
@@ -41,6 +105,7 @@ pub async fn get_user(identifier: &UserIdentifier) -> Result<Option<IPAUser>, Er
 ///
 pub async fn get_user_mutex(identifier: &UserIdentifier) -> Result<Arc<Mutex<()>>, Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     Ok(cache
         .user_mutexes
         .entry(identifier.clone())
@@ -55,6 +120,7 @@ pub async fn get_user_mutex(identifier: &UserIdentifier) -> Result<Arc<Mutex<()>
 #[allow(dead_code)]
 pub async fn add_user_to_group(user: &IPAUser, group: &IPAGroup) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
 
     let user = match cache.users.get(user.identifier()) {
         Some(user) => user.clone(),
@@ -91,6 +157,7 @@ pub async fn add_user_to_groups(user: &IPAUser, groups: &[IPAGroup]) -> Result<(
     }
 
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
 
     let user = match cache.users.get(user.identifier()) {
         Some(user) => user.clone(),
@@ -130,6 +197,7 @@ pub async fn set_users_in_group(group: &IPAGroup, users: &[IPAUser]) -> Result<(
     }
 
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
 
     // make sure we have cached the group and users
     let group = match cache.groups.get(group.identifier()) {
@@ -168,6 +236,7 @@ pub async fn set_users_in_group(group: &IPAGroup, users: &[IPAUser]) -> Result<(
 #[allow(dead_code)]
 pub async fn remove_user_from_group(group: &IPAGroup, user: &IPAUser) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
 
     let group = match cache.groups.get(group.identifier()) {
         Some(group) => group.clone(),
@@ -248,6 +317,7 @@ pub async fn get_system_groups() -> Result<Vec<IPAGroup>, Error> {
 ///
 pub async fn set_system_groups(groups: &[IPAGroup]) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     cache.system_groups = groups.to_vec();
     tracing::info!("Setting system groups to {:?}", cache.system_groups);
     Ok(())
@@ -277,6 +347,7 @@ pub async fn set_instance_groups(groups: &HashMap<Peer, Vec<IPAGroup>>) -> Resul
     }
 
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     cache.instance_groups = groups.clone();
 
     tracing::info!("Setting instance groups to {:?}", cache.instance_groups);
@@ -308,6 +379,7 @@ pub async fn get_instance_groups(instance: &Peer) -> Result<Vec<IPAGroup>, Error
         groups.push(op_instance_group);
 
         let mut cache = CACHE.write().await;
+        enforce_cache_bounds(&mut cache);
         cache
             .instance_groups
             .insert(instance.clone(), groups.clone());
@@ -321,6 +393,7 @@ pub async fn get_instance_groups(instance: &Peer) -> Result<Vec<IPAGroup>, Error
 ///
 pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     cache.users.insert(user.identifier().clone(), user.clone());
     Ok(())
 }
@@ -332,6 +405,7 @@ pub async fn add_existing_user(user: &IPAUser) -> Result<(), Error> {
 #[allow(dead_code)]
 pub async fn add_existing_users(users: &[IPAUser]) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     users.iter().for_each(|u| {
         // only insert if they don't already exist
         cache
@@ -347,6 +421,7 @@ pub async fn add_existing_users(users: &[IPAUser]) -> Result<(), Error> {
 ///
 pub async fn remove_existing_user(user: &IPAUser) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     cache.users.remove(user.identifier());
 
     cache.users_in_group.values_mut().for_each(|users| {
@@ -375,6 +450,7 @@ pub async fn get_group(group: &ProjectIdentifier) -> Result<Option<IPAGroup>, Er
 ///
 pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     cache
         .groups
         .insert(group.identifier().clone(), group.clone());
@@ -388,6 +464,7 @@ pub async fn add_existing_group(group: &IPAGroup) -> Result<(), Error> {
 #[allow(dead_code)]
 pub async fn remove_existing_group(group: &IPAGroup) -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     cache.groups.remove(group.identifier());
     cache.users_in_group.remove(group.identifier());
 
@@ -400,6 +477,7 @@ pub async fn remove_existing_group(group: &IPAGroup) -> Result<(), Error> {
 ///
 pub async fn clear() -> Result<(), Error> {
     let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
     cache.users.clear();
     cache.groups.clear();
     cache.users_in_group.clear();

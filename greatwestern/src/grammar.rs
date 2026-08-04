@@ -587,9 +587,31 @@ impl<'de> Deserialize<'de> for Hour {
     }
 }
 
+/// Truncate to the top of the hour, so `Hour`'s invariant - minutes and seconds are
+/// zero - holds however it was constructed.
+///
+/// `from_chrono` *rejects* a non-zero minute or second, but this `From` accepted one
+/// silently, so `.into()` could produce an `Hour` that is not on an hour boundary. No
+/// exploiting caller was found, and making this fallible would be a public API break
+/// for no security benefit, so it truncates instead: the invariant becomes
+/// unconditional rather than merely checked on one of the two paths. See
+/// `docs/specifications/security-review-2.md` (finding R33).
 impl From<chrono::NaiveDateTime> for Hour {
     fn from(hour: chrono::NaiveDateTime) -> Self {
-        Self { hour }
+        let truncated = hour.with_minute(0).and_then(|h| h.with_second(0));
+
+        match truncated {
+            Some(hour) => Self { hour },
+            None => {
+                // `with_minute(0)`/`with_second(0)` cannot fail for a valid
+                // NaiveDateTime, but never panic on a value that came from the wire.
+                tracing::warn!(
+                    "Could not truncate '{}' to the top of the hour - using it as-is",
+                    hour
+                );
+                Self { hour }
+            }
+        }
     }
 }
 

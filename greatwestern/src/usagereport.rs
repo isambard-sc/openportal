@@ -1601,13 +1601,64 @@ impl ProjectUsageReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+/// A portal-level usage report.
+///
+/// Deserialised via `try_from` so a wire-supplied report cannot carry map keys that
+/// disagree with its own `portal` field - `set_report` enforces that on the
+/// programmatic path, but the derive inserted whatever it was given. It only matters
+/// for a receiver that trusts the keys rather than re-inserting, but a type whose
+/// invariant holds only on one of two construction paths is a trap. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct UsageReport {
     #[ts(as = "String")]
     portal: PortalIdentifier,
     #[ts(as = "HashMap<String, ProjectUsageReport>")]
     reports: HashMap<ProjectIdentifier, ProjectUsageReport>,
+}
+
+/// The wire shape of a [`UsageReport`] - identical to what the derive produced, so the
+/// format is unchanged. Deserialising goes through [`UsageReport::set_report`] so a
+/// report whose keys disagree with its `portal` is rejected rather than accepted.
+#[derive(Deserialize)]
+struct UsageReportRepr {
+    portal: PortalIdentifier,
+    reports: HashMap<ProjectIdentifier, ProjectUsageReport>,
+}
+
+impl TryFrom<UsageReportRepr> for UsageReport {
+    type Error = Error;
+
+    fn try_from(repr: UsageReportRepr) -> Result<Self, Self::Error> {
+        let mut report = UsageReport::new(&repr.portal);
+
+        for (project, project_report) in repr.reports {
+            if project != project_report.project() {
+                return Err(Error::InvalidState(format!(
+                    "Usage report is keyed on project {} but the report it holds is for \
+                     {}",
+                    project,
+                    project_report.project()
+                )));
+            }
+
+            report.set_report(project_report)?;
+        }
+
+        Ok(report)
+    }
+}
+
+impl<'de> Deserialize<'de> for UsageReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UsageReportRepr::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl std::fmt::Display for UsageReport {

@@ -429,7 +429,7 @@ async fn get_account(
             Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
-                cache::clear().await?;
+                cache::remove_account(cached_account.name()).await?;
                 return Ok(None);
             }
         };
@@ -446,8 +446,8 @@ async fn get_account(
                     cached_account
                 );
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this account is known to be stale - see cache::remove_account
+                cache::remove_account(cached_account.name()).await?;
 
                 // store the new account
                 cache::add_account(&existing_account).await?;
@@ -462,7 +462,7 @@ async fn get_account(
                 "Account {} does not exist - it has been removed from slurm.",
                 cached_account.name()
             );
-            cache::clear().await?;
+            cache::remove_account(cached_account.name()).await?;
             return Ok(None);
         }
     }
@@ -598,7 +598,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
             Ok(user) => user,
             Err(e) => {
                 tracing::warn!("Could not get user {}: {}", cached_user.name(), e);
-                cache::clear().await?;
+                cache::remove_user(cached_user.name()).await?;
                 return Ok(None);
             }
         };
@@ -611,8 +611,8 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 );
                 tracing::warn!("Existing: {:?}, new: {:?}", existing_user, cached_user);
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this user is known to be stale - see cache::remove_user
+                cache::remove_user(cached_user.name()).await?;
 
                 // store the new user
                 cache::add_user(&existing_user).await?;
@@ -627,7 +627,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 "User {} does not exist - it has been removed from slurm.",
                 cached_user.name()
             );
-            cache::clear().await?;
+            cache::remove_user(cached_user.name()).await?;
             return Ok(None);
         }
     }

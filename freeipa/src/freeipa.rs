@@ -1256,16 +1256,22 @@ impl IPAGroup {
         &self.description
     }
 
-    pub fn is_system_group(&self) -> bool {
-        self.identifier.portal() == "system"
-    }
-
     pub fn is_instance_group(&self) -> bool {
         self.identifier.portal() == "instance"
     }
 
     pub fn is_project_group(&self) -> bool {
-        !(self.is_system_group() || self.is_instance_group())
+        // Reject every internal portal name, not just `system` and `instance` - this
+        // subsumes the former `is_system_group()`, which is why that method is gone.
+        // `openportal` was admitted, so `remove_project openportal.openportal` passed
+        // this guard and resolved to the *managed* group - `identifier_to_projectid`
+        // returns the bare project component for all three internal portals. The blast
+        // radius was zero only by accident (an unrelated filter two layers down skips
+        // every user, so the group is never emptied or deleted), which is not something
+        // a guard should rely on. `get_users`/`force_get_user` already refuse internal
+        // portals outright; this brings the predicate into line. See
+        // `docs/specifications/security-review-2.md` (finding R33).
+        !is_internal_portal(&self.identifier.portal())
     }
 }
 

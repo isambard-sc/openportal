@@ -4,5 +4,9 @@ import type { ProjectStorageReport } from "./ProjectStorageReport";
 /**
  * A portal-level storage report containing per-project storage reports for
  * all projects associated with a portal.
+ * Deserialised via a validating impl rather than the derive, so a wire-supplied report
+ * cannot carry map keys that disagree with its own `portal` field - `set_report`
+ * enforces that on the programmatic path. See
+ * `docs/specifications/security-review-2.md` (finding R33).
  */
 export type StorageReport = { portal: string, reports: { [key in string]?: ProjectStorageReport }, };

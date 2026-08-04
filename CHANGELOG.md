@@ -9,433 +9,99 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 
 - **A second security review** ([docs/specifications/security-review-2.md](docs/specifications/security-review-2.md)),
-  auditing the whole workspace as seven independent areas. It re-tested and
-  confirmed the first review's cryptographic conclusions (including a
-  differential test of the anti-replay window against a reference model), and
-  found 33 further issues concentrated in the agent framework's authorization
-  logic - an area the first review had not substantially examined. The fixes
-  below are the subset reachable without holding a peer key; the remainder are
-  recorded in the document.
+  auditing the whole workspace as seven independent areas, together with a companion
+  **record of fixes** ([docs/specifications/security-review-2-fixes.md](docs/specifications/security-review-2-fixes.md)).
+  The review re-tested and confirmed the first review's cryptographic conclusions -
+  including a differential test of the anti-replay window against a reference model -
+  and raised 34 findings concentrated in the agent framework's authorization logic, an
+  area the first review had not substantially examined. **All 34 are now resolved.**
+
+  The fixes document holds the rationale for each change, the seven recommendations
+  deliberately *not* followed and why, and the five places the review itself was
+  wrong. The entries below record only what changed.
+- Bridge API **signature version 2**, selected with `X-OpenPortal-Signature-Version: 2`.
+  Length-prefixed and fixed-arity, so the presence of a nonce is authenticated.
+  Version 1 remains accepted, so existing clients need no change.
+- `client --add --type <agent-type>` declares the agent type a client must present
+  itself as. The reverse expectation travels in the invite, so no config hand-editing
+  is needed. Omitting it leaves the peer unchecked, as before.
+- **Portal route discovery**: agents derive the route to each portal from their peers
+  and refuse traffic that does not match. Enforcement activates only where a peer is
+  declared `type = "portal"`, and is scoped to that peer's zone.
+- `secret --value-file <path>` (and bare stdin) so a secret need not appear in `ps`.
+  `--value` still works but warns.
+- `op-proxy init --name`, so an agent can use two proxies in one zone.
 - `op-cloudaccount`, `op-cloudportal`, `op-localaccount` and `op-proxy` are now
-  published as release binaries, for both `x86_64` and `aarch64`, each with an
-  attested SBOM like every other agent. CI was already compiling them - they are
-  workspace default-members - but never uploaded them as artefacts, so they never
-  reached a release. No OCI image or Helm chart is built for them.
-
-  Note that `op-localaccount` is a **testing** agent: it manages Unix accounts
-  directly with `useradd`/`groupadd` rather than through a managed directory
-  service, and logs a prominent warning to that effect on every startup.
-  `op-freeipa` is the production path.
-
-- **Bridge API signature version 2** (finding R29), selected with a new
-  `X-OpenPortal-Signature-Version: 2` header. The version 1 canonical string is
-  `\n`-joined with no length prefixes and no field count, so its four shapes are
-  indistinguishable by the signature: for a POST, `…\n<body>\n<nonce>` is
-  byte-identical to `…\n<body ‖ "\n" ‖ nonce>`, which means the *presence* of a
-  nonce was not authenticated. Version 2 signs a seven-field string with every field
-  length-prefixed and always present, led by a length-prefixed version tag.
-
-  **Backwards compatible:** an absent header means version 1, which is still
-  accepted and verified byte-for-byte as before, so existing clients need no change.
-  An *unrecognised* value is a 400 rather than a fallback to version 1, so a mangled
-  header cannot downgrade a version 2 client. `sign_api_call` now produces version 2
-  (Rust callers upgrade by recompiling) and `sign_api_call_with_version` signs an
-  explicit version; the Python client sends the header. Version 1 will be removed
-  once every client has migrated, and every version 1 verification is logged at
-  debug level so the remaining ones are discoverable.
-- `client --add --type <agent-type>` declares the agent type a client must
-  present itself as (finding R3), validated against the nine known types at
-  add-time so a typo is an error rather than a silently-unchecked peer. Omitting
-  it still means "unchecked", and now warns. The reverse expectation no longer
-  needs hand-editing either: the invite gained an optional `type` field carrying
-  the *issuer's own* type, which `server --add` picks up automatically. The
-  invite never carries the client's expected type - that is exchanged
-  out-of-band between operators, which is the point of the check. Invites
-  written by older versions have no `type` field, import cleanly, and leave the
-  peer unchecked as before.
-- Seed unit tests for the privileged agents, which previously had almost none
-  between them: `op-slurm`'s managed-organization guard and API-version parsing
-  (findings R5 and R27), `op-freeipa`'s internal-portal group mapping and
-  membership parsing (R13), `op-cluster`'s command-composition invariant,
-  `op-portal`'s offering filter, and `write_secret_file`'s permissions including
-  the pre-existing-file case (R9). 273 tests now pass, and `make test` no longer
-  skips the binary crates.
-
-- Remote diagnostics judged a report's freshness using the *generating* agent's
-  `generated_at` timestamp against a locally-taken baseline, so ordinary clock
-  skew between hosts broke the wait: a peer running slightly behind never appeared
-  to have answered, and one running ahead satisfied a baseline it predated.
-  Reports are now stamped with a local `cached_at` on receipt and judged on that,
-  matching what health already did. The "age" log line could also print a
-  negative age.
-- The health and diagnostics response caches were unbounded with no eviction.
-  Both are now capped, with least-recently-received eviction and a warning when it
-  fires.
-- The resource monitor fanned a **fleet-wide** health check out to every peer in
-  every direction - including upstream - whenever an agent crossed 90% CPU or 80%
-  memory, then discarded the aggregate into a local log line. The comment said
-  "without cascading"; `collect_health` cascades whenever the agent is not a leaf,
-  and an empty requester filtered nothing out. There is now a `collect_own_health`
-  that genuinely does not cascade.
-- A `Restart` with an empty destination meant "restart whoever received this", so
-  one message from a remote peer killed the agent that received it. A remote sender
-  must now name its target explicitly; a locally-originated request (the bridge's
-  `POST /restart` with no destination, which arrives via `send_to(self)`) still
-  works.
-- The leaf-node check on `Restart` ran *after* the target decision, so an agent
-  that refused to *forward* a restart would still kill *itself* on request from
-  the very peer it would not relay for. Authorization now precedes the target
-  decision, in a pure `decide_restart` with tests.
-
-- **Relay envelopes were not bound to the connection they arrived on** (finding
-  R16). `envelope.from` is a wire field, so any direct peer - a portal, a second
-  proxy - could inject an envelope for a relayed pair it had no part in, making the
-  receiver emit a genuine key-signed `SessionUnknown` to the far side and churn
-  their session. The receiver now requires the envelope to have arrived over the
-  connection to the relay its own config names for that peer. Note this is *not*
-  covered by the sender-adjacency check, which applies to a Job's destination
-  rather than to relay unwrapping.
-- **A hostile relay could amplify one injected packet into an unbounded number of
-  bootstrap tasks** (finding R28). `SessionUnknown` is now debounced to one per peer
-  per 5 seconds, the re-bootstrap it triggers is single-flight per peer rather than
-  one spawned task per message, and the pending-bootstrap map is capped.
-- **The bridge listener had no bounds at all** (finding R24). The request body limit
-  is down from axum's 2 MiB default to 1 MiB - which directly bounds the
-  pre-authentication HMAC-SHA512 over the whole body - plus a 512-request
-  concurrency cap (fail-fast with 503) and a 30 second request deadline. Added with
-  no new dependencies. A pre-header read timeout is still not possible via
-  `axum::serve`; this is now documented rather than implied.
-- **Boards and jobs could grow without bound** (finding R31). A Job's `expires` is a
-  wire field and reaping is the only thing that bounds a board, so a peer-chosen
-  far-future value meant a Job was never reaped: it is now clamped to at most an
-  hour after creation. Jobs per board, boards per process, queued commands per
-  board and `Command::Sync`'s job count are all capped, and a board is no longer
-  created for an arbitrary attacker-chosen destination name. Separately, the
-  duplicate scan deep-cloned every Job on the board on every new pending Job, under
-  the write lock - it now clones one.
-- **One mistyped cost report could exhaust `op-cloudaccount`'s memory** (finding
-  R26). A report window is clamped to ~5 years, day enumeration is independently
-  capped, files over 8 MiB are skipped, and directory entries are skipped unless
-  they are regular files (so a symlink to `/dev/zero` is not followed). A plausible
-  typo - `0001-01-01` for `2001-01-01` - previously produced ~739,000 daily reports,
-  which were then serialised into a Job result.
-- **`op-cloudaccount` answered usage and limit queries for projects never assigned
-  to it** (finding R30), so a peer authorised for one portal could read another
-  portal's cost history from that account. Both now require the project to be in the
-  assignment state first.
+  published as release binaries for `x86_64` and `aarch64`, each with an attested
+  SBOM. No OCI image or Helm chart is built for them. Note `op-localaccount` is a
+  **testing** agent - it manages Unix accounts directly rather than through a managed
+  directory service, and warns on every startup.
+- Seed unit tests for the privileged agents, which previously had almost none. 298
+  tests now pass (from 209).
 
 ### Fixed
 
-- **Remote process abort from any authenticated peer** (finding R1). Three arms
-  of `Instruction::parse` indexed their argument list without a length check,
-  and that parser runs inside `Command`'s `Deserialize` - so a `Job` whose
-  command was, for example, `"a.b submit"` aborted the receiving agent, and the
-  same payload was reachable through `POST /run` on the bridge. Every
-  panicking index and slice operation in the workspace's own code has been
-  replaced with a checked (`get`/`first`/`split_first`/`split_once`/slice
-  pattern) form, so no code we write can panic on malformed input from the
-  wire, from a spawned tool's output, from an external service's response, or
-  from a config file. Two latent panics of the same class were fixed on the
-  way: a char index used as a byte offset when splitting a Lustre quota
-  expression, and `permissions`/`links` in a volume config being indexed with
-  a `roots` index when those lists may be shorter.
-- **Portal route discovery** (closes the residual recorded in
-  `security-review-2.md` §4.1). Each agent now derives the route by which each
-  portal reaches it, and refuses instructions naming that portal which arrive by
-  any other route. An agent adjacent to a portal originates `<portal>.<me>` from
-  its own `type = "portal"` config entry - the only statement about a portal's
-  identity accepted without derivation - and every other agent learns its route
-  by being told one by an upstream peer and appending its own name. Routes are
-  pushed downstream on connection, so a downstream agent knows its route as soon
-  as it connects.
-
-  Because the topology is single-pathed and acyclic, two different routes to the
-  same portal name cannot legitimately occur, so a collision is an unambiguous
-  signal that an agent's config has been changed to introduce an impostor
-  portal. On collision the agent logs at error level and refuses to relay or act
-  on any instruction naming that portal - at every hop that has seen the
-  collision, not just the terminal agent. That is a deliberate denial of service
-  for that portal: once an attacker has a peer provisioned inside the estate,
-  stopping is preferable to relaying commands they should not be able to run. It
-  stays confined to the affected portal name, since an impostor of one portal
-  cannot usefully forge instructions naming another, and confining it stops one
-  compromised relationship disabling every other portal an agent serves.
-
-  The check runs only at the agent that *acts* on a portal-rooted instruction -
-  the Job's terminal agent - not at intermediate hops, which contribute the
-  collision detection instead. And a route is enforced only once known: a missing
-  route means the anchor has not been declared upstream yet, which is the default
-  state of every existing deployment, so it must not be treated as an anomaly. A
-  refusal is reported back to the sender as an errored Job rather than only
-  logged.
-
-  The portal rule is also applied **only in a zone where a portal route is
-  known**. An instance's upstream zone carries portal-rooted traffic and the rule
-  holds there; its internal zone holds the account, filesystem and scheduler
-  agents it delegates to, and those legitimately create jobs naming a portal on a
-  destination rooted at themselves - `op-freeipa` builds
-  `freeipa.shared get_local_home_dir john.aiproject.brics` while adding a user,
-  and passes `check_portal = false` for exactly that reason. Since routes are
-  zone-scoped and never propagate into an internal zone, the route table already
-  encodes the distinction and no extra configuration is needed. Declaring
-  `type = "portal"` on a peer is therefore what activates portal-ownership
-  enforcement at all.
-
-  This closes the case the positional checks below cannot: a correctly-*named*
-  impostor portal introduced one hop away satisfies the portal-ownership check,
-  because `destination.first()` really is the right name - only the route reveals
-  it. It does not defend against a code-compromised agent, which simply reports
-  whichever route it likes; that boundary still belongs to command signing, which
-  remains designed but unbuilt. See
-  `docs/plans/portal-route-discovery-design.md`.
-
-  Backwards compatible in both directions: `Register` carries a new
-  `supports_portal_routes` flag (defaulting to `false`, so a peer that predates
-  it reads as incapable), routes are never pushed to a peer that would not
-  understand them, and a route is never enforced against a peer that could not
-  have sent one. Upgrade upstream agents before downstream ones; enforcement
-  switches itself on per peer as both ends become capable.
-- **A Job's claimed route was not bound to the peer that delivered it**
-  (finding R4). `Destination::position` accepted any sender that appeared
-  *anywhere* in the route, and returned `Destination` for the last agent without
-  looking at the sender at all - so a peer could hand its neighbour a Job
-  claiming to have come from the portal and have it forwarded onward under that
-  neighbour's authority, reaching agents it holds no keys for. The sender must
-  now be the *immediate* neighbour in the route. Because the sender is stamped by
-  paddington from the authenticated connection while the route is unvalidated
-  wire data, this means an agent can only claim a position in the path for which
-  it holds the pre-shared key.
-- **The portal-ownership check never ran on the wire path** (finding R34).
-  `Command::parse`'s `check_portal` arm enforces "an instruction naming portal X
-  may only be issued via a destination rooted at X", but it is passed `true` only
-  at the two entry points to the system - the bridge, and the portal building its
-  southbound Job. Every Job arriving over paddington is deserialised with it
-  `false`, and no privileged agent re-checked it, so a Job injected directly at
-  an agent inside the estate could name any portal's project. Provider, Platform
-  and Instance agents now re-check it on receipt, using `Domain::owning_portal`
-  and their own locally-configured agent type. `op-cloudaccount` uses the new
-  `instance::run_delegated`, because its Jobs are handed to it by
-  `op-cloudportal` and are rooted there rather than at the portal that owns the
-  project - the property genuinely does not hold for that topology.
-- **A peer's agent type was taken entirely on trust** (finding R3). `Register`
-  carries the role a peer claims, and the framework makes real authorization
-  decisions from it - which peer a portal accepts a `Submit` from, which peer may
-  restart an agent or read its diagnostics, which peer an instance routes account
-  operations to. A `[[clients]]`/`[[servers]]` entry may now declare
-  `type = "bridge"` (or any other agent type), and a peer registering as anything
-  else is refused. The field is optional and unset means unchecked, so existing
-  configs keep working and the check can be adopted per peer; unset peers are
-  logged at debug level naming the value to add, and an unrecognised value is
-  logged as an error and treated as unset.
-- **`op-slurm` applied no managed-object guard to any mutation** (finding R5).
-  `set_limit` never called the `is_managed()` that already existed, and both
-  `cancel_pending_*_jobs` took a bare account/user name with no lookup at all -
-  so a peer-chosen `local_group` could rewrite the `GrpTRESMins` of, or
-  `scancel` every pending job of, any account on the cluster. All three now
-  resolve their target and refuse anything outside the OpenPortal-managed
-  organization; a target that does not exist is a logged no-op, so removal stays
-  idempotent. (The create path's existing check validated a locally-constructed
-  object whose organization is a constant, so it could never fail.)
-- **A peer could drive an unbounded loop while holding a board's write lock**
-  (finding R6). `Board::add` incremented a Job's version one deep clone at a
-  time until it passed the stored version, so a stored version of 2^40 meant
-  ~10^12 clones - synchronously, under the lock - and `u64::MAX` never
-  terminated at all, because the increment wrapped in release builds. It now
-  jumps straight past with `saturating_add`, `increment_version` saturates, and
-  a Job arriving with a version above 2^60 is rejected and logged as a bug or an
-  attack rather than acted on.
-- **`op-localaccount` could add an account to a privileged system group**
-  (finding R13). The previous hardening covered only the *remove* paths, leaving
-  the exact bare-group-name collision it documented: `bob.docker.system`
-  resolves to the group `docker`, and the add path put the new account into it.
-  Identifiers naming an internal portal (`openportal`/`system`/`instance`) are
-  now refused when they arrive from a peer, groups that already exist with a
-  system GID are never adopted, `update_homedir` gained the managed-user guard
-  its siblings had, and the home directory - a bare string that on the add path
-  comes from the peer, and that `useradd -m` creates as root - is now validated
-  the way `op-filesystem` validates every path it touches.
-- **Mapping targets permitted whitespace and separators** (finding R14). Local
-  user and group names had a deny-list that still admitted spaces, `,`, `=`,
-  `%`, `?` and `#`. Because OpenPortal rebuilds its own instructions by
-  interpolating a mapping into a *space-delimited* string that is then re-parsed
-  positionally, a space shifted every later argument - letting a compromised
-  account agent choose the limit a scheduler applied. They now use an allow-list
-  (`[A-Za-z0-9_.-]`, no leading `-`, no leading/trailing `.`, length-capped),
-  keeping the interior `.` that a `user.project` account name needs. Account and
-  user names are also percent-encoded before being interpolated into slurmrestd
-  paths, so a `?` cannot introduce a query parameter.
-- **A relayed envelope's `zone` was unauthenticated but was half the peer
-  identity** (finding R15). `RelayEnvelope` is plaintext outside the AEAD; `to`
-  is checked and `from` is implicitly bound by which key decrypts, but `zone`
-  was bound to nothing and propagated into `Message::received_from` and the
-  synthesised `Connected` event - and templemeads keys boards, job routing and
-  the peer registry on `{name}@{zone}`. The receive side now uses the configured
-  `peer.zone` and logs any disagreement.
-- **The portal-ownership check silently did not apply to ten instructions**
-  (finding R17). `owning_portal` omitted the whole block/unblock family (user
-  and project), the storage-report family, and `GetAwards` - so a bridge client
-  of one portal could, for example, block every user of another portal's
-  project. All ten arms added, with a test that enumerates every
-  identifier-bearing variant so a new one cannot silently miss the check again.
-- **`PortalIdentifier` never received the identifier allow-list** (finding R18).
-  It checked only for emptiness, spaces and periods, despite being deserialised
-  straight off the wire as the sole argument of several instructions - and
-  despite its own `from_validated` documenting the invariant as established. The
-  validator has been lifted into a new shared `templemeads::validate` module
-  (it must live there because `PortalIdentifier` does) and is now used by both
-  templemeads and `greatwestern`, so there is one allow-list rather than two
-  that can drift.
-- **Date parsing and arithmetic were unbounded** (finding R25). `%Y` accepts a
-  signed, unbounded digit count, so the entire chrono range parsed and nothing
-  capped a range's span - a single `get_usage_report` could ask an agent to
-  build a 191-million-element vector, and the day-by-day arithmetic overflowed
-  at the edges. `Date::parse` now bounds the year to 1970-2200, `DateRange`
-  caps its span at ~5 years, every date addition is checked, and `months()`/
-  `years()` - which previously spun forever at the top of the range while
-  allocating on each iteration - now require forward progress.
-- **A routine restart locked an agent out of every long-running peer**
-  (finding R10). The handshake/bootstrap anti-replay state kept the outgoing
-  nonce counter and the incoming replay window in the same in-memory structure,
-  so a restart reset the counter while the peer's window remembered where it had
-  got to - and every reconnect was then rejected as a replay until the counter
-  climbed back past the old high-water mark, at 5 s per attempt (roughly ten
-  seconds of outage per prior reconnect, so hours for a long-lived link, and
-  worse on the relay path at 35 s per attempt). No attacker was needed; an
-  on-path attacker who could reset TCP connections could inflate the eventual
-  outage substantially, and it persisted after they stopped. Every handshake and
-  bootstrap message now carries a random per-process `epoch` alongside its
-  nonce, and the receiver keeps one replay window **per sender incarnation**
-  (bounded at 8, least-recently-used evicted) rather than one per peer. A
-  restart is therefore accepted immediately, while the superseded incarnation's
-  window is *retained* so replays still fail - and concurrent client-HA
-  replicas, which legitimately share one peer identity, no longer reset each
-  other's window. The field is `#[serde(default)]` on all five message types, so
-  a peer built without it keeps exactly the previous behaviour; nothing is
-  written to disk.
-- **IPv4/IPv6 truncation defeated every IP allow-list** (finding R8).
-  `IpOrRange::matches` delegated to `iptools`, whose IPv4 range check
-  truncates an IPv6 address to its low 32 bits, so a peer at
-  `2001:db8::7f00:1` satisfied a `127.0.0.0/8` rule - bypassing both the
-  client `ip` allow-list and `trusted_proxy`. A range is now only ever matched
-  against an address of its own family, and an IPv4-mapped IPv6 address
-  (`::ffff:a.b.c.d`, how an IPv4 peer arrives on a dual-stack listener) is
-  canonicalised first so IPv4 rules still match it.
-- **The bridge invite - which holds the HMAC API key - was written
-  world-readable** (finding R9). It used a plain `std::fs::write`, landing at
-  the process umask, so any local user could read the key and sign arbitrary
-  bridge requests. It now goes through `paddington::config::write_secret_file`,
-  which is exported for the purpose and is now the single writer for every file
-  containing key material. That helper also sets mode 0600 **at creation**
-  rather than with a later `chmod` (closing a window in which the secret was on
-  disk world-readable, and covering a pre-existing file, whose mode
-  `std::fs::write` preserves), and creates a missing parent directory 0700.
-- **The bridge's rate-limit bypass was still open** (finding R11). The client
-  IP was taken from the *left-most* `X-Forwarded-For` entry, which is the
-  client-supplied one behind every appending proxy - including the
-  loopback-tunnel deployment the first review recommends - so rotating a fake
-  address per request still bought a fresh rate-limit bucket. The header is now
-  walked from the right, skipping trusted-proxy hops, taking the first
-  untrusted address ("rightmost untrusted"). The unit test that asserted the
-  old behaviour has been replaced with one that asserts the spoof fails.
-- **A stalled handshake held its connection slot indefinitely** (finding R21).
-  The pre-authentication phase had no deadline, so a peer that completed the
-  TCP handshake and then sent nothing occupied one of the 2048
-  unauthenticated-connection slots for as long as it kept the socket open;
-  2048 idle sockets stopped the listener accepting any new connection,
-  including from legitimate peers. A 30-second watchdog now applies to the
-  pre-authentication phase only, standing down the moment a peer authenticates
-  so established connections are never affected.
-- **No WebSocket message size limit** (finding R22). Without an explicit
-  `WebSocketConfig`, tungstenite's 16 MiB frame / 64 MiB message defaults
-  applied, and a frame's declared length is *reserved* before any payload
-  arrives - so ~14 bytes bought a 16 MiB allocation, pre-authentication, per
-  connection. Both the client and the server now cap frames and messages at
-  2 MiB.
-- **The message-exchange overload recovery was dead code** (finding R23). All
-  five `signed_duration_since` comparisons in the event loop had their operands
-  reversed, making every expression negative and so every threshold
-  unreachable: the periodic worker-count log never fired, the "still
-  overloaded" warning never fired, and the `abort_all` recovery could never
-  run - leaving the reaping loop with no exit while the unbounded inbound
-  channel grew behind it.
-- `trusted_proxy` and client `ip` config fields now also accept the plain,
-  comma-separated string syntax documented in
-  `docs/specifications/agent-configuration.md` (e.g.
-  `trusted_proxy = "127.0.0.0/24"`), not just the tagged
-  `{ IP = ... } / { Range = ... } / { List = [...] }` form. Previously,
-  hand-editing a config file with a bare string for either field failed to
-  parse with a confusing `unknown variant` TOML error.
-- **Silent accounting corruption from unchecked arithmetic** (finding R33). The
-  release profile had `overflow-checks` off, so `u64` arithmetic on values that
-  arrive in peer-supplied usage and storage reports wrapped silently rather than
-  failing. Every operator on `Usage` and `StorageSize` now saturates
-  explicitly, `StorageSize`'s `Div`/`DivAssign` no longer panic on a zero
-  divisor, and `overflow-checks = true` is set for release builds. `Usage`'s `-`
-  and `-=` had also disagreed - one clamped at zero, the other wrapped to near
-  `u64::MAX` - and now behave identically.
-- `Allocation` accepted `"NaN"`, `"inf"` and `"infinity"` as sizes, because
-  `f64::from_str` parses them and the existing negative-size test is *false* for
-  NaN. Both then saturated to `u64::MAX` on the way into a report. Non-finite
-  sizes are now rejected.
-- `Destination::parse` accepted an agent name containing whitespace, which
-  silently changed the destination the command addressed: a destination is the
-  first whitespace-separated token of a command string, so
-  `"a b.aip1.brics get_projects"` addressed `a`. Such a name never worked, so
-  this only rejects input that was already broken.
-- `op-slurm`'s API-version probe incremented the server-supplied patch component
-  with `+=`, which aborts under the newly-enabled overflow checks if the server
-  reports `u32::MAX`. It now stops probing instead.
+- **Remote process abort from any authenticated peer.** Three arms of
+  `Instruction::parse` indexed a slice without a length check, inside `Command`'s
+  `Deserialize` - so a ~200-byte message terminated the receiving agent. Every
+  panicking index in the workspace is now a checked form.
+- **A routine restart locked an agent out of every long-running peer.** The handshake
+  nonce counter and replay window shared process lifetime; a restart reset one but not
+  the peer's view of it. Needed no attacker - any deploy triggered it.
+- **A Job's claimed route was not bound to the peer that delivered it**, nor was an
+  agent's type, nor was an instruction bound to the portal whose authority it claimed.
+- **`op-slurm` applied no managed-object guard to any mutation**, so a peer-chosen
+  `local_group` naming any real Slurm account had its limits rewritten.
+- **`op-localaccount` could add an account to a privileged system group** (the
+  `docker.system` → `docker` collision).
+- **`op-filesystem` followed symlinks when creating and chowning directories**, so a
+  writable path component could redirect a root-owned operation outside the managed
+  tree. Paths are now verified to resolve inside a configured volume root at operation
+  time, and ownership is applied to a file descriptor opened `O_NOFOLLOW`.
+- **Relay envelopes were not bound to the connection they arrived on**, letting any
+  direct peer churn a relayed pair's session.
+- **IPv4/IPv6 truncation defeated every IP allow-list**, and the bridge's rate-limit
+  bypass was still open (the left-most `X-Forwarded-For` entry is client-supplied).
+- **Unchecked `u64` arithmetic** in `Usage`/`StorageSize` could silently corrupt a
+  billed total; `Allocation` accepted `"NaN"` and `"inf"`. Release builds now set
+  `overflow-checks = true`.
+- Boards, jobs, caches, nonce stores, connection slots and message sizes are all now
+  bounded - previously a peer could grow each without limit. Slurm and FreeIPA cache
+  eviction is targeted rather than wholesale, so a stale entry no longer forces every
+  project to re-query `slurmctld`.
+- A stalled handshake held its connection slot indefinitely; there was no WebSocket
+  message size limit; the message-exchange overload recovery was dead code.
+- Mapping targets permitted whitespace and separators; `PortalIdentifier` never
+  received the identifier allow-list; date parsing and arithmetic were unbounded.
+- Config and invite files containing key material are written atomically and
+  owner-only, including the bridge invite that a previous fix missed. Key and salt
+  lengths are validated at import, and `Key`'s `Debug` no longer prints its bytes.
+- `trusted_proxy` and client `ip` now also accept the plain comma-separated string
+  syntax the documentation describes, and a malformed value reports the specific error
+  rather than "did not match any variant of untagged enum".
 
 ### Changed
 
-- `templemeads::agent::instance::run` now re-checks portal ownership on receipt.
-  An Instance whose Jobs are delegated by another agent rather than routed down
-  from the owning portal should use the new `instance::run_delegated` instead -
-  `op-cloudaccount` does.
-- `paddington::config::save` now takes `&Path` rather than `&PathBuf`, and no
-  longer creates the parent directory separately (`write_secret_file` does it,
-  owner-only). Callers passing a `&PathBuf` are unaffected.
-- Identifier-component validation now lives in a new `templemeads::validate`
-  module and is shared with `greatwestern`, rather than being defined privately
-  in `greatwestern::grammar`. `templemeads::validate::validate_mapping_target`
-  is the mapping-target variant (same allow-list, plus an interior `.`).
-- Lints are now declared once in a `[workspace.lints]` table in the root
-  `Cargo.toml` and inherited by all 19 member crates, rather than repeated as
-  per-crate attributes. `clippy::indexing_slicing` and `clippy::dbg_macro` are
-  now denied alongside the existing `unwrap_used`/`expect_used`, plus
-  `unsafe_code = "forbid"` and `unused_crate_dependencies`. A new `clippy.toml`
-  exempts test code. Enabling `indexing_slicing` found one non-test violation:
-  `impl Index<usize> for Destinations`, which existed only to offer a panicking
-  accessor and had no callers - it has been removed, so use
-  `Destinations::get`.
-- `make test` no longer passes `--lib`, which had silently skipped every test in
-  the agent binary crates. It (and CI) now use `--all-targets`.
-- CI now runs `cargo audit --deny warnings` as a separate job, and its `clippy`
-  step is `--all-targets --all-features -- -D warnings` so new warnings fail the
-  build rather than being advisory. `make audit` runs the same scan locally.
-- `make lint` and CI also run the new `scripts/check-secret-writes.sh`, which
-  asserts that no bare `fs::write` appears outside a small annotated allow-list.
-  Files containing key material must go through
-  `paddington::config::write_secret_file`; two rounds of review found the same
-  regression independently, so it is now checked structurally.
-- `docs/specifications/bridge-api.md` gains **§0 — Deployment requirement: the
-  bridge is not internet-facing** (finding R32), stating that `op-bridge` must run on
-  a trusted network (private Kubernetes/container network or loopback) or behind a
-  TLS-terminating reverse proxy. It records the design intent - `op-portal` holds the
-  single internet-facing WebSocket surface, `op-bridge` holds the HTTP control
-  surface on the private side, so the portal never needs both - and the three
-  consequences: bodies and responses are cleartext with the HMAC covering the request
-  direction only, there is no pre-header read timeout, and the API key authenticates
-  the portal software rather than individual users.
-- `ServiceConfig::add_client` and `add_relayed_client` take an extra
-  `agent_type: &Option<String>` (the expected type of the client being added),
-  and `ClientConfig::new`/`new_relayed` likewise. `Invite` gained
-  `with_agent_type`/`agent_type`, and `ServerConfig::from_invite` populates the
-  expected type from it.
-- The `OPENPORTAL_ALLOW_INVALID_SSL_CERTS` rule is now implemented once, in
-  `templemeads::validate::allow_invalid_ssl_certs`, rather than duplicated in
-  `op-bridge` and `op-freeipa`. It fails closed on anything but the literal
-  `true`.
+- Lints are declared once in `[workspace.lints]` and inherited by all crates.
+  `clippy::indexing_slicing` and `dbg_macro` join `unwrap_used`/`expect_used` as
+  denied; `unsafe_code` is forbidden. `impl Index<usize> for Destinations` is removed -
+  use `Destinations::get`.
+- `make test` no longer passes `--lib`, which silently skipped every test in the agent
+  binary crates. CI gained `cargo audit`, fails on clippy warnings, and runs
+  `scripts/check-secret-writes.sh`.
+- `templemeads::agent::instance::run` re-checks portal ownership on receipt. An
+  Instance whose Jobs are delegated by another agent should use the new
+  `instance::run_delegated` - `op-cloudaccount` does.
+- Identifier validation moved to a shared `templemeads::validate` module, as did the
+  single `OPENPORTAL_ALLOW_INVALID_SSL_CERTS` rule.
+- `docs/specifications/bridge-api.md` gains **§0**, stating normatively that the
+  bridge must not be internet-facing and why that is a design choice.
+- API changes: `ServiceConfig::add_client`/`add_relayed_client` and
+  `ClientConfig::new`/`new_relayed` take an expected agent type; `Invite` gained
+  `with_agent_type`/`agent_type`; `paddington::config::save` takes `&Path`;
+  `op-filesystem`'s `create_dir`/`create_link`/`remove_link`/`recycle_dir` take the
+  configured volume roots; `RelayEnvelope` carries a `kind` tag (a wire change - the
+  relay has no production deployments).
 
 ## [0.90.0] - 2026-07-24
 

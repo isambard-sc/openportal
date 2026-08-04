@@ -679,13 +679,58 @@ impl std::fmt::Display for ProjectStorageReport {
 
 /// A portal-level storage report containing per-project storage reports for
 /// all projects associated with a portal.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+/// Deserialised via a validating impl rather than the derive, so a wire-supplied report
+/// cannot carry map keys that disagree with its own `portal` field - `set_report`
+/// enforces that on the programmatic path. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct StorageReport {
     #[ts(as = "String")]
     portal: PortalIdentifier,
     #[ts(as = "HashMap<String, ProjectStorageReport>")]
     reports: HashMap<ProjectIdentifier, ProjectStorageReport>,
+}
+
+/// The wire shape of a [`StorageReport`] - identical to what the derive produced.
+#[derive(Deserialize)]
+struct StorageReportRepr {
+    portal: PortalIdentifier,
+    reports: HashMap<ProjectIdentifier, ProjectStorageReport>,
+}
+
+impl TryFrom<StorageReportRepr> for StorageReport {
+    type Error = Error;
+
+    fn try_from(repr: StorageReportRepr) -> Result<Self, Self::Error> {
+        let mut report = StorageReport::new(&repr.portal);
+
+        for (project, project_report) in repr.reports {
+            if project != *project_report.project() {
+                return Err(Error::InvalidState(format!(
+                    "Storage report is keyed on project {} but the report it holds is \
+                     for {}",
+                    project,
+                    project_report.project()
+                )));
+            }
+
+            report.set_report(project_report)?;
+        }
+
+        Ok(report)
+    }
+}
+
+impl<'de> Deserialize<'de> for StorageReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StorageReportRepr::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl StorageReport {

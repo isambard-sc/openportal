@@ -1494,6 +1494,21 @@ pub async fn configure_proxy(config: &ServiceConfig) -> Result<(), Error> {
     // keep only one of them. The relayed agents enforce the same rule in
     // `configure`; enforcing it here too is what keeps the name unambiguous
     // end-to-end. See `docs/specifications/security-review-2.md` (finding R33).
+    let zones = proxy_client_zones(config)?;
+
+    let mut state = PROXY_CLIENT_ZONES.write().await;
+    *state = zones;
+
+    Ok(())
+}
+
+/// The name -> zone map [`configure_proxy`] installs, or an error if two clients
+/// share a name.
+///
+/// Split out so the uniqueness rule is testable without mutating the global
+/// `PROXY_CLIENT_ZONES` - which another test asserts on, so testing through
+/// `configure_proxy` made the two race.
+fn proxy_client_zones(config: &ServiceConfig) -> Result<HashMap<String, String>, Error> {
     let mut zones: HashMap<String, String> = HashMap::new();
 
     for client in config.clients() {
@@ -1511,10 +1526,7 @@ pub async fn configure_proxy(config: &ServiceConfig) -> Result<(), Error> {
         zones.insert(client.name(), client.zone());
     }
 
-    let mut state = PROXY_CLIENT_ZONES.write().await;
-    *state = zones;
-
-    Ok(())
+    Ok(zones)
 }
 
 ///
@@ -1995,8 +2007,8 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn test_a_proxy_refuses_two_clients_sharing_a_name() {
+    #[test]
+    fn test_a_proxy_refuses_two_clients_sharing_a_name() {
         // A relayed peer is addressed by name alone - in the envelope and in the
         // `allow` policy - so the same name in two zones is ambiguous, and this map
         // used to silently keep only one of them. Both the proxy and the relayed
@@ -2019,15 +2031,17 @@ mod tests {
             .unwrap_or_else(|e| unreachable!("add brics: {:?}", e));
 
         // distinct names in different zones are fine
-        assert!(configure_proxy(&proxy).await.is_ok());
+        assert!(proxy_client_zones(&proxy).is_ok());
 
         // ...but the same name in a second zone is refused
         proxy
             .add_client("airr", "127.0.0.1", &Some("elsewhere".to_string()), &None)
             .unwrap_or_else(|e| unreachable!("add duplicate airr: {:?}", e));
 
-        let err = configure_proxy(&proxy).await;
-        assert!(err.is_err(), "a duplicate client name must be refused");
+        assert!(
+            proxy_client_zones(&proxy).is_err(),
+            "a duplicate client name must be refused"
+        );
     }
 
     #[test]

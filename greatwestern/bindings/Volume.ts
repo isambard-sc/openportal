@@ -2,5 +2,12 @@
 
 /**
  * Identifies a storage volume (e.g., "home", "scratch", "project")
+ *
+ * `Volume` is a wire-deserialised `HashMap` key, and the `transparent` derive used
+ * to bypass [`Volume::parse`] entirely - so a name that `parse` rejects (empty, or
+ * containing a space) could still arrive over the wire. Consumers look the name up
+ * in the configured volume map, so an unknown one errors out downstream, which is
+ * why this is hardening rather than a vulnerability. `try_from` closes it at the
+ * boundary instead. See `docs/specifications/security-review-2.md` (finding R33).
  */
 export type Volume = string;

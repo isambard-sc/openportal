@@ -496,6 +496,14 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// than an unbounded backlog. See finding R24.
 const MAX_CONCURRENT_REQUESTS: usize = 512;
 
+/// Upper bound on distinct source addresses tracked for rate limiting.
+///
+/// One entry per address, never pruned except probabilistically, meant
+/// unauthenticated traffic from many addresses grew this without limit. Well above
+/// any real client population for a bridge, which serves one portal application.
+/// See finding R33.
+const MAX_RATE_LIMIT_ENTRIES: usize = 8192;
+
 /// Deadline for handling one request, measured from the point axum has parsed the
 /// headers. This also bounds the slow-body half of a slowloris, because the `Bytes`
 /// extractor runs inside the handler and therefore inside this deadline.
@@ -565,6 +573,12 @@ const NONCE_TTL_SECONDS: i64 = 30;
 /// defence-in-depth backstop that should never be reached in normal operation.
 /// See docs/specifications/security-review.md (finding F11).
 const MAX_NONCE_ENTRIES: usize = 100_000;
+
+/// Size at which expired nonces are purged. Below this the store is small enough
+/// that scanning it is not worth doing on a request path holding a global lock -
+/// correctness comes from the per-entry TTL check, not from the purge. See finding
+/// R33.
+const NONCE_PURGE_THRESHOLD: usize = 4096;
 
 /// Parse the forwarded client IP from `X-Forwarded-For` or `X-Real-IP`. Only
 /// consulted for a request whose TCP peer is a configured trusted proxy - never
@@ -664,12 +678,18 @@ async fn resolve_client_ip_middleware(
 /// Read the client IP resolved by `resolve_client_ip_middleware`. Never reads
 /// `X-Forwarded-For`/`X-Real-IP` directly - those are only consulted, and only
 /// when trusted, by the middleware above.
-fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
+fn extract_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    // `None` rather than a silent `127.0.0.1` fallback. The header is always stamped
+    // by `resolve_client_ip_middleware`, so its absence means the middleware did not
+    // run - a wiring error - and defaulting merged every such request into the
+    // loopback rate-limit bucket, where it shares a quota with genuine local traffic.
+    // Failing the request makes the misconfiguration visible instead. Not a spoofing
+    // concern either way (the header cannot be supplied by a client). See
+    // docs/specifications/security-review-2.md (finding R33).
     headers
         .get(RESOLVED_CLIENT_IP_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<IpAddr>().ok())
-        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
 
 ///
@@ -683,16 +703,39 @@ async fn verify_headers(
     function: &str,
     body: &[u8],
 ) -> Result<(), AppError> {
+    // A non-UTF-8 body cannot be signed, so it can never authenticate - but it used
+    // to surface as a 500 from `sign_api_call`'s `?`, while every other pre-auth
+    // rejection is a 4xx. That is an unauthenticated behavioural difference, and 400
+    // is the correct status for a malformed request. Checked here so the shape of the
+    // refusal does not depend on which layer noticed. See finding R33.
+    if std::str::from_utf8(body).is_err() {
+        tracing::warn!("Rejecting a request whose body is not valid UTF-8");
+        return Err(AppError(
+            anyhow::anyhow!("Request body must be valid UTF-8"),
+            Some(StatusCode::BAD_REQUEST),
+        ));
+    }
+
     // Extract client IP for rate limiting
-    let client_ip = extract_client_ip(headers);
+    let Some(client_ip) = extract_client_ip(headers) else {
+        tracing::error!(
+            "No resolved client address on this request - `resolve_client_ip_middleware` \
+             did not run. Refusing rather than attributing it to loopback."
+        );
+
+        return Err(AppError(
+            anyhow::anyhow!("Could not determine the client address"),
+            Some(StatusCode::INTERNAL_SERVER_ERROR),
+        ));
+    };
 
     // Check rate limit first (before expensive crypto operations)
     state.rate_limiter.check_rate_limit(client_ip).await?;
 
-    // randomly clean up old rate limit entries (1% chance)
-    if rand::random::<u8>() < 3 {
-        state.rate_limiter.cleanup_old_entries().await;
-    }
+    // (rate-limit entries are pruned inside `check_rate_limit` when the table grows
+    // past `MAX_RATE_LIMIT_ENTRIES` - deterministic, and inside the lock it already
+    // holds. The old probabilistic sweep here claimed 1% but was 1.17%, and ran an
+    // O(n) `retain` on the pre-authentication path. See finding R33.)
 
     let key = match headers.get("Authorization") {
         Some(key) => key,
@@ -806,14 +849,18 @@ async fn verify_headers(
     if let Some(ref nonce_value) = nonce {
         let mut nonce_store = state.nonce_store.lock().await;
 
-        // Purge expired nonces first so the check and the size cap below both
-        // work against current state.
-        let cutoff = now - Duration::seconds(NONCE_TTL_SECONDS);
-        nonce_store.retain(|_, timestamp| *timestamp > cutoff);
+        let ttl = Duration::seconds(NONCE_TTL_SECONDS);
 
         // Reject a nonce we have seen within the TTL window (replay).
+        //
+        // Checked *before* any purge: the per-entry TTL comparison here is what makes
+        // the answer correct, so purging is purely memory management and need not run
+        // on every request. It used to - an O(n) `retain` per request under one global
+        // mutex, with the store reaching ~30k entries at the allowed rate, so every
+        // request scanned the whole map serialised behind that lock. See
+        // docs/specifications/security-review-2.md (finding R33).
         if let Some(last_used) = nonce_store.get(nonce_value) {
-            if now - *last_used < Duration::seconds(NONCE_TTL_SECONDS) {
+            if now - *last_used < ttl {
                 tracing::warn!("Replay attack detected: nonce {} already used", nonce_value);
                 return Err(AppError(
                     anyhow::anyhow!("Nonce has already been used (replay attack)"),
@@ -822,17 +869,42 @@ async fn verify_headers(
             }
         }
 
-        // Defence-in-depth: never let the store grow without bound, even under
-        // a flood of authenticated requests.
-        if nonce_store.len() >= MAX_NONCE_ENTRIES && !nonce_store.contains_key(nonce_value) {
-            tracing::error!(
-                "Nonce store is full ({} entries) - rejecting request",
+        // Purge only when the store is big enough for it to be worth doing.
+        if nonce_store.len() >= NONCE_PURGE_THRESHOLD {
+            let cutoff = now - ttl;
+            let before = nonce_store.len();
+            nonce_store.retain(|_, timestamp| *timestamp > cutoff);
+            tracing::debug!(
+                "Purged {} expired nonces ({} remain)",
+                before - nonce_store.len(),
                 nonce_store.len()
             );
-            return Err(AppError(
-                anyhow::anyhow!("Server nonce store is full; please retry shortly"),
-                Some(StatusCode::SERVICE_UNAVAILABLE),
-            ));
+        }
+
+        // If it is still full, evict the oldest entries rather than refusing the
+        // request. Returning 503 here failed *every nonced* request while leaving
+        // nonce-**less** ones working, which pushed clients towards the unprotected
+        // mode - the opposite of what this store exists to encourage (cf. R29).
+        // An evicted nonce is at worst replayable within its remaining TTL, which is
+        // strictly better than turning the replay defence off wholesale.
+        while nonce_store.len() >= MAX_NONCE_ENTRIES && !nonce_store.contains_key(nonce_value) {
+            let oldest = nonce_store
+                .iter()
+                .min_by_key(|(_, timestamp)| **timestamp)
+                .map(|(k, _)| k.clone());
+
+            match oldest {
+                Some(oldest) => {
+                    tracing::warn!(
+                        "Nonce store is full ({} entries) - evicting the oldest nonce to \
+                         make room. Something is generating nonces far faster than \
+                         expected.",
+                        nonce_store.len()
+                    );
+                    nonce_store.remove(&oldest);
+                }
+                None => break,
+            }
         }
 
         // Store nonce with current timestamp
@@ -866,6 +938,41 @@ impl RateLimiter {
         let mut attempts = self.attempts.lock().await;
         let now = Utc::now();
 
+        // Prune expired entries whenever the map is larger than a real client
+        // population could explain, rather than relying on a probabilistic caller
+        // (`rand::random::<u8>() < 3`, which is 1.17% and ran on the pre-auth path).
+        // An entry is only useful for `window_seconds`, so anything older is dead
+        // weight - and without this the map grew once per distinct source address,
+        // unbounded. See docs/specifications/security-review-2.md (finding R33).
+        if attempts.len() >= MAX_RATE_LIMIT_ENTRIES {
+            let cutoff = now - Duration::seconds(self.window_seconds * 2);
+            let before = attempts.len();
+            attempts.retain(|_, (_, timestamp)| *timestamp > cutoff);
+
+            if attempts.len() >= MAX_RATE_LIMIT_ENTRIES {
+                // Everything is live, so we are genuinely seeing this many distinct
+                // addresses. Refuse rather than grow; the alternative is unbounded
+                // memory driven entirely by unauthenticated traffic.
+                tracing::warn!(
+                    "Rate-limit table is full ({} live entries) - refusing new source \
+                     addresses until the window rolls over.",
+                    attempts.len()
+                );
+
+                if !attempts.contains_key(&ip) {
+                    return Err(AppError(
+                        anyhow::anyhow!("Too many distinct clients"),
+                        Some(StatusCode::TOO_MANY_REQUESTS),
+                    ));
+                }
+            } else {
+                tracing::debug!(
+                    "Pruned {} expired rate-limit entries",
+                    before - attempts.len()
+                );
+            }
+        }
+
         let entry = attempts.entry(ip).or_insert((0, now));
 
         // Check if we're in a new time window
@@ -886,7 +993,8 @@ impl RateLimiter {
         }
     }
 
-    // Periodic cleanup of old entries (optional, can be called periodically)
+    /// Prune entries whose window has long expired. Retained for tests and for any
+    /// future periodic caller; the live path prunes inside `check_rate_limit`.
     #[allow(dead_code)]
     async fn cleanup_old_entries(&self) {
         let mut attempts = self.attempts.lock().await;
@@ -1643,11 +1751,9 @@ mod tests {
         headers.insert("X-Forwarded-For", HeaderValue::from_static("1.2.3.4"));
         headers.insert("X-Real-IP", HeaderValue::from_static("5.6.7.8"));
 
-        // No resolved header set -> safe localhost fallback, not the spoofed IPs.
-        assert_eq!(
-            extract_client_ip(&headers),
-            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-        );
+        // No resolved header set -> `None`, so the request is refused rather than
+        // attributed to loopback (finding R33). Notably *not* the spoofed IPs.
+        assert_eq!(extract_client_ip(&headers), None);
 
         // With the resolved header set (as the middleware would), that value wins.
         headers.insert(
@@ -1656,9 +1762,7 @@ mod tests {
         );
         assert_eq!(
             extract_client_ip(&headers),
-            "10.0.0.9"
-                .parse::<IpAddr>()
-                .unwrap_or_else(|e| unreachable!("Could not parse IP: {:?}", e))
+            "10.0.0.9".parse::<IpAddr>().ok()
         );
     }
 

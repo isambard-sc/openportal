@@ -305,6 +305,17 @@ impl PathConfig {
         &self.permission
     }
 
+    /// The configured root of this path - every path this `PathConfig` produces is
+    /// `{root}/{expanded_subpath}`.
+    ///
+    /// Exposed so the filesystem agent can verify at operation time that the path it
+    /// is about to create, chown or recycle really does resolve inside this root -
+    /// see `filesystem::clean_and_check_path` and
+    /// `docs/specifications/security-review-2.md` (finding R33).
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
     pub fn project_path(&self, mapping: &ProjectMapping) -> Result<PathBuf, Error> {
         let project_name = mapping.project().project();
 

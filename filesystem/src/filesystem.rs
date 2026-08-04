@@ -157,7 +157,107 @@ pub async fn clean_and_check_permissions(permissions: &str) -> Result<u32, Error
 /// such as /etc, /var, /usr, /bin, /sbin, /lib, /lib64, /boot, /root,
 /// /dev, /proc, /sys, /run, /tmp, or /.
 ///
-pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<PathBuf, Error> {
+/// Resolve `path` as far as it exists, and return the fully-resolved form.
+///
+/// The leaf usually does *not* exist yet - that is the point of `create_dir` - so
+/// canonicalising `path` directly would fail. Instead canonicalise the deepest
+/// ancestor that does exist and re-append the components below it. Any symlink in the
+/// existing prefix is therefore resolved, which is what the root check below needs.
+fn resolve_deepest_existing(path: &Path) -> Result<PathBuf, Error> {
+    let mut remaining: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+
+    loop {
+        match current.canonicalize() {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in remaining.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(_) => {
+                let Some(name) = current.file_name().map(|n| n.to_owned()) else {
+                    // Walked all the way up without finding anything that exists.
+                    return Err(Error::State(format!(
+                        "Could not resolve any existing ancestor of '{}'",
+                        path.to_string_lossy()
+                    )));
+                };
+
+                remaining.push(name);
+
+                match current.parent() {
+                    Some(parent) => current = parent.to_path_buf(),
+                    None => {
+                        return Err(Error::State(format!(
+                            "Could not resolve any existing ancestor of '{}'",
+                            path.to_string_lossy()
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Assert that `path` really resolves inside `root`, canonicalising both **at the
+/// time of the operation**.
+///
+/// The deny-list below checks the *unresolved* string, so with `check_exists: false`
+/// (which every path that gets written to used to use) a symlink anywhere in the path
+/// silently relocated the operation. Since `chown` and `set_permissions` follow
+/// symlinks, that was a route to root handing ownership of a directory outside the
+/// tree to an unprivileged user.
+///
+/// Checked live rather than from a set of roots canonicalised at startup, because the
+/// volume has to be mounted for the operation to succeed anyway - so there is no
+/// automounter to race, and no stale pre-mount resolution to worry about.
+///
+/// This is deliberately paired with the `AT_SYMLINK_NOFOLLOW` ownership change in
+/// `create_dir_native`: this check catches a symlink that is *already* in place
+/// (misconfiguration, or a writable volume root), and nofollow catches one planted
+/// between this check and the operation. Neither alone is sufficient. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+async fn assert_within_root(path: &Path, root: &Path) -> Result<PathBuf, Error> {
+    let canonical_root = root.canonicalize().map_err(|e| {
+        Error::State(format!(
+            "Could not resolve the configured volume root '{}': {}. The volume must \
+             exist and be mounted before directories can be managed inside it.",
+            root.to_string_lossy(),
+            e
+        ))
+    })?;
+
+    let resolved = resolve_deepest_existing(path)?;
+
+    if !resolved.starts_with(&canonical_root) {
+        tracing::error!(
+            "Refusing to operate on '{}': it resolves to '{}', which is outside the \
+             configured volume root '{}' (which resolves to '{}'). A symlink in the \
+             path, or a misconfigured root, would put this outside the managed tree.",
+            path.to_string_lossy(),
+            resolved.to_string_lossy(),
+            root.to_string_lossy(),
+            canonical_root.to_string_lossy()
+        );
+
+        return Err(Error::State(format!(
+            "The path '{}' resolves to '{}', outside the volume root '{}'",
+            path.to_string_lossy(),
+            resolved.to_string_lossy(),
+            canonical_root.to_string_lossy()
+        )));
+    }
+
+    Ok(resolved)
+}
+
+pub async fn clean_and_check_path(
+    path: &Path,
+    root: Option<&Path>,
+    check_exists: bool,
+) -> Result<PathBuf, Error> {
     let mut path = path.to_owned();
 
     // Reject relative paths and any '..' components up front (finding F15), so
@@ -196,6 +296,14 @@ pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<Pat
         )));
     }
 
+    // Verify the path really resolves inside its configured volume root, resolving
+    // symlinks live - see `assert_within_root`. `None` means the caller has no root to
+    // check against (the recycle-internal paths, which are derived from an
+    // already-checked path), and only the deny-list below applies.
+    if let Some(root) = root {
+        path = assert_within_root(&path, root).await?;
+    }
+
     // make sure the path is not somewhere sensitive
     if path.starts_with("/etc")
         || path.starts_with("/var")
@@ -224,11 +332,12 @@ pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<Pat
 
 pub async fn create_dir(
     path: &std::path::Path,
+    root: &std::path::Path,
     username: &str,
     groupname: &str,
     permissions: &str,
 ) -> Result<(), Error> {
-    let path = clean_and_check_path(path, false).await?;
+    let path = clean_and_check_path(path, Some(root), false).await?;
 
     // convert the permissions into a u32
     let permissions = clean_and_check_permissions(permissions).await?;
@@ -357,25 +466,72 @@ async fn create_dir_native(
         }
     };
 
-    // create the directory
+    // Create the directory.
+    //
+    // **This must stay `create_dir`, not `create_dir_all`.** Non-recursive creation
+    // fails with `EEXIST` if the final component is already a symlink, which is what
+    // stops an unprivileged user who can write to this directory's parent from
+    // pre-planting a symlink and having the `chown` below hand them ownership of its
+    // target. `create_dir_all` traverses symlinked components happily, so making this
+    // recursive - an easy-looking fix for "parent doesn't exist" - would reopen a
+    // local privilege escalation. Create parents explicitly instead, each one checked.
+    // See docs/specifications/security-review-2.md (finding R33).
     std::fs::create_dir(path)
         .with_context(|| format!("Could not create directory '{}'", path.to_string_lossy()))?;
 
-    // set the ownership and permissions
-    nix::unistd::chown(path, Some(uid), Some(gid)).with_context(|| {
+    // Set the ownership and permissions **without following symlinks**.
+    //
+    // `nix::unistd::chown` and `std::fs::set_permissions` both follow, so if anything
+    // replaced `path` between the create above and here, ownership of the symlink's
+    // *target* would be transferred. `create_dir` succeeding means `path` was a real
+    // directory a moment ago, and the nofollow variants mean that is still the thing
+    // being modified - closing the race that the resolve-then-act check in
+    // `assert_within_root` can only narrow. See finding R33.
+    // Open the directory we just created with `O_NOFOLLOW | O_DIRECTORY` and operate
+    // on the **file descriptor**, so the target cannot be swapped underneath us at
+    // all - stronger than a nofollow path operation, which still resolves the path
+    // once more. `O_NOFOLLOW` makes the open itself fail if `path` is a symlink.
+    let dir = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(path)
+            .with_context(|| {
+                format!(
+                    "Could not open the newly created directory '{}' to set its \
+                     ownership - it is not a directory, or it is a symlink",
+                    path.to_string_lossy()
+                )
+            })?
+    };
+
+    nix::unistd::fchown(&dir, Some(uid), Some(gid)).with_context(|| {
         format!(
             "Could not set ownership on directory '{}'",
             path.to_string_lossy()
         )
     })?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(permissions)).with_context(
-        || {
+
+    // `permissions` is already validated by `clean_and_check_permissions`, so it fits
+    // a mode_t; `try_into` rather than a cast so a future widening cannot silently
+    // truncate it.
+    let mode_bits: nix::libc::mode_t = permissions.try_into().with_context(|| {
+        format!(
+            "Permissions {:o} do not fit a mode_t for directory '{}'",
+            permissions,
+            path.to_string_lossy()
+        )
+    })?;
+
+    nix::sys::stat::fchmod(&dir, nix::sys::stat::Mode::from_bits_truncate(mode_bits))
+        .with_context(|| {
             format!(
                 "Could not set permissions on directory '{}'",
                 path.to_string_lossy()
             )
-        },
-    )?;
+        })?;
 
     Ok(())
 }
@@ -428,7 +584,9 @@ async fn create_dir_remote(
 
     // chown user:group path
     let owner = format!("{}:{}", username, groupname);
-    let (exit_code, _, stderr) = run_remote(prefix, &["chown", &owner, &path_str]).await?;
+    // `-h` so a symlink is never followed - the remote counterpart of the
+    // `O_NOFOLLOW` open in `create_dir_native`. See finding R33.
+    let (exit_code, _, stderr) = run_remote(prefix, &["chown", "-h", &owner, &path_str]).await?;
     if exit_code != 0 {
         return Err(Error::State(format!(
             "chown '{}' '{}' failed: exit code {}, stderr: {}",
@@ -449,18 +607,18 @@ async fn create_dir_remote(
     Ok(())
 }
 
-pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
+pub async fn create_link(path: &Path, link: &Path, root: &Path) -> Result<(), Error> {
     match get_exec_prefix() {
         Some(prefix) => {
             // In remote mode skip the local path-existence check; validate
             // only the security constraints (no /etc, /tmp, …).
-            let link = clean_and_check_path(link, false).await?;
-            let path = clean_and_check_path(path, false).await?;
+            let link = clean_and_check_path(link, Some(root), false).await?;
+            let path = clean_and_check_path(path, Some(root), false).await?;
             create_link_remote(&path, &link, prefix).await
         }
         None => {
-            let link = clean_and_check_path(link, false).await?;
-            let path = clean_and_check_path(path, true).await?;
+            let link = clean_and_check_path(link, Some(root), false).await?;
+            let path = clean_and_check_path(path, Some(root), true).await?;
             create_link_native(&path, &link).await
         }
     }
@@ -471,8 +629,8 @@ pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
 /// not a symlink. In prefix/remote mode the check and removal run on the
 /// remote system via the exec prefix.
 ///
-pub async fn remove_link(link: &Path) -> Result<(), Error> {
-    let link = clean_and_check_path(link, false).await?;
+pub async fn remove_link(link: &Path, root: &Path) -> Result<(), Error> {
+    let link = clean_and_check_path(link, Some(root), false).await?;
 
     match get_exec_prefix() {
         Some(prefix) => {
@@ -711,8 +869,8 @@ async fn restore_from_recycle_remote(
 /// This is a non-destructive way to "remove" directories - they can be restored later
 /// or permanently deleted by a separate cleanup process.
 ///
-pub async fn recycle_dir(path: &Path) -> Result<(), Error> {
-    let path = clean_and_check_path(path, false).await?;
+pub async fn recycle_dir(path: &Path, root: &Path) -> Result<(), Error> {
+    let path = clean_and_check_path(path, Some(root), false).await?;
 
     match get_exec_prefix() {
         Some(prefix) => recycle_dir_remote(&path, prefix).await,

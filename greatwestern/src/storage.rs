@@ -623,11 +623,39 @@ impl std::fmt::Display for Quota {
 }
 
 /// Identifies a storage volume (e.g., "home", "scratch", "project")
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash, TS)]
-#[serde(transparent)]
+///
+/// `Volume` is a wire-deserialised `HashMap` key, and the `transparent` derive used
+/// to bypass [`Volume::parse`] entirely - so a name that `parse` rejects (empty, or
+/// containing a space) could still arrive over the wire. Consumers look the name up
+/// in the configured volume map, so an unknown one errors out downstream, which is
+/// why this is hardening rather than a vulnerability. `try_from` closes it at the
+/// boundary instead. See `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Hash, TS)]
+#[serde(try_from = "String")]
 #[ts(export, type = "string")]
 pub struct Volume {
     name: String,
+}
+
+impl TryFrom<String> for Volume {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Volume::parse(&value)
+    }
+}
+
+/// Serialised as a bare string, exactly as `#[serde(transparent)]` did - the wire
+/// format is unchanged. Hand-written because `transparent` and `try_from` cannot be
+/// combined, and `try_from` is what routes deserialisation through
+/// [`Volume::parse`].
+impl Serialize for Volume {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.name)
+    }
 }
 
 impl Volume {
@@ -665,6 +693,46 @@ impl std::fmt::Display for Volume {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_a_volume_name_from_the_wire_goes_through_parse() {
+        // `Volume` is a wire-deserialised HashMap key and the `transparent` derive
+        // bypassed `parse` entirely, so a name `parse` rejects could still arrive.
+        // See finding R33.
+        assert_eq!(
+            serde_json::from_str::<Volume>(r#""home""#).ok(),
+            Volume::parse("home").ok()
+        );
+
+        for bad in [r#""""#, r#"" ""#, r#""two words""#, r#""a b""#] {
+            assert!(
+                serde_json::from_str::<Volume>(bad).is_err(),
+                "{} must be refused on the wire, as `parse` refuses it",
+                bad
+            );
+        }
+
+        // ...and the serialised form is still a bare string, so the wire format is
+        // unchanged.
+        let volume = match Volume::parse("scratch") {
+            Ok(v) => v,
+            Err(e) => unreachable!("parse: {:?}", e),
+        };
+        assert_eq!(
+            serde_json::to_string(&volume).unwrap_or_default(),
+            r#""scratch""#
+        );
+
+        // It is used as a map key, so round-tripping a map must work too.
+        let mut map = std::collections::HashMap::new();
+        map.insert(volume, 1u32);
+        let json = serde_json::to_string(&map).unwrap_or_default();
+        assert_eq!(json, r#"{"scratch":1}"#);
+        assert!(serde_json::from_str::<std::collections::HashMap<Volume, u32>>(&json).is_ok());
+        assert!(
+            serde_json::from_str::<std::collections::HashMap<Volume, u32>>(r#"{"a b":1}"#).is_err()
+        );
+    }
 
     #[test]
     fn test_storage_size_arithmetic_saturates_and_survives_a_zero_divisor() {

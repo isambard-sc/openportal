@@ -193,6 +193,18 @@ impl ProjectStorageReport {
 
     /// Record the mapping from a portal user to their local username.
     pub fn add_mapping(&mut self, mapping: &UserMapping) -> Result<(), Error> {
+        // Mirror `ProjectUsageReport::add_mapping`'s guard. This returned `Result`,
+        // and so advertised a check, while inserting whatever it was given - so a
+        // mapping for a different project silently landed in this report's user list.
+        // See `docs/specifications/security-review-2.md` (finding R33).
+        if mapping.user().project_identifier() != *self.project() {
+            return Err(Error::InvalidState(format!(
+                "Mapping for wrong project: {}. This report is for {}",
+                mapping,
+                self.project()
+            )));
+        }
+
         self.users
             .insert(mapping.user().clone(), mapping.local_user().to_string());
         Ok(())

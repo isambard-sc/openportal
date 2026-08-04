@@ -259,6 +259,7 @@ async fn create_project_dirs_and_links(
                     tracing::info!("    - Directory path to create: {}", path.to_string_lossy());
                     filesystem::create_dir(
                         &path,
+                        std::path::Path::new(path_config.root()),
                         "root",
                         mapping.local_group(),
                         path_config.permission(),
@@ -279,7 +280,12 @@ async fn create_project_dirs_and_links(
             if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
                 tracing::info!("    - Link path to create: {}", link_path.to_string_lossy());
                 let dir_path = path_config.path(mapping.clone().into())?;
-                filesystem::create_link(&dir_path, &link_path).await?;
+                filesystem::create_link(
+                    &dir_path,
+                    &link_path,
+                    std::path::Path::new(path_config.root()),
+                )
+                .await?;
             }
         }
     }
@@ -297,6 +303,7 @@ async fn create_project_dirs_and_links(
                     );
                     filesystem::create_dir(
                         &path,
+                        std::path::Path::new(path_config.root()),
                         "root",
                         mapping.local_group(),
                         path_config.permission(),
@@ -365,6 +372,7 @@ async fn create_user_dirs(
                     tracing::info!("    - User directory to create: {}", path.to_string_lossy());
                     filesystem::create_dir(
                         &path,
+                        std::path::Path::new(path_config.root()),
                         mapping.local_user(),
                         mapping.local_group(),
                         path_config.permission(),
@@ -424,13 +432,15 @@ async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
         for path_config in volume_config.path_configs() {
             if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
                 tracing::info!("    - Link path to remove: {}", link_path.to_string_lossy());
-                filesystem::remove_link(&link_path).await?;
+                filesystem::remove_link(&link_path, std::path::Path::new(path_config.root()))
+                    .await?;
             }
 
             match path_config.path(mapping.clone().into()) {
                 Ok(path) => {
                     tracing::info!("    - Directory path to remove: {}", path.to_string_lossy());
-                    filesystem::recycle_dir(&path).await?;
+                    filesystem::recycle_dir(&path, std::path::Path::new(path_config.root()))
+                        .await?;
                 }
                 Err(error) => {
                     tracing::warn!("Could not get path for removal: {}", error);
@@ -446,7 +456,8 @@ async fn remove_project_dirs_and_links(mapping: &ProjectMapping) -> Result<(), E
             match path_config.project_path(mapping) {
                 Ok(path) => {
                     tracing::info!("    - Directory path to remove: {}", path.to_string_lossy());
-                    filesystem::recycle_dir(&path).await?;
+                    filesystem::recycle_dir(&path, std::path::Path::new(path_config.root()))
+                        .await?;
                 }
                 Err(error) => {
                     tracing::warn!("Could not get path for removal: {}", error);
@@ -475,7 +486,8 @@ async fn remove_user_dirs(mapping: &UserMapping) -> Result<(), Error> {
                         "    - Home directory path to remove: {}",
                         path.to_string_lossy()
                     );
-                    filesystem::recycle_dir(&path).await?;
+                    filesystem::recycle_dir(&path, std::path::Path::new(path_config.root()))
+                        .await?;
                 }
                 Err(error) => {
                     tracing::warn!("Could not get path for removal: {}", error);

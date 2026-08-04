@@ -1967,7 +1967,24 @@ impl Link {
             self.url = None;
             Ok(())
         } else {
-            Url::parse(url).map_err(|e| Error::Parse(format!("Invalid URL for link: {}", e)))?;
+            let parsed = Url::parse(url)
+                .map_err(|e| Error::Parse(format!("Invalid URL for link: {}", e)))?;
+
+            // `Url::parse` accepts `javascript:`, `data:` and `file:`. These links are
+            // documented as being for display in a portal UI, so if any consumer
+            // renders one as an anchor those schemes are a stored-XSS or
+            // local-file-read primitive. Restrict to the two schemes a link in a web
+            // UI can legitimately need. See
+            // `docs/specifications/security-review-2.md` (finding R33).
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(Error::Parse(format!(
+                    "Invalid URL for link: scheme '{}' is not allowed - only http and \
+                     https are, because these links are intended to be rendered in a \
+                     portal UI",
+                    parsed.scheme()
+                )));
+            }
+
             self.url = Some(url.to_string());
             Ok(())
         }
@@ -2001,18 +2018,20 @@ impl<'de> Deserialize<'de> for Link {
 
         let helper = LinkHelper::deserialize(deserializer)?;
 
+        // Route through `set_url` rather than re-validating here, so the wire path and
+        // the programmatic path cannot drift - this copy of the validation used to be
+        // a plain `Url::parse` and so did not gain the scheme allow-list. See
+        // `docs/specifications/security-review-2.md` (finding R33).
+        let mut link = Link {
+            id: helper.id,
+            url: None,
+        };
+
         if let Some(url) = &helper.url {
-            if !url.is_empty() {
-                Url::parse(url).map_err(|e| {
-                    serde::de::Error::custom(format!("Invalid URL for link: {}", e))
-                })?;
-            }
+            link.set_url(url).map_err(serde::de::Error::custom)?;
         }
 
-        Ok(Link {
-            id: helper.id,
-            url: helper.url,
-        })
+        Ok(link)
     }
 }
 
@@ -4940,6 +4959,49 @@ mod tests {
                 assert_eq!(usage.seconds(), 3600);
             }
             other => unreachable!("expected SetLocalLimit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_link_urls_are_restricted_to_http_schemes() {
+        // These links are documented as being for display in a portal UI, and
+        // `Url::parse` happily accepts `javascript:`, `data:` and `file:` - a
+        // stored-XSS or local-file-read primitive if any consumer renders one as an
+        // anchor. See finding R33.
+        let mut link = Link::default();
+
+        assert!(link.set_url("https://example.org/award/1").is_ok());
+        assert!(link.set_url("http://example.org/award/1").is_ok());
+
+        // empty clears rather than errors, as before
+        assert!(link.set_url("").is_ok());
+        assert_eq!(link.url(), None);
+
+        for bad in [
+            "javascript:alert(1)",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "file:///etc/passwd",
+            "ftp://example.org/x",
+        ] {
+            assert!(
+                link.set_url(bad).is_err(),
+                "{:?} must be rejected as a link URL",
+                bad
+            );
+        }
+
+        // The wire path must agree with the programmatic one - it used to re-validate
+        // separately with a plain `Url::parse` and so missed the allow-list.
+        assert!(serde_json::from_str::<Link>(r#"{"url":"https://example.org"}"#).is_ok());
+        for bad in [
+            r#"{"url":"javascript:alert(1)"}"#,
+            r#"{"url":"file:///etc/passwd"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Link>(bad).is_err(),
+                "{} must be rejected on the wire too",
+                bad
+            );
         }
     }
 

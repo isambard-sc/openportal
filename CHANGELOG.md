@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.91.0] - 2026-08-04
+
 ### Added
 
 - **A second security review** ([docs/specifications/security-review-2.md](docs/specifications/security-review-2.md)),
@@ -2008,6 +2010,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.91.0]: https://github.com/isambard-sc/openportal/releases/tag/0.91.0
 [0.90.0]: https://github.com/isambard-sc/openportal/releases/tag/0.90.0
 [0.32.2]: https://github.com/isambard-sc/openportal/releases/tag/0.32.2
 [0.32.1]: https://github.com/isambard-sc/openportal/releases/tag/0.32.1

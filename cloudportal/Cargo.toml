@@ -3,7 +3,7 @@
 
 [package]
 name = "op-cloudportal"
-version = "0.90.0"
+version = "0.91.0"
 description = "Self-contained portal agent representing the 'cloud' portal, fronting one or more op-cloudaccount agents"
 edition = "2021"
 license = "MIT"

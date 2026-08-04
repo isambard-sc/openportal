@@ -3,7 +3,7 @@
 
 [package]
 name = "greatwestern"
-version = "0.90.0"
+version = "0.91.0"
 description = "The HPC/Waldur command vocabulary (Instruction, identifiers, usage and storage reports) that rides on top of paddington and templemeads - the reference Domain, and the one every built-in OpenPortal agent is compiled against"
 edition = "2021"
 license = "MIT"

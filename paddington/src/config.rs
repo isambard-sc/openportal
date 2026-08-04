@@ -97,19 +97,66 @@ pub fn write_secret_file(path: &path::Path, contents: &str) -> Result<(), Error>
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("Could not open file for writing: {:?}", path))?;
+        // Write to a temporary file in the same directory and rename over the
+        // target, so the secret is never observable at a partially-written state
+        // and a concurrent reader sees either the whole old file or the whole new
+        // one. `rename` within a directory is atomic.
+        //
+        // This also defeats the symlink concern without needing `O_NOFOLLOW`, in
+        // two ways. `create_new(true)` is `O_CREAT|O_EXCL`, which POSIX requires to
+        // fail if the path exists *at all* - including as a symlink - so the
+        // temporary file can never be redirected. And `rename` replaces a symlink
+        // at the destination rather than writing through it, so a symlink planted
+        // at the target path (several invite paths default to the **current working
+        // directory**) is overwritten instead of followed.
+        //
+        // See docs/specifications/security-review-2.md (finding R33).
+        let suffix = hex::encode(crate::crypto::random_bytes(8)?);
+        let temp_path = path.with_file_name(format!(
+            ".{}.{}.tmp",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("openportal-secret"),
+            suffix
+        ));
 
-        file.write_all(contents.as_bytes())
-            .with_context(|| format!("Could not write file: {:?}", path))?;
+        let write_temp = || -> Result<(), Error> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)
+                .with_context(|| format!("Could not create file: {:?}", temp_path))?;
 
-        // A pre-existing file keeps its own mode when reopened, so lower it
-        // explicitly too - this is the case `mode()` above does not cover.
+            file.write_all(contents.as_bytes())
+                .with_context(|| format!("Could not write file: {:?}", temp_path))?;
+
+            // Durability before the rename, so a crash cannot leave an empty file
+            // where a valid secret used to be.
+            file.sync_all()
+                .with_context(|| format!("Could not flush file: {:?}", temp_path))?;
+
+            Ok(())
+        };
+
+        if let Err(e) = write_temp() {
+            // Never leave a partially written secret lying around.
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+
+        if let Err(e) = std::fs::rename(&temp_path, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(Error::Any(anyhow::Error::from(e).context(format!(
+                "Could not move {:?} into place at {:?}",
+                temp_path, path
+            ))));
+        }
+
+        // Belt and braces for the case where `path` already existed: `rename`
+        // carries the temporary file's own 0600 mode across, so this is a no-op in
+        // practice, but it is cheap insurance against a future change to the write
+        // above.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("Could not restrict permissions on file: {:?}", path))?;
     }
@@ -1658,6 +1705,44 @@ mod tests {
             "the rewrite must actually replace the contents"
         );
 
+        // A symlink at the target must be *replaced*, not written through - the
+        // write goes to a temporary file and is renamed over the top, and `rename`
+        // replaces a symlink rather than following it. Several invite paths default
+        // to the CWD, so a pre-planted symlink there is a real concern (finding R33).
+        let decoy = dir.join("decoy.txt");
+        std::fs::write(&decoy, "must not be overwritten").expect("decoy");
+        let via_symlink = dir.join("nested").join("link.toml");
+        std::os::unix::fs::symlink(&decoy, &via_symlink).expect("symlink");
+
+        write_secret_file(&via_symlink, "key = \"fresh\"").expect("write via symlink path");
+
+        assert_eq!(
+            std::fs::read_to_string(&decoy).expect("decoy still readable"),
+            "must not be overwritten",
+            "the symlink target must not have been written through"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&via_symlink).expect("read"),
+            "key = \"fresh\""
+        );
+        assert!(
+            std::fs::symlink_metadata(&via_symlink)
+                .expect("metadata")
+                .file_type()
+                .is_file(),
+            "the symlink must have been replaced by a regular file"
+        );
+        assert_eq!(mode(&via_symlink), 0o600);
+
+        // No temporary files left behind.
+        let strays: Vec<_> = std::fs::read_dir(dir.join("nested"))
+            .expect("readdir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left temporary files: {:?}", strays);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2407,16 +2492,18 @@ mod tests {
         assert_eq!(relayed_server.proxy(), Some("proxy".to_string()));
         assert_eq!(relayed_server.url(), "".to_string());
 
-        // the shared key material must actually match between the two sides
+        // The shared key material must actually match between the two sides.
+        // Compared with `Key::equals` rather than by Debug-formatting: `Key`'s Debug
+        // redacts its bytes now, so formatting compared nothing (finding R33).
         use secrecy::ExposeSecret;
-        assert_eq!(
-            format!("{:?}", relayed_client.inner_key().expose_secret()),
-            format!("{:?}", relayed_server.inner_key().expose_secret())
-        );
-        assert_eq!(
-            format!("{:?}", relayed_client.outer_key().expose_secret()),
-            format!("{:?}", relayed_server.outer_key().expose_secret())
-        );
+        assert!(relayed_client
+            .inner_key()
+            .expose_secret()
+            .equals(relayed_server.inner_key().expose_secret()));
+        assert!(relayed_client
+            .outer_key()
+            .expose_secret()
+            .equals(relayed_server.outer_key().expose_secret()));
     }
 
     #[test]

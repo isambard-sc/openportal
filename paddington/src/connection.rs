@@ -156,9 +156,11 @@ impl ConnectionState {
     /// the peer (`true`), or rejected as a replay / too old to tell
     /// (`false`) - see `docs/plans/replay-protection-design.md` §4.2. A
     /// payload with no nonce at all (`None` - a not-yet-upgraded peer) is
-    /// always accepted; there is nothing to check it against.
-    fn check_replay(&mut self, nonce: Option<u64>) -> bool {
-        self.replay_window.check_and_record_optional(nonce)
+    /// always accepted; there is nothing to check it against, but if the peer
+    /// *advertised* nonce support this is now logged - see finding R33.
+    fn check_replay(&mut self, nonce: Option<u64>, peer_supports_nonce: bool, peer: &str) -> bool {
+        self.replay_window
+            .check_and_record_negotiated(nonce, peer_supports_nonce, peer)
     }
 
     fn set_error(&mut self) {
@@ -1148,7 +1150,7 @@ impl Connection {
             // we can no longer verify the message wasn't already seen.
             let accepted = match self.state.lock() {
                 Ok(mut state) => {
-                    let accepted = state.check_replay(nonce);
+                    let accepted = state.check_replay(nonce, self.peer_supports_nonce, &peer_name);
                     state.register_activity();
                     accepted
                 }
@@ -1356,13 +1358,39 @@ impl Connection {
             )
         })?;
 
-        let inner_key_salt: Salt = inner_key_salt
-            .parse()
-            .with_context(|| "Error parsing inner key salt")?;
+        // `Salt::from_str` requires exactly `SALT_SIZE` bytes. An **absent** header
+        // reaches here as `""` via the `unwrap_or_default()` above, which used to
+        // decode to an empty salt and connect anyway - orion's HMAC accepts an empty
+        // key, so the per-connection salt defence silently vanished with no error and
+        // no log. Distinguish missing from malformed so the operator can tell which.
+        // See docs/specifications/security-review-2.md (finding R33).
+        //
+        // Note the legacy XOR-masked salt format is unaffected: un-masking happens
+        // further down, on an already-parsed salt, and both operands are now
+        // guaranteed to be `SALT_SIZE` (`Salt::xor` zips, so a short salt used to
+        // silently shorten the result too).
+        let parse_salt = |value: &str, which: &str| -> Result<Salt, Error> {
+            if value.is_empty() {
+                return Err(Error::InvalidPeer(format!(
+                    "Connection from {} sent no `openportal-{}-salt` header. Every \
+                     client must supply both handshake salts.",
+                    client_ip, which
+                )));
+            }
 
-        let outer_key_salt: Salt = outer_key_salt
-            .parse()
-            .with_context(|| "Error parsing outer key salt")?;
+            value
+                .parse::<Salt>()
+                .with_context(|| {
+                    format!(
+                        "Connection from {} sent an invalid `openportal-{}-salt` header",
+                        client_ip, which
+                    )
+                })
+                .map_err(Error::Any)
+        };
+
+        let inner_key_salt: Salt = parse_salt(&inner_key_salt, "inner")?;
+        let outer_key_salt: Salt = parse_salt(&outer_key_salt, "outer")?;
 
         // `client_ip` is currently the real TCP peer address. A proxy-supplied
         // client address (from `proxy_header`) is only honoured when that peer
@@ -1893,7 +1921,7 @@ impl Connection {
             // we can no longer verify the message wasn't already seen.
             let accepted = match self.state.lock() {
                 Ok(mut state) => {
-                    let accepted = state.check_replay(nonce);
+                    let accepted = state.check_replay(nonce, self.peer_supports_nonce, &peer_name);
                     state.register_activity();
                     accepted
                 }

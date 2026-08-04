@@ -242,6 +242,21 @@ fn add_client(
     let mut config: ProxyConfig = config::load(&config_file)
         .with_context(|| format!("Could not load proxy config from {:?}", config_file))?;
 
+    // A relayed peer is addressed by name alone, so this proxy must not connect two
+    // peers with the same name even in different zones. `ServiceConfig::add_client`
+    // only rejects a duplicate (name, zone), so check the name here - the operator
+    // finds out now rather than at the far side's first envelope. See
+    // docs/specifications/security-review-2.md (finding R33).
+    if let Some(existing) = config.service.clients().iter().find(|c| c.name() == name) {
+        return Err(anyhow::anyhow!(
+            "This proxy already has a client named '{}' (in zone '{}'). Relayed peers \
+             are addressed by name alone, so a proxy cannot connect two peers with the \
+             same name - choose a different name.",
+            name,
+            existing.zone()
+        ));
+    }
+
     let invite: Invite = config
         .service
         // A proxy is a blind relay, not an agent: it has no `agent::Type` of its
@@ -251,12 +266,16 @@ fn add_client(
         .add_client(name, &ip, &zone, &None)
         .with_context(|| format!("Could not add client '{}'", name))?;
 
-    config::save(&config, &config_file)
-        .with_context(|| format!("Could not save proxy config to {:?}", config_file))?;
-
+    // Write the invite *first*. Saving the config first meant a failed invite write
+    // left the proxy holding a client entry - and a freshly generated key pair - that
+    // the peer could never receive, so the operator had to notice and remove it by
+    // hand. See docs/specifications/security-review-2.md (finding R33).
     invite
         .save(&invitation)
         .with_context(|| format!("Could not save invitation to {:?}", invitation))?;
+
+    config::save(&config, &config_file)
+        .with_context(|| format!("Could not save proxy config to {:?}", config_file))?;
 
     println!(
         "Client '{}' introduced. Invitation written to {:?} - \
@@ -270,6 +289,41 @@ fn add_client(
 fn allow(a: &str, b: &str, config_file: PathBuf) -> Result<()> {
     let mut config: ProxyConfig = config::load(&config_file)
         .with_context(|| format!("Could not load proxy config from {:?}", config_file))?;
+
+    // Trim, and require both names to be clients this proxy actually knows. An
+    // untrimmed or misspelled name previously produced a policy entry that silently
+    // matched nothing, so the operator believed a pair was allowed when it was not.
+    // See docs/specifications/security-review-2.md (finding R33).
+    let a = a.trim();
+    let b = b.trim();
+
+    if a.is_empty() || b.is_empty() {
+        return Err(anyhow::anyhow!("Both agent names must be non-empty"));
+    }
+
+    if a == b {
+        return Err(anyhow::anyhow!(
+            "Cannot allow '{}' to be relayed to itself",
+            a
+        ));
+    }
+
+    let known: Vec<String> = config.service.clients().iter().map(|c| c.name()).collect();
+
+    for name in [a, b] {
+        if !known.iter().any(|k| k == name) {
+            return Err(anyhow::anyhow!(
+                "'{}' is not a client of this proxy, so it cannot be relayed. Add it \
+                 first with `client --add {}`. Known clients: {}",
+                name,
+                name,
+                match known.is_empty() {
+                    true => "(none)".to_string(),
+                    false => known.join(", "),
+                }
+            ));
+        }
+    }
 
     if config.policy.permits(a, b) {
         println!("'{}' and '{}' are already allowed to be relayed.", a, b);
@@ -294,7 +348,9 @@ async fn run(config_file: PathBuf) -> Result<()> {
         .with_context(|| format!("Could not load proxy config from {:?}", config_file))?;
 
     relay::set_proxy_policy(config.policy).await;
-    relay::configure_proxy(&config.service).await;
+    relay::configure_proxy(&config.service)
+        .await
+        .with_context(|| "This proxy's client configuration cannot be relayed")?;
 
     paddington::set_handler(relay::proxy_handler).await?;
 

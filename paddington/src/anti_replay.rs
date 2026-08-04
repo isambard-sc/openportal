@@ -64,6 +64,46 @@ impl ReplayWindow {
         }
     }
 
+    /// As [`Self::check_and_record_optional`], but **rejecting** a payload with no
+    /// nonce from a peer that advertised nonce support.
+    ///
+    /// `peer_supports_nonce` was negotiated and then never checked against, so an
+    /// honest upgraded peer got no benefit from advertising it - a nonce-less payload
+    /// was accepted either way.
+    ///
+    /// This combination cannot arise between honest peers, which is why rejecting it
+    /// is safe in a mixed fleet. [`NoncedPayload::for_peer`] omits the nonce *only*
+    /// when the sender believes the **recipient** does not support nonces, and that
+    /// belief is fixed from `PeerDetails` during the handshake, before any message is
+    /// sent. So a receiver seeing "this peer advertised support" together with "this
+    /// payload has no nonce" is seeing a contradiction: the sender decided we were a
+    /// legacy peer while we told it otherwise in the same handshake. A genuinely old
+    /// peer never advertises support, so its nonce-less payloads take the `None` path
+    /// in [`Self::check_and_record_optional`] and are accepted exactly as before.
+    ///
+    /// Rejecting also closes the downgrade: "advertise support, then omit the nonce"
+    /// is no longer a way to have a message skip the replay window entirely. See
+    /// `docs/specifications/security-review-2.md` (finding R33).
+    pub(crate) fn check_and_record_negotiated(
+        &mut self,
+        nonce: Option<u64>,
+        peer_supports_nonce: bool,
+        peer: &str,
+    ) -> bool {
+        if nonce.is_none() && peer_supports_nonce {
+            tracing::error!(
+                "Rejecting a payload from peer '{}': it advertised nonce support in its \
+                 handshake but sent this payload without a nonce, so it cannot be \
+                 checked for replay. An honest peer never does both - this is a bug in \
+                 that peer, or tampering.",
+                peer
+            );
+            return false;
+        }
+
+        self.check_and_record_optional(nonce)
+    }
+
     /// Check `nonce` against everything seen so far, recording it if it's
     /// new. Returns `true` if `nonce` should be accepted (never seen
     /// before, and not too old to tell), `false` if it's a replay (or a
@@ -370,6 +410,38 @@ impl HandshakeNonceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_a_peer_that_advertised_nonce_support_must_use_it() {
+        // `peer_supports_nonce` was negotiated and then never checked, so advertising
+        // it bought an honest peer nothing. This combination cannot arise between
+        // honest peers - `NoncedPayload::for_peer` omits the nonce only when the
+        // *sender* believes the recipient is legacy, and that is fixed during the
+        // handshake - so rejecting it is safe in a mixed fleet. See finding R33.
+        let mut window = ReplayWindow::new();
+
+        // A genuinely old peer: never advertised, sends no nonce. Accepted, exactly
+        // as before - this is the mixed-fleet case that must keep working.
+        assert!(window.check_and_record_negotiated(None, false, "oldpeer"));
+        assert!(window.check_and_record_negotiated(None, false, "oldpeer"));
+
+        // An upgraded peer sending nonces: checked normally, replays rejected.
+        let mut window = ReplayWindow::new();
+        assert!(window.check_and_record_negotiated(Some(1), true, "newpeer"));
+        assert!(window.check_and_record_negotiated(Some(2), true, "newpeer"));
+        assert!(
+            !window.check_and_record_negotiated(Some(1), true, "newpeer"),
+            "a replayed nonce must still be rejected"
+        );
+
+        // Advertised support, then omitted: contradictory, so refused rather than
+        // waved through unchecked.
+        let mut window = ReplayWindow::new();
+        assert!(
+            !window.check_and_record_negotiated(None, true, "newpeer"),
+            "a nonce-less payload from a nonce-capable peer must be rejected"
+        );
+    }
 
     #[test]
     fn test_first_nonce_always_accepted() {

@@ -42,8 +42,24 @@ use crate::message::Message;
 /// Envelope carried as an ordinary [`Message`] payload when relaying
 /// through a proxy - opaque to the proxy in every case, bootstrap or not.
 /// `from`/`to` are the true peers, never the proxy itself.
+/// Constant tag identifying a relay envelope.
+///
+/// `relay_dispatch_handler` tries `RelayEnvelope` *before* the inner handler, so
+/// classification used to be purely structural - any future payload that happened to
+/// have these four fields would be misread as an envelope. A single-variant enum makes
+/// identification positive, and `deny_unknown_fields` means a payload carrying extra
+/// fields is no longer a candidate at all. No current payload collides; this is so
+/// none can in future. See `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum RelayEnvelopeKind {
+    #[serde(rename = "openportal-relay-v1")]
+    V1,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RelayEnvelope {
+    kind: RelayEnvelopeKind,
     from: String,
     to: String,
     zone: String,
@@ -214,10 +230,28 @@ struct RelayConfig {
     peers: HashMap<String, RelayedPeer>,
 }
 
+/// Monotonic counter stamping each `RelayedSession` with a generation, so the
+/// ongoing-traffic replay check can tell whether the session it decrypted with is
+/// still the session it is about to record a nonce against.
+///
+/// Without it there was a narrow TOCTOU: the payload is decrypted against a *clone*
+/// taken under a read lock, then the nonce is recorded against the stored session
+/// under a write lock. A re-bootstrap landing between the two installs a **fresh**
+/// window, which accepts a replayed old-session nonce by first-nonce initialisation.
+/// See `docs/specifications/security-review-2.md` (finding R33).
+static SESSION_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_session_generation() -> u64 {
+    SESSION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Once-bootstrapped session keys for a relayed peer - the relayed
 /// equivalent of `Connection`'s `inner_key`/`outer_key`/salts.
 #[derive(Debug, Clone)]
 struct RelayedSession {
+    /// Which incarnation of the session with this peer this is - see
+    /// [`SESSION_GENERATION`].
+    generation: u64,
     inner_key: SecretKey,
     outer_key: SecretKey,
     inner_key_salt: Salt,
@@ -246,8 +280,19 @@ type MessageHandler = fn(Message) -> Pin<Box<dyn Future<Output = Result<(), Erro
 static RELAY_CONFIG: Lazy<TokioRwLock<Option<RelayConfig>>> = Lazy::new(|| TokioRwLock::new(None));
 static SESSIONS: Lazy<TokioRwLock<HashMap<String, RelayedSession>>> =
     Lazy::new(|| TokioRwLock::new(HashMap::new()));
+/// In-flight bootstrap handshakes, keyed on **(peer, magic)** rather than magic
+/// alone.
+///
+/// Keying on magic alone was not exploitable - it is 32 CSPRNG bytes carried inside
+/// the ciphertext, so another peer cannot learn or guess one - but binding the
+/// response to the peer we sent the challenge to is free, and means a reply can only
+/// ever satisfy the handshake it belongs to. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+/// `(peer name, magic)` - see [`PENDING_BOOTSTRAPS`].
+type BootstrapKey = (String, String);
+
 static PENDING_BOOTSTRAPS: Lazy<
-    TokioMutex<HashMap<String, oneshot::Sender<RelayedConnectionAccepted>>>,
+    TokioMutex<HashMap<BootstrapKey, oneshot::Sender<RelayedConnectionAccepted>>>,
 > = Lazy::new(|| TokioMutex::new(HashMap::new()));
 /// Last time we told each peer we had no session for it. Used to debounce
 /// `SessionUnknown`, which is otherwise emitted once per undecryptable envelope -
@@ -415,9 +460,38 @@ pub async fn configure(config: &ServiceConfig) -> Result<(), Error> {
             })
     };
 
+    // A relayed peer is identified on the wire only by `envelope.from`, which is a
+    // bare name - and R15 established that the envelope's own `zone` field must not
+    // be trusted for anything. So if two relayed peers share a name in different
+    // zones, an inbound envelope naming it is genuinely ambiguous.
+    //
+    // `add_client` does allow one name in several zones with independent keys, and
+    // this map used to silently collapse them: the `clients` loop below overwrote
+    // the `servers` entry, leaving one provisioned key pair unreachable with no
+    // diagnostic. Refuse such a configuration outright rather than half-honour it -
+    // supporting it properly would mean trial-decrypting against every candidate
+    // key, which is a capability this hardening pass deliberately does not add. See
+    // `docs/specifications/security-review-2.md` (finding R33).
+    let mut relayed_names: HashMap<String, String> = HashMap::new();
+
+    let mut check_unique = |name: &str, zone: &str| -> Result<(), Error> {
+        if let Some(existing_zone) = relayed_names.get(name) {
+            return Err(Error::InvalidPeer(format!(
+                "Two relayed peers are both named '{}' (in zones '{}' and '{}'). A \
+                 relayed peer is identified on the wire by name alone, so this cannot \
+                 be resolved - give them distinct names.",
+                name, existing_zone, zone
+            )));
+        }
+
+        relayed_names.insert(name.to_string(), zone.to_string());
+        Ok(())
+    };
+
     for server in config.servers() {
         if let Some(relay) = server.proxy() {
             let relay_zone = relay_zone_of(&relay);
+            check_unique(&server.name(), &server.zone())?;
             peers.insert(
                 server.name(),
                 RelayedPeer {
@@ -434,6 +508,7 @@ pub async fn configure(config: &ServiceConfig) -> Result<(), Error> {
     for client in config.clients() {
         if let Some(relay) = client.proxy() {
             let relay_zone = relay_zone_of(&relay);
+            check_unique(&client.name(), &client.zone())?;
             peers.insert(
                 client.name(),
                 RelayedPeer {
@@ -465,6 +540,35 @@ async fn my_name() -> Result<String, Error> {
         .ok_or_else(|| {
             Error::InvalidPeer("Relay not configured - call relay::configure() first.".to_string())
         })
+}
+
+///
+/// Refuse a key that is all-zero (or empty) as transported session key material.
+///
+/// F15 added this check to the two *direct* handshake paths but not to the three
+/// relay key-transport points. `Key::derive` HKDFs happily from all-zero input
+/// material, so an all-zero session key silently worked - it needs the pair's
+/// permanent keys to inject, but the whole point of a per-session key is that it is
+/// unpredictable, and one fixed value defeats that. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+///
+fn assert_session_key_not_null(key: &SecretKey, which: &str, peer: &str) -> Result<(), Error> {
+    use secrecy::ExposeSecret;
+
+    if key.expose_secret().is_null() {
+        tracing::error!(
+            "Refusing the relayed session with '{}': its {} key is all-zero.",
+            peer,
+            which
+        );
+
+        return Err(Error::InvalidPeer(format!(
+            "Peer '{}' supplied an all-zero {} session key",
+            peer, which
+        )));
+    }
+
+    Ok(())
 }
 
 async fn get_peer(name: &str) -> Result<RelayedPeer, Error> {
@@ -582,6 +686,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
     )?;
 
     let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
         from: my_name,
         to: peer_name.to_string(),
         zone: peer.zone.clone(),
@@ -614,7 +719,7 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
             )));
         }
 
-        pending.insert(magic.clone(), tx);
+        pending.insert((peer_name.to_string(), magic.clone()), tx);
     }
 
     // the connection to the relay is normally still being dialled by
@@ -638,7 +743,10 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
                 tokio::time::sleep(RELAY_CONNECT_RETRY_DELAY).await;
             }
             Err(e) => {
-                PENDING_BOOTSTRAPS.lock().await.remove(&magic);
+                PENDING_BOOTSTRAPS
+                    .lock()
+                    .await
+                    .remove(&(peer_name.to_string(), magic.clone()));
                 return Err(e);
             }
         }
@@ -653,7 +761,10 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
             )));
         }
         Err(_) => {
-            PENDING_BOOTSTRAPS.lock().await.remove(&magic);
+            PENDING_BOOTSTRAPS
+                .lock()
+                .await
+                .remove(&(peer_name.to_string(), magic.clone()));
             return Err(Error::InvalidPeer(format!(
                 "Timed out waiting for '{}' to accept the relayed connection.",
                 peer_name
@@ -661,7 +772,10 @@ pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
         }
     };
 
+    assert_session_key_not_null(&accepted.session_inner_key, "inner", peer_name)?;
+
     let session = RelayedSession {
+        generation: next_session_generation(),
         inner_key: accepted.session_inner_key,
         outer_key,
         inner_key_salt,
@@ -850,6 +964,7 @@ async fn notify_session_unknown(peer_name: &str, peer: &RelayedPeer) -> Result<(
     };
 
     let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
         from: my_name,
         to: peer_name.to_string(),
         zone: peer.zone.clone(),
@@ -907,6 +1022,7 @@ async fn handle_start(
     let my_name = my_name().await?;
 
     let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
         from: my_name,
         to: from.to_string(),
         zone: zone.to_string(),
@@ -919,7 +1035,10 @@ async fn handle_start(
 
     exchange::send(Message::send_to(relay, &peer.relay_zone, &payload)).await?;
 
+    assert_session_key_not_null(&start.session_outer_key, "outer", from)?;
+
     let session = RelayedSession {
+        generation: next_session_generation(),
         inner_key,
         outer_key: start.session_outer_key,
         inner_key_salt: start.inner_key_salt,
@@ -1046,7 +1165,9 @@ async fn handle_incoming_envelope(
             }
             BootstrapMessage::Accepted(accepted) => {
                 let mut pending = PENDING_BOOTSTRAPS.lock().await;
-                if let Some(tx) = pending.remove(&accepted.magic) {
+                // Keyed on (peer, magic): a reply only satisfies the handshake we
+                // sent to *that* peer - see `PENDING_BOOTSTRAPS` (finding R33).
+                if let Some(tx) = pending.remove(&(envelope.from.clone(), accepted.magic.clone())) {
                     // redundant with `magic`'s existing single-use
                     // protection (see docs/plans/replay-protection-design.md
                     // §10.1) - kept for uniformity across all three
@@ -1153,6 +1274,10 @@ async fn handle_incoming_envelope(
         }
     };
 
+    // Remember which incarnation we are about to decrypt with, so the replay check
+    // below can confirm it is still the installed one (finding R33).
+    let session_generation = session.generation;
+
     let wrapped: NoncedPayload = decrypt_with_keys(
         &envelope.ciphertext,
         &session.inner_key,
@@ -1166,14 +1291,40 @@ async fn handle_incoming_envelope(
     // clone we decrypted with above - a write lock, since this mutates it.
     // See docs/plans/replay-protection-design.md.
     let accepted = match SESSIONS.write().await.get_mut(&envelope.from) {
-        Some(session) => session.replay_window.check_and_record_optional(nonce),
+        // Only record against the *same incarnation* we decrypted with. A
+        // re-bootstrap landing between the read-clone above and this write lock
+        // installs a fresh window, which would accept a replayed old-session nonce
+        // by first-nonce initialisation - so a generation change means this message
+        // belongs to a session that no longer exists. See finding R33.
+        Some(session) if session.generation == session_generation => {
+            let supports_nonce = session.peer_supports_nonce;
+            session
+                .replay_window
+                .check_and_record_negotiated(nonce, supports_nonce, &envelope.from)
+        }
+        Some(session) => {
+            tracing::warn!(
+                "Dropping a message from '{}': it was decrypted against session \
+                 generation {}, but generation {} is now installed - the session was \
+                 replaced mid-flight.",
+                envelope.from,
+                session_generation,
+                session.generation
+            );
+            false
+        }
         None => {
-            // the session vanished between the read-clone above and now
-            // (e.g. a concurrent SessionUnknown/re-bootstrap) - nothing to
-            // check against any more, so there's no session-level replay
-            // state to defend; let it through rather than drop a message
-            // that just lost a race with a legitimate re-bootstrap.
-            true
+            // The session vanished between the read-clone and now. Previously this
+            // returned `true` - "nothing to check against, let it through" - but
+            // that is exactly the window a replay wants, and a message whose
+            // session no longer exists has nowhere legitimate to go. Reject; a
+            // genuine sender re-bootstraps and resends.
+            tracing::warn!(
+                "Dropping a message from '{}': its relayed session disappeared while \
+                 the message was being processed.",
+                envelope.from
+            );
+            false
         }
     };
 
@@ -1277,6 +1428,7 @@ pub async fn send(to: &str, payload: &str) -> Result<(), Error> {
     };
 
     let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
         from: my_name,
         to: to.to_string(),
         zone: peer.zone.clone(),
@@ -1335,15 +1487,34 @@ pub async fn set_proxy_policy(policy: RelayPolicy) {
 /// e.g. two peers connect to the proxy in zone `default`, but relay to
 /// each other in a peer-specific zone like `ukri>brics`).
 ///
-pub async fn configure_proxy(config: &ServiceConfig) {
-    let zones = config
-        .clients()
-        .iter()
-        .map(|c| (c.name(), c.zone()))
-        .collect();
+pub async fn configure_proxy(config: &ServiceConfig) -> Result<(), Error> {
+    // A relayed peer is addressed by name alone, both in a `RelayEnvelope` and in
+    // the `allow` policy, so a proxy must not have two clients sharing a name even
+    // in different zones - the pair would be ambiguous and this map would silently
+    // keep only one of them. The relayed agents enforce the same rule in
+    // `configure`; enforcing it here too is what keeps the name unambiguous
+    // end-to-end. See `docs/specifications/security-review-2.md` (finding R33).
+    let mut zones: HashMap<String, String> = HashMap::new();
+
+    for client in config.clients() {
+        if let Some(existing) = zones.get(&client.name()) {
+            return Err(Error::InvalidPeer(format!(
+                "This proxy has two clients both named '{}' (in zones '{}' and '{}'). \
+                 Relayed peers are addressed by name alone, so a proxy cannot connect \
+                 two peers with the same name - give them distinct names.",
+                client.name(),
+                existing,
+                client.zone()
+            )));
+        }
+
+        zones.insert(client.name(), client.zone());
+    }
 
     let mut state = PROXY_CLIENT_ZONES.write().await;
     *state = zones;
+
+    Ok(())
 }
 
 ///
@@ -1757,6 +1928,7 @@ mod tests {
         // the RelayEnvelope JSON (what the proxy actually sees) must not
         // leak the payload either
         let envelope = RelayEnvelope {
+            kind: RelayEnvelopeKind::V1,
             from: "brics".to_string(),
             to: "airr".to_string(),
             zone: "default".to_string(),
@@ -1823,6 +1995,99 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_a_proxy_refuses_two_clients_sharing_a_name() {
+        // A relayed peer is addressed by name alone - in the envelope and in the
+        // `allow` policy - so the same name in two zones is ambiguous, and this map
+        // used to silently keep only one of them. Both the proxy and the relayed
+        // agents now refuse such a configuration. See finding R33.
+        let mut proxy = ServiceConfig::new(
+            "proxy",
+            "http://localhost:9000",
+            "127.0.0.1",
+            &9000,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service: {:?}", e));
+
+        proxy
+            .add_client("airr", "127.0.0.1", &None, &None)
+            .unwrap_or_else(|e| unreachable!("add airr: {:?}", e));
+        proxy
+            .add_client("brics", "127.0.0.1", &Some("other".to_string()), &None)
+            .unwrap_or_else(|e| unreachable!("add brics: {:?}", e));
+
+        // distinct names in different zones are fine
+        assert!(configure_proxy(&proxy).await.is_ok());
+
+        // ...but the same name in a second zone is refused
+        proxy
+            .add_client("airr", "127.0.0.1", &Some("elsewhere".to_string()), &None)
+            .unwrap_or_else(|e| unreachable!("add duplicate airr: {:?}", e));
+
+        let err = configure_proxy(&proxy).await;
+        assert!(err.is_err(), "a duplicate client name must be refused");
+    }
+
+    #[test]
+    fn test_an_all_zero_session_key_is_refused() {
+        // F15 checked the two direct handshake paths; the relay key-transport points
+        // did not. `Key::derive` HKDFs happily from all-zero input, so an all-zero
+        // session key silently worked - defeating the point of a per-session key.
+        // See finding R33.
+        let null_key = Key::null();
+        assert!(assert_session_key_not_null(&null_key, "outer", "brics").is_err());
+
+        let real_key = Key::generate();
+        assert!(assert_session_key_not_null(&real_key, "outer", "brics").is_ok());
+    }
+
+    #[test]
+    fn test_a_relay_envelope_is_identified_positively() {
+        // Classification used to be purely structural, so any future payload with
+        // these four fields would be read as an envelope. It now needs the tag, and
+        // rejects extra fields. See finding R33.
+        let envelope = RelayEnvelope {
+            kind: RelayEnvelopeKind::V1,
+            from: "brics".to_string(),
+            to: "airr".to_string(),
+            zone: "default".to_string(),
+            ciphertext: "00".to_string(),
+        };
+
+        let json =
+            serde_json::to_string(&envelope).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        assert!(json.contains("openportal-relay-v1"));
+        assert!(serde_json::from_str::<RelayEnvelope>(&json).is_ok());
+
+        // The old, untagged shape is no longer an envelope...
+        let untagged = r#"{"from":"brics","to":"airr","zone":"default","ciphertext":"00"}"#;
+        assert!(serde_json::from_str::<RelayEnvelope>(untagged).is_err());
+
+        // ...nor is a tagged one carrying anything extra.
+        let extra = r#"{"kind":"openportal-relay-v1","from":"a","to":"b","zone":"c",
+                        "ciphertext":"00","something_else":1}"#;
+        assert!(serde_json::from_str::<RelayEnvelope>(extra).is_err());
+
+        // ...nor a wrong tag.
+        let wrong = r#"{"kind":"something","from":"a","to":"b","zone":"c","ciphertext":"00"}"#;
+        assert!(serde_json::from_str::<RelayEnvelope>(wrong).is_err());
+    }
+
+    #[test]
+    fn test_session_generations_are_distinct_per_incarnation() {
+        // The replay check records a nonce against the *stored* session, having
+        // decrypted against a clone. A re-bootstrap between the two installs a fresh
+        // window that would accept a replayed old-session nonce by first-nonce
+        // initialisation; the generation is what detects that. See finding R33.
+        let first = next_session_generation();
+        let second = next_session_generation();
+
+        assert_ne!(first, second);
+        assert!(second > first, "generations must increase monotonically");
+    }
+
     #[test]
     fn test_relay_policy_default_deny() {
         let policy = RelayPolicy::new();
@@ -1870,7 +2135,9 @@ mod tests {
             )
             .unwrap_or_else(|e| unreachable!("add_client: {}", e));
 
-        configure_proxy(&proxy).await;
+        configure_proxy(&proxy)
+            .await
+            .unwrap_or_else(|e| unreachable!("configure_proxy: {:?}", e));
 
         let zones = PROXY_CLIENT_ZONES.read().await;
         assert_eq!(zones.get("ukri").cloned(), Some("default".to_string()));
@@ -2062,6 +2329,7 @@ mod tests {
         // both sides now hold the identical {inner_key (from airr),
         // outer_key (from brics)} session pair
         let brics_session = RelayedSession {
+            generation: next_session_generation(),
             inner_key: accepted.session_inner_key.clone(),
             outer_key: outer_key.clone(),
             inner_key_salt: inner_key_salt.clone(),
@@ -2071,6 +2339,7 @@ mod tests {
             peer_supports_nonce: true,
         };
         let mut airr_session = RelayedSession {
+            generation: next_session_generation(),
             inner_key: airr_inner_key,
             outer_key,
             inner_key_salt,
@@ -2172,14 +2441,19 @@ mod tests {
                     .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
 
             match decrypted {
+                // Cloned rather than Debug-formatted: `Key`'s Debug redacts its
+                // bytes now, so formatting it compared nothing (finding R33).
                 BootstrapMessage::Start(start) => {
-                    session_keys.push(format!("{:?}", start.session_outer_key.expose_secret()))
+                    session_keys.push(start.session_outer_key.expose_secret().clone())
                 }
                 BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
                 BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Start"),
             }
         }
 
-        assert_ne!(session_keys[0], session_keys[1]);
+        assert!(
+            !session_keys[0].equals(&session_keys[1]),
+            "each bootstrap must derive a fresh session key"
+        );
     }
 }

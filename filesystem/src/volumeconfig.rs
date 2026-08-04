@@ -253,6 +253,41 @@ impl FilesystemConfig {
         self.project_volumes.clone()
     }
 
+    ///
+    /// Every configured volume root, across all user and project volumes.
+    ///
+    /// This is the set of trees this agent is permitted to manage. Used to bound
+    /// operations whose two paths legitimately live under *different* roots - a
+    /// `links` entry pointing from one root of a volume into another, for example -
+    /// where checking against one specific root would wrongly refuse the other. See
+    /// `filesystem::clean_and_check_path` and
+    /// `docs/specifications/security-review-2.md` (finding R33).
+    ///
+    pub fn all_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = Vec::new();
+
+        let mut add = |root: &str| {
+            let root = PathBuf::from(root);
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        };
+
+        for volume in self.user_volumes.values() {
+            for path_config in volume.path_configs() {
+                add(path_config.root());
+            }
+        }
+
+        for volume in self.project_volumes.values() {
+            for path_config in volume.path_configs() {
+                add(path_config.root());
+            }
+        }
+
+        roots
+    }
+
     /// Return the named quota engine configuration
     ///
     /// This returns the configuration which can then be used to create an engine

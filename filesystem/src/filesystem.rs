@@ -625,9 +625,16 @@ async fn create_dir_native(
         )
     })?;
 
-    // `permissions` is already validated by `clean_and_check_permissions`, so it fits
-    // a mode_t; `try_into` rather than a cast so a future widening cannot silently
+    // `permissions` is already validated by `clean_and_check_permissions`, so it fits a
+    // mode_t; `try_into` rather than a cast so a future widening cannot silently
     // truncate it.
+    //
+    // `mode_t` is **platform-dependent** - `u16` on Darwin, `u32` on Linux - so this is
+    // a real fallible narrowing on macOS and an identity conversion on Linux, where
+    // clippy therefore reports it as useless. Allowed rather than removed: dropping
+    // `try_into` would fail to compile on Darwin, and replacing it with `as` would
+    // reintroduce the silent truncation this is here to prevent.
+    #[allow(clippy::useless_conversion)]
     let mode_bits: nix::libc::mode_t = permissions.try_into().with_context(|| {
         format!(
             "Permissions {:o} do not fit a mode_t for directory '{}'",

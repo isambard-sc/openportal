@@ -7,6 +7,7 @@ use crate::domain::Domain;
 use crate::error::Error;
 
 use crate::handler::{run_with_relay, set_my_service_details, set_verify_portal_ownership};
+use crate::job::{Envelope, Job};
 use crate::runnable::AsyncRunnable;
 use anyhow::Result;
 
@@ -23,7 +24,7 @@ use anyhow::Result;
 /// another agent rather than routed down from the owning portal.
 ///
 pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<(), Error> {
-    run_instance(config, runner, true).await
+    run_instance(config, runner, true, false).await
 }
 
 ///
@@ -42,17 +43,27 @@ pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<
 /// up a real defence, and the Jobs it accepts are bounded only by the
 /// sender-adjacency check and by whatever the runner itself validates.
 ///
+/// Unlike [`run`], this also honours `run --one-shot`, the same local
+/// execute-and-exit mode `account`/`filesystem`/`scheduler` agents have: it
+/// synthesizes a Job, runs it directly through `runner`, prints the result,
+/// and exits - no network listener, no live peer connections. That's only
+/// safe here because `run_delegated`'s one current user, `op-cloudaccount`,
+/// answers every instruction locally against its own state; [`run`] is
+/// shared with Instances (e.g. `op-cluster`) whose runners forward Jobs to
+/// other agents, so it does not get one-shot support.
+///
 pub async fn run_delegated<L: Domain>(
     config: Config,
     runner: AsyncRunnable<L>,
 ) -> Result<(), Error> {
-    run_instance(config, runner, false).await
+    run_instance(config, runner, false, true).await
 }
 
 async fn run_instance<L: Domain>(
     config: Config,
     runner: AsyncRunnable<L>,
     verify_portal_ownership: bool,
+    support_one_shot: bool,
 ) -> Result<(), Error> {
     if config.service().name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
@@ -74,6 +85,54 @@ async fn run_instance<L: Domain>(
     .await?;
 
     set_verify_portal_ownership::<L>(verify_portal_ownership).await?;
+
+    if support_one_shot {
+        if let Some(one_shot_commands) = config.one_shot_commands() {
+            for one_shot_command in one_shot_commands {
+                tracing::info!("Executing one-shot command: {}", one_shot_command);
+
+                let job = Job::parse(
+                    format!(
+                        "{}.{} {}",
+                        config.one_shot_sender(),
+                        config.service().name(),
+                        one_shot_command
+                    )
+                    .as_str(),
+                    false,
+                )?
+                .pending()?;
+
+                let envelope = Envelope::new(
+                    &config.service().name(),
+                    &config.one_shot_sender(),
+                    &config.one_shot_zone(),
+                    &job,
+                );
+
+                let job = runner(envelope).await?;
+
+                let result = serde_json::from_str::<serde_json::Value>(&job.result_json()?);
+
+                // now write this out as pretty-printed JSON
+                match result {
+                    Ok(json) => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json).unwrap_or_else(|_| {
+                                "Failed to serialize result as pretty-printed JSON".to_string()
+                            })
+                        );
+                    }
+                    Err(_) => {
+                        println!("{}", job.result_json()?);
+                    }
+                }
+            }
+
+            return Ok(());
+        }
+    }
 
     // run the Provider OpenPortal agent
     run_with_relay::<L>(config.service()).await?;

@@ -54,6 +54,16 @@ struct TimePeriod {
     end: NaiveDate,
 }
 
+/// One line of the per-service cost breakdown in `details[]`, e.g.
+/// `{"service_key": "Amazon Simple Storage Service", "amount": 0.0008786623, ...}`.
+/// `component`/`unit`/`group_keys`/`time_period` are cloud-specific or redundant
+/// with the report-level fields and are ignored.
+#[derive(Debug, Clone, Deserialize)]
+struct CostDetailLine {
+    service_key: String,
+    amount: f64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct CostReportFile {
     project: String,
@@ -64,6 +74,8 @@ struct CostReportFile {
     total: f64,
     #[serde(default)]
     components: HashMap<String, f64>,
+    #[serde(default)]
+    details: Vec<CostDetailLine>,
     #[serde(default)]
     allocated_budget: Option<f64>,
 }
@@ -214,6 +226,24 @@ fn parse_report(
         .checked_sub_days(Days::new(1))
         .unwrap_or(raw.time_period.end);
 
+    // Prefer the per-service breakdown in `details[]` (keyed by `service_key`, e.g.
+    // "Amazon Simple Storage Service") over the coarse `components` map, which the
+    // example payload buckets everything into a single "other" entry under. Fall
+    // back to `components` for operators who haven't started sending `details` yet.
+    // Zero-amount lines (most AWS services, on any given day) are dropped rather
+    // than carried through as a component reporting no usage.
+    let components = if raw.details.is_empty() {
+        raw.components
+    } else {
+        let mut components: HashMap<String, f64> = HashMap::new();
+        for detail in raw.details {
+            if detail.amount != 0.0 {
+                *components.entry(detail.service_key).or_insert(0.0) += detail.amount;
+            }
+        }
+        components
+    };
+
     Some((
         project,
         ParsedReport {
@@ -221,7 +251,7 @@ fn parse_report(
             period_start: raw.time_period.start,
             period_end,
             total: raw.total,
-            components: raw.components,
+            components,
             allocated_budget: raw.allocated_budget,
         },
     ))
@@ -811,6 +841,74 @@ mod tests {
         // "end": "2026-07-01" is AWS's half-open convention - the period is June
         // only, so the last day actually covered is 2026-06-30, not 2026-07-01.
         assert_eq!(parsed.period_end, nd("2026-06-30"));
+    }
+
+    #[test]
+    fn test_parse_report_uses_service_key_from_details_over_flat_components() {
+        let json = r#"{
+            "project": "myproject.waldur",
+            "generated_at": "2026-07-16T21:03:35+00:00",
+            "time_period": {"start": "2026-06-01", "end": "2026-07-01"},
+            "total": 0.0009,
+            "components": {"other": 0.0009},
+            "details": [
+                {"service_key": "Amazon Simple Storage Service", "component": "other", "amount": 0.0008786623, "unit": "USD"},
+                {"service_key": "AWS Secrets Manager", "component": "other", "amount": 5.06e-05, "unit": "USD"},
+                {"service_key": "AWS CloudFormation", "component": "other", "amount": 0.0, "unit": "USD"}
+            ]
+        }"#;
+
+        let (_, parsed) = parse_report(Path::new("test.json"), json, "USD").unwrap();
+
+        assert_eq!(
+            parsed.components.get("Amazon Simple Storage Service"),
+            Some(&0.0008786623)
+        );
+        assert_eq!(
+            parsed.components.get("AWS Secrets Manager"),
+            Some(&5.06e-05)
+        );
+        // zero-amount lines are dropped rather than carried through as a
+        // component reporting no usage.
+        assert!(!parsed.components.contains_key("AWS CloudFormation"));
+        // the flat map is ignored once `details` is present.
+        assert!(!parsed.components.contains_key("other"));
+    }
+
+    #[test]
+    fn test_parse_report_sums_duplicate_service_keys_in_details() {
+        let json = r#"{
+            "project": "myproject.waldur",
+            "generated_at": "2026-07-16T21:03:35+00:00",
+            "time_period": {"start": "2026-06-01", "end": "2026-07-01"},
+            "total": 1.5,
+            "details": [
+                {"service_key": "Amazon Simple Storage Service", "component": "other", "amount": 1.0},
+                {"service_key": "Amazon Simple Storage Service", "component": "other", "amount": 0.5}
+            ]
+        }"#;
+
+        let (_, parsed) = parse_report(Path::new("test.json"), json, "USD").unwrap();
+
+        assert_eq!(
+            parsed.components.get("Amazon Simple Storage Service"),
+            Some(&1.5)
+        );
+    }
+
+    #[test]
+    fn test_parse_report_falls_back_to_flat_components_without_details() {
+        let json = r#"{
+            "project": "myproject.waldur",
+            "generated_at": "2026-07-16T21:03:35+00:00",
+            "time_period": {"start": "2026-06-01", "end": "2026-07-01"},
+            "total": 0.0009,
+            "components": {"other": 0.0009}
+        }"#;
+
+        let (_, parsed) = parse_report(Path::new("test.json"), json, "USD").unwrap();
+
+        assert_eq!(parsed.components.get("other"), Some(&0.0009));
     }
 
     #[test]

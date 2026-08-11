@@ -51,6 +51,7 @@ const CURRENCY_SCALE: f64 = 1_000_000.0;
 #[derive(Debug, Clone, Deserialize)]
 struct TimePeriod {
     start: NaiveDate,
+    end: NaiveDate,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +72,9 @@ struct CostReportFile {
 struct ParsedReport {
     generated_at: DateTime<Utc>,
     period_start: NaiveDate,
+    /// Last day actually covered by `time_period` - already converted from the
+    /// half-open `end` the operator's file reports, see `parse_report`.
+    period_end: NaiveDate,
     total: f64,
     components: HashMap<String, f64>,
     allocated_budget: Option<f64>,
@@ -200,11 +204,22 @@ fn parse_report(
         }
     }
 
+    // `time_period` follows AWS Cost Explorer's convention: `end` is half-open, the
+    // first day *not* covered by the period (`{"start":"2026-06-01","end":"2026-07-01"}`
+    // describes June only). `ParsedReport::period_end` stores the last day actually
+    // covered so every other use of it can treat it as an ordinary inclusive endpoint.
+    let period_end = raw
+        .time_period
+        .end
+        .checked_sub_days(Days::new(1))
+        .unwrap_or(raw.time_period.end);
+
     Some((
         project,
         ParsedReport {
             generated_at: raw.generated_at,
             period_start: raw.time_period.start,
+            period_end,
             total: raw.total,
             components: raw.components,
             allocated_budget: raw.allocated_budget,
@@ -495,8 +510,15 @@ fn reconstruct(project: &ProjectIdentifier, reports: &[ParsedReport]) -> Project
             }
         };
 
-        let (window_start, window_end) =
-            clamp_window(window_start, report.generated_at.date_naive());
+        // `generated_at` is when the report was exported, not necessarily when the
+        // period it describes closed - an operator's export script can run well
+        // after `time_period.end`, and no further cost accrues in that gap. Cap the
+        // window there so a late export doesn't smear its delta onto days the
+        // report never covered.
+        let (window_start, window_end) = clamp_window(
+            window_start,
+            report.generated_at.date_naive().min(report.period_end),
+        );
 
         spread_across_days(
             &mut daily,
@@ -667,6 +689,10 @@ mod tests {
         ParsedReport {
             generated_at: dt(generated_at),
             period_start: nd(period_start),
+            // Far beyond any test's `generated_at`, so it never clamps unless a
+            // test overrides it via `..report(...)` - see
+            // `test_reconstruct_late_export_does_not_smear_past_period_end`.
+            period_end: NaiveDate::MAX,
             total,
             components: HashMap::new(),
             allocated_budget: None,
@@ -771,6 +797,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_report_converts_half_open_end_to_last_covered_day() {
+        let json = r#"{
+            "project": "myproject.waldur",
+            "generated_at": "2026-07-16T21:03:35+00:00",
+            "time_period": {"start": "2026-06-01", "end": "2026-07-01"},
+            "total": 0.0009,
+            "components": {}
+        }"#;
+
+        let (_, parsed) = parse_report(Path::new("test.json"), json, "USD").unwrap();
+
+        // "end": "2026-07-01" is AWS's half-open convention - the period is June
+        // only, so the last day actually covered is 2026-06-30, not 2026-07-01.
+        assert_eq!(parsed.period_end, nd("2026-06-30"));
+    }
+
+    #[test]
     fn test_parse_report_skips_invalid_project() {
         let json = r#"{
             "project": "not-a-valid-project-identifier",
@@ -798,6 +841,36 @@ mod tests {
                 10 * 1_000_000
             );
         }
+    }
+
+    #[test]
+    fn test_reconstruct_late_export_does_not_smear_past_period_end() {
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+
+        // time_period is 2026-06-01..=2026-06-30 (30 days) but the export ran
+        // more than two weeks later - the delta must spread across the 30 days
+        // the period actually covers, not the 46 days up to generated_at.
+        let reports = vec![ParsedReport {
+            period_end: nd("2026-06-30"),
+            ..report("2026-07-16T21:03:35Z", "2026-06-01", 30.0)
+        }];
+
+        let usage_report = reconstruct(&project, &reports);
+
+        let in_period = Date::from_chrono(&nd("2026-06-15"));
+        assert_eq!(
+            usage_report.get_report(&in_period).total_usage().seconds(),
+            1_000_000 // 30 / 30 days
+        );
+
+        let after_period = Date::from_chrono(&nd("2026-07-14"));
+        assert_eq!(
+            usage_report
+                .get_report(&after_period)
+                .total_usage()
+                .seconds(),
+            0
+        );
     }
 
     #[test]

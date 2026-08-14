@@ -32,6 +32,47 @@ The bridge handles two directions of communication:
 
 ---
 
+## 0. Deployment requirement: the bridge is not internet-facing
+
+> **The bridge MUST run on a trusted network — a private Kubernetes network, a
+> container network, or a loopback interface — or behind a TLS-terminating reverse
+> proxy. It must never be exposed outside that boundary.**
+
+This is a deliberate split of responsibilities, not an oversight:
+
+- **`op-portal`** holds the internet-facing surface, and it is a *single* WebSocket
+  endpoint speaking the authenticated, encrypted paddington protocol.
+- **`op-bridge`** holds the HTTP control surface, on the private side.
+
+Keeping the two in separate processes is what stops the portal from needing both an
+internet-facing endpoint *and* an HTTP control endpoint. In the reference deployment
+`op-portal` runs in a Kubernetes cluster behind a Cloudflare tunnel; the Waldur web
+application runs in that same cluster and talks to `op-bridge` over the cluster
+network with istio providing mTLS. There is no route by which anything external can
+reach the bridge.
+
+What follows from that, and is the reason this section exists:
+
+- **Request bodies and responses are cleartext.** The HMAC below authenticates the
+  *request* direction only. Responses carry no MAC and no encryption, so anything
+  on this hop can read a job's contents and tamper with a result travelling back to
+  the portal. See
+  [security-review-2.md](security-review-2.md#r32) (finding R32) and round 1's
+  [F12](security-review.md#f12), whose claim that "an on-path attacker cannot read
+  message content" applies to the paddington wire protocol, **not** to this API.
+- **There is no pre-header read timeout.** A request deadline, body size limit and
+  concurrency cap are all enforced (see §2.6 and finding R24), but a connection that
+  never completes its headers cannot be timed out through `axum::serve`. On a
+  trusted network that is a non-issue; on an exposed one it is a slowloris.
+- **The API key is a single shared secret** in the bridge invite file (§1.2). It
+  authenticates *the portal software*, not individual users, and grants the full
+  API.
+
+If you need the bridge reachable across an untrusted network, terminate TLS in front
+of it and authenticate at that layer — do not rely on this API's own protections.
+
+---
+
 ## 1. Configuration
 
 ### 1.1 Default Addresses
@@ -83,6 +124,7 @@ required header are rejected with HTTP 401.
 | Header | Description |
 |--------|-------------|
 | `X-Nonce` | Unique string per request; strongly recommended to prevent replay attacks |
+| `X-OpenPortal-Signature-Version` | `2` to use the unambiguous canonical string (§2.3.1). Absent means version 1, kept for backwards compatibility. New clients should send `2` |
 
 ### 2.3 Signature Calculation
 
@@ -90,9 +132,11 @@ The `Authorization` header value is `OpenPortal <signature>`, where
 `<signature>` is an HMAC-SHA512 tag (hex-encoded) computed using the bridge
 invite key over a canonical call string.
 
-The canonical call string is built differently for GET and POST requests:
+The canonical call string is built differently depending on whether the body is
+**empty**, not on the HTTP method. This matters for a `POST` with an empty body:
+it signs with the four-field form below, *not* the five-field one.
 
-**GET (empty body):**
+**Empty body (all GETs, and any POST with no body):**
 
 Without nonce:
 ```
@@ -104,7 +148,7 @@ With nonce:
 <protocol>\napplication/json\n<date>\n<function>\n<nonce>
 ```
 
-**POST (with body):**
+**Non-empty body:**
 
 Without nonce:
 ```
@@ -129,6 +173,77 @@ Where:
 The HMAC is computed using `orion::auth::authenticate` (HMAC-SHA512) and
 hex-encoded. The bridge verifies it using a **constant-time comparison** to
 prevent timing attacks.
+
+> **The form above is version 1, and is ambiguous.** It is `\n`-joined with no
+> length prefixes and no field count, so its four shapes are not distinguishable
+> from one another by the signature alone. For a POST,
+> `…\n<function>\n<body>\n<nonce>` is byte-identical to
+> `…\n<function>\n<body ‖ "\n" ‖ nonce>`, which means the *presence* of a nonce
+> is not authenticated. See
+> [security-review-2.md](security-review-2.md#r29) (finding R29).
+>
+> **Version 2 (below) fixes this and new clients should use it.** Version 1 remains
+> accepted so existing clients keep working, and will be removed once every client
+> is known to have moved.
+
+#### 2.3.1 Signature version 2 (recommended)
+
+Send the header:
+
+```
+X-OpenPortal-Signature-Version: 2
+```
+
+and sign a **seven-field, length-prefixed** string. Every field is present exactly
+once — an absent nonce is the empty string — and each is written as
+`<byte-length>:<value>`, joined with `\n`:
+
+```
+17:openportal-sig-v2
+4:post
+16:application/json
+29:Mon, 03 Aug 2026 12:00:00 GMT
+3:run
+43:{"command":"waldur.provider get_offerings"}
+19:unique-nonce-abc123
+```
+
+Because every field carries its own byte length, no field's content can be read as
+a field boundary, and the arity is fixed regardless of whether the body or nonce is
+empty. The leading `openportal-sig-v2` tag is itself length-prefixed, so a version 2
+string can never collide with a version 1 one.
+
+```python
+def canonical_v2(protocol, date_str, function, body, nonce):
+    def field(v):
+        b = v.encode() if isinstance(v, str) else v
+        return f"{len(b)}:".encode() + b
+    return b"\n".join([
+        field("openportal-sig-v2"),
+        field(protocol),
+        field("application/json"),
+        field(date_str),
+        field(function),
+        field(body or ""),
+        field(nonce or ""),
+    ])
+
+signature = hmac.new(key_bytes, canonical_v2(
+    "post", date_str, "run", body, nonce), hashlib.sha512).hexdigest()
+auth_header = f"OpenPortal {signature}"
+```
+
+**Version negotiation.** The header is how the server knows which form to verify:
+
+| `X-OpenPortal-Signature-Version` | Server verifies |
+|---|---|
+| absent | version 1 (§2.3) |
+| `1` | version 1 |
+| `2` | version 2 |
+| anything else | **HTTP 400** — never a silent fallback to version 1, since that would let a mangled header downgrade a version 2 client |
+
+A version 2 signature sent *without* the header will be verified against the
+version 1 form and rejected with 401.
 
 **Example signature (pseudocode):**
 
@@ -160,18 +275,45 @@ A request reusing a nonce within that window is rejected with HTTP 401
 Requests are rate-limited per client IP address at **10,000 requests per
 10-second window**. Exceeding the limit returns HTTP 429.
 
-Client IP is extracted from `X-Forwarded-For` (first value) or `X-Real-IP`
-headers if present, falling back to the TCP peer address.
+Client IP is resolved as follows, and **never** read directly from a
+client-supplied header:
+
+1. The TCP peer address is authoritative **unless** that peer matches the
+   service's configured `trusted_proxy` range. With no `trusted_proxy` set,
+   forwarded headers are ignored entirely.
+2. When the peer *is* a trusted proxy, `X-Forwarded-For` is walked
+   **right-to-left** and the first entry that is *not* itself a trusted proxy is
+   taken. An unparseable entry stops the walk rather than being skipped, because
+   past it there is no way to tell which hop appended what.
+3. `X-Real-IP` is consulted only if `X-Forwarded-For` yields nothing; it is a
+   single value set by the adjacent proxy, so there is no left/right ambiguity.
+
+Taking the **left-most** `X-Forwarded-For` entry - which earlier versions of this
+document described - lets a client choose its own value, since the list is
+appended to by each hop and the left end is whatever the client sent. See
+[security-review-2.md](security-review-2.md#r11) (finding R11).
 
 ---
 
 ## 3. Common Response Format
 
-**Error responses** return a JSON object with a `message` field:
+**Error responses** return a JSON object with a `message` field containing a
+**generic, status-appropriate string** — never internal error detail, which aided
+reconnaissance (round 1 finding F15). The full error chain is logged server-side
+only.
 
 ```json
-{"message": "Something went wrong: <error detail>"}
+{"message": "Unauthorized"}
 ```
+
+| Status | `message` |
+|---|---|
+| 401 | `Unauthorized` |
+| 429 | `Too many requests` |
+| 503 | `Service unavailable` |
+| 400 | `Bad request` |
+| 404 | `Not found` |
+| any other | `Internal server error` |
 
 HTTP status codes used:
 
@@ -182,6 +324,7 @@ HTTP status codes used:
 | 404 | Resource not found |
 | 429 | Rate limit exceeded |
 | 500 | Internal server error |
+| 503 | Service unavailable (e.g. during a soft restart) |
 
 ---
 
@@ -594,7 +737,8 @@ The flow is:
 1. OpenPortal sends create_project (or similar) to the bridge agent.
 2. Bridge adds the Job to the bridge board.
 3. Bridge calls GET <signal_url>?job_id=<uuid> to notify the portal.
-4. Portal receives the signal; calls POST /fetch_job {"job": "<uuid>"} or GET /fetch_jobs.
+4. Portal receives the signal; calls POST /fetch_job with a bare JSON UUID
+   string as the body (see §4), or GET /fetch_jobs.
 5. Portal processes the job (e.g. creates the project in its own system).
 6. Portal calls POST /send_result with the completed Job.
 7. Bridge unblocks and returns the result to OpenPortal.

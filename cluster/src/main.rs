@@ -4,11 +4,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use templemeads::agent;
-use templemeads::agent::instance::{process_args, run, Defaults};
-use templemeads::agent::Type as AgentType;
-use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{
+use greatwestern::grammar::Instruction::{
     AddProject, AddUser, BlockProject, BlockUser, ClearProjectQuota, ClearUserQuota, GetHomeDir,
     GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs,
     GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects, GetStorageReport,
@@ -16,16 +12,24 @@ use templemeads::grammar::Instruction::{
     GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser, IsProtectedUser, RemoveProject,
     RemoveUser, SetLimit, SetProjectQuota, SetUserQuota, UnblockProject, UnblockUser,
 };
-use templemeads::grammar::{
-    DateRange, PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
+use greatwestern::grammar::{
+    DateRange, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
 };
-use templemeads::job::{Envelope, Job};
-use templemeads::notification::{self, default_notify_runner, NotificationEvent};
+use greatwestern::storage::{Quota, Volume};
+use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
+use greatwestern::usagereport::{ProjectUsageReport, Usage, UsageReport};
+use greatwestern::{Hpc, NotificationEvent};
+use templemeads::agent;
+use templemeads::agent::instance::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
+use templemeads::notification::{self, default_notify_runner};
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::set_notify_runner;
-use templemeads::storage::{Quota, Volume};
-use templemeads::storagereport::{ProjectStorageReport, StorageReport};
-use templemeads::usagereport::{ProjectUsageReport, Usage, UsageReport};
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 const AGENT_WAIT_TIME: u64 = 10;
 
@@ -42,7 +46,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -138,7 +142,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectAdded(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectAdded(project.clone())).await;
                     job.completed(mapping)
                 },
                 RemoveProject(project) => {
@@ -146,7 +150,7 @@ async fn main() -> Result<()> {
 
                     // remove the project from the cluster
                     let mapping = remove_project_from_cluster(me.name(), &project).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectRemoved(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectRemoved(project.clone())).await;
                     job.completed(mapping)
                 },
                 AddUser(user) => {
@@ -216,7 +220,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserAdded(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserAdded(user.clone())).await;
                     job.completed(mapping)
                 }
                 RemoveUser(user) => {
@@ -237,17 +241,17 @@ async fn main() -> Result<()> {
 
                     // remove the user from the cluster
                     let mapping = remove_user_from_cluster(me.name(), &user).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserRemoved(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserRemoved(user.clone())).await;
                     job.completed(mapping)
                 }
                 BlockUser(user) => {
                     let mapping = block_user_on_cluster(me.name(), &user).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserBlocked(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserBlocked(user.clone())).await;
                     job.completed(mapping)
                 }
                 UnblockUser(user) => {
                     let mapping = unblock_user_on_cluster(me.name(), &user).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::UserUnblocked(user.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::UserUnblocked(user.clone())).await;
                     job.completed(mapping)
                 }
                 IsBlockedUser(user) => {
@@ -256,12 +260,12 @@ async fn main() -> Result<()> {
                 }
                 BlockProject(project) => {
                     let mappings = block_project_on_cluster(me.name(), &project).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectBlocked(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectBlocked(project.clone())).await;
                     job.completed(mappings)
                 }
                 UnblockProject(project) => {
                     let mappings = unblock_project_on_cluster(me.name(), &project).await?;
-                    notification::send(&envelope.job().destination().reverse(), NotificationEvent::ProjectUnblocked(project.clone())).await;
+                    notification::send::<Hpc>(&envelope.job().destination().reverse(), NotificationEvent::ProjectUnblocked(project.clone())).await;
                     job.completed(mappings)
                 }
                 IsBlockedProject(project) => {
@@ -375,7 +379,7 @@ async fn main() -> Result<()> {
     }
 
     // run the agent
-    set_notify_runner(default_notify_runner).await?;
+    set_notify_runner::<Hpc>(default_notify_runner).await?;
     run(config, cluster_runner).await?;
 
     Ok(())
@@ -1421,7 +1425,7 @@ async fn set_project_quota(
     me: &str,
     project: &ProjectIdentifier,
     volume: &Volume,
-    limit: &templemeads::storage::QuotaLimit,
+    limit: &greatwestern::storage::QuotaLimit,
 ) -> Result<Quota, Error> {
     // get the mapping for this project
     let mapping = get_project_mapping(me, project).await?;
@@ -1618,7 +1622,7 @@ async fn set_user_quota(
     me: &str,
     user: &UserIdentifier,
     volume: &Volume,
-    limit: &templemeads::storage::QuotaLimit,
+    limit: &greatwestern::storage::QuotaLimit,
 ) -> Result<Quota, Error> {
     // get the mapping for this user
     let mapping = get_user_mapping(me, user).await?;
@@ -2157,5 +2161,72 @@ async fn get_user_dirs(me: &str, mapping: &UserMapping) -> Result<Vec<String>, E
                 "Cannot run the job because there is no filesystem agent".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use greatwestern::grammar::UserIdentifier;
+    use templemeads::job::Job;
+
+    /// Every delegation in this file builds its Job by formatting identifiers
+    /// into a space-separated command string - e.g.
+    /// `format!("{}.{} is_protected_user {}", me, account.name(), user)` - and
+    /// hands the result to `Job::parse`. That is only safe because an
+    /// identifier cannot contain whitespace or extra dots: if one could, a
+    /// peer-supplied user or project name would inject an extra argument, or
+    /// extend the destination path past the agent we meant to address.
+    ///
+    /// The identifier parsers enforce that, but they live in another crate, so
+    /// pin the composition here - this is the invariant `op-cluster` actually
+    /// depends on.
+    #[test]
+    fn test_delegated_commands_cannot_be_extended_by_a_peer_supplied_identifier() {
+        let job: Job<Hpc> =
+            match Job::parse("cluster1.freeipa is_protected_user bob.proj.brics", false) {
+                Ok(job) => job,
+                Err(e) => unreachable!("job: {:?}", e),
+            };
+
+        assert_eq!(job.destination().to_string(), "cluster1.freeipa");
+        assert_eq!(
+            job.instruction().to_string(),
+            "is_protected_user bob.proj.brics"
+        );
+
+        // An identifier that would break that command apart must not parse in
+        // the first place.
+        for bad in [
+            "bob.proj.brics extra_argument",
+            "bob.proj.brics is_protected_user carol.proj.brics",
+            "bob.proj.brics\tx",
+            "bob.proj.brics\nx",
+            "bob.proj.brics.extra",
+            "bob.proj",
+        ] {
+            assert!(
+                UserIdentifier::parse(bad).is_err(),
+                "{:?} must not parse as a user identifier - it would change \
+                 the meaning of every command built by formatting it in",
+                bad
+            );
+        }
+    }
+
+    /// The same property for the destination half: `me` is this agent's own
+    /// configured name, but the agent it delegates to is looked up at runtime,
+    /// and the two are joined with a `.`.
+    #[test]
+    fn test_delegation_addresses_exactly_one_hop() {
+        let job: Job<Hpc> = match Job::parse("cluster1.slurm get_limit proj.brics", false) {
+            Ok(job) => job,
+            Err(e) => unreachable!("job: {:?}", e),
+        };
+
+        let destination = job.destination();
+        assert_eq!(destination.agents().len(), 2);
+        assert_eq!(destination.first(), "cluster1");
+        assert_eq!(destination.last(), "slurm");
     }
 }

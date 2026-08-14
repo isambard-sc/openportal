@@ -3,13 +3,16 @@
 
 use anyhow::Result;
 
+use greatwestern::Hpc;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::job::{Envelope, Job};
 use templemeads::Error;
 
 use std::path::PathBuf;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 #[tokio::main]
 async fn main() -> Result<()> {

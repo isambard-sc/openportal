@@ -4,13 +4,13 @@
 use anyhow::Context;
 use anyhow::Result;
 use chrono::Utc;
+use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::sync::Arc;
-use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
 use templemeads::job::assert_not_expired;
-use templemeads::usagereport::{DailyProjectUsageReport, ProjectUsageReport, Usage};
 use templemeads::Error;
 use tokio::sync::Mutex;
 
@@ -123,8 +123,12 @@ impl LockedRunner {
         tracing::debug!("Running command: {:?}", cmd);
 
         let start_time = chrono::Utc::now();
-        let output = tokio::process::Command::new(&cmd[0])
-            .args(&cmd[1..])
+        let Some((program, program_args)) = cmd.split_first() else {
+            return Err(Error::Call("Empty command vector".to_string()));
+        };
+
+        let output = tokio::process::Command::new(program)
+            .args(program_args)
             .kill_on_drop(true)
             .output();
 
@@ -425,7 +429,7 @@ async fn get_account(
             Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
-                cache::clear().await?;
+                cache::remove_account(cached_account.name()).await?;
                 return Ok(None);
             }
         };
@@ -442,8 +446,8 @@ async fn get_account(
                     cached_account
                 );
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this account is known to be stale - see cache::remove_account
+                cache::remove_account(cached_account.name()).await?;
 
                 // store the new account
                 cache::add_account(&existing_account).await?;
@@ -458,7 +462,7 @@ async fn get_account(
                 "Account {} does not exist - it has been removed from slurm.",
                 cached_account.name()
             );
-            cache::clear().await?;
+            cache::remove_account(cached_account.name()).await?;
             return Ok(None);
         }
     }
@@ -594,7 +598,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
             Ok(user) => user,
             Err(e) => {
                 tracing::warn!("Could not get user {}: {}", cached_user.name(), e);
-                cache::clear().await?;
+                cache::remove_user(cached_user.name()).await?;
                 return Ok(None);
             }
         };
@@ -607,8 +611,8 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 );
                 tracing::warn!("Existing: {:?}, new: {:?}", existing_user, cached_user);
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this user is known to be stale - see cache::remove_user
+                cache::remove_user(cached_user.name()).await?;
 
                 // store the new user
                 cache::add_user(&existing_user).await?;
@@ -623,7 +627,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 "User {} does not exist - it has been removed from slurm.",
                 cached_user.name()
             );
-            cache::clear().await?;
+            cache::remove_user(cached_user.name()).await?;
             return Ok(None);
         }
     }
@@ -980,11 +984,17 @@ pub async fn find_cluster() -> Result<(), Error> {
             return Err(Error::Login("Requested cluster not found".to_string()));
         }
     } else {
+        let Some(default_cluster) = clusters.first() else {
+            return Err(Error::Login(
+                "sacctmgr reported no clusters at all - cannot pick a default".to_string(),
+            ));
+        };
+
         tracing::debug!(
             "Using the first cluster available by default: {}",
-            clusters[0]
+            default_cluster
         );
-        cache::set_cluster(&clusters[0]).await?;
+        cache::set_cluster(default_cluster).await?;
     }
 
     Ok(())
@@ -1018,7 +1028,7 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
 async fn get_hourly_report(
     expires: &chrono::DateTime<Utc>,
     project: &ProjectMapping,
-    day: &templemeads::grammar::Date,
+    day: &greatwestern::grammar::Date,
     account: &SlurmAccount,
     slurm_nodes: &SlurmNodes,
     cluster: &str,
@@ -1046,6 +1056,19 @@ async fn get_hourly_report(
             for job in hourly_report {
                 total_usage += job.billed_node_seconds();
                 daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+
+                daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+                daily_report.add_component_usage(
+                    "memory",
+                    job.user(),
+                    Usage::new(job.memory_seconds()),
+                );
+                daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+                daily_report.add_component_usage(
+                    "billing",
+                    job.user(),
+                    Usage::new(job.billing_seconds()),
+                );
 
                 if job.original_start_time() >= &hour_start_time {
                     num_jobs += 1;
@@ -1128,6 +1151,19 @@ async fn get_hourly_report(
             total_usage += job.billed_node_seconds();
             daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
 
+            daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+            daily_report.add_component_usage(
+                "memory",
+                job.user(),
+                Usage::new(job.memory_seconds()),
+            );
+            daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+            daily_report.add_component_usage(
+                "billing",
+                job.user(),
+                Usage::new(job.billing_seconds()),
+            );
+
             // only count wait time for jobs that started in this hour
             if job.original_start_time() >= &start_time {
                 num_jobs += 1;
@@ -1190,7 +1226,7 @@ async fn get_hourly_report(
 async fn get_daily_report(
     expires: &chrono::DateTime<Utc>,
     project: &ProjectMapping,
-    day: &templemeads::grammar::Date,
+    day: &greatwestern::grammar::Date,
     account: &SlurmAccount,
     slurm_nodes: &SlurmNodes,
     cluster: &str,
@@ -1651,6 +1687,29 @@ pub async fn set_limit(
 
     match get_account(account.name(), expires).await? {
         Some(account) => {
+            // Refuse to modify an account this agent does not manage.
+            //
+            // `SlurmAccount::from_mapping` hard-wires `organization` to the
+            // managed org, so the create path's existing check can never fail -
+            // it validates a locally-constructed object, not the one that
+            // actually exists in Slurm. Nothing checked the *fetched* account,
+            // so a peer-chosen `local_group` naming any real account on the
+            // cluster had its `GrpTRESMins` rewritten. See
+            // `docs/specifications/security-review-2.md` (finding R5).
+            if !account.is_managed() {
+                tracing::warn!(
+                    "Refusing to set a limit on Slurm account '{}': it is in \
+                     organization '{}', not the OpenPortal-managed '{}'.",
+                    account.name(),
+                    account.organization(),
+                    get_managed_organization()
+                );
+                return Err(Error::UnmanagedGroup(format!(
+                    "Cannot set a limit on Slurm account '{}' - it is not managed by OpenPortal",
+                    account.name()
+                )));
+            }
+
             let mut account = account.clone();
 
             account.set_limit(limit);
@@ -1730,6 +1789,46 @@ pub async fn cancel_pending_user_jobs(
     assert_not_expired(expires)?;
 
     let user = clean_user_name(user)?;
+
+    // As for `cancel_pending_project_jobs`: resolve the user and refuse unless
+    // they are associated with at least one OpenPortal-managed account.
+    // `SlurmUser` carries no organization of its own, so "managed" is defined
+    // by association. See
+    // `docs/specifications/security-review-2.md` (finding R5).
+    match get_user(&user, expires).await? {
+        Some(existing) => {
+            let mut manages_any = false;
+
+            for association in existing.associations() {
+                if let Some(account) = get_account(association.account(), expires).await? {
+                    if account.is_managed() {
+                        manages_any = true;
+                        break;
+                    }
+                }
+            }
+
+            if !manages_any {
+                tracing::warn!(
+                    "Refusing to cancel jobs for Slurm user '{}': they are not \
+                     associated with any OpenPortal-managed account.",
+                    user
+                );
+                return Err(Error::UnmanagedGroup(format!(
+                    "Cannot cancel jobs for Slurm user '{}' - they are not managed by OpenPortal",
+                    user
+                )));
+            }
+        }
+        None => {
+            tracing::warn!(
+                "Not cancelling jobs for Slurm user '{}' - they do not exist",
+                user
+            );
+            return Ok(());
+        }
+    }
+
     let cluster = cache::get_cluster().await?;
 
     tracing::info!(
@@ -1774,6 +1873,38 @@ pub async fn cancel_pending_project_jobs(
     assert_not_expired(expires)?;
 
     let account = clean_account_name(account)?;
+
+    // Resolve the account and refuse unless OpenPortal manages it. This took a
+    // bare string and cancelled against it with no lookup at all, so a
+    // peer-chosen `local_group` could `scancel` every pending job of any
+    // account on the cluster. See
+    // `docs/specifications/security-review-2.md` (finding R5).
+    match get_account(&account, expires).await? {
+        Some(existing) if existing.is_managed() => {}
+        Some(existing) => {
+            tracing::warn!(
+                "Refusing to cancel jobs for Slurm account '{}': it is in \
+                 organization '{}', not the OpenPortal-managed '{}'.",
+                account,
+                existing.organization(),
+                get_managed_organization()
+            );
+            return Err(Error::UnmanagedGroup(format!(
+                "Cannot cancel jobs for Slurm account '{}' - it is not managed by OpenPortal",
+                account
+            )));
+        }
+        None => {
+            // Nothing to cancel for an account that does not exist - and, as
+            // for removal generally, this stays idempotent rather than erroring.
+            tracing::warn!(
+                "Not cancelling jobs for Slurm account '{}' - it does not exist",
+                account
+            );
+            return Ok(());
+        }
+    }
+
     let cluster = cache::get_cluster().await?;
 
     tracing::info!(

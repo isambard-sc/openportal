@@ -7,33 +7,45 @@ use crate::command::Command;
 use crate::control_message::process_control_message;
 use crate::destination::Position;
 use crate::diagnostics;
+use crate::domain::Domain;
+use crate::domain_static;
 use crate::error::Error;
 use crate::health;
-use crate::job::{sync_from_peer, Envelope, Status};
+use crate::job::{sync_from_peer, Envelope, Job, Status};
 use crate::jobtiming;
 use crate::notification::{default_notify_runner, AsyncNotifyRunnable, NotificationEnvelope};
+use crate::portal_identifier::PortalIdentifier;
+use crate::portalroutes;
 use crate::restart;
 use crate::runnable::{default_runner, AsyncRunnable};
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
-use paddington::async_message_handler;
+use paddington::config::ServiceConfig;
 use paddington::message::{Message, MessageType};
+use std::any::Any;
 use std::boxed::Box;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
-struct ServiceDetails {
+struct ServiceDetails<L: Domain> {
     service: String,
     agent_type: AgentType,
-    runner: AsyncRunnable,
-    notify_runner: AsyncNotifyRunnable,
+    runner: AsyncRunnable<L>,
+    notify_runner: AsyncNotifyRunnable<L>,
     keepalives: Arc<Mutex<HashSet<String>>>,
+    /// Whether this agent expects the Jobs it receives to be *portal-rooted* -
+    /// i.e. for the first agent in a Job's destination to be the portal that
+    /// owns the identifiers the instruction names. See
+    /// `assert_portal_ownership` and
+    /// `docs/specifications/security-review-2.md` (finding R34).
+    verify_portal_ownership: bool,
 }
 
-impl Default for ServiceDetails {
+impl<L: Domain> Default for ServiceDetails<L> {
     fn default() -> Self {
         ServiceDetails {
             service: String::new(),
@@ -41,17 +53,25 @@ impl Default for ServiceDetails {
             runner: default_runner,
             notify_runner: default_notify_runner,
             keepalives: Arc::new(Mutex::new(HashSet::new())),
+            // Off unless an agent opts in, so a new agent type cannot silently
+            // acquire a check its destinations were never designed for.
+            verify_portal_ownership: false,
         }
     }
 }
 
-static SERVICE_DETAILS: Lazy<RwLock<ServiceDetails>> =
-    Lazy::new(|| RwLock::new(ServiceDetails::default()));
+static SERVICE_DETAILS: OnceLock<Box<dyn Any + Send + Sync>> = OnceLock::new();
 
-pub async fn set_my_service_details(
+fn service_details<L: Domain>() -> Result<&'static RwLock<ServiceDetails<L>>, Error> {
+    domain_static::get_or_init(&SERVICE_DETAILS, || {
+        RwLock::new(ServiceDetails::<L>::default())
+    })
+}
+
+pub async fn set_my_service_details<L: Domain>(
     service: &str,
     agent_type: &agent::Type,
-    runner: Option<AsyncRunnable>,
+    runner: Option<AsyncRunnable<L>>,
     cascade_health: bool,
 ) -> Result<()> {
     let engine = env!("CARGO_PKG_NAME");
@@ -60,7 +80,7 @@ pub async fn set_my_service_details(
     tracing::info!("Agent layer: {} version {}", engine, version);
 
     agent::register_self(service, agent_type, engine, version, cascade_health).await;
-    let mut service_details = SERVICE_DETAILS.write().await;
+    let mut service_details = service_details::<L>()?.write().await;
     service_details.service = service.to_string();
     service_details.agent_type = agent_type.clone();
 
@@ -72,16 +92,377 @@ pub async fn set_my_service_details(
     Ok(())
 }
 
-pub async fn set_notify_runner(runner: AsyncNotifyRunnable) -> Result<()> {
-    let mut service_details = SERVICE_DETAILS.write().await;
+/// Declare whether this agent expects portal-rooted Jobs (see
+/// `ServiceDetails::verify_portal_ownership`).
+///
+/// Called by `provider::run`, `platform::run` and `instance::run`, which sit on
+/// the portal-rooted path. `instance::run_delegated` sets it `false` for an
+/// Instance whose Jobs are delegated by another agent rather than routed down
+/// from the owning portal.
+pub async fn set_verify_portal_ownership<L: Domain>(verify: bool) -> Result<()> {
+    let mut service_details = service_details::<L>()?.write().await;
+    service_details.verify_portal_ownership = verify;
+    Ok(())
+}
+
+async fn verify_portal_ownership<L: Domain>() -> bool {
+    match service_details::<L>() {
+        Ok(details) => details.read().await.verify_portal_ownership,
+        Err(_) => false,
+    }
+}
+
+///
+/// Push the portal routes we know to `peer`, if it is eligible to receive them.
+///
+/// A peer is eligible if it understands the message (advertised in its
+/// `Register`) and is not itself declared a portal - routes travel away from
+/// portals, never back toward them. `routes_for_peer` additionally withholds
+/// anything we learned from that same peer.
+///
+async fn advertise_routes_to<L: Domain>(peer: &Peer) {
+    if !agent::is_route_capable(peer).await {
+        tracing::debug!(
+            "Not advertising portal routes to {} - it does not support them",
+            peer
+        );
+        return;
+    }
+
+    if agent::expected_peer_type(peer).await == Some(AgentType::Portal) {
+        return;
+    }
+
+    let routes = portalroutes::routes_for_peer(peer).await;
+
+    if routes.is_empty() {
+        return;
+    }
+
+    tracing::debug!("Advertising {} portal route(s) to {}", routes.len(), peer);
+
+    if let Err(e) = Command::<L>::portal_routes(&routes, &[])
+        .send_to(peer)
+        .await
+    {
+        tracing::warn!("Could not advertise portal routes to {}: {}", peer, e);
+    }
+}
+
+/// Push our portal routes to every eligible peer, optionally skipping one
+/// (normally the peer we just learned from, though `routes_for_peer` would
+/// withhold its own routes anyway).
+async fn advertise_routes_to_all<L: Domain>(skip: Option<&Peer>) {
+    for peer in agent::all_peers().await {
+        if Some(&peer) == skip {
+            continue;
+        }
+
+        advertise_routes_to::<L>(&peer).await;
+    }
+}
+
+///
+/// Originate the routes for every peer our own config declares a portal, and
+/// advertise them. Called once at startup, after the declared types are known.
+///
+/// This is the trust anchor: an agent adjacent to a portal is the only one that
+/// asserts a portal's existence without having been told, and it does so purely
+/// from its own configuration.
+///
+pub(crate) async fn originate_portal_routes<L: Domain>() {
+    let me = agent::name().await;
+
+    if me.is_empty() {
+        return;
+    }
+
+    let mut originated = false;
+
+    for (peer, typ) in agent::expected_peer_types().await {
+        if typ != AgentType::Portal {
+            continue;
+        }
+
+        let portal = match PortalIdentifier::parse(peer.name()) {
+            Ok(portal) => portal,
+            Err(e) => {
+                tracing::error!(
+                    "Peer {} is declared a portal but its name is not a valid portal \
+                     identifier: {}",
+                    peer,
+                    e
+                );
+                continue;
+            }
+        };
+
+        match portalroutes::originate(&portal, peer.zone(), &me).await {
+            Ok(true) => originated = true,
+            Ok(false) => {}
+            Err(e) => tracing::error!("Could not originate a route for portal {}: {}", peer, e),
+        }
+    }
+
+    if originated {
+        advertise_routes_to_all::<L>(None).await;
+    }
+}
+
+///
+/// Tell our downstream peers that the routes we learned from `peer` are gone.
+/// Called when that peer disconnects and its routes have been withdrawn.
+///
+pub(crate) async fn withdraw_routes_from<L: Domain>(peer: &Peer) {
+    // The table has already dropped them, so re-advertising what remains is
+    // enough for a peer that is still connected to converge - and the explicit
+    // withdrawal below tells it which portals went away.
+    advertise_routes_to_all::<L>(Some(peer)).await;
+}
+
+/// Re-check, on receipt, that a Job's instruction is being issued via the portal
+/// that owns the identifiers it names.
+///
+/// `Command::parse`'s `check_portal` arm enforces this, but it is only ever
+/// passed `true` at the two *entry* points to the system - where the bridge
+/// parses a client command, and where the portal builds the southbound Job. Every
+/// Job arriving over paddington is deserialised with `check_portal = false`
+/// (`job.rs`'s `impl Deserialize for Command<L>`), and no privileged agent
+/// re-checked it. So a Job injected directly at an agent inside the estate never
+/// passed the check at all, and could name any portal's project while claiming
+/// any first agent. See `docs/specifications/security-review-2.md` (finding
+/// R34).
+///
+/// The decision is made entirely from locally-trusted state: this agent's own
+/// declared expectation (from its own startup, not the wire) and
+/// `Domain::owning_portal`, which lets `templemeads` ask the question without
+/// knowing any domain vocabulary. An instruction that names no portal is not
+/// checked.
+///
+/// Refuse to have anything to do with a portal for which two conflicting routes
+/// have been advertised.
+///
+/// Unlike the ownership and route checks, this runs at **every** hop, not only at
+/// a Job's terminal agent, and regardless of this agent's own
+/// `verify_portal_ownership` setting. A collision means an agent's configuration
+/// has been changed to introduce an impostor portal, and at that point we cannot
+/// tell which of the two routes is genuine - so no agent that has seen the
+/// collision should relay or act on an instruction naming that portal, not even
+/// to pass it along.
+///
+/// This is deliberately a denial of service for that portal, chosen over the
+/// alternative: if an attacker has got far enough to have a peer provisioned
+/// inside the estate, stopping is preferable to the risk of relaying commands
+/// they should not be able to run.
+///
+/// It stays scoped to the *affected portal name* rather than shutting the agent
+/// down altogether. That is not a weaker choice: an impostor of portal `P` can
+/// only usefully forge instructions naming `P`, and an instruction naming some
+/// other portal while arriving on a route rooted at `P` is caught by the root
+/// check at the terminal agent instead. Confining it keeps a compromise of one
+/// portal relationship from taking down every other portal an agent serves.
+///
+/// No gating is needed: a collision can only ever be recorded in a zone that
+/// carries portal routes, so this is inert in an internal zone.
+///
+async fn assert_no_portal_collision<L: Domain>(job: &Job<L>, sender: &Peer) -> Result<(), Error> {
+    let Some(portal) = L::owning_portal(&job.instruction()) else {
+        return Ok(());
+    };
+
+    let zone = sender.zone();
+    let name = portal.portal();
+
+    if portalroutes::is_collided(zone, &name).await {
+        tracing::error!(
+            "Refusing job {}: portal '{}' in zone '{}' has two conflicting routes, so an \
+             agent's configuration has been changed or an impostor portal introduced. \
+             Refusing to relay or act on any instruction naming '{}' until an operator \
+             resolves it.",
+            job.id(),
+            name,
+            zone,
+            name
+        );
+
+        return Err(Error::InvalidInstruction(format!(
+            "Portal '{}' has conflicting routes - refusing job {}",
+            name,
+            job.id()
+        )));
+    }
+
+    Ok(())
+}
+
+async fn assert_portal_ownership<L: Domain>(
+    job: &Job<L>,
+    sender: &Peer,
+    recipient: &str,
+    sender_name: &str,
+) -> Result<(), Error> {
+    // Only the agent that *acts* on a portal-rooted instruction checks it.
+    //
+    // An intermediate hop (a provider or platform relaying a Job onward) must
+    // not: it adds nothing, since the terminal agent checks the same Job a
+    // moment later, and it turns any gap in the route table into a silent
+    // outage several hops away from the agent that could actually diagnose it.
+    // Intermediates contribute the *collision* detection instead, which happens
+    // in `portalroutes::receive` regardless of this check.
+    //
+    // "The agent that acts" is exactly `Position::Destination` - a local,
+    // wire-independent test. See
+    // `docs/plans/portal-route-discovery-design.md` §4.7.
+    if job.destination().position(recipient, sender_name) != Position::Destination {
+        return Ok(());
+    }
+
+    if !verify_portal_ownership::<L>().await {
+        return Ok(());
+    }
+
+    // Apply the portal rule only in a zone that actually carries portal-rooted
+    // traffic, which is exactly a zone we know a portal route in.
+    //
+    // This is what separates the two kinds of zone an agent sits in. An
+    // instance's upstream zone carries instructions routed down from a portal,
+    // and there the rule holds. Its downstream zone holds the account,
+    // filesystem and scheduler agents it delegates to, and those legitimately
+    // create jobs naming a portal on a destination rooted at *themselves* -
+    // `freeipa.shared get_local_home_dir john.aiproject.brics` is the canonical
+    // one, and `op-freeipa` passes `check_portal = false` when building it for
+    // precisely that reason.
+    //
+    // An earlier build applied the rule unconditionally and rejected that job,
+    // breaking user creation. The rule was never a global invariant: it holds of
+    // portal-originated traffic, and the zone is how this architecture already
+    // distinguishes that. See
+    // `docs/plans/portal-route-discovery-design.md` §4.7.
+    if !portalroutes::zone_has_portal_route(sender.zone()).await {
+        return Ok(());
+    }
+
+    // The root check (finding R34). Retained alongside the route check below
+    // because it still catches an instruction naming a portal we hold no route
+    // for, which the route check cannot.
+    check_portal_ownership(job, true)?;
+
+    let Some(portal) = L::owning_portal(&job.instruction()) else {
+        return Ok(());
+    };
+
+    assert_portal_route(job, &portal, sender).await
+}
+
+///
+/// Check that a Job naming `portal` arrived by the route we expect that portal's
+/// instructions to travel.
+///
+/// This is strictly stronger than the root check above, which compares only the
+/// first agent of the destination: a correctly-named impostor portal introduced
+/// one hop away satisfies the root check but produces a different route. See
+/// `crate::portalroutes` and `docs/plans/portal-route-discovery-design.md`.
+///
+async fn assert_portal_route<L: Domain>(
+    job: &Job<L>,
+    portal: &PortalIdentifier,
+    sender: &Peer,
+) -> Result<(), Error> {
+    let zone = sender.zone();
+    let name = portal.portal();
+
+    // Enforce only what we actually know.
+    //
+    // A route is absent for entirely legitimate reasons: no peer has been
+    // declared `type = "portal"` anywhere upstream (the anchor is opt-in, so an
+    // estate that has not adopted it yet has no routes at all), the upstream
+    // agent predates the feature, or the push has not landed yet on a
+    // just-established connection. Rejecting on absence turned all three into an
+    // outage - and the first is the default state of every existing deployment.
+    //
+    // So the property is "a route, once known, is enforced" rather than "a route
+    // must be known". The scheme activates by itself as soon as an operator
+    // declares their portals, and the collision detection - which is what
+    // actually catches an impostor - does not depend on this check at all. See
+    // `docs/plans/portal-route-discovery-design.md` §5.
+    let Some(route) = portalroutes::expected_route(zone, &name).await else {
+        tracing::debug!(
+            "No route known for portal '{}' in zone '{}' - not checking the route of job {}",
+            name,
+            zone,
+            job.id()
+        );
+        return Ok(());
+    };
+
+    if !portalroutes::destination_matches_route(&job.destination(), &route) {
+        tracing::error!(
+            "Rejecting job {}: it names portal '{}' and arrived on destination '{}', but \
+             that portal reaches us via '{}'. The route does not match, so this instruction \
+             did not come from where it claims to have come from.",
+            job.id(),
+            name,
+            job.destination(),
+            route
+        );
+
+        return Err(Error::InvalidInstruction(format!(
+            "Job {} names portal '{}' but arrived via '{}', not '{}'",
+            job.id(),
+            name,
+            job.destination(),
+            route
+        )));
+    }
+
+    Ok(())
+}
+
+/// The decision `assert_portal_ownership` makes, with the policy passed in
+/// rather than read from global state - so it can be tested directly.
+fn check_portal_ownership<L: Domain>(job: &Job<L>, verify: bool) -> Result<(), Error> {
+    if !verify {
+        return Ok(());
+    }
+
+    let Some(portal) = L::owning_portal(&job.instruction()) else {
+        return Ok(());
+    };
+
+    let first = job.destination().first();
+
+    if portal.portal() != first {
+        tracing::warn!(
+            "Rejecting job {}: it names portal '{}' but arrived on a destination \
+             rooted at '{}'. Only '{}' may issue instructions naming '{}'.",
+            job.id(),
+            portal.portal(),
+            first,
+            portal.portal(),
+            portal.portal()
+        );
+
+        return Err(Error::InvalidInstruction(format!(
+            "Job {} names portal '{}' but was issued via '{}'",
+            job.id(),
+            portal.portal(),
+            first
+        )));
+    }
+
+    Ok(())
+}
+
+pub async fn set_notify_runner<L: Domain>(runner: AsyncNotifyRunnable<L>) -> Result<()> {
+    let mut service_details = service_details::<L>()?.write().await;
     service_details.notify_runner = runner;
     Ok(())
 }
 
 /// Deliver a notification directly to this agent's registered notify runner.
 /// Used when the current agent is the final destination in the notification path.
-pub async fn invoke_notify_runner(envelope: NotificationEnvelope) -> Result<()> {
-    let runner = SERVICE_DETAILS.read().await.notify_runner;
+pub async fn invoke_notify_runner<L: Domain>(envelope: NotificationEnvelope<L>) -> Result<()> {
+    let runner = service_details::<L>()?.read().await.notify_runner;
     if let Err(e) = runner(envelope).await {
         tracing::warn!("Local notify runner returned error: {}", e);
     }
@@ -93,13 +474,13 @@ pub async fn invoke_notify_runner(envelope: NotificationEnvelope) -> Result<()> 
 /// This will either route the command to the right place, or if the command has reached
 /// its destination it will take action
 ///
-async fn process_command(
+async fn process_command<L: Domain>(
     recipient: &str,
     sender: &str,
     zone: &str,
-    command: &Command,
-    runner: &AsyncRunnable,
-    notify_runner: &AsyncNotifyRunnable,
+    command: &Command<L>,
+    runner: &AsyncRunnable<L>,
+    notify_runner: &AsyncNotifyRunnable<L>,
 ) -> Result<(), Error> {
     // Block new jobs during soft restart
     // Allow Register, HealthCheck, and Restart commands to pass through
@@ -149,14 +530,82 @@ async fn process_command(
             agent,
             engine,
             version,
+            domain,
+            domain_version,
+            supports_portal_routes,
         } => {
+            // A peer that didn't send a domain at all (pre-0.33.0) may still
+            // be one this Domain recognises by historical version alone -
+            // see `Domain::assume_legacy_domain_version`.
+            let (domain, domain_version) = match (domain, domain_version) {
+                (Some(d), Some(v)) => (Some(d.clone()), Some(v.clone())),
+                _ => match L::assume_legacy_domain_version(version) {
+                    Some(v) => (Some(L::name().to_string()), Some(v.to_string())),
+                    None => (None, None),
+                },
+            };
+
             tracing::info!(
-                "Registering agent: {}, engine={} version={}",
+                "Registering agent: {}, engine={} version={} domain={} domain_version={}",
                 agent,
                 engine,
-                version
+                version,
+                domain.as_deref().unwrap_or("unknown"),
+                domain_version.as_deref().unwrap_or("unknown")
             );
-            agent::register_peer(&Peer::new(sender, zone), agent, engine, version).await;
+
+            // A peer's role arrives over the wire, and every type-based
+            // authorization decision in the framework is made from it - which
+            // portal accepts a `Submit`, which peer may restart us, which peer
+            // an instance routes account operations to. Nothing checked it, so
+            // any peer could claim any role. If our own config declares what
+            // this peer should be, hold it to that. See
+            // `docs/specifications/security-review-2.md` (finding R3).
+            let sender_peer = Peer::new(sender, zone);
+
+            if let Some(expected) = agent::expected_peer_type(&sender_peer).await {
+                if *agent != expected {
+                    tracing::error!(
+                        "Refusing to register {}: it presents as agent type '{}', but our \
+                         configuration declares it as '{}'. Ignoring this registration.",
+                        sender_peer,
+                        agent,
+                        expected
+                    );
+
+                    return Err(Error::InvalidPeer(format!(
+                        "Peer {} presented as '{}' but is declared as '{}'",
+                        sender_peer, agent, expected
+                    )));
+                }
+            } else {
+                tracing::debug!(
+                    "Peer {} has no declared agent type in our config, so its claimed \
+                     type '{}' is accepted unchecked. Add `type = \"{}\"` to its config \
+                     entry to have this verified.",
+                    sender_peer,
+                    agent,
+                    agent
+                );
+            }
+
+            agent::set_route_capable(&sender_peer, *supports_portal_routes).await;
+
+            agent::register_peer(
+                &Peer::new(sender, zone),
+                agent,
+                engine,
+                version,
+                domain.as_deref(),
+                domain_version.as_deref(),
+            )
+            .await;
+
+            // Now that the peer is registered - so we know its declared type
+            // and whether it understands them - push it the portal routes we
+            // know. This is the point at which the guarantee "a downstream
+            // agent learns its route as soon as it connects" is established.
+            advertise_routes_to::<L>(&sender_peer).await;
         }
         Command::Update { job } => {
             if job.is_expired() {
@@ -167,6 +616,16 @@ async fn process_command(
             let peer = Peer::new(sender, zone);
 
             tracing::debug!("Update job: {:?} to {} from {}", job, recipient, peer,);
+
+            if let Err(e) = assert_no_portal_collision::<L>(job, &peer)
+                .await
+                .and(assert_portal_ownership::<L>(job, &peer, recipient, sender).await)
+            {
+                tracing::error!("Refusing job update {}: {}", job.id(), e);
+                let job = job.errored(&e.to_string())?;
+                let _ = job.update(&Peer::new(sender, zone)).await?;
+                return Ok(());
+            }
 
             // update the sender's board with the received job
             let job = job.received(&peer).await?;
@@ -208,6 +667,19 @@ async fn process_command(
             let peer = Peer::new(sender, zone);
 
             tracing::debug!("Put job: {:?} to {} from {}", job, recipient, peer,);
+
+            // Report a refusal back to the sender rather than only logging it -
+            // otherwise the agent that submitted the job waits for a result that
+            // will never come.
+            if let Err(e) = assert_no_portal_collision::<L>(job, &peer)
+                .await
+                .and(assert_portal_ownership::<L>(job, &peer, recipient, sender).await)
+            {
+                tracing::error!("Refusing job {}: {}", job.id(), e);
+                let job = job.errored(&e.to_string())?;
+                let _ = job.update(&Peer::new(sender, zone)).await?;
+                return Ok(());
+            }
 
             // update the sender's board with the received job
             let mut job = match job.received(&peer).await {
@@ -451,12 +923,12 @@ async fn process_command(
             }
 
             // Collect health information (including cascaded peer health)
-            let health = health::collect_health(sender, visited.clone()).await?;
+            let health = health::collect_health::<L>(sender, visited.clone()).await?;
 
             tracing::debug!("Health check: {}", health);
 
             // Send health response back to sender
-            let response = Command::health_response(health);
+            let response = Command::<L>::health_response(health);
             response.send_to(&sender_peer).await?;
         }
         Command::HealthResponse { health } => {
@@ -468,7 +940,7 @@ async fn process_command(
             restart_type,
             destination,
         } => {
-            restart::handle_restart_request(sender, restart_type, destination).await?;
+            restart::handle_restart_request::<L>(sender, restart_type, destination).await?;
         }
         Command::DiagnosticsRequest { destination } => {
             tracing::debug!(
@@ -495,13 +967,33 @@ async fn process_command(
             }
 
             // Collect diagnostics information (including cascaded peer diagnostics)
-            let diagnostics_report = diagnostics::collect_diagnostics(destination).await?;
+            let diagnostics_report = diagnostics::collect_diagnostics::<L>(destination).await?;
 
             tracing::debug!("Diagnostics report: {}", diagnostics_report);
 
             // Send diagnostics response back to sender
-            let response = Command::diagnostics_response(diagnostics_report);
+            let response = Command::<L>::diagnostics_response(diagnostics_report);
             response.send_to(&sender_peer).await?;
+        }
+        Command::PortalRoutes { routes, withdrawn } => {
+            let peer = Peer::new(sender, zone);
+
+            tracing::debug!(
+                "Received {} portal route(s) and {} withdrawal(s) from {}",
+                routes.len(),
+                withdrawn.len(),
+                peer
+            );
+
+            let me = agent::name().await;
+
+            // If our own table changed, our downstream peers' routes changed
+            // too, so pass it on. In an acyclic topology this terminates:
+            // `routes_for_peer` never returns a route back to the peer it came
+            // from, so nothing loops.
+            if portalroutes::receive(&peer, routes, withdrawn, &me).await {
+                advertise_routes_to_all::<L>(Some(&peer)).await;
+            }
         }
         Command::DiagnosticsResponse { report } => {
             tracing::debug!("Received diagnostics response from {}", report.agent_name);
@@ -553,13 +1045,19 @@ async fn process_command(
                     // agent in the path (penultimate covers virtual-agent suffixes).
                     let mut handled = false;
 
-                    let my_agent_type = SERVICE_DETAILS.read().await.agent_type.clone();
+                    let my_agent_type = match service_details::<L>() {
+                        Ok(service_details) => service_details.read().await.agent_type.clone(),
+                        Err(e) => return Err(e),
+                    };
                     if my_agent_type == AgentType::Bridge {
                         if let Some(portal) = agent::portal(0).await {
                             let agents = notification.destination().agents();
                             let n = agents.len();
-                            let portal_is_last = n >= 1 && agents[n - 1] == portal.name();
-                            let portal_is_penultimate = n >= 2 && agents[n - 2] == portal.name();
+                            let portal_is_last = agents.last().is_some_and(|a| *a == portal.name());
+                            let portal_is_penultimate = n
+                                .checked_sub(2)
+                                .and_then(|i| agents.get(i))
+                                .is_some_and(|a| *a == portal.name());
 
                             if portal_is_last || portal_is_penultimate {
                                 tracing::debug!(
@@ -611,16 +1109,25 @@ async fn process_command(
     Ok(())
 }
 
-async_message_handler! {
-    ///
-    /// Message handler for most templemeads agents
-    ///
-    pub async fn process_message(message: Message) -> Result<(), paddington::Error> {
-        let service_info: ServiceDetails = SERVICE_DETAILS.read().await.to_owned();
+///
+/// Message handler for most templemeads agents
+///
+/// This is hand-expanded from paddington's `async_message_handler!` macro
+/// (rather than using it directly) because that macro's pattern has no slot
+/// for a generic parameter, and this function needs to be generic over the
+/// chosen `Domain` - paddington itself stays untouched and domain-agnostic.
+pub fn process_message<L: Domain>(
+    message: Message,
+) -> Pin<Box<dyn Future<Output = Result<(), paddington::Error>> + Send>> {
+    Box::pin(async move {
+        let service_info: ServiceDetails<L> = match service_details::<L>() {
+            Ok(service_details) => service_details.read().await.to_owned(),
+            Err(e) => return Err(paddington::Error::Any(e.into())),
+        };
 
         match message.typ() {
             MessageType::Control => {
-                process_control_message(&service_info.agent_type, message.into()).await?;
+                process_control_message::<L>(&service_info.agent_type, message.into()).await?;
                 Ok(())
             }
             MessageType::KeepAlive => {
@@ -628,8 +1135,12 @@ async_message_handler! {
                 let recipient: String = message.recipient().to_owned();
                 let zone: String = message.zone().to_owned();
 
-                if (recipient != service_info.service) {
-                    return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                if recipient != service_info.service {
+                    return Err(Error::Delivery(format!(
+                        "Recipient {} does not match service {}",
+                        recipient, service_info.service
+                    ))
+                    .into());
                 }
 
                 // check that we are the only one sending keepalives to this peer
@@ -639,7 +1150,11 @@ async_message_handler! {
                 match service_info.keepalives.lock() {
                     Ok(mut keepalives) => {
                         if keepalives.contains(&name) {
-                            tracing::debug!("Duplicate keepalive message from {} in zone {} - skipping", sender, zone);
+                            tracing::debug!(
+                                "Duplicate keepalive message from {} in zone {} - skipping",
+                                sender,
+                                zone
+                            );
                             return Ok(());
                         }
 
@@ -683,12 +1198,16 @@ async_message_handler! {
                 let sender: String = message.sender().to_owned();
                 let recipient: String = message.recipient().to_owned();
                 let zone: String = message.zone().to_owned();
-                let command: Command = message.into();
+                let command: Command<L> = message.into();
 
-                if (recipient != service_info.service) {
+                if recipient != service_info.service {
                     // check to see if this is a virtual agent
                     if !agent::is_virtual(&Peer::new(&recipient, &zone)).await {
-                        return Err(Error::Delivery(format!("Recipient {} does not match service {}", recipient, service_info.service)).into());
+                        return Err(Error::Delivery(format!(
+                            "Recipient {} does not match service {}",
+                            recipient, service_info.service
+                        ))
+                        .into());
                     }
                 }
 
@@ -705,5 +1224,379 @@ async_message_handler! {
                 Ok(())
             }
         }
+    })
+}
+
+///
+/// Start the paddington event loop with blind relay support - every
+/// `run()` in this crate calls this instead of calling
+/// `paddington::set_handler`/`paddington::run` directly, so that any
+/// `servers`/`clients` peer configured with a `proxy` (see
+/// `paddington::relay` and `docs/plans/archive/blind-relay-proxy-design.md`) works
+/// the same way for every agent kind without each one needing its own
+/// wiring.
+///
+/// Registers [`process_message::<L>`] as the *inner* handler behind
+/// [`paddington::relay::relay_dispatch_handler`] (which passes non-relay
+/// traffic through unchanged, so this is a no-op for agents with no
+/// relayed peers configured), then spawns bootstrapping of any relayed
+/// peers this agent connects to as the relayed *client* - relayed
+/// *servers* wait for their peer to initiate instead, so there's nothing
+/// to spawn for them. Bootstrapping runs concurrently with, not before,
+/// `paddington::run` below, since that's what actually dials the
+/// underlying connection to the relay in the first place.
+///
+/// Read each peer's declared `type = "..."` out of the service config and hand
+/// the result to the agent registrar, so `Command::Register` can check what a
+/// peer claims against what we were told to expect.
+///
+/// A peer with no declared type is absent from the map and is not checked, so an
+/// existing config keeps working and the check can be adopted per peer. An
+/// unrecognised value is a misconfiguration: it is logged loudly and treated as
+/// "not declared" rather than silently rejecting the peer. See
+/// `docs/specifications/security-review-2.md` (finding R3).
+async fn register_expected_peer_types(config: &ServiceConfig) {
+    let mut expected: HashMap<Peer, AgentType> = HashMap::new();
+
+    let declared = config
+        .clients()
+        .into_iter()
+        .map(|c| (c.name(), c.zone(), c.agent_type()))
+        .chain(
+            config
+                .servers()
+                .into_iter()
+                .map(|s| (s.name(), s.zone(), s.agent_type())),
+        );
+
+    for (name, zone, agent_type) in declared {
+        let Some(agent_type) = agent_type else {
+            continue;
+        };
+
+        match AgentType::parse(&agent_type) {
+            Some(typ) => {
+                expected.insert(Peer::new(&name, &zone), typ);
+            }
+            None => {
+                tracing::error!(
+                    "Peer {}@{} declares an unrecognised agent type '{}' - ignoring it, so \
+                     this peer's claimed type will NOT be checked. Valid values are: \
+                     portal, provider, platform, instance, bridge, account, filesystem, \
+                     scheduler, virtual.",
+                    name,
+                    zone,
+                    agent_type
+                );
+            }
+        }
+    }
+
+    agent::set_expected_peer_types(expected).await;
+}
+
+pub async fn run_with_relay<L: Domain>(config: ServiceConfig) -> Result<(), paddington::Error> {
+    register_expected_peer_types(&config).await;
+
+    // Must follow the line above: origination reads the declared types to find
+    // which of our peers are portals.
+    originate_portal_routes::<L>().await;
+
+    paddington::relay::configure(&config).await?;
+    paddington::relay::set_inner_handler(process_message::<L>).await?;
+    paddington::set_handler(paddington::relay::relay_dispatch_handler).await?;
+
+    tokio::spawn(async {
+        if let Err(e) = paddington::relay::bootstrap_all_as_client().await {
+            tracing::error!("Could not bootstrap relayed peer(s): {:?}", e);
+        }
+    });
+
+    paddington::run(config).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::job::Job;
+    use crate::test_domain::TestDomain;
+
+    fn job(command: &str) -> Job<TestDomain> {
+        Job::parse(command, false).unwrap_or_else(|e| unreachable!("job: {:?}", e))
+    }
+
+    #[test]
+    fn test_check_portal_ownership_rejects_a_foreign_portal_root() {
+        // Regression test for finding R34. `Command::parse`'s `check_portal` arm
+        // is only ever passed `true` at the two entry points to the system, and
+        // every Job arriving over paddington is deserialised with it `false` -
+        // so nothing re-checked that an instruction naming portal X had actually
+        // been issued via X. A Job injected directly at an agent inside the
+        // estate could therefore name any portal's project.
+
+        // The legitimate shape: the instruction names `brics`, and the Job
+        // arrived on a destination rooted at `brics`.
+        assert!(
+            check_portal_ownership(&job("brics.cluster add_user bob.proj.brics"), true).is_ok()
+        );
+        assert!(check_portal_ownership(
+            &job("brics.provider.clusters.cluster add_user bob.proj.brics"),
+            true
+        )
+        .is_ok());
+
+        // The attack: the same instruction, arriving on a destination rooted at
+        // something else. This is what an agent inside the estate could inject.
+        assert!(check_portal_ownership(
+            &job("attacker.clusters.cluster add_user bob.proj.brics"),
+            true
+        )
+        .is_err());
+
+        // ...including a route rooted at another real portal.
+        assert!(
+            check_portal_ownership(&job("otherportal.cluster add_user bob.proj.brics"), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_check_portal_ownership_is_skipped_when_not_enabled() {
+        // Account/Filesystem/Scheduler agents, and `instance::run_delegated`
+        // Instances such as `op-cloudaccount`, receive Jobs whose destination is
+        // rooted at the *delegating* agent rather than at the owning portal. For
+        // them the property does not hold and must not be enforced.
+        let delegated = job("cloudportal.cloudaccount add_user bob.proj.waldur");
+
+        assert!(check_portal_ownership(&delegated, false).is_ok());
+        // ...and it would indeed have been rejected had it been enabled, which
+        // is why the distinction has to be declared rather than inferred.
+        assert!(check_portal_ownership(&delegated, true).is_err());
+
+        // The transformed instructions an instance sends its backends are the
+        // same shape.
+        let local = job("cluster.freeipa add_local_user bob.proj.brics");
+        assert!(check_portal_ownership(&local, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assert_portal_route_enforces_the_discovered_route() {
+        // End-to-end for the enforcement half of portal route discovery. Uses a
+        // zone unique to this test, because the route table is a process-wide
+        // singleton shared with every other test in this binary.
+        use crate::portal_identifier::PortalIdentifier;
+        use crate::portalroutes;
+
+        let zone = "handler-route-enforcement-test";
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+
+        // `clusters` learns from `aip1` that brics reaches it via
+        // brics.aip1.clusters.
+        let aip1 = Peer::new("aip1", zone);
+        let advert = portalroutes::PortalRoute::new(
+            &brics,
+            &crate::destination::Destination::parse("brics.aip1")
+                .unwrap_or_else(|e| unreachable!("dest: {:?}", e)),
+        );
+        assert!(portalroutes::receive(&aip1, &[advert], &[], "clusters").await);
+
+        // A Job on the expected route is accepted.
+        let good = job("brics.aip1.clusters add_user bob.proj.brics");
+        assert!(assert_portal_route(&good, &brics, &aip1).await.is_ok());
+
+        // The same Job with further hops beyond us is also fine - we may be an
+        // intermediate.
+        let onward = job("brics.aip1.clusters.shared add_user bob.proj.brics");
+        assert!(assert_portal_route(&onward, &brics, &aip1).await.is_ok());
+
+        // The attack this scheme exists for: a correctly-*named* impostor portal
+        // introduced one hop away. The root check (R34) passes, because
+        // `first()` really is `brics` - only the route reveals it.
+        let impostor = job("brics.fake.clusters add_user bob.proj.brics");
+        assert!(check_portal_ownership(&impostor, true).is_ok());
+        assert!(assert_portal_route(&impostor, &brics, &aip1).await.is_err());
+
+        // A route that is a prefix of, but shorter than, the expected one.
+        let short = job("brics.clusters add_user bob.proj.brics");
+        assert!(assert_portal_route(&short, &brics, &aip1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_assert_portal_route_accepts_when_no_route_is_known() {
+        // The regression that broke a live test estate. A route is absent for
+        // entirely legitimate reasons - most importantly because no peer has been
+        // declared `type = "portal"` anywhere upstream, which is the default
+        // state of every existing deployment. Rejecting on absence turned that
+        // into a silent outage at an intermediate hop.
+        //
+        // The property is "a route, once known, is enforced" - not "a route must
+        // be known".
+        use crate::portal_identifier::PortalIdentifier;
+
+        let zone = "handler-route-absent-test";
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+
+        let job = job("brics.aip1.clusters add_user bob.proj.brics");
+
+        // A route-capable peer, but no route has been advertised for this zone.
+        let capable = Peer::new("aip1", zone);
+        agent::set_route_capable(&capable, true).await;
+        assert!(assert_portal_route(&job, &brics, &capable).await.is_ok());
+
+        // ...and equally for a peer that could never have sent one.
+        let old_peer = Peer::new("old-aip1", zone);
+        agent::set_route_capable(&old_peer, false).await;
+        assert!(assert_portal_route(&job, &brics, &old_peer).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_internal_zone_traffic_is_not_subject_to_the_portal_rule() {
+        // The regression this gate exists for. `op-freeipa` builds
+        // `freeipa.shared get_local_home_dir john.aiproject.brics` as part of
+        // adding a user - naming portal `brics` on a destination rooted at
+        // itself - and passes `check_portal = false` deliberately, because the
+        // portal rule does not hold of a job an internal delegate creates.
+        //
+        // An earlier build rejected it, breaking user creation. The rule now
+        // applies only in a zone that carries portal-rooted traffic.
+        use crate::destination::Destination;
+        use crate::portal_identifier::PortalIdentifier;
+        use crate::portalroutes;
+
+        let internal = "handler-internal-zone-test";
+        let upstream = "handler-upstream-zone-test";
+
+        // Nothing is known in the internal zone, so it is not portal-rooted.
+        assert!(!portalroutes::zone_has_portal_route(internal).await);
+
+        // ...whereas a route learned upstream marks that zone.
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+        let clusters = Peer::new("clusters", upstream);
+        let advert = portalroutes::PortalRoute::new(
+            &brics,
+            &Destination::parse("brics.aip1.clusters")
+                .unwrap_or_else(|e| unreachable!("dest: {:?}", e)),
+        );
+        assert!(portalroutes::receive(&clusters, &[advert], &[], "shared").await);
+        assert!(portalroutes::zone_has_portal_route(upstream).await);
+
+        // The delegate's job would fail the root check outright...
+        let delegated = job("freeipa.shared get_local_home_dir john.aiproject.brics");
+        assert!(check_portal_ownership(&delegated, true).is_err());
+
+        // ...but arriving from a peer in the internal zone, the rule does not
+        // apply and it passes.
+        let freeipa = Peer::new("freeipa", internal);
+        assert!(
+            assert_portal_ownership::<TestDomain>(&delegated, &freeipa, "shared", "freeipa")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_only_the_terminal_agent_checks_portal_ownership() {
+        // An intermediate hop must not check. It adds nothing - the terminal
+        // agent checks the same Job a moment later - and any gap in its route
+        // table becomes a silent outage several hops from where it can be
+        // diagnosed. `Position::Destination` is the local test for "I am the
+        // agent that acts on this".
+        let bad = job("attacker.aip1.clusters.shared add_user bob.proj.brics");
+
+        // At `clusters` the Job is merely passing through, so no check runs -
+        // even though its root is wrong.
+        let from_aip1 = Peer::new("aip1", "default");
+        assert_eq!(
+            bad.destination().position("clusters", "aip1"),
+            Position::Downstream
+        );
+        assert!(
+            assert_portal_ownership::<TestDomain>(&bad, &from_aip1, "clusters", "aip1")
+                .await
+                .is_ok()
+        );
+
+        // `shared` is where it is acted on, and so where it would be stopped -
+        // the root check itself is covered by
+        // `test_check_portal_ownership_rejects_a_foreign_portal_root`.
+        assert_eq!(
+            bad.destination().position("shared", "clusters"),
+            Position::Destination
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assert_portal_route_refuses_a_collided_portal() {
+        use crate::destination::Destination;
+        use crate::portal_identifier::PortalIdentifier;
+        use crate::portalroutes;
+
+        let zone = "handler-route-collision-test";
+        let brics =
+            PortalIdentifier::parse("brics").unwrap_or_else(|e| unreachable!("portal: {:?}", e));
+
+        let aip1 = Peer::new("aip1", zone);
+        let fake = Peer::new("fake", zone);
+
+        let route = |r: &str| {
+            portalroutes::PortalRoute::new(
+                &brics,
+                &Destination::parse(r).unwrap_or_else(|e| unreachable!("dest: {:?}", e)),
+            )
+        };
+
+        assert!(portalroutes::receive(&aip1, &[route("brics.aip1")], &[], "clusters").await);
+        // The impostor's advertisement collides rather than replacing.
+        assert!(!portalroutes::receive(&fake, &[route("brics.fake")], &[], "clusters").await);
+        assert!(portalroutes::is_collided(zone, "brics").await);
+
+        // With two conflicting routes we cannot tell which is genuine, so even a
+        // Job on the originally-correct route is refused until an operator
+        // resolves it.
+        let good = job("brics.aip1.clusters add_user bob.proj.brics");
+        assert!(assert_no_portal_collision::<TestDomain>(&good, &aip1)
+            .await
+            .is_err());
+
+        // ...and this refusal is *not* gated on being the Job's terminal agent.
+        // An intermediate that has seen the collision must not relay it either:
+        // once an impostor portal is in play we would rather stop than pass
+        // commands along. The Job below is merely passing through `clusters`.
+        let passing_through = job("brics.aip1.clusters.shared add_user bob.proj.brics");
+        assert_eq!(
+            passing_through.destination().position("clusters", "aip1"),
+            Position::Downstream
+        );
+        assert!(
+            assert_no_portal_collision::<TestDomain>(&passing_through, &aip1)
+                .await
+                .is_err()
+        );
+
+        // Nor is it gated on this agent's own `verify_portal_ownership`, which is
+        // off by default in these tests - so the refusal above already
+        // demonstrates that.
+
+        // But it stays confined to the affected portal: an impostor of `brics`
+        // cannot usefully forge instructions naming a different portal, and
+        // taking those down too would let one compromised relationship disable
+        // every other portal this agent serves.
+        let other = job("other.aip1.clusters add_user bob.proj.other");
+        assert!(assert_no_portal_collision::<TestDomain>(&other, &aip1)
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn test_check_portal_ownership_ignores_instructions_naming_no_portal() {
+        // An instruction that names no portal carries no ownership claim, so
+        // there is nothing to check and it must pass either way.
+        let no_portal = job("a.b something-with-no-identifier");
+
+        assert!(check_portal_ownership(&no_portal, true).is_ok());
+        assert!(check_portal_ownership(&no_portal, false).is_ok());
     }
 }

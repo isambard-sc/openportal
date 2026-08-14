@@ -7,35 +7,51 @@ use std::collections::HashMap;
 
 mod localaccount;
 
-use templemeads::agent::account::{process_args, run, Defaults};
-use templemeads::agent::{Peer, Type as AgentType};
-use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{
+use greatwestern::grammar::Instruction::{
     AddProject, AddUser, BlockUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
     IsBlockedUser, IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser,
     UnblockUser, UpdateHomeDir,
 };
-use templemeads::grammar::UserMapping;
-use templemeads::job::{assert_not_expired, Envelope, Job};
+use greatwestern::grammar::UserMapping;
+use greatwestern::Hpc;
+use templemeads::agent::account::{process_args, run, Defaults};
+use templemeads::agent::{Peer, Type as AgentType};
+use templemeads::async_runnable;
+use templemeads::job::assert_not_expired;
 use templemeads::notification::default_notify_runner;
 use templemeads::set_notify_runner;
 use templemeads::Error;
 
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
+
 ///
 /// Main function for the localaccount agent.
 ///
-/// This agent implements the Account agent interface using standard Unix
-/// commands (useradd, groupadd, etc.).  Each command is configurable so
-/// that, for example, commands can be prefixed with "docker exec slurmctld"
-/// to run inside a container without requiring local root access.
+/// **This agent is intended for testing only** (managing accounts in a
+/// containerised test Slurm cluster). It implements the Account agent
+/// interface using standard Unix commands (useradd, groupadd, etc.). Each
+/// command is configurable so that, for example, commands can be prefixed with
+/// "docker exec slurmctld" to run inside a container without requiring local
+/// root access. Use `op-freeipa` for production account management. It is
+/// written to fail safe against real systems all the same - it only removes
+/// accounts/groups it manages (see the `localaccount` module docs and
+/// docs/specifications/security-review.md finding F13).
 ///
 #[tokio::main]
 async fn main() -> Result<()> {
     // start tracing
     templemeads::config::initialise_tracing();
 
+    // op-localaccount is a testing agent - warn loudly on every startup so a
+    // mistaken production deployment is obvious in the logs.
+    tracing::warn!(
+        "op-localaccount is a TESTING agent (for a containerised test Slurm cluster). \
+         Use op-freeipa for production account management."
+    );
+
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults: Defaults = Defaults::parse(
@@ -189,7 +205,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    set_notify_runner(default_notify_runner).await?;
+    set_notify_runner::<Hpc>(default_notify_runner).await?;
     run(config, localaccount_runner).await?;
 
     Ok(())
@@ -259,9 +275,9 @@ fn parse_instance_groups(s: &str) -> HashMap<String, Vec<String>> {
         if entry.is_empty() {
             continue;
         }
-        if let Some(colon) = entry.find(':') {
-            let instance = entry[..colon].trim().to_owned();
-            let group = entry[colon + 1..].trim().to_owned();
+        if let Some((instance, group)) = entry.split_once(':') {
+            let instance = instance.trim().to_owned();
+            let group = group.trim().to_owned();
             if !instance.is_empty() && !group.is_empty() {
                 map.entry(instance).or_default().push(group);
             }

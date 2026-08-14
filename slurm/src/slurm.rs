@@ -4,6 +4,8 @@
 use anyhow::Context;
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
+use greatwestern::grammar::{DateRange, ProjectMapping, UserMapping};
+use greatwestern::usagereport::{ProjectUsageReport, Usage};
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -15,9 +17,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
-use templemeads::grammar::{DateRange, ProjectMapping, UserMapping};
 use templemeads::job::assert_not_expired;
-use templemeads::usagereport::{ProjectUsageReport, Usage};
 use templemeads::Error;
 use tokio::sync::Mutex;
 
@@ -134,6 +134,43 @@ struct SlurmSession {
     start_time: u64,
 }
 
+/// Split a Slurm `openapi.json` `info.version` string (`"dbvX.Y.Z"`, sometimes
+/// with a trailing `"&…"`) into the bare version string and its numeric
+/// components.
+///
+/// Extracted from `login` so it can be tested without a server: the string is
+/// wholly attacker-controlled if `slurm-server` is `http://` or the
+/// `slurmrestd` is compromised, and it used to be indexed unconditionally at
+/// element 2. See docs/specifications/security-review-2.md (findings R1/R27).
+fn parse_api_version(version: &str) -> Result<(String, Vec<u32>), Error> {
+    let version = version
+        .split('v')
+        .nth(1)
+        .context("Could not split version")?;
+
+    // sometimes there is an additional '&something' afterwards - remove it
+    let version = version
+        .split('&')
+        .next()
+        .context("Could not split version")?
+        .to_string();
+
+    let version_numbers: Vec<u32> = version
+        .split('.')
+        .map(|x| x.parse::<u32>())
+        .collect::<Result<Vec<u32>, _>>()
+        .context("Could not parse version numbers")?;
+
+    if version_numbers.is_empty() {
+        return Err(Error::Login(format!(
+            "Slurm reported an empty version string: '{}'",
+            version
+        )));
+    }
+
+    Ok((version, version_numbers))
+}
+
 ///
 /// Login to the Slurm server using the passed passed command to generate
 /// the JWT token. This will return the valid JWT in a secret. This
@@ -169,7 +206,9 @@ async fn login(
     // add on the lifespan to the token command
     token_command = format!("{} lifespan={}", token_command, token_lifespan);
 
-    tracing::info!("Getting JWT token from command: {}", token_command);
+    // Do not log the token command itself - some deployments embed a
+    // credential in it, which would then land in the logs (finding F15).
+    tracing::info!("Getting JWT token from the configured token command");
 
     // parse 'token_command' into an executable plus arguments
     let token_command = shlex::split(&token_command).context("Could not parse token command")?;
@@ -205,13 +244,26 @@ async fn login(
     // we expect the output to be something like "JWT: SLURM_JWT={TOKEN}"
     // We will split with spaces, then find the work that is '{something}={token}",
     // then split this with '=' and take the second part.
+    //
+    // The raw output must never appear in the error: it is the one place
+    // credential-bearing output could escape to the requesting peer, since a `Result`
+    // from here is returned up the Job chain. F15 fixed the *logging* of the token
+    // command; this is the argv/stdout counterpart. See
+    // `docs/specifications/security-review-2.md` (finding R33).
     let jwt = jwt
         .split_whitespace()
         .find(|x| x.contains("="))
-        .context(format!("Could not find JWT token from '{}'", jwt))?
+        .context(
+            "Could not find a '<name>=<token>' field in the token command's output. \
+             The output is not reported here because it may contain a credential - \
+             run the configured token command by hand to see it.",
+        )?
         .split('=')
         .nth(1)
-        .context(format!("Could not extract JWT token from '{}'", jwt))?
+        .context(
+            "Could not extract the token from the token command's output (the output \
+             is not reported here because it may contain a credential).",
+        )?
         .to_string();
 
     assert_not_expired(expires)?;
@@ -265,23 +317,9 @@ async fn login(
     let version = version
         .as_str()
         .context("Could not convert version to string")?
-        .split('v')
-        .nth(1)
-        .context("Could not split version")?;
-
-    // sometimes there is an additional '&something' afterwards - remove it
-    let version = version
-        .split('&')
-        .next()
-        .context("Could not split version")?
         .to_string();
 
-    // extract the version string above into major.minor.patch numbers
-    let mut version_numbers: Vec<u32> = version
-        .split('.')
-        .map(|x| x.parse::<u32>())
-        .collect::<Result<Vec<u32>, _>>()
-        .context("Could not parse version numbers")?;
+    let (version, mut version_numbers) = parse_api_version(&version)?;
 
     let mut working_version = None;
 
@@ -333,7 +371,30 @@ async fn login(
 
         tracing::info!("Ping response: {:?}", ping_response);
         working_version = Some(test_version);
-        version_numbers[2] += 1;
+
+        // The patch component is supplied by the Slurm server (it is parsed
+        // out of `openapi.json`'s `info.version`), so a two-component or
+        // otherwise unexpected version string must not be able to abort this
+        // process - see docs/specifications/security-review-2.md (findings
+        // R1/R27).
+        match version_numbers.get_mut(2).and_then(|patch| {
+            // `checked_add` rather than `+=`: the patch component comes
+            // straight from the server, and release builds now check overflow,
+            // so a reported patch of u32::MAX would otherwise abort here.
+            *patch = patch.checked_add(1)?;
+            Some(())
+        }) {
+            Some(()) => {}
+            None => {
+                tracing::warn!(
+                    "Slurm reported version '{}', which does not have the \
+                     expected major.minor.patch form - not probing for a \
+                     higher version.",
+                    version
+                );
+                break;
+            }
+        }
     }
 
     let version = match working_version {
@@ -420,11 +481,17 @@ async fn login(
             return Err(Error::Login("Requested cluster not found".to_string()));
         }
     } else {
+        let Some(default_cluster) = clusters.first() else {
+            return Err(Error::Login(
+                "Slurm reported no clusters at all - cannot pick a default".to_string(),
+            ));
+        };
+
         tracing::info!(
             "Using the first cluster available by default: {}",
-            clusters[0]
+            default_cluster
         );
-        cache::set_cluster(&clusters[0]).await?;
+        cache::set_cluster(default_cluster).await?;
     }
 
     Ok(SlurmSession {
@@ -1003,7 +1070,7 @@ async fn get_account_from_slurm(
 
     let response = match call_get(
         "slurmdb",
-        &format!("account/{}", account),
+        &format!("account/{}", encode_path_segment(&account)),
         &vec![("with_assocs", "true")],
         expires,
     )
@@ -1091,7 +1158,7 @@ async fn get_account(
             Ok(account) => account,
             Err(e) => {
                 tracing::warn!("Could not get account {}: {}", cached_account.name(), e);
-                cache::clear().await?;
+                cache::remove_account(cached_account.name()).await?;
                 return Ok(None);
             }
         };
@@ -1108,8 +1175,8 @@ async fn get_account(
                     cached_account
                 );
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this account is known to be stale - see cache::remove_account
+                cache::remove_account(cached_account.name()).await?;
 
                 // store the new account
                 cache::add_account(&existing_account).await?;
@@ -1124,7 +1191,7 @@ async fn get_account(
                 "Account {} does not exist - it has been removed from slurm.",
                 cached_account.name()
             );
-            cache::clear().await?;
+            cache::remove_account(cached_account.name()).await?;
             return Ok(None);
         }
     }
@@ -1209,14 +1276,20 @@ async fn get_user_from_slurm(
 
     let query_params = vec![("with_assocs", "true"), ("default_account", "true")];
 
-    let response =
-        match call_get("slurmdb", &format!("user/{}", user), &query_params, expires).await {
-            Ok(response) => response,
-            Err(e) => {
-                tracing::warn!("Could not get user {}: {}", user, e);
-                return Ok(None);
-            }
-        };
+    let response = match call_get(
+        "slurmdb",
+        &format!("user/{}", encode_path_segment(&user)),
+        &query_params,
+        expires,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("Could not get user {}: {}", user, e);
+            return Ok(None);
+        }
+    };
 
     // there should be a users list, with a single entry for this user
     let users = match response.get("users") {
@@ -1268,7 +1341,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
             Ok(user) => user,
             Err(e) => {
                 tracing::warn!("Could not get user {}: {}", cached_user.name(), e);
-                cache::clear().await?;
+                cache::remove_user(cached_user.name()).await?;
                 return Ok(None);
             }
         };
@@ -1281,8 +1354,8 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 );
                 tracing::warn!("Existing: {:?}, new: {:?}", existing_user, cached_user);
 
-                // clear the cache as something has changed behind our back
-                cache::clear().await?;
+                // only this user is known to be stale - see cache::remove_user
+                cache::remove_user(cached_user.name()).await?;
 
                 // store the new user
                 cache::add_user(&existing_user).await?;
@@ -1297,7 +1370,7 @@ async fn get_user(user: &str, expires: &chrono::DateTime<Utc>) -> Result<Option<
                 "User {} does not exist - it has been removed from slurm.",
                 cached_user.name()
             );
-            cache::clear().await?;
+            cache::remove_user(cached_user.name()).await?;
             return Ok(None);
         }
     }
@@ -1573,9 +1646,12 @@ pub async fn initialise_servers(
             continue;
         }
 
-        let user = users[i].trim();
-        let token_command = token_commands[i].trim();
-        let token_lifespan = token_lifespans[i].max(10);
+        // The lengths were checked equal above; read via `get` so that a
+        // future change to that check cannot turn into a panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let user = users.get(i).map(|u| u.trim()).unwrap_or_default();
+        let token_command = token_commands.get(i).map(|c| c.trim()).unwrap_or_default();
+        let token_lifespan = token_lifespans.get(i).copied().unwrap_or(10).max(10);
 
         slurm_servers.push(Arc::new(Mutex::new(SlurmServer::new(
             server,
@@ -1586,6 +1662,36 @@ pub async fn initialise_servers(
     }
 
     Ok(())
+}
+
+/// Percent-encode `segment` so it is safe to interpolate into a URL *path*.
+///
+/// Everything outside the RFC 3986 unreserved set (`A-Za-z0-9-._~`) is encoded,
+/// so a name containing `?`, `#`, `/`, `%`, `&` or `=` cannot inject a query
+/// parameter, an extra path segment, or a fragment into a slurmrestd request.
+/// `Url::parse_with_params` *appends* to whatever query the interpolated string
+/// introduces, so a name of `x?with_deleted=true` previously became a real
+/// query parameter.
+///
+/// Mapping targets are now restricted to `[A-Za-z0-9_.-]` upstream
+/// (`templemeads::validate::validate_mapping_target`), so nothing reaching here
+/// from a peer needs encoding - but account and user names also come back from
+/// Slurm itself, and this must not depend on that upstream guard staying
+/// exactly as it is. See `docs/specifications/security-review-2.md` (finding
+/// R14).
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+
+    encoded
 }
 
 pub fn clean_account_name(account: &str) -> Result<String, Error> {
@@ -2677,7 +2783,7 @@ impl SlurmJob {
                     None => match state.as_array() {
                         Some(state) => {
                             if !state.is_empty() {
-                                match state[0].as_str() {
+                                match state.first().and_then(|s| s.as_str()) {
                                     Some(state) => state.to_string(),
                                     None => {
                                         tracing::warn!(
@@ -3405,4 +3511,134 @@ pub async fn set_limit(
 
     // Call the sacctmgr version
     sacctmgr::set_limit(project, limit, expires).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_only_accounts_in_the_managed_organization_are_managed() {
+        // Every mutation path (`set_limit`, `cancel_pending_*_jobs`) gates on
+        // `is_managed()` applied to the account *fetched from Slurm*. Before
+        // finding R5 the only check was on a locally-constructed account whose
+        // organization was hard-wired to the managed one, so it could never
+        // fail, and a peer-chosen `local_group` naming any real account on the
+        // cluster had its limits rewritten.
+        let account_json = |org: &str| {
+            serde_json::json!({
+                "name": "someproject",
+                "description": "a project",
+                "organization": org,
+                "associations": [{"cluster": "cluster1"}],
+            })
+        };
+
+        let managed = match SlurmAccount::construct(&account_json(&get_managed_organization())) {
+            Ok(a) => a,
+            Err(e) => unreachable!("construct: {:?}", e),
+        };
+        assert!(managed.is_managed());
+
+        // A pre-existing site account - root's, another team's, anything not
+        // created by OpenPortal - must not be treated as ours.
+        for foreign in ["", "root", "physics", "OpenPortal", "openportal2"] {
+            let account = match SlurmAccount::construct(&account_json(foreign)) {
+                Ok(a) => a,
+                Err(e) => unreachable!("construct({:?}): {:?}", foreign, e),
+            };
+            assert!(
+                !account.is_managed(),
+                "account in organization {:?} must not be considered managed",
+                foreign
+            );
+        }
+    }
+
+    #[test]
+    fn test_api_version_parsing_tolerates_a_hostile_version_string() {
+        // The version comes from the server's openapi.json and used to be
+        // indexed at element 2 unconditionally, so a two-component version -
+        // legitimate or hostile - aborted the process. See findings R1/R27.
+        let ok = |s: &str| match parse_api_version(s) {
+            Ok(v) => v,
+            Err(e) => unreachable!("parse_api_version({:?}): {:?}", s, e),
+        };
+
+        assert_eq!(ok("dbv0.0.40"), ("0.0.40".to_string(), vec![0, 0, 40]));
+        // the trailing '&something' form the server sometimes uses
+        assert_eq!(
+            ok("dbv0.0.40&openapi/slurmdbd"),
+            ("0.0.40".to_string(), vec![0, 0, 40])
+        );
+        // two components: parses, and the caller must cope with no element 2
+        assert_eq!(ok("dbv1.2"), ("1.2".to_string(), vec![1, 2]));
+        assert!(ok("dbv1").1.get(2).is_none());
+
+        // malformed input is an error, never a panic
+        // (the leading tag is not itself validated - any "…v<numbers>" is
+        // accepted - but a non-numeric component never is)
+        for bad in [
+            "dbv",
+            "dbv1.x.3",
+            "dbv..",
+            "dbv-1.2.3",
+            "dbv4294967296.0.0",
+            "",
+        ] {
+            assert!(
+                parse_api_version(bad).is_err(),
+                "{:?} must be rejected, not parsed",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_clean_account_name_rejects_empty_and_normalises_separators() {
+        assert!(clean_account_name("").is_err());
+        assert!(clean_account_name("   ").is_err());
+        assert!(clean_user_name("").is_err());
+
+        assert_eq!(
+            match clean_account_name("  My/Project Name  ") {
+                Ok(n) => n,
+                Err(e) => unreachable!("clean: {:?}", e),
+            },
+            "my_project_name"
+        );
+    }
+
+    #[test]
+    fn test_encode_path_segment_blocks_url_injection() {
+        // Regression test for finding R14. An account or user name is
+        // interpolated into a slurmrestd *path*, and `Url::parse_with_params`
+        // appends to whatever query the interpolated string introduces - so an
+        // unencoded `?` became a real query parameter.
+        assert_eq!(encode_path_segment("proj.portal"), "proj.portal");
+        assert_eq!(encode_path_segment("a-b_c1~"), "a-b_c1~");
+
+        assert_eq!(
+            encode_path_segment("x?with_deleted=true"),
+            "x%3Fwith_deleted%3Dtrue"
+        );
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment("a#frag"), "a%23frag");
+        assert_eq!(encode_path_segment("a&b=c"), "a%26b%3Dc");
+        assert_eq!(encode_path_segment("a b"), "a%20b");
+        assert_eq!(encode_path_segment("100%"), "100%25");
+
+        // Nothing outside the unreserved set survives unencoded. `%` is
+        // excluded from this loop because it is the escape prefix itself - it
+        // is covered by the `100%` case above, which asserts it becomes `%25`.
+        for injected in ["?", "#", "/", "&", "=", " ", ";", ":", "@", "+"] {
+            let encoded = encode_path_segment(&format!("name{}x", injected));
+            assert!(
+                !encoded.contains(injected),
+                "{:?} must not survive encoding (got {:?})",
+                injected,
+                encoded
+            );
+        }
+    }
 }

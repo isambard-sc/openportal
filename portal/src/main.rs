@@ -3,28 +3,34 @@
 
 use anyhow::Result;
 
+use greatwestern::grammar::Instruction::{
+    AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
+    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers,
+    RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
+};
+use greatwestern::grammar::{
+    DateRange, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
+};
+use greatwestern::storagereport::{ProjectStorageReport, StorageReport};
+use greatwestern::usagereport::{ProjectUsageReport, UsageReport};
+use greatwestern::{Hpc, NotificationEvent};
 use templemeads::agent;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
 use templemeads::command::Command;
-use templemeads::notification::{self, NotificationEnvelope, NotificationEvent};
+use templemeads::notification::{self};
 use templemeads::set_notify_runner;
 
 use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
-use templemeads::grammar::Instruction::{
-    AddOfferings, CreateProject, GetAward, GetAwards, GetOfferings, GetProject, GetProjectMapping,
-    GetProjects, GetStorageReport, GetStorageReports, GetUsageReport, GetUsageReports, GetUsers,
-    RemoveOfferings, RemoveProject, Submit, SyncOfferings, UpdateProject,
-};
-use templemeads::grammar::{
-    DateRange, PortalIdentifier, ProjectDetails, ProjectIdentifier, ProjectMapping, UserMapping,
-};
-use templemeads::job::{send_queued, Envelope, Job};
-use templemeads::storagereport::{ProjectStorageReport, StorageReport};
-use templemeads::usagereport::{ProjectUsageReport, UsageReport};
+use templemeads::job::send_queued;
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
+type NotificationEnvelope = templemeads::notification::NotificationEnvelope<Hpc>;
 
 ///
 /// Main function for the portal instance agent
@@ -41,7 +47,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults = Defaults::parse(
@@ -88,21 +94,21 @@ async fn main() -> Result<()> {
                     tracing::debug!("Creating project {} with details {}", project, details);
 
                     let result = create_project(&me, &resource, &project, &details, &job.destination()).await?;
-                    notification::send(&job.destination().reverse(), NotificationEvent::AwardAdded(project.clone())).await;
+                    notification::send::<Hpc>(&job.destination().reverse(), NotificationEvent::AwardAdded(project.clone())).await;
                     job.completed(result)
                 }
                 RemoveProject(project) => {
                     tracing::debug!("Removing project {}", project);
 
                     let result = remove_project(&me, &resource, &project, &job.destination()).await?;
-                    notification::send(&job.destination().reverse(), NotificationEvent::AwardRemoved(project.clone())).await;
+                    notification::send::<Hpc>(&job.destination().reverse(), NotificationEvent::AwardRemoved(project.clone())).await;
                     job.completed(result)
                 }
                 UpdateProject(project, details) => {
                     tracing::debug!("Updating project {} with details {}", project, details);
 
                     let result = update_project(&me, &resource, &project, &details, &job.destination()).await?;
-                    notification::send(&job.destination().reverse(), NotificationEvent::AwardChanged(project.clone())).await;
+                    notification::send::<Hpc>(&job.destination().reverse(), NotificationEvent::AwardChanged(project.clone())).await;
                     job.completed(result)
                 }
                 GetProject(project) => {
@@ -212,8 +218,15 @@ async fn main() -> Result<()> {
                                 ));
                             }
 
-                            // the first agent in the destination is the agent should be this portal
-                            let first_agent = destination.agents()[0].clone();
+                            // the first agent in the destination is the agent should be this portal.
+                            // Both agents are read via `get`/`first` rather than
+                            // indexed - the destination comes off the wire. See
+                            // docs/specifications/security-review-2.md (R1).
+                            let destination_agents = destination.agents();
+                            let first_agent =
+                                destination_agents.first().cloned().unwrap_or_default();
+                            let second_agent =
+                                destination_agents.get(1).cloned().unwrap_or_default();
 
                             if first_agent != envelope.recipient().name() {
                                 tracing::error!("Invalid instruction: {}. First agent in destination should be this portal ({})", job.instruction(), envelope.recipient().name());
@@ -225,7 +238,7 @@ async fn main() -> Result<()> {
                             }
 
                             // who is next in line to receive this job? - find it, and its zone
-                            let next_agent = agent::find(&destination.agents()[1], 5).await.ok_or_else(|| {
+                            let next_agent = agent::find(&second_agent, 5).await.ok_or_else(|| {
                                 tracing::error!("Invalid instruction: {}. Cannot find next agent in destination {}", job.instruction(), destination);
                                 Error::InvalidInstruction(
                                     format!("Invalid instruction: {}. Cannot find next agent in destination {}",
@@ -372,15 +385,21 @@ async fn main() -> Result<()> {
                                 }
                                 Some(0) => 1,
                                 Some(1) => {
-                                    // Northbound: agents()[0] must be a registered virtual agent.
-                                    let is_valid = match agent::find(&agents[0], 0).await {
+                                    // Northbound: the first agent must be a
+                                    // registered virtual agent. Read via
+                                    // `first()` rather than `[0]` - see
+                                    // docs/specifications/security-review-2.md
+                                    // (finding R1).
+                                    let first_agent =
+                                        agents.first().cloned().unwrap_or_default();
+                                    let is_valid = match agent::find(&first_agent, 0).await {
                                         Some(peer) => agent::is_virtual(&peer).await,
                                         None => false,
                                     };
                                     if !is_valid {
                                         return Err(Error::InvalidInstruction(format!(
                                             "Forward notification destination '{}': '{}' must be a virtual agent when portal is at position 1",
-                                            destination, agents[0]
+                                            destination, first_agent
                                         )));
                                     }
                                     2
@@ -417,13 +436,19 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
 
+                            // `next_index < agents.len()` was established
+                            // just above; read via `get` anyway so the bound
+                            // cannot become a panic - see
+                            // docs/specifications/security-review-2.md (R1).
+                            let next_name = agents.get(next_index).cloned().unwrap_or_default();
+
                             let next_agent =
-                                agent::find(&agents[next_index], 5)
+                                agent::find(&next_name, 5)
                                     .await
                                     .ok_or_else(|| {
                                         Error::MissingAgent(format!(
                                             "Cannot find next agent '{}' for notification forwarding",
-                                            agents[next_index]
+                                            next_name
                                         ))
                                     })?;
 
@@ -475,7 +500,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    set_notify_runner(portal_notify_runner).await?;
+    set_notify_runner::<Hpc>(portal_notify_runner).await?;
 
     // run the portal agent
     run(config, portal_runner).await?;
@@ -488,6 +513,33 @@ const BRIDGE_WAIT_TIME: u64 = 5;
 ///
 /// Return all of the currently configured offerings
 ///
+/// Recover the offering [`Destination`] a virtual agent stands for, or `None`
+/// if it does not describe one belonging to `me`.
+///
+/// A virtual agent's zone encodes the relationship as `remote>local`, so the
+/// destination is `{name}.{local}.{remote}`. Returning `None` rather than an
+/// error is deliberate - the agent registry holds every virtual agent this
+/// process knows about, and only those in the middle of which *this* portal
+/// sits are ours to offer.
+///
+/// Split out from `get_offerings` so the filter can be tested without a live
+/// agent registry: it is what stops another portal's relationship from being
+/// advertised as one of ours.
+fn offering_for_virtual_agent(name: &str, zone: &str, me: &str) -> Option<Destination> {
+    let zone = zone.split('>').collect::<Vec<&str>>();
+
+    let [remote, local] = zone.as_slice() else {
+        return None;
+    };
+
+    let destination = Destination::parse(&format!("{}.{}.{}", name, local, remote)).ok()?;
+
+    match destination.agents().as_slice() {
+        [_, local_portal, _] if *local_portal == me => Some(destination),
+        _ => None,
+    }
+}
+
 pub async fn get_offerings() -> Result<Destinations, Error> {
     let me = agent::name().await;
 
@@ -495,29 +547,7 @@ pub async fn get_offerings() -> Result<Destinations, Error> {
         .await
         .iter()
         .filter_map(|virtual_agent| {
-            // convert this back to a destination
-            let zone = virtual_agent.zone().split('>').collect::<Vec<&str>>();
-
-            if zone.len() == 2 {
-                Some(Destination::parse(&format!(
-                    "{}.{}.{}",
-                    virtual_agent.name(),
-                    zone[1],
-                    zone[0]
-                )))
-            } else {
-                None
-            }
-        })
-        .filter_map(|result| match result {
-            Ok(destination) => {
-                if destination.agents().len() == 3 && destination.agents()[1] == me {
-                    Some(destination)
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
+            offering_for_virtual_agent(virtual_agent.name(), virtual_agent.zone(), &me)
         })
         .collect();
 
@@ -537,17 +567,22 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
             // first, make sure that we have virtual agents for each
             // of the offerings
             for offering in offerings.iter() {
-                if offering.agents().len() != 3 {
+                // Destructured rather than length-checked then indexed, so the
+                // three-agent shape is established once and cannot panic - see
+                // docs/specifications/security-review-2.md (finding R1).
+                let offering_agents = offering.agents();
+                let [offered_resource, local_portal, remote_portal] = offering_agents.as_slice()
+                else {
                     tracing::error!(
                         "Invalid offering: {}. Offerings must have exactly three agents",
                         offering
                     );
                     continue;
-                }
+                };
 
                 // The offering's destination should be of the form
                 // offering-name.local-portal.remote-portal
-                if offering.agents()[1] != me {
+                if *local_portal != me {
                     tracing::error!(
                         "Invalid offering: {}. The second agent in the offering must be this portal ({})",
                         offering,
@@ -560,8 +595,8 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
                 // while the zone should be remote-portal>local-portal, to
                 // indicate that the remote portal can send instructions to
                 // the virtual resource via this portal
-                let resource = offering.agents()[0].clone();
-                let zone = format!("{}>{}", offering.agents()[2], me);
+                let resource = offered_resource.clone();
+                let zone = format!("{}>{}", remote_portal, me);
 
                 let peer = agent::Peer::new(&resource, &zone);
 
@@ -573,7 +608,15 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
                         zone
                     );
 
-                    agent::register_peer(&peer, &agent::Type::Virtual, "virtual", "virtual").await;
+                    agent::register_peer(
+                        &peer,
+                        &agent::Type::Virtual,
+                        "virtual",
+                        "virtual",
+                        None,
+                        None,
+                    )
+                    .await;
                 }
 
                 synched_offerings.push(offering.clone());
@@ -589,12 +632,12 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
 
                 let mut found = false;
 
-                if zone.len() == 2 {
+                if let [remote, local] = zone.as_slice() {
                     let destination = Destination::parse(&format!(
                         "{}.{}.{}",
                         virtual_agent.name(),
-                        zone[1],
-                        zone[0]
+                        local,
+                        remote
                     ))?;
 
                     found = synched_offerings.contains(&destination);
@@ -636,12 +679,15 @@ pub async fn sync_offerings(offerings: &Destinations) -> Result<Destinations, Er
             // Now that both portal and bridge have registered their virtual agents,
             // send any queued jobs to the virtual agents
             for offering in synched_offerings.iter() {
-                let resource = offering.agents()[0].clone();
-                let zone = format!("{}>{}", offering.agents()[2], me);
-                let peer = agent::Peer::new(&resource, &zone);
+                let agents = offering.agents();
+                let [resource, _, remote_portal] = agents.as_slice() else {
+                    continue;
+                };
+                let zone = format!("{}>{}", remote_portal, me);
+                let peer = agent::Peer::new(resource, &zone);
 
                 tracing::debug!("Sending queued jobs to virtual agent {}", peer);
-                if let Err(e) = send_queued(&peer).await {
+                if let Err(e) = send_queued::<Hpc>(&peer).await {
                     tracing::warn!("Error sending queued jobs to virtual agent {}: {}", peer, e);
                 }
             }
@@ -1363,5 +1409,39 @@ pub async fn get_usage_reports(
                 "Cannot run the job because there is no bridge agent".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_only_this_portals_relationships_are_offered() {
+        // A virtual agent's zone is `remote>local`, so the offering it stands
+        // for is `{name}.{local}.{remote}` - and it is only ours if *this*
+        // portal is the local hop in the middle.
+        let offering = offering_for_virtual_agent("resource1", "brics>aip1", "aip1");
+        assert_eq!(
+            offering.map(|d| d.to_string()),
+            Some("resource1.aip1.brics".to_string())
+        );
+
+        // Another portal's relationship must not be advertised as ours, even
+        // though it is a perfectly well-formed destination.
+        assert!(offering_for_virtual_agent("resource1", "brics>other", "aip1").is_none());
+
+        // Neither must a zone that does not encode a relationship at all.
+        for zone in ["aip1", "", "a>b>c", ">", "brics>"] {
+            assert!(
+                offering_for_virtual_agent("resource1", zone, "aip1").is_none(),
+                "zone {:?} must not yield an offering",
+                zone
+            );
+        }
+
+        // ...nor one whose parts cannot form a destination.
+        assert!(offering_for_virtual_agent("", "brics>aip1", "aip1").is_none());
+        assert!(offering_for_virtual_agent("a b", "brics>aip1", "aip1").is_none());
     }
 }

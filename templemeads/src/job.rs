@@ -5,8 +5,9 @@ use crate::agent::Peer;
 use crate::board::{JobAddState, SyncState, Waiter};
 use crate::command::Command as ControlCommand;
 use crate::destination::{Destination, Position};
+use crate::domain::Domain;
 use crate::error::Error;
-use crate::grammar::{Instruction, NamedType};
+use crate::named::NamedType;
 use crate::state;
 
 use anyhow::Result;
@@ -17,16 +18,29 @@ use std::fmt::Display;
 use ts_rs::TS;
 use uuid::Uuid;
 
+/// Maximum lifetime of a Job, from creation to expiry.
+///
+/// `expires` is a wire field, and reaping expired Jobs is the only thing that
+/// bounds a board's size, so a peer-chosen far-future value meant a Job was never
+/// reaped. Real Jobs are created with a two-minute lifetime (`Job::new`) and
+/// occasionally extended, so an hour is generous. See
+/// `docs/specifications/security-review-2.md` (finding R31).
+const MAX_JOB_LIFETIME: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+
+/// Maximum number of Jobs accepted in a single `Command::Sync` payload.
+const MAX_SYNCED_JOBS: usize = 10_000;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Envelope {
+#[serde(bound = "")]
+pub struct Envelope<L: Domain> {
     recipient: String,
     sender: String,
     zone: String,
-    job: Job,
+    job: Job<L>,
 }
 
-impl Envelope {
-    pub fn new(recipient: &str, sender: &str, zone: &str, job: &Job) -> Self {
+impl<L: Domain> Envelope<L> {
+    pub fn new(recipient: &str, sender: &str, zone: &str, job: &Job<L>) -> Self {
         Self {
             recipient: recipient.to_owned(),
             sender: sender.to_owned(),
@@ -43,7 +57,7 @@ impl Envelope {
         Peer::new(&self.sender, &self.zone)
     }
 
-    pub fn job(&self) -> Job {
+    pub fn job(&self) -> Job<L> {
         self.job.clone()
     }
 }
@@ -94,12 +108,12 @@ impl std::str::FromStr for Status {
 /// many "command" types.
 ///
 #[derive(Clone, PartialEq)]
-struct Command {
+struct Command<L: Domain> {
     destination: Destination,
-    instruction: Instruction,
+    instruction: L::Instruction,
 }
 
-impl Command {
+impl<L: Domain> Command<L> {
     pub fn parse(command: &str, check_portal: bool) -> Result<Self, Error> {
         // the format of commands is "destination command arguments..."
         let mut parts = command.split_whitespace();
@@ -114,7 +128,7 @@ impl Command {
             }
         };
 
-        let instruction = match Instruction::parse(&parts.collect::<Vec<&str>>().join(" ")) {
+        let instruction = match L::parse_instruction(&parts.collect::<Vec<&str>>().join(" ")) {
             Ok(i) => i,
             Err(e) => {
                 return Err(Error::Parse(format!(
@@ -125,94 +139,7 @@ impl Command {
         };
 
         if check_portal {
-            let user = match instruction.clone() {
-                Instruction::AddUser(user) => Some(user),
-                Instruction::RemoveUser(user) => Some(user),
-                Instruction::AddLocalUser(user) => Some(user.user().clone()),
-                Instruction::RemoveLocalUser(user) => Some(user.user().clone()),
-                Instruction::UpdateHomeDir(user, _) => Some(user),
-                Instruction::GetUserMapping(user) => Some(user),
-                Instruction::IsProtectedUser(user) => Some(user),
-                Instruction::IsExistingUser(user) => Some(user),
-                Instruction::GetHomeDir(user) => Some(user),
-                Instruction::GetLocalHomeDir(user) => Some(user.user().clone()),
-                Instruction::GetUserQuota(user, _) => Some(user),
-                Instruction::SetUserQuota(user, _, _) => Some(user),
-                Instruction::ClearUserQuota(user, _) => Some(user),
-                Instruction::GetUserQuotas(user) => Some(user),
-                Instruction::GetLocalUserQuota(user, _) => Some(user.user().clone()),
-                Instruction::SetLocalUserQuota(user, _, _) => Some(user.user().clone()),
-                Instruction::ClearLocalUserQuota(user, _) => Some(user.user().clone()),
-                Instruction::GetLocalUserQuotas(user) => Some(user.user().clone()),
-                Instruction::GetUserDirs(user) => Some(user),
-                Instruction::GetLocalUserDirs(user) => Some(user.user().clone()),
-                _ => None,
-            };
-
-            if let Some(user) = user {
-                if user.portal() != destination.first() {
-                    tracing::error!(
-                    "Invalid command '{}'. Commands involving user '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, user, user.portal(), destination.first()
-                );
-                    return Err(Error::Parse(format!(
-                    "Invalid command '{}'. Commands involving user '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, user, user.portal(), destination.first()
-                )));
-                }
-            }
-
-            let project = match instruction.clone() {
-                Instruction::CreateProject(project, _) => Some(project),
-                Instruction::UpdateProject(project, _) => Some(project),
-                Instruction::GetProject(project) => Some(project),
-                Instruction::GetAward(project) => Some(project),
-                Instruction::AddProject(project) => Some(project),
-                Instruction::AddLocalProject(project) => Some(project.project().clone()),
-                Instruction::RemoveLocalProject(project) => Some(project.project().clone()),
-                Instruction::IsExistingProject(project) => Some(project),
-                Instruction::GetUsers(project) => Some(project),
-                Instruction::RemoveProject(project) => Some(project),
-                Instruction::GetUsageReport(project, _) => Some(project),
-                Instruction::GetLocalUsageReport(project, _) => Some(project.project().clone()),
-                Instruction::GetProjectMapping(project) => Some(project),
-                Instruction::GetLocalLimit(project) => Some(project.project().clone()),
-                Instruction::SetLocalLimit(project, _) => Some(project.project().clone()),
-                Instruction::GetLimit(project) => Some(project),
-                Instruction::SetLimit(project, _) => Some(project),
-                Instruction::GetProjectDirs(project) => Some(project),
-                Instruction::GetLocalProjectDirs(project) => Some(project.project().clone()),
-                Instruction::GetProjectQuota(project, _) => Some(project),
-                Instruction::SetProjectQuota(project, _, _) => Some(project),
-                Instruction::ClearProjectQuota(project, _) => Some(project),
-                Instruction::GetProjectQuotas(project) => Some(project),
-                Instruction::GetLocalProjectQuota(project, _) => Some(project.project().clone()),
-                Instruction::SetLocalProjectQuota(project, _, _) => Some(project.project().clone()),
-                Instruction::ClearLocalProjectQuota(project, _) => Some(project.project().clone()),
-                Instruction::GetLocalProjectQuotas(project) => Some(project.project().clone()),
-                _ => None,
-            };
-
-            if let Some(project) = project {
-                if project.portal() != destination.first() {
-                    tracing::error!(
-                    "Invalid command '{}'. Commands involving project '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, project, project.portal(), destination.first()
-                );
-                    return Err(Error::Parse(format!(
-                    "Invalid command '{}'. Commands involving project '{}' can only be issued via the portal '{}', not '{}'.",
-                    command, project, project.portal(), destination.first()
-                )));
-                }
-            }
-
-            let portal = match instruction.clone() {
-                Instruction::GetProjects(portal) => Some(portal),
-                Instruction::GetUsageReports(portal, _) => Some(portal),
-                _ => None,
-            };
-
-            if let Some(portal) = portal {
+            if let Some(portal) = L::owning_portal(&instruction) {
                 if portal.portal() != destination.first() {
                     tracing::error!(
                     "Invalid command '{}'. Commands involving portal '{}' can only be issued via the portal '{}', not '{}'.",
@@ -236,25 +163,25 @@ impl Command {
         self.destination.clone()
     }
 
-    pub fn instruction(&self) -> Instruction {
+    pub fn instruction(&self) -> L::Instruction {
         self.instruction.clone()
     }
 }
 
-impl std::fmt::Debug for Command {
+impl<L: Domain> std::fmt::Debug for Command<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{} {}", self.destination, self.instruction)
     }
 }
 
-impl std::fmt::Display for Command {
+impl<L: Domain> std::fmt::Display for Command<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{} {}", self.destination, self.instruction,)
     }
 }
 
 // serialise via the string representation - this looks better
-impl Serialize for Command {
+impl<L: Domain> Serialize for Command<L> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
@@ -265,7 +192,7 @@ impl Serialize for Command {
 
 // deserialise via the string representation - this looks better
 
-impl<'de> Deserialize<'de> for Command {
+impl<'de, L: Domain> Deserialize<'de> for Command<L> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -278,36 +205,40 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct Job {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Job<L: Domain> {
     id: Uuid,
     #[serde(with = "ts_seconds")]
-    #[ts(type = "number")]
     created: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    #[ts(type = "number")]
     changed: chrono::DateTime<Utc>,
     #[serde(with = "ts_seconds")]
-    #[ts(type = "number")]
     expires: chrono::DateTime<Utc>,
-    #[ts(type = "number")]
     version: u64,
-    #[ts(as = "String")]
-    command: Command,
+    command: Command<L>,
     state: Status,
     result: Option<String>,
     result_type: Option<String>,
     #[serde(default)]
-    #[ts(as = "Option<String>")]
     forwarded_for: Option<Destination>,
+    /// The `Domain::name()` that authored this Job's instruction, set once
+    /// at `Job::parse()` and never touched again - including by any
+    /// domain-oblivious router hop it passes through, which relays it as
+    /// just another opaque field it doesn't need to understand. `None`
+    /// only for a Job from a peer running templemeads from before this
+    /// field existed.
+    #[serde(default)]
+    domain: Option<String>,
+    /// The domain's version, alongside `domain`.
+    #[serde(default)]
+    domain_version: Option<String>,
     #[serde(skip)]
-    #[ts(skip)]
     board: Option<Peer>,
 }
 
 // implement display for Job
-impl std::fmt::Display for Job {
+impl<L: Domain> std::fmt::Display for Job<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.state {
             Status::Created => write!(f, "{{{}: Created}}", self.command),
@@ -326,7 +257,7 @@ impl std::fmt::Display for Job {
     }
 }
 
-impl Job {
+impl<L: Domain> Job<L> {
     pub fn parse(command: &str, check_portal: bool) -> Result<Self, Error> {
         tracing::debug!("Parsing command: {:?}", command);
 
@@ -347,8 +278,21 @@ impl Job {
             result: None,
             result_type: None,
             forwarded_for: None,
+            domain: Some(L::name().to_string()),
+            domain_version: Some(L::version().to_string()),
             board: None,
         })
+    }
+
+    /// The `Domain::name()` that authored this Job's instruction, if known -
+    /// see the field doc comment on `Job` for what `None` means.
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
+    }
+
+    /// The domain's version, alongside `domain()`.
+    pub fn domain_version(&self) -> Option<&str> {
+        self.domain_version.as_deref()
     }
 
     pub fn to_json(&self) -> Result<String, Error> {
@@ -367,12 +311,57 @@ impl Job {
         self.command.destination()
     }
 
-    pub fn instruction(&self) -> Instruction {
+    pub fn instruction(&self) -> L::Instruction {
         self.command.instruction()
     }
 
     pub fn expires(&self) -> &chrono::DateTime<Utc> {
         &self.expires
+    }
+
+    ///
+    /// Return this Job with its `expires` clamped to at most `MAX_JOB_LIFETIME`
+    /// after `created`, and to at most that far in the future.
+    ///
+    /// `expires` arrives from the wire as whatever the sending peer wrote, and
+    /// reaping is the only thing that bounds a board's size - so a Job claiming to
+    /// expire in the year 3000 stayed on the board for the life of the process. A
+    /// legitimate Job's lifetime is minutes. See
+    /// `docs/specifications/security-review-2.md` (finding R31).
+    ///
+    pub fn clamp_expires(&self) -> Self {
+        let now = Utc::now();
+
+        // `checked_add_signed` rather than `+`: `created` is a wire field, so it
+        // can sit near `DateTime::MAX` where the addition would panic - and with
+        // `panic = "abort"` that is a remote process kill (cf. finding R25).
+        let ceiling = match (
+            self.created.checked_add_signed(MAX_JOB_LIFETIME),
+            now.checked_add_signed(MAX_JOB_LIFETIME),
+        ) {
+            (Some(from_created), Some(from_now)) => std::cmp::min(from_created, from_now),
+            // `created` is absurd; fall back to a ceiling relative to now only.
+            (None, Some(from_now)) => from_now,
+            // Only reachable if the clock itself is near DateTime::MAX.
+            _ => now,
+        };
+
+        if self.expires <= ceiling {
+            return self.clone();
+        }
+
+        tracing::warn!(
+            "Job {} claims to expire at {}, which is beyond the {} minute maximum \
+             lifetime - clamping it to {}.",
+            self.id,
+            self.expires,
+            MAX_JOB_LIFETIME.num_minutes(),
+            ceiling
+        );
+
+        let mut clamped = self.clone();
+        clamped.expires = ceiling;
+        clamped
     }
 
     pub fn set_lifetime(&self, lifetime: chrono::Duration) -> Self {
@@ -387,6 +376,8 @@ impl Job {
             result: self.result.clone(),
             result_type: self.result_type.clone(),
             forwarded_for: self.forwarded_for.clone(),
+            domain: self.domain.clone(),
+            domain_version: self.domain_version.clone(),
             board: self.board.clone(),
         }
     }
@@ -438,18 +429,36 @@ impl Job {
         }
     }
 
+    /// A copy of this Job with `version` set to `version`, and `changed`
+    /// stamped now - the bulk equivalent of calling `increment_version()`
+    /// repeatedly, without the intermediate clones. See
+    /// `docs/specifications/security-review-2.md` (finding R6).
+    pub fn with_version(&self, version: u64) -> Self {
+        Self {
+            version,
+            changed: Utc::now(),
+            ..self.clone()
+        }
+    }
+
     pub fn increment_version(&self) -> Self {
         Self {
             id: self.id,
             created: self.created,
             changed: Utc::now(),
             expires: self.expires,
-            version: self.version + 1,
+            // Saturating: `version` is a wire field, and the release profile
+            // sets no `overflow-checks`, so `self.version + 1` at `u64::MAX`
+            // wrapped silently to zero. See
+            // `docs/specifications/security-review-2.md` (finding R6).
+            version: self.version.saturating_add(1),
             command: self.command.clone(),
             state: self.state.clone(),
             result: self.result.clone(),
             result_type: self.result_type.clone(),
             forwarded_for: self.forwarded_for.clone(),
+            domain: self.domain.clone(),
+            domain_version: self.domain_version.clone(),
             board: self.board.clone(),
         }
     }
@@ -492,7 +501,7 @@ impl Job {
         }
     }
 
-    pub fn pending(&self) -> Result<Job, Error> {
+    pub fn pending(&self) -> Result<Job<L>, Error> {
         match self.state {
             Status::Created => Ok(Job {
                 id: self.id,
@@ -505,6 +514,8 @@ impl Job {
                 result: self.result.clone(),
                 result_type: self.result_type.clone(),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             Status::Pending => Ok(self.clone()),
@@ -514,7 +525,7 @@ impl Job {
         }
     }
 
-    pub fn is_duplicate_of(&self, job: &Job) -> bool {
+    pub fn is_duplicate_of(&self, job: &Job<L>) -> bool {
         self.command.destination().last() == job.command.destination().last()
             && self.command.instruction() == job.command.instruction()
             && job.is_pending()
@@ -522,7 +533,7 @@ impl Job {
             && self.is_pending()
     }
 
-    pub fn duplicate(&self, job: &Job) -> Result<Job, Error> {
+    pub fn duplicate(&self, job: &Job<L>) -> Result<Job<L>, Error> {
         if !self.is_duplicate_of(job) {
             return Err(Error::InvalidState(
                 format!("Job {} is not a duplicate of job {}", self, job).to_owned(),
@@ -548,6 +559,8 @@ impl Job {
                 result: job.id.to_string().into(),
                 result_type: None,
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -556,7 +569,7 @@ impl Job {
         }
     }
 
-    pub fn running(&self, progress: Option<String>) -> Result<Job, Error> {
+    pub fn running(&self, progress: Option<String>) -> Result<Job<L>, Error> {
         match self.state {
             Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
@@ -569,6 +582,8 @@ impl Job {
                 result: progress,
                 result_type: None,
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -577,7 +592,7 @@ impl Job {
         }
     }
 
-    pub fn copy_result_from(&self, other: &Job) -> Result<Job, Error> {
+    pub fn copy_result_from(&self, other: &Job<L>) -> Result<Job<L>, Error> {
         // check other has finished and is error or completed
         if !other.is_finished() {
             return Err(Error::InvalidState(
@@ -597,6 +612,8 @@ impl Job {
                 result: other.result.clone(),
                 result_type: other.result_type.clone(),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -605,7 +622,7 @@ impl Job {
         }
     }
 
-    pub fn completed_none(&self) -> Result<Job, Error> {
+    pub fn completed_none(&self) -> Result<Job<L>, Error> {
         match self.state {
             Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
@@ -618,6 +635,8 @@ impl Job {
                 result: None,
                 result_type: Some("None".to_string()),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -626,7 +645,7 @@ impl Job {
         }
     }
 
-    pub fn completed<T>(&self, result: T) -> Result<Job, Error>
+    pub fn completed<T>(&self, result: T) -> Result<Job<L>, Error>
     where
         T: serde::Serialize,
         T: NamedType,
@@ -641,8 +660,10 @@ impl Job {
                 command: self.command.clone(),
                 state: Status::Complete,
                 result: Some(serde_json::to_string(&result)?),
-                result_type: Some(T::type_name().to_string()),
+                result_type: Some(T::type_name()),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -651,7 +672,7 @@ impl Job {
         }
     }
 
-    pub fn errored(&self, message: &str) -> Result<Job, Error> {
+    pub fn errored(&self, message: &str) -> Result<Job<L>, Error> {
         match self.state {
             Status::Duplicate | Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
@@ -664,6 +685,8 @@ impl Job {
                 result: Some(message.to_owned()),
                 result_type: Some("Error".to_string()),
                 forwarded_for: self.forwarded_for.clone(),
+                domain: self.domain.clone(),
+                domain_version: self.domain_version.clone(),
                 board: self.board.clone(),
             }),
             _ => Err(Error::InvalidState(
@@ -779,7 +802,7 @@ impl Job {
         }
     }
 
-    pub async fn execute(&self) -> Result<Job, Error> {
+    pub async fn execute(&self) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         match self.state() {
@@ -793,7 +816,7 @@ impl Job {
         }
     }
 
-    pub async fn received(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn received(&self, peer: &Peer) -> Result<Job<L>, Error> {
         if self.state == Status::Created {
             return Err(Error::InvalidState(
                 format!("A created job should not have been received? {:?}", self).to_owned(),
@@ -805,7 +828,7 @@ impl Job {
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -832,7 +855,7 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn put(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn put(&self, peer: &Peer) -> Result<Job<L>, Error> {
         tracing::debug!("Put {} : {}", self.destination(), self.instruction());
 
         self.assert_is_not_expired()?;
@@ -841,7 +864,7 @@ impl Job {
         let mut job = self.pending()?;
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -894,7 +917,7 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn updated(&self) -> Result<Job, Error> {
+    pub async fn updated(&self) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let agent = match self.board {
@@ -907,7 +930,7 @@ impl Job {
         };
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get::<L>(agent).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -939,13 +962,13 @@ impl Job {
         Ok(self.clone())
     }
 
-    pub async fn update(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn update(&self, peer: &Peer) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1007,13 +1030,13 @@ impl Job {
         &self,
         virtual_peer: &Peer,
         hosting_peer: &Peer,
-    ) -> Result<Job, Error> {
+    ) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // First, update the hosting agent's board directly (since it "processed" the job)
-        let board = match state::get(hosting_peer).await {
+        let board = match state::get::<L>(hosting_peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1041,7 +1064,7 @@ impl Job {
         }
 
         // Now update the virtual agent's board
-        let board = match state::get(virtual_peer).await {
+        let board = match state::get::<L>(virtual_peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1081,7 +1104,7 @@ impl Job {
             );
 
             // now update the upstream agent's board with the updated job
-            let board = match state::get(&upstream_peer).await {
+            let board = match state::get::<L>(&upstream_peer).await {
                 Ok(b) => b.board().await,
                 Err(e) => {
                     tracing::error!(
@@ -1132,13 +1155,13 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn deleted(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn deleted(&self, peer: &Peer) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1171,13 +1194,13 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn delete(&self, peer: &Peer) -> Result<Job, Error> {
+    pub async fn delete(&self, peer: &Peer) -> Result<Job<L>, Error> {
         self.assert_is_not_expired()?;
 
         let mut job = self.clone();
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1222,7 +1245,7 @@ impl Job {
         Ok(job)
     }
 
-    async fn _wait(&self) -> Result<Job, Error> {
+    async fn _wait(&self) -> Result<Job<L>, Error> {
         if self.is_finished() || self.is_expired() {
             return Ok(self.clone());
         }
@@ -1237,7 +1260,7 @@ impl Job {
         };
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get::<L>(agent).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1248,7 +1271,7 @@ impl Job {
             }
         };
 
-        let waiter: Waiter;
+        let waiter: Waiter<L>;
 
         // in a scope so we drop the lock asap
         {
@@ -1266,7 +1289,7 @@ impl Job {
         Ok(result)
     }
 
-    pub async fn wait(&self) -> Result<Job, Error> {
+    pub async fn wait(&self) -> Result<Job<L>, Error> {
         let mut job = self._wait().await?;
 
         // if the job is still running, then we need to wait for it to finish
@@ -1290,7 +1313,7 @@ impl Job {
         Ok(job)
     }
 
-    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job>, Error> {
+    pub async fn try_wait(&self, timeout_ms: u64) -> Result<Option<Job<L>>, Error> {
         if self.is_finished() || self.is_expired() {
             return Ok(Some(self.clone()));
         } else if timeout_ms == 0 {
@@ -1307,7 +1330,7 @@ impl Job {
         };
 
         // get a RwLock to the board from the shared state
-        let board = match state::get(agent).await {
+        let board = match state::get::<L>(agent).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1318,7 +1341,7 @@ impl Job {
             }
         };
 
-        let waiter: Waiter;
+        let waiter: Waiter<L>;
 
         // in a scope so we drop the lock asap
         {
@@ -1341,9 +1364,9 @@ impl Job {
 /// board. From the two exchanges we should recover our true
 /// shared state
 ///
-pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
+pub async fn sync_board<L: Domain>(peer: &Peer) -> Result<(), Error> {
     // get a RwLock to the board from the shared state
-    let board = match state::get(peer).await {
+    let board = match state::get::<L>(peer).await {
         Ok(b) => b.board().await,
         Err(e) => {
             tracing::error!(
@@ -1373,7 +1396,11 @@ pub async fn sync_board(peer: &Peer) -> Result<(), Error> {
 /// Function used to process the sync message received from the specified
 /// peer
 ///
-pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> Result<(), Error> {
+pub async fn sync_from_peer<L: Domain>(
+    recipient: &str,
+    peer: &Peer,
+    sync: &SyncState<L>,
+) -> Result<(), Error> {
     tracing::debug!("Syncing state from peer {}", peer);
 
     let jobs = sync.jobs();
@@ -1381,6 +1408,26 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
     if jobs.is_empty() {
         tracing::debug!("No jobs to sync from peer {}", peer);
         return Ok(());
+    }
+
+    // `Command::Sync` carries a peer-supplied `Vec<Job>` that is re-injected into
+    // the inbound channel, so an oversized one is both a large allocation and a
+    // large amount of downstream work. A real sync carries a board's worth of live
+    // Jobs. See `docs/specifications/security-review-2.md` (finding R31).
+    if jobs.len() > MAX_SYNCED_JOBS {
+        tracing::warn!(
+            "Refusing to sync {} jobs from peer {} - the limit is {}.",
+            jobs.len(),
+            peer,
+            MAX_SYNCED_JOBS
+        );
+
+        return Err(Error::Unavailable(format!(
+            "Peer {} tried to sync {} jobs, which is more than the {} allowed",
+            peer,
+            jobs.len(),
+            MAX_SYNCED_JOBS
+        )));
     }
 
     let mut update_jobs = Vec::new();
@@ -1391,7 +1438,7 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
     // loop over all of the jobs in the sync state and process them
     {
         // get a RwLock to the board from the shared state
-        let board = match state::get(peer).await {
+        let board = match state::get::<L>(peer).await {
             Ok(b) => b.board().await,
             Err(e) => {
                 tracing::error!(
@@ -1485,9 +1532,9 @@ pub async fn sync_from_peer(recipient: &str, peer: &Peer, sync: &SyncState) -> R
 ///
 /// Function used to send all jobs that were queued for the specified peer
 ///
-pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
+pub async fn send_queued<L: Domain>(peer: &Peer) -> Result<(), Error> {
     // get a RwLock to the board from the shared state
-    let board = match state::get(peer).await {
+    let board = match state::get::<L>(peer).await {
         Ok(b) => b.board().await,
         Err(e) => {
             tracing::error!(
@@ -1499,7 +1546,7 @@ pub async fn send_queued(peer: &Peer) -> Result<(), Error> {
     };
 
     // get all of the queued jobs
-    let queued: Vec<ControlCommand>;
+    let queued: Vec<ControlCommand<L>>;
 
     // in a scope so we drop the lock asap
     {
@@ -1548,6 +1595,123 @@ pub fn assert_not_expired(expiry: &chrono::DateTime<Utc>) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::test_domain::TestDomain;
+
+    type Command = super::Command<TestDomain>;
+    type Job = super::Job<TestDomain>;
+
+    #[test]
+    fn test_a_peer_supplied_expiry_is_clamped() {
+        // `expires` is a wire field, and reaping expired Jobs is the only thing that
+        // bounds a board's size - so a Job claiming to expire in the year 3000 sat
+        // on the board for the life of the process. See finding R31.
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true).unwrap();
+
+        // A normal Job is untouched.
+        assert_eq!(job.clamp_expires().expires(), job.expires());
+
+        // A far-future expiry is pulled back to the ceiling.
+        let far_future = job.set_lifetime(chrono::TimeDelta::days(365 * 1000));
+        let clamped = far_future.clamp_expires();
+
+        assert!(
+            clamped.expires() < far_future.expires(),
+            "a millennium-long lifetime must be clamped"
+        );
+        assert!(
+            *clamped.expires() <= Utc::now() + MAX_JOB_LIFETIME + chrono::TimeDelta::seconds(5),
+            "clamped expiry {} is still beyond the ceiling",
+            clamped.expires()
+        );
+
+        // Clamping never *extends* a short lifetime, and is idempotent.
+        let short = job.set_lifetime(chrono::TimeDelta::seconds(30));
+        assert_eq!(short.clamp_expires().expires(), short.expires());
+        assert_eq!(
+            clamped.clamp_expires().expires(),
+            clamped.expires(),
+            "clamping twice must be a no-op"
+        );
+    }
+
+    #[test]
+    fn test_board_add_rejects_an_implausible_version() {
+        // Regression test for finding R6, part 1. `version` is a wire field
+        // with no validation; a value anywhere near this is a bug or an
+        // attacker, not a real Job.
+        use crate::agent::Peer;
+        use crate::board::Board;
+
+        let peer = Peer::new("cluster", "default");
+        let mut board = Board::<TestDomain>::new(&peer);
+
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("job: {:?}", e));
+        job.board = Some(peer.clone());
+
+        // A normal version is accepted...
+        job.version = 3;
+        assert!(board.add(&job).is_ok());
+
+        // ...and an implausible one is refused rather than acted on.
+        job.version = (1u64 << 60) + 1;
+        assert!(board.add(&job).is_err());
+
+        job.version = u64::MAX;
+        assert!(board.add(&job).is_err());
+    }
+
+    #[test]
+    fn test_board_add_supersedes_a_version_without_looping() {
+        // Regression test for finding R6, part 2. This branch used to
+        // `increment_version()` in a loop until it passed the stored version -
+        // deep-cloning the Job each time, synchronously, while holding the
+        // board's write lock. A stored version of 2^40 therefore drove ~10^12
+        // clones; `u64::MAX` never terminated at all, because the increment
+        // wrapped in release builds. It must now jump straight past.
+        use crate::agent::Peer;
+        use crate::board::Board;
+
+        let peer = Peer::new("cluster", "default");
+        let mut board = Board::<TestDomain>::new(&peer);
+
+        let mut stored = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("job: {:?}", e));
+        stored.board = Some(peer.clone());
+        stored.version = 1 << 40;
+        stored.changed = Utc::now();
+
+        assert!(board.add(&stored).is_ok());
+
+        // Same id, *lower* version but a newer `changed` - the branch that
+        // previously looped. It must return promptly with a version above the
+        // one it superseded.
+        let mut newer = stored.clone();
+        newer.version = 0;
+        newer.changed = stored.changed + chrono::Duration::seconds(10);
+
+        let (result, _) = board
+            .add(&newer)
+            .unwrap_or_else(|e| unreachable!("add: {:?}", e));
+
+        assert_eq!(result.version(), (1u64 << 40) + 1);
+    }
+
+    #[test]
+    fn test_increment_version_saturates() {
+        // The release profile sets no `overflow-checks`, so `version + 1` at
+        // `u64::MAX` used to wrap silently to zero (finding R6).
+        let mut job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("job: {:?}", e));
+
+        job.version = u64::MAX;
+        assert_eq!(job.increment_version().version(), u64::MAX);
+
+        job.version = 7;
+        assert_eq!(job.increment_version().version(), 8);
+        assert_eq!(job.with_version(100).version(), 100);
+    }
 
     #[test]
     fn test_command_new() {

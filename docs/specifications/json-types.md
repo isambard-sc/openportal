@@ -9,6 +9,14 @@ This document specifies the JSON serialisation format for the key object types
 used in OpenPortal. All results returned by agents are carried inside a `Job`
 object; this document covers `Job` itself and every result type it can contain.
 
+`Job`'s envelope fields (`id`, `created`, `state`, ...) are domain-agnostic and
+defined in `templemeads`. Its `result`/`result_type` payloads, however, are
+supplied by whichever `Domain` an agent is compiled against - every type
+documented below `Job` on this page (`AwardDetails`, `ProjectUsageReport`,
+`Quota`, ...) belongs to `greatwestern`, the reference `Domain`. A different
+`Domain` (see [writing-a-domain.md](writing-a-domain.md)) would return
+entirely different result types instead.
+
 Types from the instruction protocol that serialise as plain strings (e.g.
 `UserIdentifier`, `ProjectIdentifier`, `UserMapping`, `ProjectMapping`,
 `Destination`) are documented in [instruction-protocol.md](instruction-protocol.md).
@@ -22,16 +30,18 @@ The top-level container transmitted between agents. Every instruction creates a
 
 ```json
 {
-  "id":             "<uuid-v4>",
-  "created":        <unix-timestamp-seconds>,
-  "changed":        <unix-timestamp-seconds>,
-  "expires":        <unix-timestamp-seconds>,
-  "version":        <u64>,
-  "command":        "<destination> <instruction>",
-  "state":          "<status>",
-  "result":         "<json-string>" | null,
-  "result_type":    "<type-name>" | null,
-  "forwarded_for":  "<destination>" | null
+  "id":              "<uuid-v4>",
+  "created":         <unix-timestamp-seconds>,
+  "changed":         <unix-timestamp-seconds>,
+  "expires":         <unix-timestamp-seconds>,
+  "version":         <u64>,
+  "command":         "<destination> <instruction>",
+  "state":           "<status>",
+  "result":          "<json-string>" | null,
+  "result_type":     "<type-name>" | null,
+  "forwarded_for":   "<destination>" | null,
+  "domain":          "<domain-name>" | null,
+  "domain_version":  "<domain-version>" | null
 }
 ```
 
@@ -49,6 +59,8 @@ The top-level container transmitted between agents. Every instruction creates a
 | `result` | string or null | JSON-encoded result payload (see below); null when not yet complete |
 | `result_type` | string or null | Rust type name of the result (see [Result Types](#result-types)) |
 | `forwarded_for` | string or null | Original job destination before the portal rewrote it for the bridge (e.g. `ukri.brics.isambard-ai`). Set by the portal's `virtual_resource_runner` when creating a bridge-board job; absent (`null`) on all other jobs. Web-portal code can use this to identify the true originating portal rather than reconstructing the path from the bridge destination. Absent from older jobs (treated as `null`). |
+| `domain` | string or null | The `Domain::name()` (e.g. `"greatwestern"`) that authored this Job's instruction, set once when the Job was created and unchanged thereafter - including by any domain-oblivious routing hop it passes through. `null` only for a Job from a peer running templemeads from before this field existed. See [writing-a-domain.md](writing-a-domain.md#1-the-domain-trait). |
+| `domain_version` | string or null | The domain's version, alongside `domain`. |
 
 ### Job States
 
@@ -776,9 +788,9 @@ structure:
   `UserMapping`, `ProjectMapping`, and `Destination` all serialise as plain strings
   (via custom `Serialize`/`Deserialize` impls that delegate to `to_string()` and
   `parse()`).
-- Source files: `templemeads/src/job.rs` (`Job`, `Status`),
-  `templemeads/src/usagereport.rs` (`Usage`, `UserUsageReport`,
+- Source files: `templemeads/src/job.rs` (`Job`, `Status` — domain-agnostic),
+  `greatwestern/src/usagereport.rs` (`Usage`, `UserUsageReport`,
   `DailyProjectUsageReport`, `ProjectUsageReport`, `UsageReport`),
-  `templemeads/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`),
-  `templemeads/src/storage.rs` (`StorageSize`, `QuotaLimit`, `Quota`, `Volume`),
-  `templemeads/src/grammar.rs` (`AwardDetails` / `ProjectDetails`, `Link`, `Note`, identifiers and mappings).
+  `greatwestern/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`),
+  `greatwestern/src/storage.rs` (`StorageSize`, `QuotaLimit`, `Quota`, `Volume`),
+  `greatwestern/src/grammar.rs` (`AwardDetails` / `ProjectDetails`, `Link`, `Note`, identifiers and mappings).

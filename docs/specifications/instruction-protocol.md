@@ -5,9 +5,19 @@ SPDX-License-Identifier: CC0-1.0
 
 # OpenPortal Agent Instruction Protocol
 
-This document formally specifies the instruction protocol used for communication
-between agents in the OpenPortal system. Instructions are text strings serialised
-as Job payloads and transmitted over the paddington secure WebSocket layer.
+This document formally specifies the instruction protocol of `greatwestern`,
+the HPC/Waldur command vocabulary that every built-in OpenPortal agent is
+compiled against. Instructions are text strings serialised as Job payloads and
+transmitted over the paddington secure WebSocket layer.
+
+`templemeads`, the crate that actually moves Jobs around, has no built-in
+opinion on what an instruction is - it is generic over a `Domain` trait, of
+which `greatwestern` is one implementation (the reference one). Everything in
+this document - the `Instruction` enum, the identifier types, the concrete
+instruction list - is `greatwestern` vocabulary, not part of `templemeads`
+itself. If you are building agents against a different `Domain`, this document
+does not apply to you; see
+[writing-a-domain.md](writing-a-domain.md) instead.
 
 ## Instruction String Format
 
@@ -1217,13 +1227,18 @@ is_blocked_project myproject.waldur
 
 ## Implementation Notes
 
-- The canonical implementation is in `templemeads/src/grammar.rs` (`Instruction` enum,
+- The canonical implementation is in `greatwestern/src/grammar.rs` (`Instruction` enum,
   `Instruction::parse()`, and `Instruction::fmt()`).
-- Supporting types are in `templemeads/src/storage.rs` (`Volume`, `QuotaLimit`,
-  `StorageSize`), `templemeads/src/usagereport.rs` (`Usage`), and
-  `templemeads/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`).
-- Routing types (`Destination`, `Destinations`) are in
-  `templemeads/src/destination.rs`.
+- Supporting types are in `greatwestern/src/storage.rs` (`Volume`, `QuotaLimit`,
+  `StorageSize`), `greatwestern/src/usagereport.rs` (`Usage`), and
+  `greatwestern/src/storagereport.rs` (`ProjectStorageReport`, `StorageReport`).
+- Routing types (`Destination`, `Destinations`) are domain-agnostic and remain
+  in `templemeads/src/destination.rs`.
+- `Instruction` is `greatwestern::Hpc`'s `Domain::Instruction` associated type
+  (see `templemeads/src/domain.rs`); every built-in OpenPortal agent is
+  compiled with `L = Hpc`, so `Job<Hpc>::instruction()` returns this
+  `Instruction` type. A `Job<L>` compiled against a different `Domain` would
+  carry a completely different, unrelated instruction type instead.
 - Instructions are serialised to/from JSON transparently as their string
   representation (via `Serialize`/`Deserialize` impls that delegate to
   `to_string()`/`parse()`).

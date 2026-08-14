@@ -105,11 +105,25 @@ struct AppError(anyhow::Error, Option<axum::http::StatusCode>);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (
-            self.1.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            Json(json!({"message":format!("Something went wrong: {:?}", self.0)})),
-        )
-            .into_response()
+        let status = self.1.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Log the detail, return a generic message. F15 fixed the `bridge_server` copy
+        // of this and missed the one here; it is currently unreachable (`health()`
+        // cannot fail), so this is closing a latent regression for whatever handler is
+        // added to this router next. See
+        // docs/specifications/security-review-2.md (finding R33).
+        tracing::error!("Health check request failed ({}): {:?}", status, self.0);
+
+        let client_message = match status {
+            StatusCode::UNAUTHORIZED => "Unauthorized",
+            StatusCode::TOO_MANY_REQUESTS => "Too many requests",
+            StatusCode::SERVICE_UNAVAILABLE => "Service unavailable",
+            StatusCode::BAD_REQUEST => "Bad request",
+            StatusCode::NOT_FOUND => "Not found",
+            _ => "Internal server error",
+        };
+
+        (status, Json(json!({ "message": client_message }))).into_response()
     }
 }
 

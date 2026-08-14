@@ -22,10 +22,10 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use greatwestern::grammar::{ProjectMapping, UserMapping};
+use greatwestern::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use serde::{Deserialize, Serialize};
-use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::job::assert_not_expired;
-use templemeads::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use templemeads::Error;
 use tokio::process::Command;
 
@@ -166,25 +166,23 @@ impl LinuxEngine {
         for line in output.lines() {
             let tokens: Vec<&str> = line.split_whitespace().collect();
 
-            // Need at least: name flags bused bsoft bhard
-            if tokens.len() < 5 {
-                continue;
-            }
-
-            if tokens[0] != name {
+            // Need at least: name flags bused bsoft bhard. Read via `get`
+            // rather than indexed - this is `repquota` output, not ours. See
+            // docs/specifications/security-review-2.md (finding R1).
+            if tokens.first() != Some(&name) {
                 continue;
             }
 
             // tokens[2] = block used (KB)
-            let used_kb: f64 = match tokens[2].parse() {
-                Ok(v) => v,
-                Err(_) => continue, // malformed line; try the next
+            let used_kb: f64 = match tokens.get(2).map(|t| t.parse()) {
+                Some(Ok(v)) => v,
+                _ => continue, // malformed line; try the next
             };
 
             // tokens[4] = block hard limit (KB), 0 means unlimited
-            let hard_kb: f64 = match tokens[4].parse() {
-                Ok(v) => v,
-                Err(_) => continue,
+            let hard_kb: f64 = match tokens.get(4).map(|t| t.parse()) {
+                Some(Ok(v)) => v,
+                _ => continue,
             };
 
             let usage = StorageUsage::new(StorageSize::from_kilobytes(used_kb));

@@ -3,8 +3,9 @@
 
 use crate::agent::Type as AgentType;
 use crate::agent_core::Config;
+use crate::domain::Domain;
 use crate::error::Error;
-use crate::handler::{process_message, set_my_service_details};
+use crate::handler::{run_with_relay, set_my_service_details};
 use crate::job::{Envelope, Job};
 use crate::runnable::AsyncRunnable;
 
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Run the filesystem service
 ///
-pub async fn run<T>(config: Config<T>, runner: AsyncRunnable) -> Result<(), Error>
+pub async fn run<T, L: Domain>(config: Config<T>, runner: AsyncRunnable<L>) -> Result<(), Error>
 where
     T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
 {
@@ -84,8 +85,7 @@ where
     }
 
     // run the Provider OpenPortal agent
-    paddington::set_handler(process_message).await?;
-    paddington::run(config.service()).await?;
+    run_with_relay::<L>(config.service()).await?;
 
     Ok(())
 }

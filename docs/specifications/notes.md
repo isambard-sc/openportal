@@ -189,6 +189,63 @@ The current schema is:
 
 **Source:** `templemeads/src/diagnostics.rs`
 
+### 1.3 Blind relay proxy: real-agent integration
+
+Every `templemeads`-based agent can now act as a relayed peer, not just
+`op-proxy` itself - see [agent-configuration.md](agent-configuration.md)
+§3.11 for the operator-facing walkthrough. The pieces that make this work:
+
+- `templemeads/src/agent_core.rs`'s common `client --add` subcommand takes
+  a `--proxy <relay-name>` flag - this is the only place an operator needs
+  to say "this peer is relayed"; the resulting invite file carries the
+  relay's name, so `server --add` on the importing side auto-detects it
+  (`paddington::config::ServiceConfig::add_server` reads `invite.proxy()`)
+  and needs no separate flag.
+- `templemeads::handler::run_with_relay` - what every agent's `run()` now
+  calls instead of `paddington::set_handler`/`paddington::run` directly -
+  calls `paddington::relay::configure()`, registers the real message
+  handler behind `paddington::relay::relay_dispatch_handler`, and spawns
+  `bootstrap_all_as_client()` concurrently with `paddington::run()` (since
+  that's what actually dials the real connection to the proxy in the first
+  place).
+- `paddington::relay::bootstrap()`'s initial send retries indefinitely (a
+  short retry loop within the call for the underlying connection to the
+  relay not being up yet, and `maintain_relayed_client` retrying the whole
+  bootstrap forever, at the same cadence a direct connection retries at)
+  rather than giving up - `exchange::send` fails immediately instead of
+  queuing, and agents can start in any order or restart independently.
+- `paddington::exchange::send()` transparently falls back to
+  `paddington::relay::send()` for a recipient with no real connection but
+  a configured relay entry - this is what makes relayed peers invisible to
+  templemeads' own `Command::send_to` and keepalive-reply code, which
+  otherwise have no idea relaying is happening.
+- `paddington::eventloop::run()` skips dialling `servers` entries that
+  have `proxy` set (they have no real URL - they're bootstrapped
+  separately, over the real connection to the proxy itself).
+- A relayed peer's own zone (the relationship between the two relayed
+  agents) and the zone of the real, direct connection to the relay itself
+  are tracked and used separately throughout (`RelayedPeer::relay_zone`,
+  `configure_proxy` on the proxy's own side) - they are very often, but
+  not necessarily, the same zone.
+- A restarted relayed *server* (the side that only ever waits) has no way
+  to notice on its own that it lost its session state, so its relayed
+  *client* peer's still-cached session would otherwise fail silently
+  forever. A `SessionUnknown` bootstrap message (permanent-key encrypted,
+  so the proxy can't forge it) lets either side tell the other to redo the
+  handshake the moment it receives traffic it can't decrypt - see
+  [wire-protocol.md](wire-protocol.md) §7.3.
+- An agent can use a *different* proxy for each relayed peer - there is no
+  requirement to route everything through one proxy (an earlier
+  simplification restricting this was removed once it became clear
+  nothing in the protocol actually needed it).
+
+Validated with a genuine three-process test (`op-proxy` + `op-portal` +
+`op-cloudportal`, real compiled binaries, real TCP connections): the
+bootstrap completes, each side fires its synthesised `Connected` event,
+and a real templemeads `Register` command sent immediately afterwards is
+correctly relayed and processed on the other side, including recovering
+correctly across a simulated server-side restart.
+
 ---
 
 ## 2. Duplicate Job Handling

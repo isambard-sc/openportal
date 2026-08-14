@@ -32,19 +32,27 @@ pub mod command;
 pub mod config;
 pub mod destination;
 pub mod diagnostics;
+pub mod domain;
+mod domain_static;
 pub use error::Error;
-pub mod grammar;
+pub mod erased;
 pub mod health;
 pub mod job;
+pub mod named;
 pub mod notification;
+pub mod portal_identifier;
+pub mod portalroutes;
 pub mod runnable;
 pub mod state;
-pub mod storage;
-pub mod storagereport;
-pub mod usagereport;
+#[cfg(test)]
+mod test_domain;
+pub mod validate;
 
 pub mod server {
     pub use crate::bridge_server::sign_api_call;
+    pub use crate::bridge_server::sign_api_call_with_version;
+    pub use crate::bridge_server::SignatureVersion;
+    pub use crate::bridge_server::SIGNATURE_VERSION_HEADER;
     pub use crate::bridgestate::get as get_board;
     pub use crate::notificationstate::add as add_pending_notification;
     pub use crate::notificationstate::enqueue as enqueue_notification;
@@ -67,22 +75,20 @@ mod tests {
         DiagnosticsReport, ExpiredJobEntry, FailedJobEntry, JobStatistics, LogEntry,
         RunningJobEntry, SlowJobEntry,
     };
-    use crate::grammar::{AwardDetails, Link, MembershipControl, Note};
     use crate::health::HealthInfo;
-    use crate::job::{Job, Status};
-    use crate::storage::{Quota, Volume};
-    use crate::storagereport::{ProjectStorageReport, StorageReport};
-    use crate::usagereport::{
-        DailyProjectUsageReport, ProjectUsageReport, Usage, UsageReport, UserUsageReport,
-    };
+    use crate::job::Status;
     use ts_rs::TS;
 
+    // Domain-vocabulary types (Instruction/identifiers, usage/storage
+    // reports, Link/Note/MembershipControl/AwardDetails, ...) export their
+    // own TS bindings from the domain crate (e.g. greatwestern) that owns
+    // them - templemeads only exports the framework-level types below,
+    // which exist regardless of which Domain an agent is built against.
     #[allow(clippy::expect_used)]
     #[test]
     fn export_ts_bindings() {
         AgentType::export_all().expect("Could not export AgentType");
         Status::export_all().expect("Could not export Status");
-        Job::export_all().expect("Could not export Job");
         JobStatistics::export_all().expect("Could not export JobStatistics");
         DiagnosticsReport::export_all().expect("Could not export DiagnosticsReport");
         FailedJobEntry::export_all().expect("Could not export FailedJobEntry");
@@ -91,18 +97,5 @@ mod tests {
         RunningJobEntry::export_all().expect("Could not export RunningJobEntry");
         LogEntry::export_all().expect("Could not export LogEntry");
         HealthInfo::export_all().expect("Could not export HealthInfo");
-        Volume::export_all().expect("Could not export Volume");
-        Quota::export_all().expect("Could not export Quota");
-        Usage::export_all().expect("Could not export Usage");
-        UserUsageReport::export_all().expect("Could not export UserUsageReport");
-        DailyProjectUsageReport::export_all().expect("Could not export DailyProjectUsageReport");
-        ProjectUsageReport::export_all().expect("Could not export ProjectUsageReport");
-        UsageReport::export_all().expect("Could not export UsageReport");
-        ProjectStorageReport::export_all().expect("Could not export ProjectStorageReport");
-        StorageReport::export_all().expect("Could not export StorageReport");
-        Link::export_all().expect("Could not export Link");
-        Note::export_all().expect("Could not export Note");
-        MembershipControl::export_all().expect("Could not export MembershipControl");
-        AwardDetails::export_all().expect("Could not export AwardDetails");
     }
 }

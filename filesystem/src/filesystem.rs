@@ -57,8 +57,12 @@ async fn run_remote(prefix: &[String], args: &[&str]) -> Result<(i32, String, St
 
     tracing::debug!("Remote: {} {}", prefix.join(" "), args.join(" "));
 
-    let mut cmd = tokio::process::Command::new(&prefix[0]);
-    for p in &prefix[1..] {
+    let Some((program, extra_args)) = prefix.split_first() else {
+        return Err(Error::State("Empty exec-prefix".to_owned()));
+    };
+
+    let mut cmd = tokio::process::Command::new(program);
+    for p in extra_args {
         cmd.arg(p);
     }
     for a in args {
@@ -96,6 +100,59 @@ async fn remote_is_symlink(prefix: &[String], path: &Path) -> Result<bool, Error
     let path_str = path.to_string_lossy();
     let (exit_code, _, _) = run_remote(prefix, &["test", "-L", &path_str]).await?;
     Ok(exit_code == 0)
+}
+
+/// Fully resolve `path` on the remote system, following every symlink.
+///
+/// `readlink -m` rather than `-f`: `-f` requires all but the final component to exist
+/// and exits non-zero otherwise, which would reject a legitimate create whose parent
+/// has not been made yet. `-m` resolves symlinks wherever they appear and tolerates
+/// missing components, matching what `resolve_deepest_existing` does locally. Both are
+/// coreutils, so this is available anywhere the `chown`/`mkdir` this module already
+/// runs remotely are.
+///
+/// Note `readlink -m` *succeeds* for a path that does not exist at all, so it cannot
+/// itself tell us whether a configured root is present - hence `must_exist`, which
+/// adds an explicit directory test. That is the check that catches an unmounted or
+/// mistyped volume root.
+async fn remote_canonicalize(
+    prefix: &[String],
+    path: &Path,
+    must_exist: bool,
+) -> Result<PathBuf, Error> {
+    let path_str = path.to_string_lossy();
+
+    let (exit_code, stdout, stderr) =
+        run_remote(prefix, &["readlink", "-m", "--", &path_str]).await?;
+
+    let resolved = stdout.trim();
+
+    if exit_code != 0 || resolved.is_empty() {
+        return Err(Error::State(format!(
+            "Could not resolve '{}' on the remote system: exit code {}, stderr: {}",
+            path_str, exit_code, stderr
+        )));
+    }
+
+    if must_exist {
+        // No `--`: not every `test` accepts it (the one in the reference test
+        // container reports "binary operator expected"), and the existing
+        // `remote_is_symlink` does not use it either. `run_remote` builds an argv
+        // array with no shell, and these paths come from validated configuration, so
+        // there is nothing to quote around.
+        let (exists, _, _) = run_remote(prefix, &["test", "-d", resolved]).await?;
+
+        if exists != 0 {
+            return Err(Error::State(format!(
+                "The configured volume root '{}' (which resolves to '{}') is not a \
+                 directory on the remote system. The volume must exist and be mounted \
+                 before directories can be managed inside it.",
+                path_str, resolved
+            )));
+        }
+    }
+
+    Ok(PathBuf::from(resolved))
 }
 
 /// Read a symlink target on the remote system (`readlink`).
@@ -153,8 +210,181 @@ pub async fn clean_and_check_permissions(permissions: &str) -> Result<u32, Error
 /// such as /etc, /var, /usr, /bin, /sbin, /lib, /lib64, /boot, /root,
 /// /dev, /proc, /sys, /run, /tmp, or /.
 ///
-pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<PathBuf, Error> {
+/// Resolve `path` as far as it exists, and return the fully-resolved form.
+///
+/// The leaf usually does *not* exist yet - that is the point of `create_dir` - so
+/// canonicalising `path` directly would fail. Instead canonicalise the deepest
+/// ancestor that does exist and re-append the components below it. Any symlink in the
+/// existing prefix is therefore resolved, which is what the root check below needs.
+fn resolve_deepest_existing(path: &Path) -> Result<PathBuf, Error> {
+    let mut remaining: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+
+    loop {
+        match current.canonicalize() {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in remaining.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(_) => {
+                let Some(name) = current.file_name().map(|n| n.to_owned()) else {
+                    // Walked all the way up without finding anything that exists.
+                    return Err(Error::State(format!(
+                        "Could not resolve any existing ancestor of '{}'",
+                        path.to_string_lossy()
+                    )));
+                };
+
+                remaining.push(name);
+
+                match current.parent() {
+                    Some(parent) => current = parent.to_path_buf(),
+                    None => {
+                        return Err(Error::State(format!(
+                            "Could not resolve any existing ancestor of '{}'",
+                            path.to_string_lossy()
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Assert that `path` really resolves inside `root`, canonicalising both **at the
+/// time of the operation**.
+///
+/// The deny-list below checks the *unresolved* string, so with `check_exists: false`
+/// (which every path that gets written to used to use) a symlink anywhere in the path
+/// silently relocated the operation. Since `chown` and `set_permissions` follow
+/// symlinks, that was a route to root handing ownership of a directory outside the
+/// tree to an unprivileged user.
+///
+/// Checked live rather than from a set of roots canonicalised at startup, because the
+/// volume has to be mounted for the operation to succeed anyway - so there is no
+/// automounter to race, and no stale pre-mount resolution to worry about.
+///
+/// This is deliberately paired with the `AT_SYMLINK_NOFOLLOW` ownership change in
+/// `create_dir_native`: this check catches a symlink that is *already* in place
+/// (misconfiguration, or a writable volume root), and nofollow catches one planted
+/// between this check and the operation. Neither alone is sufficient. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+async fn assert_within_roots(path: &Path, roots: &[PathBuf]) -> Result<(), Error> {
+    let mut last_error = None;
+    let mut resolved_path = None;
+
+    for root in roots {
+        match assert_within_root(path, root).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if resolved_path.is_none() {
+                    resolved_path = Some(e.to_string());
+                }
+                last_error = Some(e);
+            }
+        }
+    }
+
+    tracing::error!(
+        "Refusing to operate on '{}': it does not resolve inside any configured volume \
+         root ({}). A symlink in the path, or a misconfigured root, would put this \
+         outside the managed tree.",
+        path.to_string_lossy(),
+        roots
+            .iter()
+            .map(|r| r.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    Err(last_error.unwrap_or_else(|| {
+        Error::State(format!(
+            "The path '{}' is not inside any configured volume root",
+            path.to_string_lossy()
+        ))
+    }))
+}
+
+async fn assert_within_root(path: &Path, root: &Path) -> Result<PathBuf, Error> {
+    // Resolve on whichever system actually owns these paths. With an `exec-prefix`
+    // configured, op-filesystem runs somewhere else entirely - the paths exist only on
+    // the target - so canonicalising locally would fail on every path, or worse,
+    // resolve against an unrelated local filesystem. Every other filesystem operation
+    // in this module already routes through `run_remote` for exactly this reason; this
+    // check has to as well.
+    let (canonical_root, resolved) = match get_exec_prefix() {
+        Some(prefix) => (
+            remote_canonicalize(prefix, root, true).await?,
+            remote_canonicalize(prefix, path, false).await?,
+        ),
+        None => (
+            root.canonicalize().map_err(|e| {
+                Error::State(format!(
+                    "Could not resolve the configured volume root '{}': {}. The volume \
+                     must exist and be mounted before directories can be managed \
+                     inside it.",
+                    root.to_string_lossy(),
+                    e
+                ))
+            })?,
+            resolve_deepest_existing(path)?,
+        ),
+    };
+
+    if !resolved.starts_with(&canonical_root) {
+        // Debug, not error: with several configured roots this is the expected
+        // outcome for all but one of them. `assert_within_roots` logs once, at error
+        // level, only if *every* root rejects the path.
+        tracing::debug!(
+            "'{}' resolves to '{}', which is not inside volume root '{}' ('{}')",
+            path.to_string_lossy(),
+            resolved.to_string_lossy(),
+            root.to_string_lossy(),
+            canonical_root.to_string_lossy()
+        );
+
+        return Err(Error::State(format!(
+            "The path '{}' resolves to '{}', outside the volume root '{}'",
+            path.to_string_lossy(),
+            resolved.to_string_lossy(),
+            canonical_root.to_string_lossy()
+        )));
+    }
+
+    Ok(resolved)
+}
+
+pub async fn clean_and_check_path(
+    path: &Path,
+    roots: &[PathBuf],
+    check_exists: bool,
+) -> Result<PathBuf, Error> {
     let mut path = path.to_owned();
+
+    // Reject relative paths and any '..' components up front (finding F15), so
+    // that neither the sensitive-location check below nor the eventual mkdir can
+    // be steered out of the intended tree by traversal - even when
+    // `check_exists` is false and no canonicalisation runs. Configured volume
+    // paths are always absolute, so this never rejects a legitimate path.
+    if !path.is_absolute() {
+        return Err(Error::State(format!(
+            "The path '{}' is not absolute.",
+            path.to_string_lossy()
+        )));
+    }
+
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(Error::State(format!(
+            "The path '{}' contains a '..' component.",
+            path.to_string_lossy()
+        )));
+    }
 
     // convert into a path
     if check_exists {
@@ -168,6 +398,21 @@ pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<Pat
             "The path '{}' does not exist.",
             path.to_string_lossy()
         )));
+    }
+
+    // Verify the path really resolves inside one of the permitted volume roots,
+    // resolving symlinks live - see `assert_within_roots`. An empty slice means the
+    // caller has no root to check against and only the deny-list below applies.
+    //
+    // The resolved form is used **only** to decide containment; it is deliberately
+    // *not* substituted for `path`. Several callers must act on the path exactly as
+    // given: `create_link` and `remove_link` operate on the symlink itself, and
+    // `recycle_dir` must move the symlink rather than whatever it points at.
+    // Substituting the resolved path made `create_link` try to create the link at its
+    // own target - so restoring a recycled project, whose directory still contained
+    // the symlink from the first run, tried to link '/public/aiproject' to itself.
+    if !roots.is_empty() {
+        assert_within_roots(&path, roots).await?;
     }
 
     // make sure the path is not somewhere sensitive
@@ -198,11 +443,12 @@ pub async fn clean_and_check_path(path: &Path, check_exists: bool) -> Result<Pat
 
 pub async fn create_dir(
     path: &std::path::Path,
+    roots: &[PathBuf],
     username: &str,
     groupname: &str,
     permissions: &str,
 ) -> Result<(), Error> {
-    let path = clean_and_check_path(path, false).await?;
+    let path = clean_and_check_path(path, roots, false).await?;
 
     // convert the permissions into a u32
     let permissions = clean_and_check_permissions(permissions).await?;
@@ -331,25 +577,79 @@ async fn create_dir_native(
         }
     };
 
-    // create the directory
+    // Create the directory.
+    //
+    // **This must stay `create_dir`, not `create_dir_all`.** Non-recursive creation
+    // fails with `EEXIST` if the final component is already a symlink, which is what
+    // stops an unprivileged user who can write to this directory's parent from
+    // pre-planting a symlink and having the `chown` below hand them ownership of its
+    // target. `create_dir_all` traverses symlinked components happily, so making this
+    // recursive - an easy-looking fix for "parent doesn't exist" - would reopen a
+    // local privilege escalation. Create parents explicitly instead, each one checked.
+    // See docs/specifications/security-review-2.md (finding R33).
     std::fs::create_dir(path)
         .with_context(|| format!("Could not create directory '{}'", path.to_string_lossy()))?;
 
-    // set the ownership and permissions
-    nix::unistd::chown(path, Some(uid), Some(gid)).with_context(|| {
+    // Set the ownership and permissions **without following symlinks**.
+    //
+    // `nix::unistd::chown` and `std::fs::set_permissions` both follow, so if anything
+    // replaced `path` between the create above and here, ownership of the symlink's
+    // *target* would be transferred. `create_dir` succeeding means `path` was a real
+    // directory a moment ago, and the nofollow variants mean that is still the thing
+    // being modified - closing the race that the resolve-then-act check in
+    // `assert_within_root` can only narrow. See finding R33.
+    // Open the directory we just created with `O_NOFOLLOW | O_DIRECTORY` and operate
+    // on the **file descriptor**, so the target cannot be swapped underneath us at
+    // all - stronger than a nofollow path operation, which still resolves the path
+    // once more. `O_NOFOLLOW` makes the open itself fail if `path` is a symlink.
+    let dir = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(path)
+            .with_context(|| {
+                format!(
+                    "Could not open the newly created directory '{}' to set its \
+                     ownership - it is not a directory, or it is a symlink",
+                    path.to_string_lossy()
+                )
+            })?
+    };
+
+    nix::unistd::fchown(&dir, Some(uid), Some(gid)).with_context(|| {
         format!(
             "Could not set ownership on directory '{}'",
             path.to_string_lossy()
         )
     })?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(permissions)).with_context(
-        || {
+
+    // `permissions` is already validated by `clean_and_check_permissions`, so it fits a
+    // mode_t; `try_into` rather than a cast so a future widening cannot silently
+    // truncate it.
+    //
+    // `mode_t` is **platform-dependent** - `u16` on Darwin, `u32` on Linux - so this is
+    // a real fallible narrowing on macOS and an identity conversion on Linux, where
+    // clippy therefore reports it as useless. Allowed rather than removed: dropping
+    // `try_into` would fail to compile on Darwin, and replacing it with `as` would
+    // reintroduce the silent truncation this is here to prevent.
+    #[allow(clippy::useless_conversion)]
+    let mode_bits: nix::libc::mode_t = permissions.try_into().with_context(|| {
+        format!(
+            "Permissions {:o} do not fit a mode_t for directory '{}'",
+            permissions,
+            path.to_string_lossy()
+        )
+    })?;
+
+    nix::sys::stat::fchmod(&dir, nix::sys::stat::Mode::from_bits_truncate(mode_bits))
+        .with_context(|| {
             format!(
                 "Could not set permissions on directory '{}'",
                 path.to_string_lossy()
             )
-        },
-    )?;
+        })?;
 
     Ok(())
 }
@@ -402,7 +702,9 @@ async fn create_dir_remote(
 
     // chown user:group path
     let owner = format!("{}:{}", username, groupname);
-    let (exit_code, _, stderr) = run_remote(prefix, &["chown", &owner, &path_str]).await?;
+    // `-h` so a symlink is never followed - the remote counterpart of the
+    // `O_NOFOLLOW` open in `create_dir_native`. See finding R33.
+    let (exit_code, _, stderr) = run_remote(prefix, &["chown", "-h", &owner, &path_str]).await?;
     if exit_code != 0 {
         return Err(Error::State(format!(
             "chown '{}' '{}' failed: exit code {}, stderr: {}",
@@ -423,18 +725,27 @@ async fn create_dir_remote(
     Ok(())
 }
 
-pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
+/// Create a symlink at `link` pointing to `path`.
+///
+/// `roots` is every configured volume root, not one - the two paths legitimately live
+/// under *different* roots. A `links` entry such as
+/// `links = ["", "/projects/{PROJECT}/public"]` on a volume rooted at
+/// `["/projects", "/public"]` means the directory `/public/aiproject` is linked from
+/// `/projects/aiproject/public`, so checking both against a single root wrongly
+/// refuses one of them. Both must be inside the managed tree; neither has to be
+/// inside the *same* part of it. See finding R33.
+pub async fn create_link(path: &Path, link: &Path, roots: &[PathBuf]) -> Result<(), Error> {
     match get_exec_prefix() {
         Some(prefix) => {
             // In remote mode skip the local path-existence check; validate
             // only the security constraints (no /etc, /tmp, …).
-            let link = clean_and_check_path(link, false).await?;
-            let path = clean_and_check_path(path, false).await?;
+            let link = clean_and_check_path(link, roots, false).await?;
+            let path = clean_and_check_path(path, roots, false).await?;
             create_link_remote(&path, &link, prefix).await
         }
         None => {
-            let link = clean_and_check_path(link, false).await?;
-            let path = clean_and_check_path(path, true).await?;
+            let link = clean_and_check_path(link, roots, false).await?;
+            let path = clean_and_check_path(path, roots, true).await?;
             create_link_native(&path, &link).await
         }
     }
@@ -445,8 +756,8 @@ pub async fn create_link(path: &Path, link: &Path) -> Result<(), Error> {
 /// not a symlink. In prefix/remote mode the check and removal run on the
 /// remote system via the exec prefix.
 ///
-pub async fn remove_link(link: &Path) -> Result<(), Error> {
-    let link = clean_and_check_path(link, false).await?;
+pub async fn remove_link(link: &Path, roots: &[PathBuf]) -> Result<(), Error> {
+    let link = clean_and_check_path(link, roots, false).await?;
 
     match get_exec_prefix() {
         Some(prefix) => {
@@ -685,8 +996,8 @@ async fn restore_from_recycle_remote(
 /// This is a non-destructive way to "remove" directories - they can be restored later
 /// or permanently deleted by a separate cleanup process.
 ///
-pub async fn recycle_dir(path: &Path) -> Result<(), Error> {
-    let path = clean_and_check_path(path, false).await?;
+pub async fn recycle_dir(path: &Path, roots: &[PathBuf]) -> Result<(), Error> {
+    let path = clean_and_check_path(path, roots, false).await?;
 
     match get_exec_prefix() {
         Some(prefix) => recycle_dir_remote(&path, prefix).await,
@@ -881,4 +1192,127 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_deepest_existing_resolves_symlinks_in_the_prefix() {
+        // The path being created does not exist yet, so it cannot be canonicalised
+        // directly - resolve the deepest existing ancestor and re-append the rest. Any
+        // symlink in that existing prefix is therefore resolved, which is what lets
+        // `assert_within_root` see where the operation would really land. See
+        // docs/specifications/security-review-2.md (finding R33).
+        let base = std::env::temp_dir().join(format!("op-r33-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("proj")).expect("mkdir root/proj");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+
+        // A leaf that does not exist yet still resolves.
+        let target = root.join("proj").join("newuser");
+        let resolved = resolve_deepest_existing(&target).expect("resolve");
+        assert!(resolved.ends_with("proj/newuser"));
+        assert!(resolved.starts_with(root.canonicalize().expect("canonicalize root")));
+
+        // Now make the *parent* a symlink pointing outside the root - the shape of the
+        // escalation. The resolved path must reveal that.
+        std::fs::remove_dir(root.join("proj")).expect("rmdir");
+        std::os::unix::fs::symlink(&outside, root.join("proj")).expect("symlink");
+
+        let resolved = resolve_deepest_existing(&target).expect("resolve via symlink");
+        assert!(
+            resolved.starts_with(outside.canonicalize().expect("canonicalize outside")),
+            "a symlinked parent must resolve to its target, got {:?}",
+            resolved
+        );
+        assert!(
+            !resolved.starts_with(root.canonicalize().expect("canonicalize root")),
+            "the resolved path must no longer look like it is inside the root"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_a_symlink_pointing_into_another_configured_root_is_allowed() {
+        // The shape after restoring a recycled project: the restored directory still
+        // contains the symlink from the first run, so the link path *is* a symlink
+        // pointing into a different root of the same volume. That must be allowed.
+        //
+        // Note `assert_within_roots` returns `()`. That is deliberate and is itself the
+        // fix for a bug this caught: resolution decides containment only, and must
+        // never be substituted for the path the operation acts on. `create_link` and
+        // `remove_link` act on the symlink itself, and `recycle_dir` must move the
+        // symlink rather than its target - substituting the resolved form made
+        // `create_link` try to link '/public/aiproject' to itself. Returning nothing
+        // makes that mistake unrepresentable. See
+        // docs/specifications/security-review-2.md (finding R33).
+        let base = std::env::temp_dir().join(format!("op-r33-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let projects = base.join("projects");
+        let public = base.join("public");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(projects.join("aiproject")).expect("mkdir projects");
+        std::fs::create_dir_all(public.join("aiproject")).expect("mkdir public");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+
+        let link = projects.join("aiproject").join("public");
+        std::os::unix::fs::symlink(public.join("aiproject"), &link).expect("symlink");
+
+        let roots = vec![projects.clone(), public.clone()];
+
+        assert!(
+            assert_within_roots(&link, &roots).await.is_ok(),
+            "a symlink pointing into another configured root must be allowed"
+        );
+
+        // ...whereas one pointing out of the managed tree is still refused.
+        let escape = projects.join("aiproject").join("escape");
+        std::os::unix::fs::symlink(&outside, &escape).expect("symlink");
+        assert!(
+            assert_within_roots(&escape, &roots).await.is_err(),
+            "a symlink pointing outside every configured root must be refused"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_assert_within_root_refuses_a_path_that_escapes_via_a_symlink() {
+        let base = std::env::temp_dir().join(format!("op-r33-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+
+        // An ordinary path inside the root is fine.
+        assert!(
+            assert_within_roots(&root.join("proj"), std::slice::from_ref(&root))
+                .await
+                .is_ok()
+        );
+
+        // A symlinked component pointing out of the tree is refused.
+        std::os::unix::fs::symlink(&outside, root.join("escape")).expect("symlink");
+        assert!(assert_within_root(&root.join("escape").join("dir"), &root)
+            .await
+            .is_err());
+
+        // A missing root is reported rather than silently passing.
+        assert!(
+            assert_within_root(&root.join("proj"), &base.join("nosuchroot"))
+                .await
+                .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

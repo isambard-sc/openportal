@@ -4,21 +4,22 @@
 use crate::agent;
 use crate::command::Command;
 use crate::destination::Destination;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::job::Job;
-use crate::notification::{Notification, NotificationEvent};
+use crate::notification::Notification;
 use crate::state;
 
 use anyhow::Result;
 use uuid::Uuid;
 
-pub async fn status(job: &Uuid) -> Result<Job, Error> {
+pub async fn status<L: Domain>(job: &Uuid) -> Result<Job<L>, Error> {
     tracing::debug!("Received status request for job: {}", job);
 
     match agent::portal(5).await {
         Some(portal) => {
             // get the (shared) board for the portal
-            let board = match state::get(&portal).await {
+            let board = match state::get::<L>(&portal).await {
                 Ok(b) => b.board().await,
                 Err(e) => {
                     tracing::error!("Error getting board for portal: {:?}", e);
@@ -48,14 +49,14 @@ pub async fn status(job: &Uuid) -> Result<Job, Error> {
 /// where `<destination>` must start with the portal name.
 /// The bridge wraps the notification in a `Forward` event addressed to the
 /// portal so the portal can strip the bridge from the path before forwarding.
-pub async fn notify(command: &str) -> Result<(), Error> {
+pub async fn notify<L: Domain>(command: &str) -> Result<(), Error> {
     tracing::debug!("Received notification command: {}", command);
 
     let my_name = agent::name().await;
 
     match agent::portal(5).await {
         Some(portal) => {
-            let inner = Notification::parse(command)?;
+            let inner = Notification::<L>::parse(command)?;
 
             if !inner
                 .destination()
@@ -75,7 +76,7 @@ pub async fn notify(command: &str) -> Result<(), Error> {
             // next agent — works for both southbound (portal first) and northbound
             // (portal in the middle, e.g. isambard-ai.brics.ukri).
             let outer_dest = Destination::parse(&format!("{}.{}", my_name, portal.name()))?;
-            let outer = Notification::new(outer_dest, NotificationEvent::Forward(Box::new(inner)));
+            let outer = Notification::<L>::new(outer_dest, L::wrap_forward(inner));
 
             Ok(Command::notify(&outer).send_to(&portal).await?)
         }
@@ -88,7 +89,7 @@ pub async fn notify(command: &str) -> Result<(), Error> {
     }
 }
 
-pub async fn run(command: &str) -> Result<Job, Error> {
+pub async fn run<L: Domain>(command: &str) -> Result<Job<L>, Error> {
     tracing::info!("Received command: {}", command);
 
     let my_name = agent::name().await;

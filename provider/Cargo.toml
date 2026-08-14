@@ -3,7 +3,7 @@
 
 [package]
 name = "op-provider"
-version = "0.32.2"
+version = "0.91.0"
 description = "An example of an OpenPortal provider interface service"
 edition = "2021"
 license = "MIT"
@@ -16,14 +16,8 @@ dirs = "6.0.0"
 templemeads = { path = "../templemeads" }
 tokio = { version = "1.48", features = ["full"] }
 
-[lints.rust]
-unsafe_code = "forbid"
-unused_crate_dependencies = "warn"
-
-[lints.clippy]
-dbg_macro = "deny"
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true
 
 [package.metadata.clippy]
 allow-dbg-in-tests = true

@@ -3,16 +3,57 @@
 
 use crate::agent::Type as AgentType;
 use crate::agent_core::Config;
+use crate::domain::Domain;
 use crate::error::Error;
 
-use crate::handler::{process_message, set_my_service_details};
+use crate::handler::{run_with_relay, set_my_service_details, set_verify_portal_ownership};
 use crate::runnable::AsyncRunnable;
 use anyhow::Result;
 
 ///
-/// Run the agent service
+/// Run the agent service.
 ///
-pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
+/// Jobs reaching an Instance are expected to be *portal-rooted*: the first agent
+/// in a Job's destination should be the portal that owns the identifiers its
+/// instruction names, because the Job was routed down from that portal through
+/// the provider/platform layers. That is re-checked on receipt - see
+/// `docs/specifications/security-review-2.md` (finding R34).
+///
+/// Use [`run_delegated`] instead for an Instance whose Jobs are handed to it by
+/// another agent rather than routed down from the owning portal.
+///
+pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<(), Error> {
+    run_instance(config, runner, true).await
+}
+
+///
+/// Run the agent service for an Instance whose Jobs are *delegated* by another
+/// agent rather than routed down from the portal that owns the identifiers they
+/// name.
+///
+/// `op-cloudaccount` is the case this exists for: it is driven directly by
+/// `op-cloudportal`, so its Jobs arrive on a `cloudportal.cloudaccount`
+/// destination while their instructions name the upstream portal that owns the
+/// project (e.g. `myproject.waldur`). The portal-ownership re-check that
+/// [`run`] applies would therefore reject every such Job, correctly - the
+/// property simply does not hold for this topology.
+///
+/// Prefer [`run`] unless your Instance is in that position: this variant gives
+/// up a real defence, and the Jobs it accepts are bounded only by the
+/// sender-adjacency check and by whatever the runner itself validates.
+///
+pub async fn run_delegated<L: Domain>(
+    config: Config,
+    runner: AsyncRunnable<L>,
+) -> Result<(), Error> {
+    run_instance(config, runner, false).await
+}
+
+async fn run_instance<L: Domain>(
+    config: Config,
+    runner: AsyncRunnable<L>,
+    verify_portal_ownership: bool,
+) -> Result<(), Error> {
     if config.service().name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
@@ -32,9 +73,10 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     )
     .await?;
 
+    set_verify_portal_ownership::<L>(verify_portal_ownership).await?;
+
     // run the Provider OpenPortal agent
-    paddington::set_handler(process_message).await?;
-    paddington::run(config.service()).await?;
+    run_with_relay::<L>(config.service()).await?;
 
     Ok(())
 }

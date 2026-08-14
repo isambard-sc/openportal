@@ -33,6 +33,15 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     }
 
     for server in config.servers() {
+        // relayed servers (reached only via a blind relay proxy, see
+        // `crate::relay`) have no real URL to dial directly - they are
+        // bootstrapped separately, over the real connection to the proxy
+        // itself (which is a normal, direct `servers` entry in its own
+        // right, and so is dialled here as usual).
+        if server.proxy().is_some() {
+            continue;
+        }
+
         let my_config = config.clone();
         client_handles.push(tokio::spawn(async move {
             client::run(my_config.clone(), server.to_peer()).await
@@ -48,7 +57,7 @@ pub async fn run(config: ServiceConfig) -> Result<(), Error> {
     }
 
     if !client_handles.is_empty() {
-        tracing::info!("Number of expected servers: {}", config.servers().len());
+        tracing::info!("Number of expected servers: {}", client_handles.len());
     }
 
     for handle in server_handles {

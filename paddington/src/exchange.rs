@@ -276,9 +276,16 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
             *count = workers.len();
         }
 
+        // `now - then`, not `then - now`. All five comparisons in this loop
+        // had their operands reversed, making every expression negative and so
+        // every threshold unreachable: the periodic log never fired, the
+        // "still overloaded" warning never fired, and the `abort_all` recovery
+        // below was dead code - leaving the reaping loop with no exit and the
+        // unbounded inbound channel growing behind it. See
+        // docs/specifications/security-review-2.md (finding R23).
         if (last_logged_count - workers.len() as i64).abs() >= 10
-            || last_logged_update
-                .signed_duration_since(chrono::Utc::now())
+            || chrono::Utc::now()
+                .signed_duration_since(last_logged_update)
                 .num_seconds()
                 >= 60
         {
@@ -308,29 +315,33 @@ async fn event_loop(mut rx: UnboundedReceiver<Message>) -> Result<(), Error> {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                     // log a message every 10 seconds
-                    if last_update
-                        .signed_duration_since(chrono::Utc::now())
+                    if chrono::Utc::now()
+                        .signed_duration_since(last_update)
                         .num_seconds()
                         >= 10
                     {
                         let count = workers.len();
                         tracing::warn!(
                             "It has been {} seconds and there are still a high number of workers: {}. Attempting to reduce...",
-                            start_reaping.signed_duration_since(last_update).num_seconds(),
+                            chrono::Utc::now()
+                                .signed_duration_since(start_reaping)
+                                .num_seconds(),
                             count
                         );
                         last_update = chrono::Utc::now();
                     }
                 }
 
-                if start_reaping
-                    .signed_duration_since(chrono::Utc::now())
+                if chrono::Utc::now()
+                    .signed_duration_since(start_reaping)
                     .num_seconds()
                     >= 300
                 {
                     tracing::error!(
                         "It has been {} seconds since the last log message and there are still a high number of workers: {}.",
-                        start_reaping.signed_duration_since(last_logged_update).num_seconds(),
+                        chrono::Utc::now()
+                            .signed_duration_since(start_reaping)
+                            .num_seconds(),
                         workers.len()
                     );
                     tracing::error!("Something has gone wrong, so we will now abort all tasks and restart event processing.");
@@ -682,6 +693,21 @@ pub async fn register(connection: Connection) -> Result<(), Error> {
     Ok(())
 }
 
+///
+/// Whether a real, direct connection to `name@zone` currently exists -
+/// used by `paddington::relay` to detect when the underlying connection
+/// to a proxy has dropped, so a relayed session built on top of it can be
+/// re-bootstrapped once it comes back.
+///
+pub fn is_connected(name: &str, zone: &str) -> bool {
+    match SINGLETON_EXCHANGE.read() {
+        Ok(exchange) => exchange
+            .connections
+            .contains_key(&get_key_from_str(name, zone)),
+        Err(_) => false,
+    }
+}
+
 pub async fn send(message: Message) -> Result<(), Error> {
     let connection = match SINGLETON_EXCHANGE.read() {
         Ok(exchange) => exchange,
@@ -694,14 +720,25 @@ pub async fn send(message: Message) -> Result<(), Error> {
     .cloned();
 
     if let Some(connection) = connection {
-        connection.send_message(message.payload()).await?;
-        Ok(())
-    } else {
-        Err(Error::UnnamedConnection(format!(
-            "Connection {} not found",
-            message.recipient()
-        )))
+        return connection.send_message(message.payload()).await;
     }
+
+    // no real paddington connection - transparently fall back to the
+    // blind relay if this recipient is only reachable via a proxy (see
+    // `paddington::relay` and `docs/plans/archive/blind-relay-proxy-design.md`),
+    // so callers above this layer (templemeads' `Command::send_to`,
+    // keepalive replies, ...) never need to know the difference.
+    if crate::relay::is_configured(message.recipient()).await {
+        // boxed to break the mutual async-fn recursion with
+        // `relay::bootstrap`, which itself calls back into this function
+        // to reach the proxy over its own real, direct connection.
+        return Box::pin(crate::relay::send(message.recipient(), message.payload())).await;
+    }
+
+    Err(Error::UnnamedConnection(format!(
+        "Connection {} not found",
+        message.recipient()
+    )))
 }
 
 pub fn received(message: Message) -> Result<(), Error> {
@@ -843,5 +880,18 @@ pub fn worker_count() -> usize {
             tracing::error!("Error getting exchange read lock: {}", e);
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_is_connected_false_for_unregistered_peer() {
+        assert!(!is_connected(
+            "definitely-not-a-registered-peer-name",
+            "default"
+        ));
     }
 }

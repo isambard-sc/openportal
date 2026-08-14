@@ -3,7 +3,7 @@
 
 [package]
 name = "op-bridge"
-version = "0.32.2"
+version = "0.91.0"
 description = "An example of an OpenPortal user portal to OpenPortal bridge"
 edition = "2021"
 license = "MIT"
@@ -13,20 +13,15 @@ repository = "https://github.com/chryswoods/openportal/"
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }
 dirs = "6.0.0"
+greatwestern = { path = "../greatwestern" }
 reqwest = { version = "0.12.24", default-features = false, features = ["cookies", "json", "blocking", "rustls-tls"] }
 templemeads = { path = "../templemeads" }
 tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1.41"
 url = { version="2.5.7", features=["serde"] }
 
-[lints.rust]
-unsafe_code = "forbid"
-unused_crate_dependencies = "warn"
-
-[lints.clippy]
-dbg_macro = "deny"
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true
 
 [package.metadata.clippy]
 allow-dbg-in-tests = true

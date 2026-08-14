@@ -3,16 +3,18 @@
 
 use crate::agent::Type as AgentType;
 use crate::agent_core::Config;
+use crate::domain::Domain;
 use crate::error::Error;
 
-use crate::handler::{process_message, set_my_service_details};
+use crate::handler::{run_with_relay, set_my_service_details};
+use crate::job::{Envelope, Job};
 use crate::runnable::AsyncRunnable;
 use anyhow::Result;
 
 ///
 /// Run the agent service
 ///
-pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
+pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<(), Error> {
     if config.service().name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
@@ -32,9 +34,54 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     )
     .await?;
 
+    if let Some(one_shot_commands) = config.one_shot_commands() {
+        for one_shot_command in one_shot_commands {
+            tracing::info!("Executing one-shot command: {}", one_shot_command);
+
+            let job = Job::parse(
+                format!(
+                    "{}.{} {}",
+                    config.one_shot_sender(),
+                    config.service().name(),
+                    one_shot_command
+                )
+                .as_str(),
+                false,
+            )?
+            .pending()?;
+
+            let envelope = Envelope::new(
+                &config.service().name(),
+                &config.one_shot_sender(),
+                &config.one_shot_zone(),
+                &job,
+            );
+
+            let job = runner(envelope).await?;
+
+            let result = serde_json::from_str::<serde_json::Value>(&job.result_json()?);
+
+            // now write this out as pretty-printed JSON
+            match result {
+                Ok(json) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json).unwrap_or_else(|_| {
+                            "Failed to serialize result as pretty-printed JSON".to_string()
+                        })
+                    );
+                }
+                Err(_) => {
+                    println!("{}", job.result_json()?);
+                }
+            }
+        }
+
+        return Ok(());
+    }
+
     // run the Portal OpenPortal agent
-    paddington::set_handler(process_message).await?;
-    paddington::run(config.service()).await?;
+    run_with_relay::<L>(config.service()).await?;
 
     Ok(())
 }

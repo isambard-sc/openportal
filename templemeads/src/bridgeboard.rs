@@ -8,12 +8,14 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::board::{Listener, Waiter};
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::job::Job;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct BridgeBoard {
-    jobs: HashMap<Uuid, Job>,
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct BridgeBoard<L: Domain> {
+    jobs: HashMap<Uuid, Job<L>>,
 
     signal_url: Option<Url>,
 
@@ -21,10 +23,10 @@ pub struct BridgeBoard {
 
     // do not serialise or clone the waiters
     #[serde(skip)]
-    waiters: HashMap<Uuid, Vec<Listener>>,
+    waiters: HashMap<Uuid, Vec<Listener<L>>>,
 }
 
-impl Clone for BridgeBoard {
+impl<L: Domain> Clone for BridgeBoard<L> {
     /// Clone the board, but do not clone the waiters
     fn clone(&self) -> Self {
         Self {
@@ -36,7 +38,13 @@ impl Clone for BridgeBoard {
     }
 }
 
-impl BridgeBoard {
+impl<L: Domain> Default for BridgeBoard<L> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<L: Domain> BridgeBoard<L> {
     pub fn new() -> Self {
         Self {
             jobs: HashMap::new(),
@@ -49,7 +57,7 @@ impl BridgeBoard {
     ///
     /// Return a list of all of the unfinished jobs on the board
     ///
-    pub fn unfinished_jobs(&self) -> Vec<Job> {
+    pub fn unfinished_jobs(&self) -> Vec<Job<L>> {
         self.jobs
             .values()
             .filter_map(|job| {
@@ -68,7 +76,7 @@ impl BridgeBoard {
     /// the passed job transitions into one of those states,
     /// and it will return the new version of the job
     ///
-    pub fn get_waiter(&mut self, job: &Job) -> Result<Waiter, Error> {
+    pub fn get_waiter(&mut self, job: &Job<L>) -> Result<Waiter<L>, Error> {
         // check that we have this job on the board
         match self.jobs.get(&job.id()) {
             Some(j) => {
@@ -105,7 +113,7 @@ impl BridgeBoard {
     /// It is an error to attempt to add a job that is already
     /// present on the board
     ///
-    pub fn add(&mut self, job: &Job) -> Result<Waiter, Error> {
+    pub fn add(&mut self, job: &Job<L>) -> Result<Waiter<L>, Error> {
         match self.jobs.get_mut(&job.id()) {
             Some(j) => {
                 return Err(Error::Duplicate(format!(
@@ -127,7 +135,7 @@ impl BridgeBoard {
     ///
     /// Update the passed job on our board
     ///
-    pub fn update(&mut self, job: &Job) {
+    pub fn update(&mut self, job: &Job<L>) {
         // check that we have this job on the board
         match self.jobs.get_mut(&job.id()) {
             Some(j) => {
@@ -158,7 +166,7 @@ impl BridgeBoard {
     /// This returns whether or not the board has changed
     /// (i.e. whether the job was on the board)
     ///
-    pub fn remove(&mut self, job: &Job) -> Result<bool, Error> {
+    pub fn remove(&mut self, job: &Job<L>) -> Result<bool, Error> {
         // if we have any waiters for this job then notify them with an error
         if let Some(listeners) = self.waiters.remove(&job.id()) {
             let mut notify_job = job.clone();
@@ -181,7 +189,7 @@ impl BridgeBoard {
     /// Get the job with the passed id
     /// If the job doesn't exist then we return an error
     ///
-    pub fn get(&self, id: &Uuid) -> Result<Job, Error> {
+    pub fn get(&self, id: &Uuid) -> Result<Job<L>, Error> {
         match self.jobs.get(id) {
             Some(j) => Ok(j.clone()),
             None => Err(Error::NotFound(format!("Job not found: {:?}", id))),
@@ -192,7 +200,7 @@ impl BridgeBoard {
     /// Return whether or not this board would be changed by the
     /// passed job
     ///
-    pub fn would_be_changed_by(&self, job: &Job) -> bool {
+    pub fn would_be_changed_by(&self, job: &Job<L>) -> bool {
         if job.is_expired() {
             return false;
         }

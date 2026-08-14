@@ -5,6 +5,8 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use greatwestern::grammar::{ProjectMapping, UserMapping};
+use greatwestern::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -13,9 +15,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use templemeads::grammar::{ProjectMapping, UserMapping};
 use templemeads::job::assert_not_expired;
-use templemeads::storage::{Quota, QuotaLimit, StorageSize, StorageUsage, Volume};
 use templemeads::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -166,8 +166,11 @@ impl LustreIdStrategy {
 
         // Warn about spaces inside braces (likely a typo)
         if let Some(start) = format.find('{') {
-            if let Some(end) = format[start..].find('}') {
-                let expr = &format[start + 1..start + end];
+            // Offsets come from `find`, so they are on character boundaries;
+            // read via `get` anyway so a future change cannot turn into a
+            // panic. See docs/specifications/security-review-2.md (R1).
+            if let Some(end) = format.get(start..).and_then(|tail| tail.find('}')) {
+                let expr = format.get(start + 1..start + end).unwrap_or_default();
                 if expr.starts_with(' ') || expr.ends_with(' ') {
                     return Err(Error::Parse(format!(
                         "Expression in braces contains leading/trailing spaces: '{{{}}}'",
@@ -247,7 +250,7 @@ impl LustreIdStrategy {
         // Keep evaluating until there are no more curly brace expressions
         while let Some(start) = result.find('{') {
             // Find the matching closing brace
-            let end = match result[start..].find('}') {
+            let end = match result.get(start..).and_then(|tail| tail.find('}')) {
                 Some(pos) => start + pos,
                 None => {
                     return Err(Error::Misconfigured(format!(
@@ -258,7 +261,8 @@ impl LustreIdStrategy {
             };
 
             // Extract the expression content (without braces)
-            let expr = &result[start + 1..end];
+            let expr = result.get(start + 1..end).unwrap_or_default().to_string();
+            let expr = expr.as_str();
 
             // Evaluate the expression
             let value = Self::evaluate_arithmetic(expr)?;
@@ -283,8 +287,13 @@ impl LustreIdStrategy {
         let mut operator_pos = None;
         let mut operator = ' ';
 
-        // Scan from left to right, skipping the first character (which might be a negative sign)
-        for (i, ch) in expr.chars().enumerate().skip(1) {
+        // Scan from left to right, skipping the first character (which might
+        // be a negative sign). `char_indices` (byte offsets), not
+        // `chars().enumerate()` (character counts) - the two differ as soon as
+        // the expression contains any multi-byte character, and slicing a
+        // `&str` at an offset that is not a character boundary panics. See
+        // docs/specifications/security-review-2.md (finding R1).
+        for (i, ch) in expr.char_indices().skip(1) {
             if ch == '+' || ch == '-' {
                 operator_pos = Some(i);
                 operator = ch;
@@ -293,9 +302,17 @@ impl LustreIdStrategy {
         }
 
         if let Some(pos) = operator_pos {
-            // Split at the operator
-            let left = expr[..pos].trim();
-            let right = expr[pos + 1..].trim();
+            // Split at the operator. `get` rather than `[..]`, so a offset
+            // that is somehow not on a character boundary is an error rather
+            // than an abort.
+            let (Some(left), Some(right)) = (expr.get(..pos), expr.get(pos + 1..)) else {
+                return Err(Error::Misconfigured(format!(
+                    "Could not split expression '{}' at its operator",
+                    expr
+                )));
+            };
+            let left = left.trim();
+            let right = right.trim();
 
             // Parse both sides as integers
             let left_val = left.parse::<i64>().map_err(|e| {
@@ -870,10 +887,13 @@ impl LustreEngine {
             )));
         }
 
-        let gid = parts[2].parse::<u32>().map_err(|e| {
+        // `get` rather than indexed - this is `getent` output, not ours. See
+        // docs/specifications/security-review-2.md (finding R1).
+        let gid_str = parts.get(2).copied().unwrap_or_default();
+        let gid = gid_str.parse::<u32>().map_err(|e| {
             Error::Failed(format!(
                 "Failed to parse GID '{}' for group '{}': {}",
-                parts[2], groupname, e
+                gid_str, groupname, e
             ))
         })?;
 
@@ -905,11 +925,11 @@ impl LustreEngine {
             // Check if line starts with "groupname:"
             if line.starts_with(&format!("{}:", groupname)) {
                 let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() >= 3 {
-                    let gid = parts[2].parse::<u32>().map_err(|e| {
+                if let Some(gid_str) = parts.get(2) {
+                    let gid = gid_str.parse::<u32>().map_err(|e| {
                         Error::Failed(format!(
                             "Failed to parse GID '{}' for group '{}': {}",
-                            parts[2], groupname, e
+                            gid_str, groupname, e
                         ))
                     })?;
                     return Ok(gid);
@@ -1067,9 +1087,8 @@ impl LustreEngine {
         // or just "0 - /path/to/directory" if no project ID is set
         for line in output.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let id_str = parts[0];
-                let flag = parts[1];
+            if let (Some(id_str), Some(flag)) = (parts.first(), parts.get(1)) {
+                let (id_str, flag) = (*id_str, *flag);
 
                 // If flag is 'P', a project ID is set
                 if flag == "P" {
@@ -1381,8 +1400,8 @@ impl LustreEngine {
             if !found_id && lower_trimmed.starts_with("disk quotas for") {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 5 {
-                    // parts[3] = id
-                    match parts[4].parse::<u64>() {
+                    // parts[4] = id
+                    match parts.get(4).copied().unwrap_or_default().parse::<u64>() {
                         Ok(id) => {
                             if id == lustre_id {
                                 found_id = true;
@@ -1456,12 +1475,15 @@ impl LustreEngine {
                 )));
             }
 
-            // parts[0] = filesystem
-            if parts[0] != mount_point {
+            // parts[0] = filesystem. Read via `get` throughout - this is
+            // `lfs quota` output, not ours. See
+            // docs/specifications/security-review-2.md (finding R1).
+            let filesystem_str = parts.first().copied().unwrap_or_default();
+            if filesystem_str != mount_point {
                 tracing::warn!(
                     "Filesystem mount point mismatch in quota output: expected {}, found {}",
                     mount_point,
-                    parts[0]
+                    filesystem_str
                 );
 
                 continue;
@@ -1470,14 +1492,16 @@ impl LustreEngine {
             // parts[1] = current kbytes usage
             // parts[3] = hard limit in kbytes (0 = unlimited)
             // Note: Lustre adds a '*' suffix to values that exceed quota, so we strip it
-            let usage_str = parts[1].trim_end_matches('*');
+            let usage_field = parts.get(1).copied().unwrap_or_default();
+            let usage_str = usage_field.trim_end_matches('*');
             let usage_kb = usage_str.parse::<u64>().map_err(|e| {
-                Error::Parse(format!("Failed to parse usage '{}': {}", parts[1], e))
+                Error::Parse(format!("Failed to parse usage '{}': {}", usage_field, e))
             })?;
 
-            let limit_str = parts[3].trim_end_matches('*');
+            let limit_field = parts.get(3).copied().unwrap_or_default();
+            let limit_str = limit_field.trim_end_matches('*');
             let limit_kb = limit_str.parse::<u64>().map_err(|e| {
-                Error::Parse(format!("Failed to parse limit '{}': {}", parts[3], e))
+                Error::Parse(format!("Failed to parse limit '{}': {}", limit_field, e))
             })?;
 
             tracing::info!(

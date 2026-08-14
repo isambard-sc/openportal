@@ -5,10 +5,14 @@ use paddington::message::Message;
 
 use crate::agent;
 use crate::destination::Destination;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::handler::process_message;
 
-pub async fn send(destination: &Option<Destination>, message: Message) -> Result<(), Error> {
+pub async fn send<L: Domain>(
+    destination: &Option<Destination>,
+    message: Message,
+) -> Result<(), Error> {
     let my_name = agent::name().await;
 
     let mut message = message;
@@ -39,7 +43,7 @@ pub async fn send(destination: &Option<Destination>, message: Message) -> Result
             .map_or("None".to_string(), |d| d.to_string())
     );
 
-    match process_message(message).await {
+    match process_message::<L>(message).await {
         Ok(_) => Ok(()),
         Err(e) => {
             tracing::error!("Error processing message in virtual agent: {}", e);

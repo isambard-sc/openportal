@@ -14,6 +14,15 @@ use crate::error::Error;
 pub const KEY_SIZE: usize = 32;
 pub const SALT_SIZE: usize = KEY_SIZE;
 
+/// Argon2 parameters for versioned (v1) password-based secret encryption
+/// (`from_password_with_salt`). Far above orion's minimum (`MIN_MEMORY = 8`
+/// KiB, `MIN_ITERATIONS = 3`): 19 MiB / 3 passes matches the current OWASP
+/// Argon2 floor. Used only for config-at-rest secrets, derived rarely (at
+/// startup and when the operator sets a `secret`), so the cost is never on a
+/// hot path. See docs/specifications/security-review.md (finding F2).
+const SECRET_KDF_MEMORY_KIB: u32 = 19456;
+const SECRET_KDF_ITERATIONS: u32 = 3;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signature {
     sig: orion::auth::Tag,
@@ -64,11 +73,64 @@ pub fn random_bytes(size: usize) -> Result<Vec<u8>, Error> {
     Ok(data)
 }
 
+///
+/// Constant-time equality check for two byte slices, using orion's vetted
+/// `secure_cmp`. Returns `true` iff the slices are equal. Use this instead of
+/// `==` (or a hand-rolled loop) when comparing authentication tags, tokens, or
+/// other secret-derived values, to avoid a timing side-channel. Slices of
+/// differing length compare unequal (the length itself is not treated as
+/// secret).
+///
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    orion::util::secure_cmp(a, b).is_ok()
+}
+
+/// The on-the-wire shape both `Key` and `Salt` have always had. Extracted so their
+/// hand-written `Deserialize` impls can validate the length without changing the
+/// format - see finding R33.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Deserialize)]
+struct HexBytes {
+    #[serde_as(as = "serde_with::hex::Hex")]
+    data: vec::Vec<u8>,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
 pub struct Salt {
     #[serde_as(as = "serde_with::hex::Hex")]
     data: vec::Vec<u8>,
+}
+
+/// Deserialise a `Salt`, requiring exactly `SALT_SIZE` bytes.
+///
+/// The derive accepted **any** hex length, including the empty string - and an
+/// absent salt header decoded to `""` without error. orion's HMAC accepts an empty
+/// key, so a connection with no salt succeeded silently, with the per-connection
+/// salt defence gone and nothing logged. Per-message keys still differed (the
+/// `info` is fresh random each time) so there was no key reuse, but the defence
+/// itself vanished. See `docs/specifications/security-review-2.md` (finding R33).
+impl<'de> Deserialize<'de> for Salt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialise the same wire form the derive produced - `{"data": "<hex>"}` -
+        // then check the length. The format is unchanged; only invalid input is
+        // newly rejected.
+        let repr = HexBytes::deserialize(deserializer)?;
+
+        if repr.data.len() != SALT_SIZE {
+            return Err(serde::de::Error::custom(format!(
+                "a salt must be exactly {} bytes ({} hex characters), not {}",
+                SALT_SIZE,
+                SALT_SIZE * 2,
+                repr.data.len()
+            )));
+        }
+
+        Ok(Salt { data: repr.data })
+    }
 }
 
 impl Display for Salt {
@@ -102,15 +164,68 @@ impl std::str::FromStr for Salt {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let bytes = hex::decode(s).with_context(|| "Failed to decode the salt.")?;
+
+        // Exactly `SALT_SIZE`, for the same reason as the `Deserialize` impl above
+        // - this is the path the handshake salt headers take, where an absent
+        // header used to decode to an empty salt and connect anyway (finding R33).
+        if bytes.len() != SALT_SIZE {
+            return Err(Error::Parse(format!(
+                "A salt must be exactly {} bytes ({} hex characters), not {}",
+                SALT_SIZE,
+                SALT_SIZE * 2,
+                bytes.len()
+            )));
+        }
+
         Ok(Salt { data: bytes })
     }
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 pub struct Key {
     #[serde_as(as = "serde_with::hex::Hex")]
     data: vec::Vec<u8>,
+}
+
+/// Redact the key material.
+///
+/// `SecretBox<Key>` renders as `[REDACTED]`, but a **bare** `Key` derived `Debug`
+/// and printed its raw bytes. No production call site formats an exposed secret
+/// today, but two tests relied on it, which is proof the vector was live. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+impl fmt::Debug for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Key([REDACTED], {} bytes)", self.data.len())
+    }
+}
+
+/// Deserialise a `Key`, requiring exactly `KEY_SIZE` bytes.
+///
+/// The derive accepted any hex length. That was not directly exploitable -
+/// `chacha20::SecretKey::from_slice` requires exactly 32 bytes and errors cleanly -
+/// but a truncated key was accepted at *import* and only failed opaquely at connect
+/// time, and `Key::derive` sizes its HKDF output from the input length, so a short
+/// key silently produced a short derived key. Failing at import is what makes the
+/// operator's mistake visible where they can fix it. See finding R33.
+impl<'de> Deserialize<'de> for Key {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let repr = HexBytes::deserialize(deserializer)?;
+
+        if repr.data.len() != KEY_SIZE {
+            return Err(serde::de::Error::custom(format!(
+                "a key must be exactly {} bytes ({} hex characters), not {}",
+                KEY_SIZE,
+                KEY_SIZE * 2,
+                repr.data.len()
+            )));
+        }
+
+        Ok(Key { data: repr.data })
+    }
 }
 
 impl Zeroize for Key {
@@ -141,6 +256,18 @@ impl Key {
     ///
     /// let key = Key::generate();
     /// ```
+    ///
+    /// Whether this key's material equals `other`'s, in constant time.
+    ///
+    /// Provided so callers (notably tests) can compare keys without formatting
+    /// them. `Debug` deliberately redacts the bytes, so `format!("{:?}", key)` is
+    /// no longer a usable comparison - it used to be, which is exactly the leak
+    /// finding R33 reported.
+    ///
+    pub fn equals(&self, other: &Key) -> bool {
+        constant_time_eq(&self.data, &other.data)
+    }
+
     pub fn generate() -> SecretKey {
         Box::new(Key {
             data: aead::SecretKey::default().unprotected_as_bytes().to_vec(),
@@ -166,8 +293,48 @@ impl Key {
     }
 
     ///
+    /// Derive a secret key from a password and an explicit salt, using strong
+    /// Argon2 parameters (`SECRET_KDF_*`). This is the derivation used by the
+    /// versioned (v1) config-secret encryption: a fresh random salt is stored
+    /// alongside each ciphertext, so identical passwords no longer produce
+    /// identical keys and the derivation cost is realistic. See
+    /// `ServiceConfig::encrypt`/`decrypt` and
+    /// docs/specifications/security-review.md (finding F2).
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - The password to derive the key from.
+    /// * `salt` - A per-secret random salt (see `SECRET_SALT_SIZE`).
+    ///
+    pub fn from_password_with_salt(password: &str, salt: &[u8]) -> Result<SecretKey, Error> {
+        let salt = kdf::Salt::from_slice(salt)
+            .context("Failed to create a salt from the supplied salt bytes.")?;
+
+        Ok(Box::new(Key {
+            data: kdf::derive_key(
+                &kdf::Password::from_slice(password.as_bytes())
+                    .context("Failed to build a KDF password from the supplied secret")?,
+                &salt,
+                SECRET_KDF_ITERATIONS,
+                SECRET_KDF_MEMORY_KIB,
+                KEY_SIZE as u32,
+            )
+            .context("Failed to derive key from password and salt.")?
+            .unprotected_as_bytes()
+            .to_vec(),
+        })
+        .into())
+    }
+
+    ///
     /// Generate a new secret key from the supplied password - this will
     /// reproducibly generate the same key from the same password.
+    ///
+    /// **Legacy.** This uses a fixed application-defined salt and orion's
+    /// minimum Argon2 cost, so it is deterministic and weak. It is retained
+    /// only to decrypt pre-existing (v0) config secrets; new secrets are
+    /// written with `from_password_with_salt`. See
+    /// docs/specifications/security-review.md (finding F2).
     ///
     /// # Arguments
     ///
@@ -200,8 +367,11 @@ impl Key {
 
         Ok(Box::new(Key {
             data: kdf::derive_key(
+                // Do not interpolate `password` into this context: it is the
+                // secret (the OPENPORTAL_SECRET_KEY value under the Environment
+                // scheme) and would otherwise be leaked into logs/stderr.
                 &kdf::Password::from_slice(password.as_bytes())
-                    .context(format!("Failed to generate a password from {}", password))?,
+                    .context("Failed to build a KDF password from the supplied secret")?,
                 &salt,
                 3,
                 8,
@@ -322,6 +492,19 @@ impl Key {
     /// Sign (authenticate) the passed data with this key.
     /// This will return the signed data as a hex-encoded string.
     ///
+    /// # Key domain separation
+    ///
+    /// `sign`/`verify` (BLAKE2b MAC) and `encrypt`/`decrypt` (XChaCha20-Poly1305
+    /// AEAD) use the key bytes directly, with no domain-separating sub-key
+    /// derivation. This is safe **only because a given `Key` is never used for
+    /// both purposes** in OpenPortal: the AEAD is used for wire messages and
+    /// config-at-rest secrets, and the MAC is used solely for the `op-bridge`
+    /// HTTP request signatures - always distinct keys. If a future caller ever
+    /// needs to use one key for both, it must first derive purpose-specific
+    /// sub-keys (e.g. `derive` with an `"enc"`/`"mac"` `info`) to avoid
+    /// cross-protocol key reuse. See docs/specifications/security-review.md
+    /// (finding F15).
+    ///
     /// Arguments
     ///
     /// * `data` - The data to sign.
@@ -408,6 +591,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_a_key_or_salt_of_the_wrong_length_is_refused_at_import() {
+        // Any hex length used to deserialise. A truncated key was accepted at
+        // *import* and only failed opaquely at connect time, and `Key::derive` sizes
+        // its HKDF output from the input length. An absent salt header decoded to an
+        // empty salt and connected successfully, silently losing the per-connection
+        // salt. See finding R33.
+        let hex_of = |n: usize| format!(r#"{{"data":"{}"}}"#, "ab".repeat(n));
+
+        // exactly right
+        assert!(serde_json::from_str::<Key>(&hex_of(KEY_SIZE)).is_ok());
+        assert!(serde_json::from_str::<Salt>(&hex_of(SALT_SIZE)).is_ok());
+
+        // anything else, including empty
+        for n in [0, 1, 16, 31, 33, 64] {
+            assert!(
+                serde_json::from_str::<Key>(&hex_of(n)).is_err(),
+                "a {}-byte key must be refused",
+                n
+            );
+            assert!(
+                serde_json::from_str::<Salt>(&hex_of(n)).is_err(),
+                "a {}-byte salt must be refused",
+                n
+            );
+        }
+
+        // ...and the same via FromStr, which is the path the handshake salt headers
+        // take. An empty header value is the case that used to connect anyway.
+        assert!("".parse::<Salt>().is_err());
+        assert!("ab".repeat(SALT_SIZE).parse::<Salt>().is_ok());
+        assert!("ab".repeat(SALT_SIZE - 1).parse::<Salt>().is_err());
+        assert!("nothex".parse::<Salt>().is_err());
+    }
+
+    #[test]
+    fn test_a_bare_key_does_not_print_its_material() {
+        // `SecretBox<Key>` redacted, but a bare `Key` derived Debug and printed the
+        // raw bytes - and two tests were comparing keys that way, which is proof the
+        // vector was live. See finding R33.
+        let key = Key::generate();
+        let rendered = format!("{:?}", key.expose_secret());
+
+        assert!(rendered.contains("REDACTED"), "got: {}", rendered);
+        assert!(
+            !rendered.contains("ab") || !rendered.contains(&hex::encode([0u8; 4])),
+            "must not contain hex-looking key material: {}",
+            rendered
+        );
+
+        // The whole struct must not leak it either.
+        assert!(!format!("{:?}", key).contains("data"));
+
+        // And there is a proper way to compare, which the tests now use.
+        let other = Key::generate();
+        assert!(key.expose_secret().equals(key.expose_secret()));
+        assert!(!key.expose_secret().equals(other.expose_secret()));
+    }
+
+    #[test]
     fn test_key_generate() {
         let key = Key::generate();
         assert_eq!(key.expose_secret().data.len(), KEY_SIZE);
@@ -426,6 +668,32 @@ mod tests {
         });
 
         assert_eq!(key.expose_secret().data, key2.expose_secret().data);
+    }
+
+    #[test]
+    fn test_salt_xor_roundtrip() {
+        // The legacy salt masking relies on XOR being self-inverse:
+        // (salt XOR key) XOR key == salt. The server un-masks an old client's
+        // salts this way (finding F15).
+        let key = Key::generate();
+        let salt = Salt::generate().unwrap_or_else(|err| {
+            unreachable!("Failed to generate salt: {}", err);
+        });
+
+        let masked = salt.xor(key.expose_secret());
+        let unmasked = masked.xor(key.expose_secret());
+
+        assert_eq!(salt.to_string(), unmasked.to_string());
+        // Masking actually changes the value (keys are non-null random).
+        assert_ne!(salt.to_string(), masked.to_string());
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"abcdef", b"abcdef"));
+        assert!(!constant_time_eq(b"abcdef", b"abcdeg"));
+        assert!(!constant_time_eq(b"abc", b"abcdef"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]

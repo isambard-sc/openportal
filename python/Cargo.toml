@@ -3,7 +3,7 @@
 
 [package]
 name = "openportal"
-version = "0.32.2"
+version = "0.91.0"
 description = "Python wrappers for OpenPortal"
 edition = "2021"
 license = "MIT"
@@ -22,6 +22,7 @@ required-features = ["generate-stubs"]
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }
 chrono = "0.4.42"
+greatwestern = { path = "../greatwestern" }
 once_cell = "1.21.3"
 paddington = { path = "../paddington" }
 pyo3 = { version="0.27.1", features = ["chrono", "abi3-py310"] }

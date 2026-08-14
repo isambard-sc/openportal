@@ -3,13 +3,14 @@
 
 use crate::agent::{Peer, Type as AgentType};
 use crate::command::Command;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::job;
 
 use anyhow::Result;
 use paddington::command::Command as ControlCommand;
 
-pub async fn process_control_message(
+pub async fn process_control_message<L: Domain>(
     agent_type: &AgentType,
     command: ControlCommand,
 ) -> Result<(), Error> {
@@ -22,21 +23,23 @@ pub async fn process_control_message(
         } => {
             let peer = Peer::new(&agent, &zone);
             tracing::info!("Connected to agent: {}", peer);
-            Command::register(
+            Command::<L>::register(
                 agent_type,
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
+                L::name(),
+                L::version(),
             )
             .send_to(&peer)
             .await?;
 
             // now send the current board to the peer, so that they
             // can restore their state
-            job::sync_board(&peer).await?;
+            job::sync_board::<L>(&peer).await?;
 
             // now they have their new state, we need to send all of the
             // queued jobs for this peer
-            job::send_queued(&peer).await?;
+            job::send_queued::<L>(&peer).await?;
         }
         ControlCommand::Disconnect { agent, zone } => {
             let peer = Peer::new(&agent, &zone);
@@ -46,6 +49,17 @@ pub async fn process_control_message(
         ControlCommand::Disconnected { agent, zone } => {
             let peer = Peer::new(&agent, &zone);
             tracing::info!("Disconnected from agent: {}", peer);
+
+            // Drop the portal routes this peer told us about, so that a later
+            // topology change does not present as a collision against a stale
+            // route. Routes we originated from our own config are unaffected.
+            // See `crate::portalroutes` and
+            // `docs/plans/portal-route-discovery-design.md` §4.5.
+            if crate::portalroutes::withdraw_all_from(&peer).await {
+                crate::handler::withdraw_routes_from::<L>(&peer).await;
+            }
+
+            crate::agent::set_route_capable(&peer, false).await;
         }
         ControlCommand::Error { error } => {
             tracing::error!("Received error: {}", error);

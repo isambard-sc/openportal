@@ -8,8 +8,9 @@
 
 use crate::agent;
 use crate::command::Command;
-use crate::grammar::NamedType;
+use crate::domain::Domain;
 use crate::job::Job;
+use crate::named::NamedType;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -161,38 +162,38 @@ pub struct LogEntry {
 }
 
 impl NamedType for DiagnosticsReport {
-    fn type_name() -> &'static str {
-        "DiagnosticsReport"
+    fn type_name() -> String {
+        "DiagnosticsReport".to_string()
     }
 }
 
 impl NamedType for FailedJobEntry {
-    fn type_name() -> &'static str {
-        "FailedJobEntry"
+    fn type_name() -> String {
+        "FailedJobEntry".to_string()
     }
 }
 
 impl NamedType for SlowJobEntry {
-    fn type_name() -> &'static str {
-        "SlowJobEntry"
+    fn type_name() -> String {
+        "SlowJobEntry".to_string()
     }
 }
 
 impl NamedType for ExpiredJobEntry {
-    fn type_name() -> &'static str {
-        "ExpiredJobEntry"
+    fn type_name() -> String {
+        "ExpiredJobEntry".to_string()
     }
 }
 
 impl NamedType for RunningJobEntry {
-    fn type_name() -> &'static str {
-        "RunningJobEntry"
+    fn type_name() -> String {
+        "RunningJobEntry".to_string()
     }
 }
 
 impl NamedType for LogEntry {
-    fn type_name() -> &'static str {
-        "LogEntry"
+    fn type_name() -> String {
+        "LogEntry".to_string()
     }
 }
 
@@ -204,7 +205,7 @@ struct JobKey {
 }
 
 impl JobKey {
-    fn from_job(job: &Job) -> Self {
+    fn from_job<L: Domain>(job: &Job<L>) -> Self {
         Self {
             destination: job.destination().to_string(),
             instruction: job.instruction().to_string(),
@@ -277,7 +278,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_failed_job(&mut self, job: &Job, error_message: String) {
+    fn record_failed_job<L: Domain>(&mut self, job: &Job<L>, error_message: String) {
         let key = JobKey::from_job(job);
         let now = Utc::now();
 
@@ -311,7 +312,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_slow_job(&mut self, job: &Job, duration_ms: f64) {
+    fn record_slow_job<L: Domain>(&mut self, job: &Job<L>, duration_ms: f64) {
         if duration_ms < SLOW_JOB_THRESHOLD_MS {
             return;
         }
@@ -340,7 +341,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_expired_job(&mut self, job: &Job) {
+    fn record_expired_job<L: Domain>(&mut self, job: &Job<L>) {
         let key = JobKey::from_job(job);
 
         // Increment total expired jobs counter
@@ -371,7 +372,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_job_started(&mut self, job: &Job) {
+    fn record_job_started<L: Domain>(&mut self, job: &Job<L>) {
         let key = JobKey::from_job(job);
 
         if let Some(data) = self.running_jobs.get_mut(&key) {
@@ -387,7 +388,7 @@ impl DiagnosticsTracker {
         }
     }
 
-    fn record_job_finished(&mut self, job: &Job) {
+    fn record_job_finished<L: Domain>(&mut self, job: &Job<L>) {
         let key = JobKey::from_job(job);
 
         if let Some(data) = self.running_jobs.get_mut(&key) {
@@ -608,19 +609,19 @@ pub fn get_recent_logs(max: usize) -> Vec<LogEntry> {
 static SLOW_JOB_THRESHOLD_MS: f64 = 10000.0; // 10 seconds
 
 /// Record a failed job
-pub async fn record_failed_job(job: &Job, error_message: String) {
+pub async fn record_failed_job<L: Domain>(job: &Job<L>, error_message: String) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_failed_job(job, error_message);
 }
 
 /// Record a completed (successful) job
-pub async fn record_completed_job(_job: &Job) {
+pub async fn record_completed_job<L: Domain>(_job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.total_jobs_completed += 1;
 }
 
 /// Record a slow job completion
-pub async fn record_slow_job(job: &Job, duration_ms: f64) {
+pub async fn record_slow_job<L: Domain>(job: &Job<L>, duration_ms: f64) {
     if duration_ms > SLOW_JOB_THRESHOLD_MS {
         let mut tracker = DIAGNOSTICS.write().await;
         tracker.record_slow_job(job, duration_ms);
@@ -628,19 +629,19 @@ pub async fn record_slow_job(job: &Job, duration_ms: f64) {
 }
 
 /// Record an expired job
-pub async fn record_expired_job(job: &Job) {
+pub async fn record_expired_job<L: Domain>(job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_expired_job(job);
 }
 
 /// Record when a job starts running
-pub async fn record_job_started(job: &Job) {
+pub async fn record_job_started<L: Domain>(job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_job_started(job);
 }
 
 /// Record when a job finishes (successful or failed)
-pub async fn record_job_finished(job: &Job) {
+pub async fn record_job_finished<L: Domain>(job: &Job<L>) {
     let mut tracker = DIAGNOSTICS.write().await;
     tracker.record_job_finished(job);
 }
@@ -690,8 +691,33 @@ pub async fn clear_diagnostics() {
 /// The key is the agent name that generated the report
 /// This allows intermediate agents to retrieve and forward responses back through the network
 ///
-static DIAGNOSTICS_CACHE: Lazy<RwLock<HashMap<String, DiagnosticsReport>>> =
+static DIAGNOSTICS_CACHE: Lazy<RwLock<HashMap<String, CachedReport>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+
+///
+/// A cached report, paired with the time *we* received it.
+///
+/// Freshness must be judged against `cached_at`, never against the report's own
+/// `generated_at`: that field is stamped by the agent that produced the report,
+/// on that host's clock. Comparing it to a locally-taken baseline made the
+/// wait loop sensitive to clock skew between hosts - a peer running even slightly
+/// behind never appears to have answered, while one running ahead satisfies a
+/// baseline it predates. `HealthInfo` already did this correctly, stamping
+/// `last_updated` locally on receipt. See
+/// `docs/specifications/security-review-2.md` (finding R20).
+///
+#[derive(Clone, Debug)]
+struct CachedReport {
+    cached_at: DateTime<Utc>,
+    report: DiagnosticsReport,
+}
+
+/// Upper bound on the number of agents held in the diagnostics cache.
+///
+/// The cache is keyed on the name carried inside the report - which it has to be,
+/// since a report legitimately describes an agent several hops away and is
+/// relayed back hop by hop - so its size is not bounded by our own peer count.
+const MAX_CACHED_REPORTS: usize = 256;
 
 ///
 /// Store a diagnostics response in the global cache
@@ -702,7 +728,33 @@ static DIAGNOSTICS_CACHE: Lazy<RwLock<HashMap<String, DiagnosticsReport>>> =
 ///
 pub async fn cache_diagnostics_response(agent_name: String, report: DiagnosticsReport) {
     let mut cache = DIAGNOSTICS_CACHE.write().await;
-    cache.insert(agent_name.clone(), report);
+
+    if cache.len() >= MAX_CACHED_REPORTS && !cache.contains_key(&agent_name) {
+        // Evict the least recently received entry rather than growing forever.
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, c)| c.cached_at)
+            .map(|(k, _)| k.clone());
+
+        if let Some(oldest) = oldest {
+            tracing::warn!(
+                "Diagnostics cache is full ({} entries) - evicting the oldest ('{}') \
+                 to make room for '{}'.",
+                MAX_CACHED_REPORTS,
+                oldest,
+                agent_name
+            );
+            cache.remove(&oldest);
+        }
+    }
+
+    cache.insert(
+        agent_name.clone(),
+        CachedReport {
+            cached_at: Utc::now(),
+            report,
+        },
+    );
 
     tracing::debug!("Cached diagnostics response for agent: {}", agent_name);
 }
@@ -711,14 +763,30 @@ pub async fn cache_diagnostics_response(agent_name: String, report: DiagnosticsR
 /// Get a cached diagnostics report for a specific agent
 ///
 pub async fn get_cached_diagnostics(agent_name: &str) -> Option<DiagnosticsReport> {
-    DIAGNOSTICS_CACHE.read().await.get(agent_name).cloned()
+    DIAGNOSTICS_CACHE
+        .read()
+        .await
+        .get(agent_name)
+        .map(|c| c.report.clone())
+}
+
+///
+/// When we received the cached report for `agent_name`, on our own clock.
+///
+async fn cached_diagnostics_age(agent_name: &str) -> Option<chrono::Duration> {
+    DIAGNOSTICS_CACHE
+        .read()
+        .await
+        .get(agent_name)
+        .map(|c| Utc::now().signed_duration_since(c.cached_at))
 }
 
 ///
 /// Wait for a diagnostics response from a specific agent
 ///
-/// Polls the cache until the agent has an updated diagnostics report since baseline_time,
-/// or until the timeout expires.
+/// Polls the cache until the agent has a report we *received* after baseline_time,
+/// or until the timeout expires. Judged on our own clock, not the report's
+/// `generated_at` - see `CachedReport`.
 ///
 /// Parameters:
 /// - `agent_name`: The name of the agent we're waiting for a response from
@@ -738,14 +806,15 @@ async fn wait_for_diagnostics_response(
     loop {
         // Check if we have an updated diagnostics report since baseline
         let cache = DIAGNOSTICS_CACHE.read().await;
-        if let Some(report) = cache.get(agent_name) {
-            if report.generated_at > baseline_time {
+        if let Some(cached) = cache.get(agent_name) {
+            // `cached_at`, not the report's own `generated_at` - see `CachedReport`.
+            if cached.cached_at > baseline_time {
                 tracing::debug!(
                     "Diagnostics response received from {} in {:?}",
                     agent_name,
                     start.elapsed()
                 );
-                let result = report.clone();
+                let result = cached.report.clone();
                 drop(cache);
                 return Some(result);
             }
@@ -778,7 +847,9 @@ async fn wait_for_diagnostics_response(
 ///
 /// Returns the diagnostics report or an error if the request fails or times out.
 ///
-pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport, anyhow::Error> {
+pub async fn collect_diagnostics<L: Domain>(
+    destination: &str,
+) -> Result<DiagnosticsReport, anyhow::Error> {
     let my_name = agent::get_self(None).await.name().to_owned();
 
     // Parse the destination path
@@ -794,7 +865,7 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
         true
     } else if destination_parts.len() == 1 {
         // Extract just the name part (before any @zone) and check if it matches
-        let target_spec = destination_parts[0];
+        let target_spec = destination_parts.first().copied().unwrap_or_default();
         let target_name = if target_spec.contains('@') {
             target_spec.split('@').next().unwrap_or(target_spec)
         } else {
@@ -825,11 +896,17 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
 
         // We need to forward the diagnostics request to the next peer in the path
         // Parse the next hop, which may include a zone specifier (name@zone)
-        let next_hop = destination_parts[0];
+        // `first()`/`get(1..)` rather than `[0]`/`[1..]`, so a malformed
+        // path is handled rather than aborting the process - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let next_hop = destination_parts.first().copied().unwrap_or_default();
         let (next_peer_name, zone_filter) = if next_hop.contains('@') {
             let parts: Vec<&str> = next_hop.split('@').collect();
             if parts.len() == 2 {
-                (parts[0], Some(parts[1]))
+                (
+                    parts.first().copied().unwrap_or_default(),
+                    parts.get(1).copied(),
+                )
             } else {
                 tracing::error!("Invalid format for agent specification: {}", next_hop);
                 return Err(anyhow::anyhow!(
@@ -841,7 +918,7 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
             (next_hop, None)
         };
 
-        let remaining_path = destination_parts[1..].join(".");
+        let remaining_path = destination_parts.get(1..).unwrap_or_default().join(".");
 
         tracing::debug!(
             "Forwarding diagnostics request to {} (remaining path: {})",
@@ -884,7 +961,7 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
             let baseline_time = Utc::now();
 
             // Forward the diagnostics command with the updated destination
-            let diagnostics_cmd = Command::diagnostics_request(&remaining_path);
+            let diagnostics_cmd = Command::<L>::diagnostics_request(&remaining_path);
             diagnostics_cmd.send_to(next_peer).await?;
 
             tracing::debug!(
@@ -935,7 +1012,10 @@ pub async fn collect_diagnostics(destination: &str) -> Result<DiagnosticsReport,
                     tracing::warn!(
                         "Timeout waiting for fresh diagnostics from {}, returning cached response (age: {}s)",
                         ultimate_target_name,
-                        Utc::now().signed_duration_since(cached_report.generated_at).num_seconds(),
+                        cached_diagnostics_age(ultimate_target_name)
+                            .await
+                            .map(|d| d.num_seconds())
+                            .unwrap_or(0),
                     );
                     Ok(cached_report)
                 } else {

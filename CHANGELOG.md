@@ -6,6 +6,419 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.91.0] - 2026-08-04
+
+### Added
+
+- **A second security review** ([docs/specifications/security-review-2.md](docs/specifications/security-review-2.md)),
+  auditing the whole workspace as seven independent areas, together with a companion
+  **record of fixes** ([docs/specifications/security-review-2-fixes.md](docs/specifications/security-review-2-fixes.md)).
+  The review re-tested and confirmed the first review's cryptographic conclusions -
+  including a differential test of the anti-replay window against a reference model -
+  and raised 34 findings concentrated in the agent framework's authorization logic, an
+  area the first review had not substantially examined. **All 34 are now resolved.**
+
+  The fixes document holds the rationale for each change, the seven recommendations
+  deliberately *not* followed and why, and the five places the review itself was
+  wrong. The entries below record only what changed.
+- Bridge API **signature version 2**, selected with `X-OpenPortal-Signature-Version: 2`.
+  Length-prefixed and fixed-arity, so the presence of a nonce is authenticated.
+  Version 1 remains accepted, so existing clients need no change.
+- `client --add --type <agent-type>` declares the agent type a client must present
+  itself as. The reverse expectation travels in the invite, so no config hand-editing
+  is needed. Omitting it leaves the peer unchecked, as before.
+- **Portal route discovery**: agents derive the route to each portal from their peers
+  and refuse traffic that does not match. Enforcement activates only where a peer is
+  declared `type = "portal"`, and is scoped to that peer's zone.
+- `secret --value-file <path>` (and bare stdin) so a secret need not appear in `ps`.
+  `--value` still works but warns.
+- `op-proxy init --name`, so an agent can use two proxies in one zone.
+- `op-cloudaccount`, `op-cloudportal`, `op-localaccount` and `op-proxy` are now
+  published as release binaries for `x86_64` and `aarch64`, each with an attested
+  SBOM. No OCI image or Helm chart is built for them. Note `op-localaccount` is a
+  **testing** agent - it manages Unix accounts directly rather than through a managed
+  directory service, and warns on every startup.
+- Seed unit tests for the privileged agents, which previously had almost none. 298
+  tests now pass (from 209).
+
+### Fixed
+
+- **Remote process abort from any authenticated peer.** Three arms of
+  `Instruction::parse` indexed a slice without a length check, inside `Command`'s
+  `Deserialize` - so a ~200-byte message terminated the receiving agent. Every
+  panicking index in the workspace is now a checked form.
+- **A routine restart locked an agent out of every long-running peer.** The handshake
+  nonce counter and replay window shared process lifetime; a restart reset one but not
+  the peer's view of it. Needed no attacker - any deploy triggered it.
+- **A Job's claimed route was not bound to the peer that delivered it**, nor was an
+  agent's type, nor was an instruction bound to the portal whose authority it claimed.
+- **`op-slurm` applied no managed-object guard to any mutation**, so a peer-chosen
+  `local_group` naming any real Slurm account had its limits rewritten.
+- **`op-localaccount` could add an account to a privileged system group** (the
+  `docker.system` → `docker` collision).
+- **`op-filesystem` followed symlinks when creating and chowning directories**, so a
+  writable path component could redirect a root-owned operation outside the managed
+  tree. Paths are now verified to resolve inside a configured volume root at operation
+  time, and ownership is applied to a file descriptor opened `O_NOFOLLOW`.
+- **Relay envelopes were not bound to the connection they arrived on**, letting any
+  direct peer churn a relayed pair's session.
+- **IPv4/IPv6 truncation defeated every IP allow-list**, and the bridge's rate-limit
+  bypass was still open (the left-most `X-Forwarded-For` entry is client-supplied).
+- **Unchecked `u64` arithmetic** in `Usage`/`StorageSize` could silently corrupt a
+  billed total; `Allocation` accepted `"NaN"` and `"inf"`. Release builds now set
+  `overflow-checks = true`.
+- Boards, jobs, caches, nonce stores, connection slots and message sizes are all now
+  bounded - previously a peer could grow each without limit. Slurm and FreeIPA cache
+  eviction is targeted rather than wholesale, so a stale entry no longer forces every
+  project to re-query `slurmctld`.
+- A stalled handshake held its connection slot indefinitely; there was no WebSocket
+  message size limit; the message-exchange overload recovery was dead code.
+- Mapping targets permitted whitespace and separators; `PortalIdentifier` never
+  received the identifier allow-list; date parsing and arithmetic were unbounded.
+- Config and invite files containing key material are written atomically and
+  owner-only, including the bridge invite that a previous fix missed. Key and salt
+  lengths are validated at import, and `Key`'s `Debug` no longer prints its bytes.
+- `trusted_proxy` and client `ip` now also accept the plain comma-separated string
+  syntax the documentation describes, and a malformed value reports the specific error
+  rather than "did not match any variant of untagged enum".
+
+### Changed
+
+- Lints are declared once in `[workspace.lints]` and inherited by all crates.
+  `clippy::indexing_slicing` and `dbg_macro` join `unwrap_used`/`expect_used` as
+  denied; `unsafe_code` is forbidden. `impl Index<usize> for Destinations` is removed -
+  use `Destinations::get`.
+- `make test` no longer passes `--lib`, which silently skipped every test in the agent
+  binary crates. CI gained `cargo audit`, fails on clippy warnings, and runs
+  `scripts/check-secret-writes.sh`.
+- `templemeads::agent::instance::run` re-checks portal ownership on receipt. An
+  Instance whose Jobs are delegated by another agent should use the new
+  `instance::run_delegated` - `op-cloudaccount` does.
+- Identifier validation moved to a shared `templemeads::validate` module, as did the
+  single `OPENPORTAL_ALLOW_INVALID_SSL_CERTS` rule.
+- `docs/specifications/bridge-api.md` gains **§0**, stating normatively that the
+  bridge must not be internet-facing and why that is a design choice.
+- API changes: `ServiceConfig::add_client`/`add_relayed_client` and
+  `ClientConfig::new`/`new_relayed` take an expected agent type; `Invite` gained
+  `with_agent_type`/`agent_type`; `paddington::config::save` takes `&Path`;
+  `op-filesystem`'s `create_dir`/`create_link`/`remove_link`/`recycle_dir` take the
+  configured volume roots; `RelayEnvelope` carries a `kind` tag (a wire change - the
+  relay has no production deployments).
+
+## [0.90.0] - 2026-07-24
+
+### Added
+
+- ** Separated out the grammar of the Job commands and the Notifications
+  into a new Domain** - Now paddington and templemeads do not know about or
+  force any particular command or notification grammar onto the agents,
+  and could, in theory, be used to create agents that work in any number
+  of domains. The previous HPC domain commands and notifications have
+  been broken out into the `greatwestern` domain,
+  and the `op-provider` agent has been updated to be a
+  multi-domain router.
+- **`greatwestern` — `Domain::name()`/`version()`/`assume_legacy_domain_version()`**
+  — `Hpc` now reports itself as `"greatwestern"` plus its crate version
+  (used by the connection-level check), and treats any peer whose
+  reported engine version predates the `templemeads`/`greatwestern` crate
+  split (`<= 0.32.2`) as implicitly speaking `greatwestern 0.32.2` - those
+  older agents have no way to report a domain of their own, since the
+  split didn't exist yet when they were built.
+- **Domain-oblivious multi-domain routing (`Erased`)** — `templemeads`
+  gains an `Erased` domain for building router/proxy agents that forward
+  Jobs and Notifications between other agents without needing to
+  understand their instruction vocabulary at all. `Job`/`Notification` now
+  carry their originating domain's name and version through every hop,
+  surviving serialization through any number of `Erased`-typed relays
+  completely unchanged. New opt-in compatibility checks,
+  `ensure_domain_matches` (connection-level) and
+  `ensure_job_domain_matches`/`ensure_notification_domain_matches`
+  (per-message), let an agent refuse to talk to a peer speaking a
+  different domain - a peer identifying as `Erased` is always accepted at
+  the connection level, since routers are meant to carry any domain.
+  `op-provider` now uses `Erased` as its domain, making it a genuine
+  multi-domain router rather than being hardcoded to `greatwestern`. See
+  `docs/plans/archive/multi-domain-routing-design.md`.
+- **`op-cloudaccount` — new agent representing a single cloud account** —
+  lets a project be assigned to a cloud account (e.g. one AWS account) the
+  same way a project is assigned to an `op-cluster` instance. Deliberately
+  a rough prototype, built alongside cloud operators who are still
+  developing their own side of the integration: there is no cloud-side
+  API yet to record project/user assignment, so this agent is the source
+  of truth for that (one JSON file per project, atomic writes, in-memory
+  cache); usage reports are reconstructed by parsing whatever cost-report
+  JSON files the operators drop into a directory, diffing consecutive
+  cumulative reports and spreading the delta evenly across the calendar
+  days each pair of reports spans. `Usage` (normally compute-seconds
+  elsewhere in OpenPortal) is reinterpreted here as micro-currency-units
+  (1 second = 1e-6 of the configured currency) - the same
+  "reinterpret-the-base-unit" move `op-slurm` already makes for
+  node-seconds, just for cost instead of time. See
+  `docs/plans/archive/op-cloudaccount-design.md`.
+- **`op-cloudportal` — new agent representing a self-contained "cloud"
+  portal** — a `Portal` agent for the other side of a portal-to-portal
+  Award relationship (e.g. a central portal creating Awards on it), with
+  no real portal management software (no Waldur) behind it. Also a rough
+  prototype: it stores Award state itself as plain JSON files, read fresh
+  from disk on every instruction rather than cached, since the separate
+  CLI approval step described below can edit the same files while the
+  server process is running; `AwardDetails.template` picks which cloud
+  provider an Award targets, mapped via config to a specific
+  `op-cloudaccount` peer. Award creation and infrastructure provisioning
+  are deliberately decoupled
+  behind a human-in-the-loop approval step: `list-pending`/`approve`/
+  `reject` CLI subcommands (pure state-file edits, no network calls)
+  alongside a background poller inside the running `run` process that
+  makes the actual `add_project`/`add_user` calls once an Award is
+  approved, retrying automatically on its next cycle if a previous
+  attempt partially failed. An earlier design based on `op-portal`'s
+  virtual-resource/offering mechanism was abandoned after tracing
+  `templemeads::virtual_agent::send()` showed it only ever routes jobs
+  within the same process, never between genuinely separate peers -
+  `airr`/`cloud` are just an ordinary direct portal-to-portal connection
+  instead. See `docs/plans/archive/op-cloudportal-design.md`.
+- **One-shot CLI support for `Portal` agents** — `templemeads::portal::run()`
+  gained the `run --one-shot "instruction args"` mode (synthesize a local
+  Job, run it through the real instruction handler, print the JSON
+  result, exit) already available to Account/Filesystem/Scheduler agents,
+  mirroring `account.rs` exactly. Added to support debugging/inspecting
+  `op-cloudportal` state without a live network peer, but applies to any
+  `Portal` agent, `op-portal` included.
+- **Multiple IPs/ranges per client allowlist entry** — a `[[clients]]`
+  entry's `ip` now accepts a comma-separated list of addresses and/or
+  CIDR ranges (IPv4, IPv6, or a mix of both), any one of which is allowed
+  to match, e.g. `client --add new_agent --ip
+  127.0.0.1,10.0.0.0/24,2001:db8::/32`. A single entry (no comma) behaves
+  exactly as before - no change to how existing configs are stored or
+  read. Implemented as a new `IpOrRange::List` variant rather than
+  changing `ClientConfig.ip`'s type, so it composes with the existing
+  single-address/CIDR-range/IPv4-IPv6 logic instead of duplicating it.
+- **IPv6 support for IP allowlisting and server binding** — `paddington`'s
+  IP-based connection authentication (`IpOrRange`) and a server's own
+  listen address now both work correctly for IPv6, not just IPv4. A
+  single allowed IP already worked for either family; CIDR *ranges* were
+  previously hard-coded to IPv4 only (`iptools::iprange::IPv4`) and are
+  now tried against IPv6 too, with identical config syntax either way
+  (`ip = "2001:db8::/32"`, just like `ip = "10.0.0.0/24"`). Separately, a
+  server's own bind address was built via a formatted string that never
+  bracketed an IPv6 address correctly (`TcpListener::bind` requires
+  `[::1]:8080`, not `::1:8080`) - now built as a typed `SocketAddr`
+  instead, matching the pattern the health-check listener already used.
+  Dual-stack listening (one socket accepting both families) remains
+  outside OpenPortal's control - it's an OS-level socket option this
+  layer doesn't expose - see `docs/plans/ipv6-support-design.md`.
+- **`op-proxy` — blind relay proxy for outbound-only agents** — a new agent
+  that relays encrypted traffic between two agents that can each only make
+  outbound connections (neither can open a port the other can reach),
+  without ever being able to decrypt what it forwards. Agents opt in
+  explicitly via a `proxy` field in their paddington config, and the proxy
+  operator must separately `allow` each `(agent, agent)` pair before it
+  will relay between them (default-deny). Every `templemeads`-based agent
+  (`op-portal`, `op-provider`, `op-cluster`, etc.) can act as one of the
+  two relayed peers: `client --add <name> --proxy <relay-name>` introduces
+  a relayed peer, and the resulting invite file is self-describing, so the
+  importing side's ordinary `server --add` picks up the relay
+  automatically with no extra flag. Validated end-to-end with real
+  `op-proxy`/`op-portal`/`op-cloudportal` processes. See
+  `docs/plans/archive/blind-relay-proxy-design.md`.
+- **Replay protection for ongoing message traffic** — every ongoing
+  message (Jobs, Notifications, keepalives) now carries a per-sender
+  nonce, checked against a receiver-side sliding window before being
+  processed: the standard IPsec/WireGuard-style anti-replay scheme (a
+  high-water-mark plus a fixed-size bitmap of recently-accepted values),
+  chosen deliberately over a bespoke design. Without this, a captured,
+  validly-encrypted message - by an attacker, or the blind relay proxy
+  itself - could be resent later to re-trigger its effect; encryption
+  alone never prevented that. The nonce lives inside the encrypted,
+  authenticated content, so the proxy can no more forge or strip it than
+  it can read the payload, and the same protection applies uniformly to
+  direct and relayed connections. Rollout is negotiated, not a
+  coordinated flag-day: each peer advertises `supports_nonce` in its
+  `PeerDetails` (or relayed bootstrap message), and a sender only wraps
+  outgoing traffic with a nonce once the specific peer it's talking to
+  has confirmed support - an upgraded server therefore gains full
+  protection against every already-upgraded peer immediately, while
+  continuing to interoperate, unprotected but functioning, with peers
+  that haven't been upgraded yet. See
+  `docs/plans/replay-protection-design.md` §5.
+- **Replay protection for handshake/bootstrap messages** — `Handshake`/
+  `PeerDetails` (direct connections) and `StartRelayedConnection`/
+  `RelayedConnectionAccepted`/`SessionUnknown` (relayed bootstrap) now
+  carry a nonce too, checked against a per-peer window that - unlike the
+  ongoing-traffic window above - persists across reconnects rather than
+  resetting, since these messages are encrypted under the *permanent*
+  pre-shared key pair, which doesn't change across reconnects. Tracing
+  through the actual threat showed `StartRelayedConnection` and
+  `SessionUnknown` are where this closes a real, repeatable disruption (a
+  single captured message could otherwise reset a peer's live session, or
+  force endless re-bootstrap churn, indefinitely); `Handshake`/
+  `PeerDetails` get it too for defense-in-depth, though a session hijack
+  via their replay was never actually possible (session keys are freshly
+  random per connection). For direct connections this needed no
+  capability negotiation at all - `nonce` is an additive optional field on
+  messages that were already structured objects, so an old peer's message
+  is simply read with `nonce: None` and the check is skipped, with no
+  wire-shape change to gate on. For relayed bootstrap, no backward
+  compatibility was needed at all (`op-proxy` isn't deployed yet), so
+  `nonce` there is a plain required field. See
+  `docs/plans/replay-protection-design.md` §10.
+
+### Security
+
+- **New `docs/specifications/security-review.md`** — an independent,
+  code-level security assessment complementing the existing
+  `security-model.md`. Where the model document describes how security is
+  *intended* to work, the review *evaluates* it for security professionals:
+  the threat model, verified strengths (bounded trust topology, sound
+  transport crypto with no nonce reuse, a correct anti-replay window, the
+  genuinely-blind relay proxy, no-shell privileged agents), and graded
+  findings (F1-F15) with `file:line` references and remediation, cited from
+  `security-model.md` and cross-linked from the specifications index. It
+  records which findings were fixed while writing it (below) and which
+  remain open.
+- **Fixed: arbitrary absolute-path file write in `op-cloudaccount` /
+  `op-cloudportal`** (review finding F1) — a crafted `ProjectIdentifier`
+  whose project component began with `/` escaped the configured state
+  directory, because `Path::join` discards its base on an absolute
+  argument. Closed both at the source (identifier validation, below) and at
+  the write path, which now rejects any filename that is not a single plain
+  path component.
+- **Fixed: strict identifier validation** (F5) — `UserIdentifier` /
+  `ProjectIdentifier` components are now restricted to `[A-Za-z0-9_-]` with
+  no leading `-` and a length cap, and mapping targets reject `/`, a
+  leading `-`, and control characters. This closes argument (flag)
+  injection into the privileged tools agents spawn (`useradd`, `sacctmgr`,
+  …) and the path-escape enabling F1, at the point identifiers enter the
+  system.
+- **Fixed: reachable panic decoding wire frames** (F4) —
+  `deenvelope_message` sliced an attacker-controlled text frame at fixed
+  byte offsets, which panics (aborting the process) if a multi-byte UTF-8
+  character straddles a boundary. It now slices with `str::get`, returning
+  a clean error instead.
+- **Fixed: proxy now binds the relayed `from` to the authenticated sender**
+  (F7) — `op-proxy` dropped any envelope whose claimed `from` did not match
+  the peer identity the connection authenticated as, so `RelayPolicy` no
+  longer rests on attacker-supplied labels.
+- **Fixed: secrets no longer leak into error messages** (F10) —
+  `Key::from_password` and `ServiceConfig::get_key` no longer interpolate
+  the password (or a secret environment variable's *value*) into error
+  context that can reach logs.
+- **Fixed: config and invite files are written `0600`** (F9) — files
+  holding plaintext pre-shared keys are now owner-only on Unix, rather than
+  landing at the process umask.
+- **Fixed: strong, versioned config-secret encryption** (F2) — secrets
+  stored in a config's `extras` (e.g. FreeIPA/Slurm credentials) are now
+  encrypted with a fresh per-secret random salt and a realistic Argon2 cost
+  (19 MiB / 3 passes) via `Key::from_password_with_salt`, in a versioned
+  `op-secret-v1:` format. Previously the derivation used orion's minimum
+  cost (8 KiB) with a hardcoded salt, making it deterministic and cheap to
+  brute-force. Legacy (v0) secrets still decrypt, and re-running the
+  `secret` command upgrades a value to the strong format. The `Simple`
+  encryption scheme is now documented as obfuscation only (its "password"
+  is the public agent name) - use `Environment` in production.
+- **Fixed: forwarded client IPs are only trusted from a configured proxy**
+  (F3, F6) — a new `trusted_proxy` config field / `--trusted-proxy` init
+  flag (IP or CIDR list) gates all trust in `proxy_header` /
+  `X-Forwarded-For`. On the agent (paddington) side, a forwarded client
+  address is honoured only when the real TCP peer matches `trusted_proxy`,
+  else the header is ignored (fail-closed), closing IP-allow-list spoofing.
+  On the bridge HTTP side, a new middleware resolves the client IP from the
+  real TCP peer (`ConnectInfo`), honouring `X-Forwarded-For`/`X-Real-IP`
+  only from a trusted peer, so rate limiting can no longer be bypassed by a
+  spoofed header. Works with a Cloudflare tunnel / in-cluster proxy on an
+  internal address (e.g. `--trusted-proxy 127.0.0.0/8`).
+- **Fixed: pre-authentication resource-exhaustion (DoS) hardening** (F11) —
+  the agent (paddington) accept loop now fail-fasts any inbound connection
+  whose source address matches neither a configured client IP nor the
+  `trusted_proxy` range, dropping it before any WebSocket-upgrade or crypto
+  work; and it bounds concurrent *unauthenticated* connections with a
+  process-wide semaphore (limit 2048, released the moment a peer
+  authenticates, so long-lived authenticated peers never occupy the pool).
+  On the bridge, `verify_headers` now verifies the request signature
+  **before** reading or growing the nonce store (so only authenticated
+  callers can touch it), and the store has a hard size cap.
+- **Fixed: `op-localaccount` now only removes accounts/groups it manages**
+  (F13) — `remove_user` applies the same managed-group guard as
+  `block_user`/`unblock_user` (a pre-existing system account is never
+  `userdel`'d), and `remove_project` refuses to `groupdel` any group with a
+  system GID (`< 1000`) or a configured system/managed group name — closing
+  the case where a crafted project identifier (e.g. `docker.system`) mapped
+  to a bare system group name. `op-localaccount` is a **testing agent**
+  (for a containerised test Slurm cluster; use `op-freeipa` in production)
+  and now logs a warning to that effect on every startup, with matching
+  notes added to its docs.
+- **Noted (by design): the bridge's `X-Nonce` is optional for backward
+  compatibility** (F8) — the official Python client always sends a fresh
+  per-request nonce (included in the signature), so current clients get
+  full replay protection; the optional path exists only for older clients,
+  mirroring the negotiated nonce rollout on the agent side.
+- **Documented: TLS is an external concern by design** (F12) — the wire
+  protocol is confidential and authenticated over plain HTTP/`ws` on its own
+  (double-envelope AEAD; HMAC on the bridge), so terminating TLS is left to
+  the operator's infrastructure. Operators who also want the residual
+  metadata (salts, IPs, sizes, timing) protected layer on HTTPS/`wss` with
+  standard tooling (nginx, ingress, Cloudflare tunnel) and point
+  `trusted_proxy` at the terminator. Clarified in the security review and
+  agent-configuration docs as a deliberate design decision, not a gap.
+- **Documented: no forward secrecy, by design** (F14) — session keys are
+  freshly random per connection but key-transported (encrypted) under the
+  permanent pre-shared keys, never negotiated in-band; OpenPortal
+  deliberately provides no in-band key-agreement route (not even
+  Diffie-Hellman). The permanent keys only ever encrypt high-entropy random
+  session keys, so there is no crib to attack them from the wire; security
+  rests on out-of-band permanent-key secrecy plus the `rotate` path.
+  Corrected inaccurate "forward secrecy" wording in `wire-protocol.md`,
+  `highavailability.md`, `security-model.md` (new §2.5), and the relay
+  source comments.
+- **Fixed: lower-severity hardening (F15)** — replaced the bridge's
+  hand-rolled constant-time compare with `paddington::constant_time_eq`
+  (orion `secure_cmp`); the bridge no longer echoes internal `Debug` error
+  detail to clients (logged server-side, generic message returned);
+  `op-slurm` no longer logs the token-fetch command (may embed a
+  credential); FreeIPA login now uses `reqwest`'s `.form()` for correct
+  URL-encoding; both handshake paths reject an all-zero session key;
+  `clean_and_check_path` now rejects relative paths and `..` components; and
+  `op-localaccount`'s shadow-utils mutation commands gained a `--`
+  end-of-options separator. The handshake now sends HKDF salts **in the
+  clear** (they are public by design) instead of XOR-masking them, negotiated
+  via a new `openportal-salt-format: plain` header so an upgraded server still
+  reads legacy (XOR) clients — upgrade servers before clients, since a client
+  commits to its salt encoding in the first message (see
+  `wire-protocol.md` §4.1). AEAD/MAC key domain separation was assessed and
+  deliberately not changed: no code path uses one key for both (wire = AEAD
+  only, bridge = MAC only, config = AEAD only), so it would be a breaking
+  change for zero benefit; the invariant is instead documented on `Key::sign`.
+  The auth-layer timing distinction and the healthcheck worker count are left
+  as-is (not exploitable / useful monitoring signal).
+
+### Fixed
+
+- **Slurm hourly usage-report fallback silently dropped per-component
+  usage** — `sacctmgr::get_hourly_report()` (used when a project has too
+  many jobs for the daily `sacct` query to complete in time) only
+  accumulated total usage, job counts, and wait times; unlike the normal
+  daily path, it never called `add_component_usage`, so any day that fell
+  back to hourly reporting kept a correct overall total but lost its
+  cpu/memory/gpu/billing breakdown entirely, in both the cached-hour and
+  freshly-fetched branches. Fixed by adding the same per-job component
+  accumulation the daily path already does.
+- **Invalid IP ranges no longer silently break connections or panic** — a
+  hand-edited or mistyped range (e.g. `0.0.0.0/0.0.0.0`) is now rejected
+  with a clear error when the config is loaded, instead of loading
+  successfully and only failing later, silently, at connection time. The
+  canonical "match everything" CIDR range `0.0.0.0/0` is now handled
+  correctly and no longer triggers an integer-overflow panic in the
+  underlying `iptools` dependency. `client --add` without `--ip` now also
+  errors clearly instead of falling back to an invalid default range.
+- **`server --remove` / `client --remove` silently doing nothing** —
+  removal used to match on name *and* zone together, defaulting to the
+  `"default"` zone when `--zone` wasn't given; if the peer had actually
+  been added under a different zone, the command reported success but left
+  the peer list unchanged. Removal by name now succeeds without needing
+  `--zone` at all as long as the name is unambiguous, and errors clearly
+  (rather than silently doing nothing) if the name doesn't exist or exists
+  in more than one zone.
+
 ## [0.32.2] - 2026-06-03
 
 ### Fixed
@@ -1597,6 +2010,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.91.0]: https://github.com/isambard-sc/openportal/releases/tag/0.91.0
+[0.90.0]: https://github.com/isambard-sc/openportal/releases/tag/0.90.0
 [0.32.2]: https://github.com/isambard-sc/openportal/releases/tag/0.32.2
 [0.32.1]: https://github.com/isambard-sc/openportal/releases/tag/0.32.1
 [0.32.0]: https://github.com/isambard-sc/openportal/releases/tag/0.32.0

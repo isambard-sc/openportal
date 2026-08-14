@@ -3,13 +3,16 @@
 
 use anyhow::Result;
 
+use greatwestern::grammar::Instruction::{AddUser, RemoveUser};
+use greatwestern::Hpc;
 use std::path::PathBuf;
 use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{AddUser, RemoveUser};
-use templemeads::job::{Envelope, Job};
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 #[tokio::main]
 async fn main() -> Result<()> {

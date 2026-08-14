@@ -251,6 +251,12 @@ the function has to be made `async_runnable`, to help Rust hold pointers
 to async functions.
 
 ```rust
+use greatwestern::grammar::Instruction::{AddUser, RemoveUser};
+use greatwestern::Hpc;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
+
 async_runnable! {
     ///
     /// Runnable function that will be called when a job is received
@@ -267,7 +273,7 @@ async_runnable! {
 
                 tracing::info!("Here we would implement the business logic to add the user to the cluster");
 
-                job = job.completed("account created")?;
+                job = job.completed("account created".to_string())?;
             }
             RemoveUser(user) => {
                 // remove the user from the cluster
@@ -279,7 +285,7 @@ async_runnable! {
                     job = job.errored(&format!("You are not allowed to remove the account for {:?}",
                                       user.username()))?;
                 } else {
-                    job = job.completed("account removed")?;
+                    job = job.completed("account removed".to_string())?;
                 }
             }
             _ => {
@@ -294,6 +300,13 @@ async_runnable! {
     }
 }
 ```
+
+`Job` and `Envelope` are generic over a `Domain` (see
+[Writing your own Domain](../specifications/writing-a-domain.md)) - here we
+fix them to `Hpc`, `greatwestern`'s reference domain, via type aliases, so the
+rest of the file can refer to `Job`/`Envelope` exactly as before. `AddUser` and
+`RemoveUser` are two of the variants of `greatwestern::grammar::Instruction`,
+the concrete instruction vocabulary `Hpc` supplies.
 
 The `Job` is passed to the handler function in an `Envelope`. The `Envelope`
 contains the `Job`, as well as metadata about the communication of that
@@ -310,6 +323,10 @@ command that the job is supposed to carry out. There is a whole grammar,
 described later, that maps string commands (e.g. `add_user`) to Rust
 instruction Enums (e.g. `AddUser`). This ensures that command parsing
 is robust and that the risk of command injection attacks is minimised.
+This grammar is defined by whichever `Domain` the agents are compiled
+against - in this example (and in every built-in OpenPortal agent) that's
+`greatwestern`, described in
+[instruction-protocol.md](../specifications/instruction-protocol.md).
 
 There are three arms to this match statement. The first is for the
 `AddUser` instruction. This implements the business logic to add a user

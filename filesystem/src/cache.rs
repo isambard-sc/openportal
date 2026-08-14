@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::Result;
+use greatwestern::storage::QuotaLimit;
 use once_cell::sync::Lazy;
-use templemeads::storage::QuotaLimit;
 use templemeads::Error;
 use tokio::sync::RwLock;
 

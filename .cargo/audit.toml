@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+#
+# Configuration for `cargo audit` (run by `make audit` and by CI).
+#
+# Every entry in `ignore` below is a **temporary** suppression with a written
+# justification, not a permanent exception. All eight arrive through a single
+# dependency path and are cleared by one upgrade:
+#
+#     openportal (python/) -> pyo3 0.27
+#                          -> pyo3-stub-gen 0.22 -> rustpython-parser 0.4 -> unic-* 0.9
+#
+# **The fix is to upgrade `pyo3` to >= 0.29 and `pyo3-stub-gen` in lockstep.** That is
+# planned as its own piece of work rather than folded into the security review, because
+# pyo3 0.27 -> 0.29 crosses two major versions over ~900 API touchpoints in
+# `python/src/lib.rs`, and the Python bindings are the one component
+# `docs/specifications/security-review-2.md` §7 records as *not* covered by that
+# review. Migrating them as a footnote to it, against advisories that are not
+# reachable, would trade a real regression risk for no security gain.
+#
+# Re-check this file whenever `pyo3` or `pyo3-stub-gen` moves, and delete the entries
+# rather than extending them.
+
+[advisories]
+ignore = [
+    # ---------------------------------------------------------------------------
+    # pyo3 0.27.2 - two genuine vulnerabilities, neither reachable from this
+    # workspace. Audited 2026-08-04; see the analysis below each entry.
+    # ---------------------------------------------------------------------------
+
+    # Out-of-bounds read in `nth` / `nth_back` for `PyList` and `PyTuple` iterators.
+    #
+    # Not reachable. Only three crates in the tree depend on pyo3 - `openportal`
+    # (python/), `pyo3-stub-gen` and `numpy` - and none reaches the vulnerable code:
+    #
+    #   * `openportal` never iterates a `PyList` or `PyTuple`. Its entire use of those
+    #     types is `PyList::empty` (11 sites), `list.append` (11) and `list.into_any`
+    #     (11) - it only ever *builds* lists. `PyTuple` is not used at all.
+    #   * The indirect route matters too, because `Iterator::skip` and `step_by` call
+    #     `nth` internally: there is no `skip`, `step_by`, `nth` or `nth_back` anywhere
+    #     in `python/src/`.
+    #   * `pyo3-stub-gen` has two `.nth()` calls, both on `str::Chars` rather than a
+    #     pyo3 iterator (`generate/qualifier.rs:191`, `docgen/util.rs:37`).
+    #   * `numpy` and `pyo3-stub-gen-derive` have none. The derive macro also emits no
+    #     code touching `PyList`/`PyTuple`, which matters because its output compiles
+    #     into the shipped `cdylib`.
+    "RUSTSEC-2026-0176",
+
+    # Missing `Sync` bound on `PyCFunction::new_closure` closures.
+    #
+    # Not reachable. `PyCFunction` and `new_closure` appear nowhere in
+    # `python/src/`, `pyo3-stub-gen`, `pyo3-stub-gen-derive` or `numpy`.
+    "RUSTSEC-2026-0177",
+
+    # ---------------------------------------------------------------------------
+    # unic-* 0.9 - unmaintained, not vulnerable. No advisory claims a defect in
+    # any of these crates; they are flagged solely as no longer maintained.
+    #
+    # All six arrive via `pyo3-stub-gen` -> `rustpython-parser`, and none is a
+    # transitive dependency of any *agent*: they exist only on the Python-bindings
+    # path, whose purpose is generating `.pyi` type stubs. Nothing in `op-portal`,
+    # `op-bridge` or any other agent links them.
+    #
+    # These are cleared by the same `pyo3-stub-gen` upgrade, which is expected to
+    # drop `rustpython-parser` entirely.
+    # ---------------------------------------------------------------------------
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0090", # unic-emoji-char
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+]

@@ -3,17 +3,20 @@
 
 use anyhow::Result;
 
-use templemeads::agent::scheduler::{process_args, run, Defaults};
-use templemeads::agent::Type as AgentType;
-use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{
+use greatwestern::grammar::Instruction::{
     AddLocalProject, AddLocalUser, GetLocalLimit, GetLocalUsageReport, RemoveLocalProject,
     RemoveLocalUser, SetLocalLimit,
 };
-use templemeads::job::{Envelope, Job};
+use greatwestern::Hpc;
+use templemeads::agent::scheduler::{process_args, run, Defaults};
+use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
 use templemeads::notification::default_notify_runner;
 use templemeads::set_notify_runner;
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 mod cache;
 mod sacctmgr;
@@ -33,7 +36,7 @@ async fn main() -> Result<()> {
     templemeads::config::initialise_tracing();
 
     // start system monitoring
-    templemeads::spawn_system_monitor();
+    templemeads::spawn_system_monitor::<Hpc>();
 
     // create the OpenPortal paddington defaults
     let defaults: Defaults = Defaults::parse(
@@ -123,7 +126,7 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    set_notify_runner(default_notify_runner).await?;
+    set_notify_runner::<Hpc>(default_notify_runner).await?;
 
     if slurm_server.is_empty() {
         // we are using sacctmgr and the commandline to interact

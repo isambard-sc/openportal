@@ -3,76 +3,39 @@
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use ts_rs::TS;
 
-use crate::error::Error;
+use templemeads::Error;
 
-use crate::grammar::NamedType;
+use templemeads::named::NamedType;
 
 impl NamedType for StorageSize {
-    fn type_name() -> &'static str {
-        "StorageSize"
-    }
-}
-
-impl NamedType for Vec<StorageSize> {
-    fn type_name() -> &'static str {
-        "Vec<StorageSize>"
+    fn type_name() -> String {
+        "StorageSize".to_string()
     }
 }
 
 impl NamedType for StorageUsage {
-    fn type_name() -> &'static str {
-        "StorageUsage"
-    }
-}
-
-impl NamedType for Vec<StorageUsage> {
-    fn type_name() -> &'static str {
-        "Vec<StorageUsage>"
+    fn type_name() -> String {
+        "StorageUsage".to_string()
     }
 }
 
 impl NamedType for QuotaLimit {
-    fn type_name() -> &'static str {
-        "QuotaLimit"
-    }
-}
-
-impl NamedType for Vec<QuotaLimit> {
-    fn type_name() -> &'static str {
-        "Vec<QuotaLimit>"
+    fn type_name() -> String {
+        "QuotaLimit".to_string()
     }
 }
 
 impl NamedType for Quota {
-    fn type_name() -> &'static str {
-        "Quota"
-    }
-}
-
-impl NamedType for Vec<Quota> {
-    fn type_name() -> &'static str {
-        "Vec<Quota>"
+    fn type_name() -> String {
+        "Quota".to_string()
     }
 }
 
 impl NamedType for Volume {
-    fn type_name() -> &'static str {
-        "Volume"
-    }
-}
-
-impl NamedType for Vec<Volume> {
-    fn type_name() -> &'static str {
-        "Vec<Volume>"
-    }
-}
-
-impl NamedType for HashMap<Volume, Quota> {
-    fn type_name() -> &'static str {
-        "HashMap<Volume, Quota>"
+    fn type_name() -> String {
+        "Volume".to_string()
     }
 }
 
@@ -142,14 +105,14 @@ impl std::ops::Add for StorageSize {
 
     fn add(self, other: Self) -> Self {
         Self {
-            bytes: self.bytes + other.bytes,
+            bytes: self.bytes.saturating_add(other.bytes),
         }
     }
 }
 
 impl std::ops::AddAssign for StorageSize {
     fn add_assign(&mut self, other: Self) {
-        self.bytes += other.bytes;
+        self.bytes = self.bytes.saturating_add(other.bytes);
     }
 }
 
@@ -174,14 +137,14 @@ impl std::ops::Mul<u64> for StorageSize {
 
     fn mul(self, rhs: u64) -> Self {
         Self {
-            bytes: self.bytes * rhs,
+            bytes: self.bytes.saturating_mul(rhs),
         }
     }
 }
 
 impl std::ops::MulAssign<u64> for StorageSize {
     fn mul_assign(&mut self, rhs: u64) {
-        self.bytes *= rhs;
+        self.bytes = self.bytes.saturating_mul(rhs);
     }
 }
 
@@ -190,21 +153,25 @@ impl std::ops::Div<u64> for StorageSize {
 
     fn div(self, rhs: u64) -> Self {
         Self {
-            bytes: self.bytes / rhs,
+            // Dividing by zero panics, and with `panic = "abort"` that ends the
+            // process. Zero is treated as "no divisor", yielding zero, which
+            // matches how `Usage`'s `DivAssign` already handles it. See
+            // docs/specifications/security-review-2.md (finding R33).
+            bytes: self.bytes.checked_div(rhs).unwrap_or(0),
         }
     }
 }
 
 impl std::ops::DivAssign<u64> for StorageSize {
     fn div_assign(&mut self, rhs: u64) {
-        self.bytes /= rhs;
+        self.bytes = self.bytes.checked_div(rhs).unwrap_or(0);
     }
 }
 
 impl std::iter::Sum for StorageSize {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::default(), |a, b| Self {
-            bytes: a.bytes + b.bytes,
+            bytes: a.bytes.saturating_add(b.bytes),
         })
     }
 }
@@ -588,8 +555,8 @@ impl Quota {
         // Find if there's a "used" keyword
         if let Some(used_idx) = parts.iter().position(|&p| p.eq_ignore_ascii_case("used")) {
             // Format: "<limit> used <usage>"
-            let limit_str = parts[..used_idx].join("");
-            let usage_str = parts[used_idx + 1..].join("");
+            let limit_str = parts.get(..used_idx).unwrap_or_default().join("");
+            let usage_str = parts.get(used_idx + 1..).unwrap_or_default().join("");
 
             let limit = StorageSize::parse(&limit_str)?;
             let usage = StorageSize::parse(&usage_str)?;
@@ -656,11 +623,39 @@ impl std::fmt::Display for Quota {
 }
 
 /// Identifies a storage volume (e.g., "home", "scratch", "project")
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Hash, TS)]
-#[serde(transparent)]
+///
+/// `Volume` is a wire-deserialised `HashMap` key, and the `transparent` derive used
+/// to bypass [`Volume::parse`] entirely - so a name that `parse` rejects (empty, or
+/// containing a space) could still arrive over the wire. Consumers look the name up
+/// in the configured volume map, so an unknown one errors out downstream, which is
+/// why this is hardening rather than a vulnerability. `try_from` closes it at the
+/// boundary instead. See `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Hash, TS)]
+#[serde(try_from = "String")]
 #[ts(export, type = "string")]
 pub struct Volume {
     name: String,
+}
+
+impl TryFrom<String> for Volume {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Volume::parse(&value)
+    }
+}
+
+/// Serialised as a bare string, exactly as `#[serde(transparent)]` did - the wire
+/// format is unchanged. Hand-written because `transparent` and `try_from` cannot be
+/// combined, and `try_from` is what routes deserialisation through
+/// [`Volume::parse`].
+impl Serialize for Volume {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.name)
+    }
 }
 
 impl Volume {
@@ -692,5 +687,87 @@ impl Volume {
 impl std::fmt::Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_a_volume_name_from_the_wire_goes_through_parse() {
+        // `Volume` is a wire-deserialised HashMap key and the `transparent` derive
+        // bypassed `parse` entirely, so a name `parse` rejects could still arrive.
+        // See finding R33.
+        assert_eq!(
+            serde_json::from_str::<Volume>(r#""home""#).ok(),
+            Volume::parse("home").ok()
+        );
+
+        for bad in [r#""""#, r#"" ""#, r#""two words""#, r#""a b""#] {
+            assert!(
+                serde_json::from_str::<Volume>(bad).is_err(),
+                "{} must be refused on the wire, as `parse` refuses it",
+                bad
+            );
+        }
+
+        // ...and the serialised form is still a bare string, so the wire format is
+        // unchanged.
+        let volume = match Volume::parse("scratch") {
+            Ok(v) => v,
+            Err(e) => unreachable!("parse: {:?}", e),
+        };
+        assert_eq!(
+            serde_json::to_string(&volume).unwrap_or_default(),
+            r#""scratch""#
+        );
+
+        // It is used as a map key, so round-tripping a map must work too.
+        let mut map = std::collections::HashMap::new();
+        map.insert(volume, 1u32);
+        let json = serde_json::to_string(&map).unwrap_or_default();
+        assert_eq!(json, r#"{"scratch":1}"#);
+        assert!(serde_json::from_str::<std::collections::HashMap<Volume, u32>>(&json).is_ok());
+        assert!(
+            serde_json::from_str::<std::collections::HashMap<Volume, u32>>(r#"{"a b":1}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn test_storage_size_arithmetic_saturates_and_survives_a_zero_divisor() {
+        // As for `Usage` - see finding R33. Additionally, dividing by zero
+        // panics outright, which `panic = "abort"` turns into a process kill.
+        let max = StorageSize::from_bytes(u64::MAX);
+        let one = StorageSize::from_bytes(1);
+
+        assert_eq!((max + one).as_bytes(), u64::MAX);
+        assert_eq!((max * 2).as_bytes(), u64::MAX);
+        assert_eq!(
+            [max, one].into_iter().sum::<StorageSize>().as_bytes(),
+            u64::MAX
+        );
+
+        let mut acc = max;
+        acc += one;
+        assert_eq!(acc.as_bytes(), u64::MAX);
+
+        let mut acc = max;
+        acc *= 2;
+        assert_eq!(acc.as_bytes(), u64::MAX);
+
+        // Underflow clamps at zero rather than wrapping.
+        assert_eq!((one - max).as_bytes(), 0);
+
+        // Division by zero yields zero rather than aborting.
+        assert_eq!((max / 0).as_bytes(), 0);
+
+        let mut acc = max;
+        acc /= 0;
+        assert_eq!(acc.as_bytes(), 0);
+
+        // Ordinary values are unaffected.
+        assert_eq!((StorageSize::from_bytes(100) / 4).as_bytes(), 25);
+        assert_eq!((StorageSize::from_bytes(100) * 3).as_bytes(), 300);
     }
 }

@@ -4,9 +4,9 @@
 [workspace]
 
 members = [
-    "bridge", "cluster", "clusters",
-    "filesystem", "freeipa", "localaccount", "paddington", "portal",
-    "provider", "python", "slurm", "templemeads",
+    "bridge", "cloudaccount", "cloudportal", "cluster", "clusters",
+    "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
+    "provider", "proxy", "python", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
     "docs/cmdline/cluster"
 ]
@@ -15,14 +15,34 @@ members = [
 # cargo, because its stub_gen binary requires Python symbols that are only
 # available in maturin's build environment.
 default-members = [
-    "bridge", "cluster", "clusters",
-    "filesystem", "freeipa", "localaccount", "paddington", "portal",
-    "provider", "slurm", "templemeads",
+    "bridge", "cloudaccount", "cloudportal", "cluster", "clusters",
+    "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
+    "provider", "proxy", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
     "docs/cmdline/cluster"
 ]
 
 resolver = "2"
+
+# Lints are declared once here and inherited by every member crate with
+# `[lints] workspace = true`, rather than being repeated in sixteen Cargo.toml
+# files that can drift apart. Test-code exemptions live in `clippy.toml`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_crate_dependencies = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+# Indexing and slicing panic on an out-of-range index, and the release profile
+# sets `panic = "abort"`, so a single bad index from the wire, from a spawned
+# tool's output, or from an external service's response terminates the agent.
+# That is exactly what happened in finding R1 - `Instruction::parse` indexed
+# `parts[1]` unguarded, reachable from `Command`'s `Deserialize`. Denying the
+# whole class means the next one cannot be written by accident. See
+# docs/specifications/security-review-2.md (finding R1).
+indexing_slicing = "deny"
 
 [profile.release]
 strip = true
@@ -30,3 +50,11 @@ opt-level = 3
 lto = false   # Disable LTO to speed up compilation
 codegen-units = 1
 panic = "abort"
+# Integer overflow is a bug, and a release build that wraps silently turns it
+# into corrupted data instead of a crash - a peer-supplied report value could
+# wrap a project's billed total to near zero without anything noticing. Checking
+# it is only safe now that the arithmetic reachable from the wire saturates
+# explicitly (`Usage`, `StorageSize`) and the reachable panics of finding R1 are
+# gone; with `panic = "abort"` an unchecked overflow would otherwise be a remote
+# process kill. See docs/specifications/security-review-2.md §5.
+overflow-checks = true

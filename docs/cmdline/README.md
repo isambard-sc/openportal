@@ -145,15 +145,20 @@ These defaults were set in the code in the `portal/src/main.rs` file.
 ```rust
 use anyhow::Result;
 
+use greatwestern::Hpc;
 use templemeads::agent::portal::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
+use templemeads::async_runnable;
+use templemeads::Error;
 
 use std::path::PathBuf;
 
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    templemeads::config::initialise_tracing();
 
     // create the default options for a portal
     let defaults = Defaults::parse(
@@ -162,6 +167,8 @@ async fn main() -> Result<()> {
         Some("ws://localhost:8090".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8090),
+        None,
+        None,
         Some(AgentType::Portal),
     );
 
@@ -175,11 +182,36 @@ async fn main() -> Result<()> {
     };
 
     // run the portal agent
-    run(config).await?;
+    run(config, portal_runner).await?;
 
     Ok(())
 }
+
+async_runnable! {
+    ///
+    /// Runnable function that is called when the portal needs
+    /// to issue a job
+    ///
+    pub async fn portal_runner(envelope: Envelope) -> Result<Job, Error>
+    {
+        let job = envelope.job();
+
+        tracing::error!("Unknown instruction: {:?}", job.instruction());
+        return Err(Error::UnknownInstruction(
+            format!("Unknown instruction: {:?}", job.instruction()).to_string(),
+        ));
+    }
+}
 ```
+
+`Job` and `Envelope` are generic over a `Domain` - see
+[Writing your own Domain](../specifications/writing-a-domain.md) - so the
+example fixes them to `greatwestern`'s `Hpc` domain via type aliases. Because
+`templemeads` no longer knows what instructions exist, `portal::run` (like
+`instance::run` below) takes an explicit job handler (`portal_runner`) rather
+than assuming a built-in one; here it doesn't do anything with the instruction
+beyond reporting that it doesn't recognise it, since this example portal never
+receives jobs itself.
 
 This line;
 
@@ -201,6 +233,8 @@ example portal;
         Some("ws://localhost:8090".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8090),
+        None,
+        None,
         Some(AgentType::Portal),
     );
 ```
@@ -209,7 +243,8 @@ Here, we set the default name of the agent to `portal`, the default
 configuration file path to `example-portal.toml`, the default URL to
 `ws://localhost:8090`, the default IP address to `127.0.0.1` and
 the default port to `8090`. We also set the type of the agent to
-`Portal`.
+`Portal`. The two `None` arguments in the middle are optional defaults
+that this example doesn't need to override.
 
 > [!NOTE]
 > With the exception of the agent type, all of these options
@@ -230,12 +265,12 @@ the command line arguments;
     };
 ```
 
-Finally, we enter the event loop for our example portal agent
-via;
+Finally, we enter the event loop for our example portal agent, passing
+in `portal_runner` as the job handler;
 
 ```rust
     // run the portal agent
-    run(config).await?;
+    run(config, portal_runner).await?;
 ```
 
 ## Running the cluster
@@ -305,13 +340,16 @@ similar to that of the `portal` agent.
 
 use anyhow::Result;
 
+use greatwestern::grammar::Instruction::{AddUser, RemoveUser};
+use greatwestern::Hpc;
 use std::path::PathBuf;
 use templemeads::agent::instance::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
 use templemeads::async_runnable;
-use templemeads::grammar::Instruction::{AddUser, RemoveUser};
-use templemeads::job::{Envelope, Job};
 use templemeads::Error;
+
+type Envelope = templemeads::job::Envelope<Hpc>;
+type Job = templemeads::job::Job<Hpc>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -325,6 +363,8 @@ async fn main() -> Result<()> {
         Some("ws://localhost:8091".to_owned()),
         Some("127.0.0.1".to_owned()),
         Some(8091),
+        None,
+        None,
         Some(AgentType::Instance),
     );
 
@@ -348,7 +388,13 @@ The main differences are that we are importing `process_args`,
 `run` and `Defaults` from `templemeads::agent::instance`, and that
 we pass in the `cluster_runner` function to the `run` function,
 so that it can be used to handle the jobs that are sent to the
-`cluster` agent.
+`cluster` agent. `Job` and `Envelope` are aliased to
+`templemeads::job::Job<Hpc>` / `Envelope<Hpc>` exactly as in the `portal`
+agent above, and `AddUser`/`RemoveUser` are imported from
+`greatwestern::grammar::Instruction` - `greatwestern` being the `Domain`
+every built-in OpenPortal agent, including this example, is compiled
+against (see [Writing your own Domain](../specifications/writing-a-domain.md)
+if you want to swap it for your own vocabulary).
 
 > [!NOTE]
 > The `cluster_runner` function is not shown here as it

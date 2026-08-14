@@ -13,18 +13,41 @@ encrypted on the wire).
 For a narrative introduction to OpenPortal — its design philosophy, agent
 types, and worked examples — see the [docs overview](../README.md).
 
+`templemeads` (Job/Notification transport, wire protocol, security model,
+bridge API, agent configuration) is generic over a `Domain` — the compile-time
+choice of instruction and notification vocabulary. Every built-in OpenPortal
+agent is compiled against `greatwestern`, the reference `Domain`, which is
+what [instruction-protocol.md](instruction-protocol.md),
+[notification-protocol.md](notification-protocol.md), and
+[json-types.md](json-types.md) document. If you want to bring your own
+vocabulary instead, see
+[writing-a-domain.md](writing-a-domain.md).
+
 ---
 
 ## Documents
 
-### [instruction-protocol.md](instruction-protocol.md)
-**The OpenPortal instruction text protocol**
+### [writing-a-domain.md](writing-a-domain.md)
+**Implementing your own command vocabulary**
 
-Specifies the full grammar for the instruction strings that agents exchange:
-all 53 instructions, their argument formats, and the identifier types
-(`UserIdentifier`, `ProjectIdentifier`, `UserMapping`, `ProjectMapping`,
-`Destination`, etc.). This is the primary reference for anyone implementing
-a portal or agent that needs to construct or parse OpenPortal commands.
+For anyone reusing `paddington`/`templemeads` for infrastructure other than
+HPC/Waldur: how to implement the `templemeads::domain::Domain` trait, define
+your own `Instruction` and `NotificationEvent` types, and wire them up so your
+own agents interoperate over the same secure peer-to-peer transport without
+depending on `greatwestern` at all.
+
+---
+
+### [instruction-protocol.md](instruction-protocol.md)
+**The `greatwestern` instruction text protocol**
+
+Specifies the full grammar for the instruction strings that `greatwestern`
+(the reference `Domain`) agents exchange: all 53 instructions, their argument
+formats, and the identifier types (`UserIdentifier`, `ProjectIdentifier`,
+`UserMapping`, `ProjectMapping`, `Destination`, etc.). This is the primary
+reference for anyone implementing a portal or agent that needs to construct
+or parse `greatwestern` commands. Building a different `Domain`? See
+[writing-a-domain.md](writing-a-domain.md) instead.
 
 ---
 
@@ -33,7 +56,9 @@ a portal or agent that needs to construct or parse OpenPortal commands.
 
 Specifies the fire-and-forget `Notification` system — the lightweight,
 unacknowledged signalling mechanism that complements the robust Job system.
-Covers:
+`Notification` itself is generic over a `Domain`; this document covers both
+the domain-agnostic parts (owned by `templemeads`) and `greatwestern`'s
+concrete `NotificationEvent` vocabulary. Covers:
 
 - The conceptual distinction between Jobs (TCP-like) and Notifications (UDP-like)
 - The full `NotificationEvent` grammar: all 10 user and project events
@@ -52,9 +77,11 @@ Covers:
 **JSON serialisation of result types**
 
 Specifies the JSON format of every value that can appear in a `Job`'s `result`
-field once a job completes: `Job` itself, `AwardDetails` (wire name: `ProjectDetails`), `ProjectUsageReport`,
-`Quota`, `Usage`, and all other return types. Includes the `result_type` name
-reference table mapping Rust type names to their JSON schemas.
+field once a job completes: `Job` itself (domain-agnostic, from `templemeads`)
+and `greatwestern`'s result types - `AwardDetails` (wire name: `ProjectDetails`),
+`ProjectUsageReport`, `Quota`, `Usage`, and all others. Includes the
+`result_type` name reference table mapping Rust type names to their JSON
+schemas.
 
 ---
 
@@ -72,6 +99,13 @@ network layer:
   key derivation, and XChaCha20-Poly1305 AEAD
 - **Handshake**: HTTP header salt exchange, session key negotiation, and
   `PeerDetails` identity exchange
+- **Blind relay protocol**: the `RelayEnvelope` wire format and the
+  `StartRelayedConnection`/`RelayedConnectionAccepted` bootstrap used by
+  `op-proxy` to relay two outbound-only agents' traffic without decrypting it
+- **Replay protection**: the `NoncedPayload` wrapper carrying a per-sender
+  nonce on every ongoing message, direct or relayed, plus a nonce on
+  `Handshake`/`PeerDetails` and the relayed bootstrap messages themselves,
+  checked against a separate, longer-lived per-peer window
 
 ---
 
@@ -87,7 +121,55 @@ provisioned using the invite file mechanism. Also covers:
 - Config file encryption at rest (Environment and Simple schemes)
 - Zone isolation
 - The per-agent trust topology
+- The blind relay proxy's trust model - why `op-proxy` never sees either
+  relayed agent's traffic or pre-shared keys
+- Replay protection - the IPsec/WireGuard-style anti-replay window that
+  stops a captured, validly-encrypted message from being resent to
+  re-trigger its effect, applied to both ongoing traffic and to the
+  handshake/bootstrap messages that establish a connection or relayed
+  session in the first place
 - Memory safety guarantees (`SecretBox`, `Zeroize`)
+
+---
+
+### [security-review.md](security-review.md)
+**Independent security assessment**
+
+Where `security-model.md` *describes* the intended model, this document
+*evaluates* it: a code-level security review for professionals who need to
+judge how strong OpenPortal actually is and where the genuine gaps are.
+Written with full candour, findings cite `file:line` and are graded by
+severity. Covers:
+
+- The threat model (on-path attacker, compromised peer key, malicious proxy,
+  bridge client, local user) and what each can and cannot do
+- Verified security strengths (bounded trust topology, sound transport crypto
+  with no nonce reuse, a correct anti-replay window, blind relay, no-shell
+  privileged agents, memory safety)
+- Graded findings (F1–F15) with locations and remediation — all now resolved
+  (fixed in code, or recorded as deliberate, documented design decisions)
+- Residual risks and accepted trade-offs (out-of-band key management, TLS as a
+  deployment responsibility, negotiated replay-protection rollout, no forward
+  secrecy, the prototype cloud agents)
+- A prioritised remediation list
+
+---
+
+### [highavailability.md](highavailability.md)
+**Client and server high availability**
+
+Covers the two ways an OpenPortal agent can be run redundantly so a single
+host failure doesn't take down a peer relationship:
+
+- Client HA (direct connections) - multiple physical clients presenting
+  one identity to a server, arbitrated via `StandbyStatus`
+- Server HA (via `op-proxy`) - a later insight showing that composing
+  client HA with the blind relay proxy and its existing `SessionUnknown`
+  restart-recovery path gives genuine server-side redundancy too, for an
+  agent that is server-only
+- Why board-sync reconciliation, command idempotency, and portal-side
+  retries mean a brief failover gap isn't expected to surface as a failure
+- Practical guidance on where HA is actually worth deploying
 
 ---
 
@@ -124,18 +206,26 @@ the OpenPortal network. Covers:
 ### [agent-configuration.md](agent-configuration.md)
 **Agent configuration reference**
 
-The complete configuration reference for all eight agent types. Covers:
+The complete configuration reference for every agent type. Covers:
 
 - Common TOML config fields shared by all agents (`name`, `url`, `ip`,
-  `port`, peer lists, encryption)
+  `port`, peer lists including the relayed-peer `proxy` field, encryption)
 - The common CLI subcommands (`init`, `client`, `server`, `encryption`,
   `extra`, `secret`, `run`)
 - Per-agent sections with default ports, config file paths, and all
   agent-specific options:
   - **Portal**, **Provider**, **Bridge**, **Clusters**, **Cluster**
-  - **FreeIPA** (server hostnames, credentials, group mappings)
+  - **FreeIPA** and **Local Account** (server hostnames, credentials, group
+    mappings)
   - **Filesystem** (volume config, quota engines, Lustre ID strategies)
   - **Slurm** (sacctmgr mode and REST API mode)
+  - **Cloud Account** (assignment state directory, accounting directory,
+    currency)
+  - **Cloud Portal** (Award state directory, offerings table, approval
+    CLI subcommands)
+  - **Blind Relay Proxy** (`op-proxy` - its own bespoke CLI, relay policy
+    file, and the current integration gap for real agents - see
+    [notes.md](notes.md) §1.3)
 - Default port reference table and a typical deployment walkthrough
 
 ---
@@ -173,16 +263,18 @@ wire together, and run agents in a real deployment.
 **TypeScript bindings**
 
 Describes the auto-generated TypeScript type definitions produced from the
-`templemeads` Rust types via [ts-rs](https://github.com/Aleph-Alpha/ts-rs).
-Covers:
+`templemeads` and `greatwestern` Rust types via
+[ts-rs](https://github.com/Aleph-Alpha/ts-rs). Covers:
 
 - How to regenerate the bindings with `cargo test`
-- The full table of exported types and which Rust source they derive from
+- The full table of exported types, which crate and Rust source they derive
+  from, and why `Job` needs a hand-written binding rather than a derived one
 - Serialisation notes: timestamp formats, identifier strings, HashMap key
   conventions, and custom-format fields such as storage sizes
-- The hand-written `identifiers.ts` utility — parse/stringify helpers for
-  `UserIdentifier`, `ProjectIdentifier`, `PortalIdentifier`, `UserMapping`,
-  and `ProjectMapping`
+- The hand-written `identifiers.ts` utilities — parse/stringify helpers for
+  `PortalIdentifier` (`templemeads/bindings/`) and `UserIdentifier`,
+  `ProjectIdentifier`, `UserMapping`, `ProjectMapping`
+  (`greatwestern/bindings/`)
 - How to add a new exported type
 
 ---

@@ -6,6 +6,7 @@ use crate::bridge_server::{
     save as save_bridge_invite, spawn, Config as BridgeConfig, Defaults as BridgeDefaults,
     Invite as BridgeInvite,
 };
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::handler::{process_message, set_my_service_details};
 use crate::runnable::AsyncRunnable;
@@ -27,7 +28,7 @@ use std::path::PathBuf;
 /// This listens for requests from the bridge http server and
 /// bridges those to the other Agents in the OpenPortal system.
 ///
-pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
+pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<(), Error> {
     if config.service.name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
@@ -42,10 +43,10 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     set_my_service_details(&config.service.name(), &config.agent, Some(runner), true).await?;
 
     // spawn the bridge server
-    spawn(config.bridge).await?;
+    spawn::<L>(config.bridge).await?;
 
     // now run the bridge OpenPortal agent
-    paddington::set_handler(process_message).await?;
+    paddington::set_handler(process_message::<L>).await?;
     paddington::run(config.service).await?;
 
     Ok(())
@@ -140,6 +141,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             bridge_port,
             healthcheck_port,
             proxy_header,
+            trusted_proxy,
             signal_url,
             notification_url,
             force,
@@ -152,7 +154,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 local_healthcheck_port = defaults.service.healthcheck_port();
             }
 
-            let config = Config {
+            let mut config = Config {
                 service: {
                     ServiceConfig::new(
                         &service.clone().unwrap_or(defaults.service.name()),
@@ -183,15 +185,20 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
                 agent: AgentType::Bridge,
             };
 
+            // Apply the trusted-proxy allow-list to both the agent (paddington,
+            // finding F6) and the bridge HTTP (finding F3) layers.
+            config.service.set_trusted_proxy(trusted_proxy.as_deref())?;
+            config.bridge.set_trusted_proxy(trusted_proxy.as_deref())?;
+
             if config_file.try_exists()? {
                 if *force {
                     std::fs::remove_file(&config_file)
                         .context("Could not remove existing config file.")?;
                 } else {
-                    tracing::warn!("Config file already exists: {}", &config_file.display());
+                    tracing::warn!("Config file already exists: {}", config_file.display());
                     return Err(Error::ConfigExists(format!(
                         "Config file already exists: {}",
-                        &config_file.display()
+                        config_file.display()
                     )));
                 }
             }
@@ -212,6 +219,7 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             remove,
             zone,
             rotate,
+            r#type,
         }) => {
             if *list {
                 let config = load_config::<Config>(&config_file)?;
@@ -222,6 +230,8 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
             }
 
             if let Some(client) = add {
+                let agent_type = crate::agent_core::validate_agent_type(r#type)?;
+
                 if ip.is_none() {
                     return Err(Error::PeerEdit(format!(
                         "No IP address or IP range provided for client {}.",
@@ -231,11 +241,17 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
                 let mut config = load_config::<Config>(&config_file)?;
 
-                let invite = config.service.add_client(
-                    client,
-                    &ip.clone().unwrap_or_else(|| "".to_string()),
-                    zone,
-                )?;
+                let invite = config
+                    .service
+                    .add_client(
+                        client,
+                        &ip.clone().unwrap_or_else(|| "".to_string()),
+                        zone,
+                        &agent_type,
+                    )?
+                    // A bridge is always a Bridge - tell the client so, so its
+                    // side of the expectation needs no hand-editing.
+                    .with_agent_type(Some(AgentType::Bridge.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -257,7 +273,10 @@ pub async fn process_args(defaults: &Defaults) -> Result<Option<Config>, Error> 
 
             if let Some(client) = rotate {
                 let mut config = load_config::<Config>(&config_file)?;
-                let invite = config.service.rotate_client_keys(client, zone)?;
+                let invite = config
+                    .service
+                    .rotate_client_keys(client, zone)?
+                    .with_agent_type(Some(AgentType::Bridge.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -416,6 +435,17 @@ enum Commands {
             help = "Name of the client whose keys are being rotated"
         )]
         rotate: Option<String>,
+
+        #[arg(
+            long,
+            short = 't',
+            help = "The agent type this client must present itself as, e.g. 'portal'. \
+                    Communicated out-of-band by the operator of that agent - it is never \
+                    taken from anything the client sends. If omitted, the client's claimed \
+                    type is not checked. One of: portal, provider, platform, instance, \
+                    bridge, account, filesystem, scheduler, virtual"
+        )]
+        r#type: Option<String>,
     },
 
     /// Adding and removing servers
@@ -512,6 +542,15 @@ enum Commands {
             help = "Optional header to use for proxying requests - look in this for the client IP address"
         )]
         proxy_header: Option<String>,
+
+        #[arg(
+            long,
+            help = "IP address(es)/range(s) of trusted reverse proxies whose forwarded client \
+                    IP headers may be trusted (comma-separated, CIDR allowed, e.g. 127.0.0.0/8). \
+                    Applies to both the agent (proxy_header) and bridge HTTP layers. Required for \
+                    any forwarded client IP to be trusted."
+        )]
+        trusted_proxy: Option<String>,
 
         #[arg(
             long,

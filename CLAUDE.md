@@ -6,61 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OpenPortal is a distributed infrastructure management protocol implementation written in Rust. It provides secure communication between user portals (e.g., Waldur) and digital research infrastructure (e.g., supercomputers). The system uses a peer-to-peer agent-based architecture where each agent handles specific infrastructure management tasks without requiring centralized "god keys."
 
-## Build Commands
-
-```bash
-# Development build
-make
-# or
-cargo build
-
-# Release build (optimized, stripped binaries)
-make release
-# or
-cargo build --release
-
-# Run tests
-make test
-# or
-cargo test --offline --lib -- --color=always --nocapture
-
-# Run specific test(s) - set TESTS variable
-make test TESTS="test_name"
-
-# Build Python bindings
-make python
-# or
-maturin develop -m python/Cargo.toml
-
-# Generate documentation
-make docs
-# or
-cargo doc --no-deps
-
-# Code quality checks
-make style-check    # Check formatting with rustfmt
-make lint           # Run clippy with strict warnings
-```
-
-## Development Commands
-
-```bash
-# Run portal service locally
-make dev-portal
-# or
-cargo run --bin portal-svc
-
-# Run provider service locally
-make dev-provider
-# or
-cargo run --bin provider-svc
-
-# Run specific binary
-cargo run --bin <binary-name>
-# Available binaries: portal-svc, provider-svc, op-bridge, op-cluster,
-# op-clusters, op-filesystem, op-freeipa, and example binaries in docs/
-```
-
 ## Workspace Structure
 
 This is a Cargo workspace with multiple crates. The workspace is organized into:
@@ -69,7 +14,9 @@ This is a Cargo workspace with multiple crates. The workspace is organized into:
 
 - **paddington**: Low-level secure websocket peer-to-peer protocol for service communication. Handles cryptographic authentication, message passing, and connection management between services.
 
-- **templemeads**: High-level agent framework built on paddington. Implements the Agent concept, Job management, Job Boards, and distributed task coordination. All agent executables depend on this.
+- **templemeads**: High-level agent framework built on paddington. Implements the Agent concept, Job management, Job Boards, and distributed task coordination. All agent executables depend on this. Deliberately domain-agnostic: `Job`, `Board`, `Command`, `Notification`, etc. are generic over one `L: templemeads::domain::Domain` type, chosen at compile time per binary via a type alias (e.g. `type Job = templemeads::job::Job<greatwestern::Hpc>;`). templemeads itself carries no command vocabulary - see `docs/plans/archive/grammar-split-design.md` for why and how this split happened.
+
+- **greatwestern**: The HPC/Waldur command vocabulary (the `Instruction` enum, `ProjectIdentifier`/`UserIdentifier`, usage/storage reports, notification events) that rides on top of templemeads. This is the reference `Domain` - every built-in agent below is compiled against `greatwestern::Hpc`. A developer targeting a different kind of infrastructure entirely would write their own crate implementing `templemeads::domain::Domain` instead, and reuse paddington/templemeads unchanged. Two agents built against different `Domain`s are not expected to interoperate - that's intentional, not a bug.
 
 ### Agent Executable Crates
 
@@ -89,7 +36,13 @@ Each agent type is its own binary crate that implements specific infrastructure 
 
 - **slurm** (`op-slurm`): Agent that interfaces with the Slurm scheduler.
 
+- **cloudaccount** (`op-cloudaccount`): Represents a single cloud account (e.g. an AWS account) assigned to a project. This is a deliberately rough prototype agent, co-developed alongside cloud operators who are still building out their side of the integration - it collapses what would normally be separate Instance + Account/Scheduler agents into one process (see `docs/plans/archive/op-cloudaccount-design.md`), holds its own project/user assignment state as plain JSON files (there's no cloud-side API for this yet), and reconstructs usage reports by parsing whatever cost-report JSON files the operators drop into a directory. Expect this to need reshaping once the cloud side of the integration matures.
+
+- **cloudportal** (`op-cloudportal`): A self-contained `Portal` agent representing the "cloud" side of a portal-to-portal relationship (e.g. a central portal creating Awards on it). Also a deliberately rough prototype (see `docs/plans/archive/op-cloudportal-design.md`): there's no real portal management software (no Waldur) behind it, so it stores Award state itself as plain JSON files, addresses/is addressed directly by the upstream portal (no virtual-resource/offering indirection - that mechanism turned out to be same-process-only, see the design doc §4), and requires a human operator to `approve`/`reject` a pending Award via CLI subcommands before a background poller provisions it on whichever `cloudaccount` its `AwardDetails.template` maps to. Also added one-shot CLI support (`run --one-shot`) to `templemeads::portal::run()`, previously only available to Account/Filesystem/Scheduler agents.
+
 - **bridge** (`op-bridge`): Bridges non-Rust portal implementations to the OpenPortal network. Runs a local HTTP server to translate API calls into OpenPortal Jobs.
+
+- **proxy** (`op-proxy`): A blind relay for two agents that can each only make outbound connections (neither can open a port the other can reach). Depends only on `paddington`, never `templemeads` - it has no `Domain`, no Jobs, and never decrypts the traffic it forwards; see `docs/plans/archive/blind-relay-proxy-design.md`. Agents opt in explicitly via a `proxy` field in their paddington config, and the proxy operator must separately `allow` each `(agent, agent)` pair before it will relay between them (default-deny).
 
 - **python**: Python library (via pyo3) for calling into OpenPortal via the bridge agent.
 
@@ -106,6 +59,10 @@ Jobs flow through the system in a hierarchical manner:
 5. **Account/Filesystem** agents perform actual privileged operations
 
 Each agent only has the permissions needed for its specific role, avoiding centralized privileged access.
+
+Exception: **op-cloudaccount** is an Instance agent that does *not* delegate to separate Account/Scheduler agents - it's a rough prototype that merges those roles into one process (see the crate note above and `docs/plans/archive/op-cloudaccount-design.md`).
+
+Exception: **op-cloudportal** is a Portal agent that receives Jobs directly from its upstream portal rather than via a bridge, and provisions approved Awards on **op-cloudaccount** directly rather than via a Provider/Platform layer (see the crate note above and `docs/plans/archive/op-cloudportal-design.md`).
 
 ### Jobs and Job Boards
 
@@ -131,19 +88,15 @@ Agents use TOML configuration files (typically in ~/.config/openportal/ or speci
 
 ## Code Standards
 
-The codebase enforces strict Rust safety standards via lints in Cargo.toml files:
-
-- **unsafe_code = "forbid"**: No unsafe code allowed
-- **dbg_macro = "deny"**: No debug macros in production code
-- **unwrap_used = "deny"**: Must handle errors explicitly, no .unwrap()
-- **expect_used = "deny"**: Must handle errors explicitly, no .expect()
-
 When writing or modifying code:
 - Use proper error handling with Result types and the anyhow crate
 - Follow existing patterns for agent implementation
 - Maintain the security model - agents should only have necessary permissions
 - Add tests to the appropriate crate's lib.rs or separate test files
-- After making changes, run `cargo fmt` to format the code and `cargo clippy` to check for warnings. Fix any warnings introduced by the changes before finishing.
+- After making changes, run `make style-check`, `make lint` and `make test` (or `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings` and `cargo test --all-targets`). Fix any warnings introduced by the changes before finishing. Note `--all-targets` on both: without it clippy skips test code and `cargo test` skips every test in the agent binary crates.
+- Lints are declared once in `[workspace.lints]` in the root `Cargo.toml`; member crates inherit them with `[lints] workspace = true`. `unwrap_used`, `expect_used`, `indexing_slicing` and `dbg_macro` are denied in production code (`clippy.toml` exempts tests), and `unsafe_code` is forbidden. Use `get`/`first`/`split_first`/slice patterns rather than indexing.
+- Release builds set `panic = "abort"` **and** `overflow-checks = true`, so any reachable panic or integer overflow is a remote process kill. Arithmetic on values that arrive from a peer must be explicitly saturating or checked - see `Usage` and `StorageSize` in `greatwestern`.
+- Any file containing key material must be written with `paddington::config::write_secret_file`, never a bare `fs::write`. `scripts/check-secret-writes.sh` (run by `make lint` and CI) enforces this.
 
 ## Examples
 

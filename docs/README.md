@@ -46,7 +46,7 @@ OpenPortal is a collection of Agents, each of which are implemented in their
 own statically compiled executable. Each executable links to a common set
 of OpenPortal crates (libraries).
 
-The two main components of OpenPortal are:
+The three main components of OpenPortal are:
 
 1. `paddington` - this is a crate that implements the secure websocket
    peer-to-peer protocol that lets services communicate with each other.
@@ -62,7 +62,22 @@ The two main components of OpenPortal are:
    the failure of individual Agents. In addition to Jobs, `templemeads`
    provides a lightweight fire-and-forget **Notification** system for
    signalling events between agents without requiring acknowledgement or
-   a result. The source code is in the [templemeads](../templemeads) directory.
+   a result. Deliberately, `templemeads` has no opinion on what a Job
+   actually asks an Agent to do - it is generic over a `Domain` (a Rust
+   trait), which supplies the concrete instruction and notification
+   vocabulary. The source code is in the
+   [templemeads](../templemeads) directory.
+
+3. `greatwestern` - this is the `Domain` that every built-in OpenPortal
+   Agent is compiled against: the HPC/Waldur command vocabulary (`add_user`,
+   `get_usage_report`, `set_project_quota`, and so on), along with the
+   identifier types and usage/storage report types those instructions
+   operate on. It is the *reference implementation* of a Domain, not a
+   privileged part of the protocol - anyone wanting to reuse
+   `paddington`/`templemeads` for a completely different kind of
+   infrastructure can write their own crate in its place. See
+   [Writing your own Domain](specifications/writing-a-domain.md) for how.
+   The source code is in the [greatwestern](../greatwestern) directory.
 
 ### Agents
 
@@ -140,7 +155,33 @@ The key types of Agent are:
    implements the `slurm` Agent, with source code in the
    [slurm](../slurm) directory.
 
-8. `bridge` - OpenPortal is implemented in Rust, while portals are typically
+8. `cloudaccount` - this is an Agent that represents a single cloud account
+   (e.g. one AWS account) assigned to a project. It is a prototype agent
+   that merges the `instance` and `slurm`-style roles into one process:
+   there is no cloud-side API yet to record which projects/users have been
+   assigned to the account, so this Agent is the source of truth for that,
+   and it turns whatever cost-report files the cloud operators drop into a
+   directory into a usage report. The `op-cloudaccount` executable
+   implements this Agent, with source code in the
+   [cloudaccount](../cloudaccount) directory. See
+   [docs/plans/archive/op-cloudaccount-design.md](plans/archive/op-cloudaccount-design.md)
+   for the full design.
+
+9. `cloudportal` - this is an Agent that acts as a self-contained "cloud"
+   portal in a portal-to-portal relationship - for example, a central
+   portal creating Awards on it, the same way any OpenPortal portal can
+   create Awards on a downstream portal. Like `cloudaccount`, it is a
+   deliberately rough prototype agent: there is no real portal management
+   software (no Waldur) behind it, so it stores Award state itself,
+   requires a human operator to approve an Award (via CLI subcommands)
+   before anything is provisioned, and then provisions the approved Award
+   on whichever `cloudaccount` Agent its `template` field maps to. The
+   `op-cloudportal` executable implements this Agent, with source code in
+   the [cloudportal](../cloudportal) directory. See
+   [docs/plans/archive/op-cloudportal-design.md](plans/archive/op-cloudportal-design.md)
+   for the full design.
+
+10. `bridge` - OpenPortal is implemented in Rust, while portals are typically
    implemented in other languages (e.g. Python). The `bridge` Agent is
    responsible for bridging between the Rust-based OpenPortal network and
    the actual code in the portal. For example, the `op-bridge` executable
@@ -156,6 +197,19 @@ The key types of Agent are:
    enables imperative or polling based programming models typically
    used for portals, to be used with the asynchronous, real-time communication
    that is the basis of OpenPortal.
+
+One further crate sits outside the numbered list above. `proxy` is not a
+`templemeads` Agent at all - it has no `Domain`
+and never handles Jobs. It is a blind relay at the `paddington` layer for
+pairs of agents that can each only make outbound connections (neither can
+open a port the other can reach): each agent connects outbound to the
+`op-proxy` executable instead of directly to its peer, and the proxy
+forwards the encrypted traffic between them without ever being able to
+decrypt it. Both agents still authenticate each other directly with a
+pre-shared key pair the proxy never sees. The source code is in the
+[proxy](../proxy) directory. See
+[docs/plans/blind-relay-proxy-design.md](plans/archive/blind-relay-proxy-design.md)
+for the full design.
 
 Finally, the `python` crate provides a Python library written in rust
 (via the [pyo3](https://pyo3.rs/v0.22.5/) crate) that provides a simple Python
@@ -203,6 +257,11 @@ agent and the `openportal` Python library.
 ## Protocol Specifications
 
 The [specifications](specifications) directory contains formal protocol
-and API reference documentation covering the instruction grammar, notification
-event grammar, JSON result types, wire protocol, security model, bridge HTTP
-API, and agent configuration reference.
+and API reference documentation covering the wire protocol, security model,
+bridge HTTP API, and agent configuration reference - all of which apply to
+any OpenPortal `Domain` - plus the instruction grammar, notification event
+grammar, and JSON result types of `greatwestern`, the reference `Domain`.
+
+If you want to bring your own instruction vocabulary instead of
+`greatwestern`'s, see
+[Writing your own Domain](specifications/writing-a-domain.md).

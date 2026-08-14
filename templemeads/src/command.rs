@@ -6,10 +6,13 @@ use crate::agent::{self, Peer};
 use crate::board::SyncState;
 use crate::destination::Destination;
 use crate::diagnostics::DiagnosticsReport;
+use crate::domain::Domain;
 use crate::error::Error;
 use crate::health::HealthInfo;
 use crate::job::Job;
 use crate::notification::Notification;
+use crate::portal_identifier::PortalIdentifier;
+use crate::portalroutes::PortalRoute;
 use crate::virtual_agent::send as send_to_virtual;
 
 use anyhow::Result;
@@ -20,26 +23,47 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Command {
+#[serde(bound = "")]
+pub enum Command<L: Domain> {
     Error {
         error: String,
     },
     Put {
-        job: Job,
+        job: Job<L>,
     },
     Update {
-        job: Job,
+        job: Job<L>,
     },
     Delete {
-        job: Job,
+        job: Job<L>,
     },
     Register {
         agent: AgentType,
         engine: String,
         version: String,
+        /// The sender's `Domain` name (e.g. `"greatwestern"`), if it sent
+        /// one. Absent (`None`) on messages from a peer running templemeads
+        /// <= 0.32.2, from before this field existed - see
+        /// `Domain::assume_legacy_domain_version`.
+        #[serde(default)]
+        domain: Option<String>,
+        /// The sender's `Domain` version, alongside `domain` above.
+        #[serde(default)]
+        domain_version: Option<String>,
+        /// Whether the sender understands `Command::PortalRoutes` - see
+        /// `crate::portalroutes` and
+        /// `docs/plans/portal-route-discovery-design.md`.
+        ///
+        /// `#[serde(default)]`, so a peer that predates the field deserialises
+        /// as `false`, which is the correct answer for it. Used in both
+        /// directions: we do not push routes to a peer that would not
+        /// understand them, and we do not *enforce* a route against a peer that
+        /// could never have sent us one.
+        #[serde(default)]
+        supports_portal_routes: bool,
     },
     Sync {
-        state: SyncState,
+        state: SyncState<L>,
     },
     HealthCheck {
         /// Chain of agents that have already been visited in this health check cascade
@@ -66,11 +90,25 @@ pub enum Command {
         report: Box<DiagnosticsReport>,
     },
     Notify {
-        notification: Notification,
+        notification: Notification<L>,
+    },
+    /// Advertise (or retract) the routes by which portals reach the sender.
+    ///
+    /// Pushed downstream on connection and whenever the sender's own table
+    /// changes; never sent to a peer declared as a portal, and never back to the
+    /// peer a route was learned from. See `crate::portalroutes` and
+    /// `docs/plans/portal-route-discovery-design.md`.
+    PortalRoutes {
+        /// Each route already ends with the sender's own name, which is what the
+        /// receiver checks before accepting it.
+        routes: Vec<PortalRoute>,
+        /// Portals whose routes the sender is retracting, by name.
+        #[serde(default)]
+        withdrawn: Vec<PortalIdentifier>,
     },
 }
 
-impl std::fmt::Display for Command {
+impl<L: Domain> std::fmt::Display for Command<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Command::Error { error } => write!(f, "Error: {}", error),
@@ -81,10 +119,17 @@ impl std::fmt::Display for Command {
                 agent,
                 engine,
                 version,
+                domain,
+                domain_version,
+                supports_portal_routes: _,
             } => write!(
                 f,
-                "Register: {}, engine={} version={}",
-                agent, engine, version
+                "Register: {}, engine={} version={} domain={} domain_version={}",
+                agent,
+                engine,
+                version,
+                domain.as_deref().unwrap_or("unknown"),
+                domain_version.as_deref().unwrap_or("unknown")
             ),
             Command::Sync { state: _ } => write!(f, "Sync: State"),
             Command::HealthCheck { visited } => {
@@ -106,20 +151,26 @@ impl std::fmt::Display for Command {
                 write!(f, "DiagnosticsResponse: {}", report)
             }
             Command::Notify { notification } => write!(f, "Notify: {}", notification),
+            Command::PortalRoutes { routes, withdrawn } => write!(
+                f,
+                "PortalRoutes: {} advertised, {} withdrawn",
+                routes.len(),
+                withdrawn.len()
+            ),
         }
     }
 }
 
-impl Command {
-    pub fn put(job: &Job) -> Self {
+impl<L: Domain> Command<L> {
+    pub fn put(job: &Job<L>) -> Self {
         Self::Put { job: job.clone() }
     }
 
-    pub fn update(job: &Job) -> Self {
+    pub fn update(job: &Job<L>) -> Self {
         Self::Update { job: job.clone() }
     }
 
-    pub fn delete(job: &Job) -> Self {
+    pub fn delete(job: &Job<L>) -> Self {
         Self::Delete { job: job.clone() }
     }
 
@@ -129,15 +180,33 @@ impl Command {
         }
     }
 
-    pub fn register(agent: &AgentType, engine: &str, version: &str) -> Self {
+    pub fn register(
+        agent: &AgentType,
+        engine: &str,
+        version: &str,
+        domain: &str,
+        domain_version: &str,
+    ) -> Self {
         Self::Register {
             agent: agent.clone(),
             engine: engine.to_owned(),
             version: version.to_owned(),
+            domain: Some(domain.to_owned()),
+            domain_version: Some(domain_version.to_owned()),
+            // This build understands portal routes, so always advertise it.
+            supports_portal_routes: true,
         }
     }
 
-    pub fn sync(state: &SyncState) -> Self {
+    /// Advertise the given portal routes, and retract the given portals.
+    pub fn portal_routes(routes: &[PortalRoute], withdrawn: &[PortalIdentifier]) -> Self {
+        Self::PortalRoutes {
+            routes: routes.to_vec(),
+            withdrawn: withdrawn.to_vec(),
+        }
+    }
+
+    pub fn sync(state: &SyncState<L>) -> Self {
         Self::Sync {
             state: state.clone(),
         }
@@ -178,7 +247,7 @@ impl Command {
         }
     }
 
-    pub fn notify(notification: &Notification) -> Self {
+    pub fn notify(notification: &Notification<L>) -> Self {
         Self::Notify {
             notification: notification.clone(),
         }
@@ -195,7 +264,7 @@ impl Command {
 
         if agent::is_virtual(peer).await {
             tracing::debug!("Sending command to virtual peer {} locally", peer);
-            Ok(send_to_virtual(
+            Ok(send_to_virtual::<L>(
                 &self.destination(),
                 Message::send_to(peer.name(), peer.zone(), &serde_json::to_string(self)?),
             )
@@ -221,7 +290,7 @@ impl Command {
         }
     }
 
-    pub fn job(&self) -> Option<Job> {
+    pub fn job(&self) -> Option<Job<L>> {
         match self {
             Command::Put { job } => Some(job.clone()),
             Command::Update { job } => Some(job.clone()),
@@ -231,6 +300,9 @@ impl Command {
                 agent: _,
                 engine: _,
                 version: _,
+                domain: _,
+                domain_version: _,
+                supports_portal_routes: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -242,6 +314,10 @@ impl Command {
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
             Command::Notify { notification: _ } => None,
+            Command::PortalRoutes {
+                routes: _,
+                withdrawn: _,
+            } => None,
         }
     }
 
@@ -255,6 +331,9 @@ impl Command {
                 agent: _,
                 engine: _,
                 version: _,
+                domain: _,
+                domain_version: _,
+                supports_portal_routes: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -266,6 +345,10 @@ impl Command {
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
             Command::Notify { notification: _ } => None,
+            Command::PortalRoutes {
+                routes: _,
+                withdrawn: _,
+            } => None,
         }
     }
 
@@ -279,6 +362,9 @@ impl Command {
                 agent: _,
                 engine: _,
                 version: _,
+                domain: _,
+                domain_version: _,
+                supports_portal_routes: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -290,11 +376,15 @@ impl Command {
             Command::DiagnosticsRequest { destination: _ } => None,
             Command::DiagnosticsResponse { report: _ } => None,
             Command::Notify { notification } => Some(notification.destination().clone()),
+            Command::PortalRoutes {
+                routes: _,
+                withdrawn: _,
+            } => None,
         }
     }
 }
 
-impl From<Message> for Command {
+impl<L: Domain> From<Message> for Command<L> {
     fn from(m: Message) -> Self {
         serde_json::from_str(m.payload())
             .unwrap_or(Command::error(&format!("Could not parse command: {:?}", m)))
@@ -304,38 +394,14 @@ impl From<Message> for Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_domain::TestDomain;
 
-    #[test]
-    fn test_command_display() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::put(&job);
-        assert_eq!(format!("{}", command), format!("Put: {}", job));
-    }
+    type Command = super::Command<TestDomain>;
 
-    #[test]
-    fn test_command_put() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::put(&job);
-        assert_eq!(command, Command::Put { job });
-    }
-
-    #[test]
-    fn test_command_update() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::update(&job);
-        assert_eq!(command, Command::Update { job });
-    }
-
-    #[test]
-    fn test_command_delete() {
-        #[allow(clippy::unwrap_used)]
-        let job = Job::parse("a.b add_user person.group.a", true).unwrap();
-        let command = Command::delete(&job);
-        assert_eq!(command, Command::Delete { job });
-    }
+    // Tests that exercise put/update/delete/display against a real parsed
+    // Job (e.g. "a.b add_user person.group.a") need a concrete Domain, so
+    // they live alongside the domain crate's own grammar tests instead of
+    // here - templemeads itself has no concrete Instruction to parse.
 
     #[test]
     fn test_command_error() {
@@ -354,14 +420,72 @@ mod tests {
         let agent = AgentType::Portal;
         let engine = "templemeads";
         let version = "0.0.10";
-        let command = Command::register(&agent, engine, version);
+        let domain = "test-domain";
+        let domain_version = "0.0.0";
+        let command = Command::register(&agent, engine, version, domain, domain_version);
         assert_eq!(
             command,
             Command::Register {
                 agent,
                 engine: engine.to_owned(),
-                version: version.to_owned()
+                version: version.to_owned(),
+                domain: Some(domain.to_owned()),
+                domain_version: Some(domain_version.to_owned()),
+                supports_portal_routes: true,
             }
         );
+    }
+
+    /// A `Register` from a peer running templemeads <= 0.32.2 (before this
+    /// field existed) has no `domain`/`domain_version` keys in its JSON at
+    /// all. `#[serde(default)]` must let this still deserialize, defaulting
+    /// both to `None`, rather than failing to parse.
+    #[test]
+    fn test_command_register_deserialize_without_domain_fields() {
+        let json = r#"{"Register":{"agent":"Portal","engine":"templemeads","version":"0.32.2"}}"#;
+        #[allow(clippy::expect_used)]
+        let command: Command = serde_json::from_str(json).expect("legacy Register should parse");
+        assert_eq!(
+            command,
+            Command::Register {
+                agent: AgentType::Portal,
+                engine: "templemeads".to_owned(),
+                version: "0.32.2".to_owned(),
+                domain: None,
+                domain_version: None,
+                // Absent from the JSON, so it defaults to `false` - a peer that
+                // predates the field cannot understand portal routes, and must
+                // not have one enforced against it.
+                supports_portal_routes: false,
+            }
+        );
+    }
+
+    /// A `Register` that predates `supports_portal_routes` must deserialise with
+    /// it `false`, and one that carries it must round-trip. This is what makes
+    /// the portal-route rollout non-breaking in a mixed-version fleet - see
+    /// `docs/plans/portal-route-discovery-design.md` §7.
+    #[test]
+    fn test_command_register_portal_route_capability_defaults_to_false() {
+        let legacy = r#"{"Register":{"agent":"Portal","engine":"templemeads","version":"0.90.0","domain":"d","domain_version":"1"}}"#;
+        #[allow(clippy::expect_used)]
+        let command: Command = serde_json::from_str(legacy).expect("legacy Register should parse");
+
+        match command {
+            Command::Register {
+                supports_portal_routes,
+                ..
+            } => assert!(!supports_portal_routes),
+            other => unreachable!("expected Register, got {:?}", other),
+        }
+
+        // ...and this build advertises support.
+        match Command::register(&AgentType::Portal, "templemeads", "0.91.0", "d", "1") {
+            Command::Register {
+                supports_portal_routes,
+                ..
+            } => assert!(supports_portal_routes),
+            other => unreachable!("expected Register, got {:?}", other),
+        }
     }
 }

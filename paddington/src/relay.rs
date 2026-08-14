@@ -1,0 +1,2473 @@
+// SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+// SPDX-License-Identifier: MIT
+
+//! A blind relay for agents that can only make outbound connections - see
+//! `docs/plans/archive/blind-relay-proxy-design.md` for the full design and
+//! rationale.
+//!
+//! Two peers that can each only connect outwards to a shared proxy agent
+//! can still talk to each other as if directly connected: each keeps an
+//! ordinary, unmodified paddington connection to the proxy (§4.1), and
+//! separately bootstraps a session with its true peer using a pre-shared
+//! key pair the proxy never sees (§4.2). The proxy only ever relays the
+//! resulting ciphertext, opaque to it in every case - it cannot read it.
+//!
+//! Relayed agents (not the proxy itself) call [`configure`] once at
+//! startup from their `ServiceConfig`, then [`set_inner_handler`] with
+//! their real message handler and register [`relay_dispatch_handler`]
+//! with `paddington::set_handler` instead of that handler directly. The
+//! proxy itself needs none of this - only [`set_proxy_policy`] and
+//! [`proxy_handler`].
+
+use anyhow::Context;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::RwLock as StdRwLock;
+use tokio::sync::{oneshot, Mutex as TokioMutex, RwLock as TokioRwLock};
+use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
+
+use once_cell::sync::Lazy;
+
+use crate::anti_replay::{HandshakeNonceState, NoncedPayload, ReplayWindow};
+use crate::command::Command;
+use crate::config::ServiceConfig;
+use crate::connection::{deenvelope_message, envelope_message};
+use crate::crypto::{random_bytes, Key, Salt, SecretKey};
+use crate::error::Error;
+use crate::exchange;
+use crate::message::Message;
+
+/// Envelope carried as an ordinary [`Message`] payload when relaying
+/// through a proxy - opaque to the proxy in every case, bootstrap or not.
+/// `from`/`to` are the true peers, never the proxy itself.
+/// Constant tag identifying a relay envelope.
+///
+/// `relay_dispatch_handler` tries `RelayEnvelope` *before* the inner handler, so
+/// classification used to be purely structural - any future payload that happened to
+/// have these four fields would be misread as an envelope. A single-variant enum makes
+/// identification positive, and `deny_unknown_fields` means a payload carrying extra
+/// fields is no longer a candidate at all. No current payload collides; this is so
+/// none can in future. See `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum RelayEnvelopeKind {
+    #[serde(rename = "openportal-relay-v1")]
+    V1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayEnvelope {
+    kind: RelayEnvelopeKind,
+    from: String,
+    to: String,
+    zone: String,
+    ciphertext: String,
+}
+
+/// brics (relayed client) → airr (relayed server), via proxy. Encrypted
+/// with the permanent pre-shared keys (§4.1) - the only thing they are
+/// ever used for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StartRelayedConnection {
+    session_outer_key: SecretKey,
+    inner_key_salt: Salt,
+    outer_key_salt: Salt,
+    magic: String,
+    engine: String,
+    version: String,
+    /// Whether the sender of *this* message understands `NoncedPayload` for
+    /// ongoing traffic over the resulting session - the relayed-bootstrap
+    /// equivalent of `PeerDetails::supports_nonce` (`connection.rs`). See
+    /// `docs/plans/replay-protection-design.md` §9 and
+    /// `docs/specifications/security-model.md` §9. `#[serde(default)]` so a
+    /// pre-upgrade peer's `StartRelayedConnection` (which has no such
+    /// field) deserialises as `false`, the correct answer for it.
+    #[serde(default)]
+    supports_nonce: bool,
+    /// Replay-protection nonce for this bootstrap message, checked against
+    /// a per-peer window that persists across every bootstrap attempt for
+    /// this peer (unlike `RelayedSession`'s ongoing-traffic nonce, which
+    /// resets on every bootstrap) - see
+    /// `docs/plans/replay-protection-design.md` §10. No backward
+    /// compatibility needed here (unlike `supports_nonce` above): `op-proxy`
+    /// isn't deployed yet, so this is a plain required field, not negotiated.
+    nonce: u64,
+    /// Identifies the *sending process incarnation*, so the receiver can tell
+    /// a restart (whose in-memory nonce counter legitimately restarted at
+    /// zero) from a replay of an old bootstrap message. The receiver keeps one
+    /// replay window per epoch - see `anti_replay::HandshakeNonceState` and
+    /// `docs/specifications/security-review-2.md` (finding R10).
+    ///
+    /// This matters most here: §10.1 of the replay-protection design notes
+    /// that `Start` and `SessionUnknown` are the two bootstrap messages a
+    /// replay can actually disrupt (a replayed `Start` resets the receiver's
+    /// live session for that peer; a replayed `SessionUnknown` forces
+    /// re-bootstrap churn), so this is where losing replay protection to a
+    /// restart - or to a naive "reset the window when the epoch changes" -
+    /// would cost the most. `#[serde(default)]` so a peer built before this
+    /// field deserialises as `None`, which gets its own window and so behaves
+    /// exactly as it did before.
+    #[serde(default)]
+    epoch: Option<u64>,
+}
+
+/// airr → brics, via proxy. Same permanent pre-shared keys - the last
+/// message that ever uses them for this bootstrap attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RelayedConnectionAccepted {
+    session_inner_key: SecretKey,
+    magic: String,
+    engine: String,
+    version: String,
+    /// See `StartRelayedConnection::supports_nonce` - same mechanism, other
+    /// direction.
+    #[serde(default)]
+    supports_nonce: bool,
+    /// See `StartRelayedConnection::nonce` - same mechanism, other
+    /// direction. Redundant with `magic`'s existing single-use protection
+    /// (§10.1) but kept for uniformity across all three bootstrap message
+    /// types.
+    nonce: u64,
+    /// See `StartRelayedConnection::epoch` - same mechanism, other direction.
+    #[serde(default)]
+    epoch: Option<u64>,
+}
+
+/// Internally tagged so a successful permanent-key decryption can be
+/// recognised as one specific bootstrap message type unambiguously.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum BootstrapMessage {
+    Start(StartRelayedConnection),
+    Accepted(RelayedConnectionAccepted),
+    /// Sent by whichever side finds it has no session for the sender of
+    /// some ongoing traffic - almost always because *it* just restarted
+    /// and lost its in-memory session state while the sender (never
+    /// having restarted) still thinks its old session is valid. Unlike a
+    /// sender-side restart, which self-heals by re-bootstrapping on its
+    /// own startup, the receiving side has no way to notice this
+    /// happened on its own - see `notify_session_unknown` /
+    /// `handle_incoming_envelope`. Encrypted with the permanent pre-shared
+    /// key like any other bootstrap message, so the proxy cannot forge it -
+    /// `nonce` additionally stops it (or anyone else) replaying a genuine,
+    /// previously-captured one to force repeated re-bootstrap churn (see
+    /// `docs/plans/replay-protection-design.md` §10.1).
+    SessionUnknown {
+        nonce: u64,
+        /// See `StartRelayedConnection::epoch`.
+        #[serde(default)]
+        epoch: Option<u64>,
+    },
+}
+
+/// Which side of the *virtual* relayed connection we are - independent of
+/// the fact both sides are physically only ever clients of the proxy (see
+/// `docs/plans/archive/blind-relay-proxy-design.md` §4.2).
+#[derive(Debug, Clone)]
+enum RelayedRole {
+    /// We initiate the bootstrap - this peer is one of our `servers`
+    /// entries, reached via a relay.
+    Client { relay: String },
+    /// We wait for the bootstrap - this peer is one of our `clients`
+    /// entries, reached via a relay.
+    Server { relay: String },
+}
+
+#[derive(Debug, Clone)]
+struct RelayedPeer {
+    /// Zone of the *relayed* relationship itself (e.g. `ukri`'s zone from
+    /// `airr`'s perspective) - carried end-to-end in `RelayEnvelope.zone`
+    /// and used for the synthesised `Message`, exactly like a direct
+    /// connection's zone would be.
+    zone: String,
+    /// Zone of the *real, direct* connection to the relay/proxy itself
+    /// (e.g. `airr`'s own `servers` entry for `"proxy"`) - this is what
+    /// paddington's connection registry is actually keyed on, and is very
+    /// often but **not necessarily** the same as `zone` above. Using
+    /// `zone` here by mistake sends the bootstrap/relay traffic to
+    /// `"proxy@<ukri's zone>"`, which paddington's real connection table
+    /// has no entry for if `ukri` was added in a different zone to the
+    /// proxy itself - see `Message::send_to` call sites below.
+    relay_zone: String,
+    role: RelayedRole,
+    inner_key: SecretKey,
+    outer_key: SecretKey,
+}
+
+impl RelayedPeer {
+    /// The relay/proxy this peer is reached through, whichever role we hold.
+    fn relay(&self) -> &str {
+        match &self.role {
+            RelayedRole::Client { relay } | RelayedRole::Server { relay } => relay,
+        }
+    }
+}
+
+///
+/// Whether a relay envelope claiming to come from `peer` actually arrived over the
+/// connection to the relay our own configuration names for that peer.
+///
+/// `envelope.from` is a wire field, so on its own it says nothing about who sent
+/// the envelope. `arrived_from`/`arrived_zone` are stamped by paddington from the
+/// authenticated connection. F7 bound `envelope.from` to the authenticated sender
+/// on the *proxy*; this is the receive-side counterpart, which was missing - so any
+/// direct peer of ours could inject an envelope for a relayed pair it has no part
+/// in, making us emit a genuine PSK-signed `SessionUnknown` to the far side. See
+/// `docs/specifications/security-review-2.md` (findings R16 and R28).
+///
+fn arrived_over_configured_relay(
+    peer: &RelayedPeer,
+    arrived_from: &str,
+    arrived_zone: &str,
+) -> bool {
+    arrived_from == peer.relay() && arrived_zone == peer.relay_zone
+}
+
+struct RelayConfig {
+    my_name: String,
+    peers: HashMap<String, RelayedPeer>,
+}
+
+/// Monotonic counter stamping each `RelayedSession` with a generation, so the
+/// ongoing-traffic replay check can tell whether the session it decrypted with is
+/// still the session it is about to record a nonce against.
+///
+/// Without it there was a narrow TOCTOU: the payload is decrypted against a *clone*
+/// taken under a read lock, then the nonce is recorded against the stored session
+/// under a write lock. A re-bootstrap landing between the two installs a **fresh**
+/// window, which accepts a replayed old-session nonce by first-nonce initialisation.
+/// See `docs/specifications/security-review-2.md` (finding R33).
+static SESSION_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_session_generation() -> u64 {
+    SESSION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Once-bootstrapped session keys for a relayed peer - the relayed
+/// equivalent of `Connection`'s `inner_key`/`outer_key`/salts.
+#[derive(Debug, Clone)]
+struct RelayedSession {
+    /// Which incarnation of the session with this peer this is - see
+    /// [`SESSION_GENERATION`].
+    generation: u64,
+    inner_key: SecretKey,
+    outer_key: SecretKey,
+    inner_key_salt: Salt,
+    outer_key_salt: Salt,
+    /// Nonce to assign to the next ongoing message *we* send over this
+    /// session, and the window tracking which nonces we've already
+    /// accepted from the peer over it - see
+    /// `docs/plans/replay-protection-design.md`. A fresh `RelayedSession`
+    /// is constructed on every bootstrap (deliberately, for forward
+    /// secrecy - see `bootstrap`/`handle_start`), so this resets for free
+    /// alongside the session keys it protects, with no extra logic
+    /// needed.
+    next_nonce: u64,
+    replay_window: ReplayWindow,
+    /// Whether the peer confirmed (via `supports_nonce` on the
+    /// `StartRelayedConnection`/`RelayedConnectionAccepted` that bootstrapped
+    /// this session) that it understands `NoncedPayload` for ongoing
+    /// traffic. Gates whether `send` wraps its outgoing payload with a
+    /// nonce at all - see `Connection::peer_supports_nonce`
+    /// (`connection.rs`) for the direct-connection equivalent.
+    peer_supports_nonce: bool,
+}
+
+type MessageHandler = fn(Message) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+static RELAY_CONFIG: Lazy<TokioRwLock<Option<RelayConfig>>> = Lazy::new(|| TokioRwLock::new(None));
+static SESSIONS: Lazy<TokioRwLock<HashMap<String, RelayedSession>>> =
+    Lazy::new(|| TokioRwLock::new(HashMap::new()));
+/// In-flight bootstrap handshakes, keyed on **(peer, magic)** rather than magic
+/// alone.
+///
+/// Keying on magic alone was not exploitable - it is 32 CSPRNG bytes carried inside
+/// the ciphertext, so another peer cannot learn or guess one - but binding the
+/// response to the peer we sent the challenge to is free, and means a reply can only
+/// ever satisfy the handshake it belongs to. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+/// `(peer name, magic)` - see [`PENDING_BOOTSTRAPS`].
+type BootstrapKey = (String, String);
+
+static PENDING_BOOTSTRAPS: Lazy<
+    TokioMutex<HashMap<BootstrapKey, oneshot::Sender<RelayedConnectionAccepted>>>,
+> = Lazy::new(|| TokioMutex::new(HashMap::new()));
+/// Last time we told each peer we had no session for it. Used to debounce
+/// `SessionUnknown`, which is otherwise emitted once per undecryptable envelope -
+/// see [`notify_session_unknown`] and finding R28.
+static LAST_SESSION_UNKNOWN: Lazy<TokioMutex<HashMap<String, tokio::time::Instant>>> =
+    Lazy::new(|| TokioMutex::new(HashMap::new()));
+/// Peers for which a re-bootstrap task is already in flight, so a burst of
+/// `SessionUnknown` messages produces one attempt rather than one per message -
+/// see finding R28.
+static BOOTSTRAPPING: Lazy<TokioMutex<HashSet<String>>> =
+    Lazy::new(|| TokioMutex::new(HashSet::new()));
+
+/// Minimum interval between two `SessionUnknown` notifications to the same peer.
+///
+/// A session-less peer emits one per inbound envelope it cannot decrypt. A
+/// malicious relay can drop every `Start` to keep us session-less and then inject
+/// junk envelopes at line rate, and each one made us sign a real, PSK-authenticated
+/// `SessionUnknown` - which the far side accepts (the nonces are genuinely fresh,
+/// so the replay window is no defence), dropping its session and re-bootstrapping.
+/// See `docs/specifications/security-review-2.md` (finding R28).
+const SESSION_UNKNOWN_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Upper bound on in-flight bootstrap handshakes. Each entry lives until the
+/// handshake completes or its 30 s timeout expires; without a cap, a peer that can
+/// induce bootstraps faster than they retire grows this map without limit.
+const MAX_PENDING_BOOTSTRAPS: usize = 256;
+static INNER_HANDLER: Lazy<StdRwLock<Option<MessageHandler>>> = Lazy::new(|| StdRwLock::new(None));
+static PROXY_POLICY: Lazy<TokioRwLock<RelayPolicy>> =
+    Lazy::new(|| TokioRwLock::new(RelayPolicy::default()));
+/// On the proxy itself: name -> zone of each of *its own* real `clients`
+/// connections (both real hops of a relayed pair are always `clients` of
+/// the proxy - it never dials out). Populated by [`configure_proxy`] -
+/// see [`proxy_handler`] for why this is needed.
+static PROXY_CLIENT_ZONES: Lazy<TokioRwLock<HashMap<String, String>>> =
+    Lazy::new(|| TokioRwLock::new(HashMap::new()));
+/// Per-peer, process-lifetime nonce state for bootstrap messages
+/// (`Start`/`Accepted`/`SessionUnknown`) - unlike `RelayedSession`'s
+/// ongoing-traffic nonce fields, this must **not** reset on every
+/// bootstrap, since these messages are encrypted (at least partly) under
+/// the permanent pre-shared key pair, which never changes across
+/// bootstrap attempts. See `docs/plans/replay-protection-design.md` §10.
+static BOOTSTRAP_NONCE_STATE: Lazy<TokioRwLock<HashMap<String, HandshakeNonceState>>> =
+    Lazy::new(|| TokioRwLock::new(HashMap::new()));
+
+async fn take_bootstrap_nonce(peer_name: &str) -> u64 {
+    BOOTSTRAP_NONCE_STATE
+        .write()
+        .await
+        .entry(peer_name.to_string())
+        .or_default()
+        .take_next_nonce()
+}
+
+async fn check_bootstrap_replay(peer_name: &str, epoch: Option<u64>, nonce: u64) -> bool {
+    BOOTSTRAP_NONCE_STATE
+        .write()
+        .await
+        .entry(peer_name.to_string())
+        .or_default()
+        .check_replay(epoch, Some(nonce))
+}
+
+const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long to keep retrying the initial bootstrap send while the
+/// underlying connection to the relay is still being established.
+const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RELAY_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long to wait before retrying a whole bootstrap attempt that failed
+/// or timed out (e.g. the relayed peer hadn't connected to the proxy yet) -
+/// matches `client::run`'s own reconnect cadence for direct connections, so
+/// a relayed peer is exactly as persistent as a direct one.
+const BOOTSTRAP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often to check whether the real connection to the relay is still
+/// up, once bootstrapped - see `maintain_relayed_client`.
+const RELAY_HEALTH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+///
+/// Fixed, non-secret salt used only for the one-off bootstrap messages -
+/// there is no live connection to generate a per-connection salt from.
+/// Safe because `envelope_message` always mixes in a fresh, random
+/// per-message `info` value regardless of salt (see `connection.rs`), and
+/// the permanent pre-shared key itself is already unique per peer pair -
+/// this salt only needs to be consistent, not secret or unique.
+///
+fn bootstrap_salt() -> Result<Salt, Error> {
+    "ab".repeat(32)
+        .parse()
+        .with_context(|| "Invalid hardcoded bootstrap salt constant")
+        .map_err(Error::Any)
+}
+
+fn generate_magic() -> Result<String, Error> {
+    Ok(hex::encode(random_bytes(32)?))
+}
+
+fn encrypt_with_keys<T: Serialize>(
+    payload: &T,
+    inner_key: &SecretKey,
+    outer_key: &SecretKey,
+    inner_key_salt: &Salt,
+    outer_key_salt: &Salt,
+) -> Result<String, Error> {
+    let tokio_msg = envelope_message(
+        payload,
+        inner_key,
+        outer_key,
+        inner_key_salt,
+        outer_key_salt,
+    )?;
+    Ok(tokio_msg
+        .to_text()
+        .with_context(|| "Enveloped relay message was not valid text")
+        .map_err(Error::Any)?
+        .to_string())
+}
+
+fn decrypt_with_keys<T: DeserializeOwned>(
+    ciphertext: &str,
+    inner_key: &SecretKey,
+    outer_key: &SecretKey,
+    inner_key_salt: &Salt,
+    outer_key_salt: &Salt,
+) -> Result<T, Error> {
+    let tokio_msg = TokioMessage::text(ciphertext);
+    Ok(deenvelope_message(
+        tokio_msg,
+        inner_key,
+        outer_key,
+        inner_key_salt,
+        outer_key_salt,
+    )?)
+}
+
+///
+/// Configure this agent's relayed peers from its `ServiceConfig` - call
+/// once at startup, alongside `paddington::run(config)`. Reads every
+/// `servers`/`clients` entry that has a `proxy` set (see
+/// `paddington::config`); entries without one are ignored here (they are
+/// ordinary, unmodified paddington connections).
+///
+pub async fn configure(config: &ServiceConfig) -> Result<(), Error> {
+    let mut peers = HashMap::new();
+
+    // the zone of the real, direct connection to a given relay - a
+    // property of that one `servers` entry, shared by every relayed peer
+    // that uses it. A service can freely use different proxies for
+    // different peers (see `ServiceConfig::check_relay_exists`), so this
+    // is looked up per relay name, not assumed to be the same for every
+    // relayed peer.
+    let relay_zone_of = |relay: &str| -> String {
+        config
+            .servers()
+            .iter()
+            .find(|s| s.name() == relay)
+            .map(|s| s.zone())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "Relay '{}' is not a known server - defaulting its zone to 'default'.",
+                    relay
+                );
+                "default".to_string()
+            })
+    };
+
+    // A relayed peer is identified on the wire only by `envelope.from`, which is a
+    // bare name - and R15 established that the envelope's own `zone` field must not
+    // be trusted for anything. So if two relayed peers share a name in different
+    // zones, an inbound envelope naming it is genuinely ambiguous.
+    //
+    // `add_client` does allow one name in several zones with independent keys, and
+    // this map used to silently collapse them: the `clients` loop below overwrote
+    // the `servers` entry, leaving one provisioned key pair unreachable with no
+    // diagnostic. Refuse such a configuration outright rather than half-honour it -
+    // supporting it properly would mean trial-decrypting against every candidate
+    // key, which is a capability this hardening pass deliberately does not add. See
+    // `docs/specifications/security-review-2.md` (finding R33).
+    let mut relayed_names: HashMap<String, String> = HashMap::new();
+
+    let mut check_unique = |name: &str, zone: &str| -> Result<(), Error> {
+        if let Some(existing_zone) = relayed_names.get(name) {
+            return Err(Error::InvalidPeer(format!(
+                "Two relayed peers are both named '{}' (in zones '{}' and '{}'). A \
+                 relayed peer is identified on the wire by name alone, so this cannot \
+                 be resolved - give them distinct names.",
+                name, existing_zone, zone
+            )));
+        }
+
+        relayed_names.insert(name.to_string(), zone.to_string());
+        Ok(())
+    };
+
+    for server in config.servers() {
+        if let Some(relay) = server.proxy() {
+            let relay_zone = relay_zone_of(&relay);
+            check_unique(&server.name(), &server.zone())?;
+            peers.insert(
+                server.name(),
+                RelayedPeer {
+                    zone: server.zone(),
+                    relay_zone,
+                    role: RelayedRole::Client { relay },
+                    inner_key: server.inner_key(),
+                    outer_key: server.outer_key(),
+                },
+            );
+        }
+    }
+
+    for client in config.clients() {
+        if let Some(relay) = client.proxy() {
+            let relay_zone = relay_zone_of(&relay);
+            check_unique(&client.name(), &client.zone())?;
+            peers.insert(
+                client.name(),
+                RelayedPeer {
+                    zone: client.zone(),
+                    relay_zone,
+                    role: RelayedRole::Server { relay },
+                    inner_key: client.inner_key(),
+                    outer_key: client.outer_key(),
+                },
+            );
+        }
+    }
+
+    let mut state = RELAY_CONFIG.write().await;
+    *state = Some(RelayConfig {
+        my_name: config.name(),
+        peers,
+    });
+
+    Ok(())
+}
+
+async fn my_name() -> Result<String, Error> {
+    RELAY_CONFIG
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.my_name.clone())
+        .ok_or_else(|| {
+            Error::InvalidPeer("Relay not configured - call relay::configure() first.".to_string())
+        })
+}
+
+///
+/// Refuse a key that is all-zero (or empty) as transported session key material.
+///
+/// F15 added this check to the two *direct* handshake paths but not to the three
+/// relay key-transport points. `Key::derive` HKDFs happily from all-zero input
+/// material, so an all-zero session key silently worked - it needs the pair's
+/// permanent keys to inject, but the whole point of a per-session key is that it is
+/// unpredictable, and one fixed value defeats that. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+///
+fn assert_session_key_not_null(key: &SecretKey, which: &str, peer: &str) -> Result<(), Error> {
+    use secrecy::ExposeSecret;
+
+    if key.expose_secret().is_null() {
+        tracing::error!(
+            "Refusing the relayed session with '{}': its {} key is all-zero.",
+            peer,
+            which
+        );
+
+        return Err(Error::InvalidPeer(format!(
+            "Peer '{}' supplied an all-zero {} session key",
+            peer, which
+        )));
+    }
+
+    Ok(())
+}
+
+async fn get_peer(name: &str) -> Result<RelayedPeer, Error> {
+    RELAY_CONFIG
+        .read()
+        .await
+        .as_ref()
+        .and_then(|s| s.peers.get(name).cloned())
+        .ok_or_else(|| Error::UnknownPeer(format!("'{}' is not a configured relayed peer.", name)))
+}
+
+///
+/// Whether `name` is a configured relayed peer - used by
+/// [`crate::exchange::send`] to transparently fall back to [`send`] when a
+/// caller (e.g. templemeads' `Command::send_to`) addresses a peer that has
+/// no real paddington connection because it is only reachable via a proxy.
+///
+pub async fn is_configured(name: &str) -> bool {
+    RELAY_CONFIG
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|s| s.peers.contains_key(name))
+}
+
+///
+/// Register the real message handler to call once a relay envelope has
+/// been dealt with (relayed, bootstrapped, or unwrapped) - or immediately,
+/// for any payload that isn't relay-related at all. Register
+/// [`relay_dispatch_handler`] with `paddington::set_handler` instead of
+/// this handler directly.
+///
+pub async fn set_inner_handler(handler: MessageHandler) -> Result<(), Error> {
+    match INNER_HANDLER.write() {
+        Ok(mut inner) => {
+            *inner = Some(handler);
+            Ok(())
+        }
+        Err(e) => Err(Error::Poison(format!(
+            "Error getting write lock for inner handler: {}",
+            e
+        ))),
+    }
+}
+
+fn call_inner_handler(message: Message) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
+    let handler = match INNER_HANDLER.read() {
+        Ok(inner) => *inner,
+        Err(e) => {
+            let err = Error::Poison(format!("Error getting read lock for inner handler: {}", e));
+            return Box::pin(async move { Err(err) });
+        }
+    };
+
+    match handler {
+        Some(handler) => handler(message),
+        None => Box::pin(async move {
+            Err(Error::InvalidPeer(
+                "No inner message handler registered - call relay::set_inner_handler first."
+                    .to_string(),
+            ))
+        }),
+    }
+}
+
+///
+/// (Re-)establish a relayed session with `peer_name`, if we are the
+/// relayed *client* for it. Blocks (with a timeout) until the bootstrap
+/// completes. Produces fresh, mutually-contributed session keys every
+/// time it's called - this is per-session key freshness, NOT forward
+/// secrecy (the keys are key-transported under the permanent pre-shared
+/// keys, not agreed in-band; see `docs/specifications/security-model.md`
+/// §2.5 and `docs/plans/archive/blind-relay-proxy-design.md` §4.2.1, §5).
+///
+pub async fn bootstrap(peer_name: &str) -> Result<(), Error> {
+    let peer = get_peer(peer_name).await?;
+
+    let relay = match &peer.role {
+        RelayedRole::Client { relay } => relay.clone(),
+        RelayedRole::Server { .. } => {
+            return Err(Error::InvalidPeer(format!(
+                "'{}' is a relayed server for us, not a relayed client - it waits, it doesn't initiate.",
+                peer_name
+            )));
+        }
+    };
+
+    let my_name = my_name().await?;
+
+    let outer_key = Key::generate();
+    let inner_key_salt = Salt::generate()?;
+    let outer_key_salt = Salt::generate()?;
+    let magic = generate_magic()?;
+    let nonce = take_bootstrap_nonce(peer_name).await;
+
+    let start = StartRelayedConnection {
+        session_outer_key: outer_key.clone(),
+        inner_key_salt: inner_key_salt.clone(),
+        outer_key_salt: outer_key_salt.clone(),
+        magic: magic.clone(),
+        engine: env!("CARGO_PKG_NAME").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        supports_nonce: true,
+        nonce,
+        epoch: Some(crate::anti_replay::process_epoch()),
+    };
+
+    let bootstrap_salt = bootstrap_salt()?;
+    let ciphertext = encrypt_with_keys(
+        &BootstrapMessage::Start(start),
+        &peer.inner_key,
+        &peer.outer_key,
+        &bootstrap_salt,
+        &bootstrap_salt,
+    )?;
+
+    let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
+        from: my_name,
+        to: peer_name.to_string(),
+        zone: peer.zone.clone(),
+        ciphertext,
+    };
+
+    let payload = serde_json::to_string(&envelope)
+        .with_context(|| "Could not serialise relay envelope")
+        .map_err(Error::Any)?;
+
+    let (tx, rx) = oneshot::channel();
+
+    {
+        let mut pending = PENDING_BOOTSTRAPS.lock().await;
+
+        // Bound the map. Entries retire on completion or after the 30 s timeout, so
+        // this can only fill if bootstraps are being induced faster than they
+        // retire - which is the R28 shape. Refuse rather than grow without limit.
+        if pending.len() >= MAX_PENDING_BOOTSTRAPS {
+            tracing::warn!(
+                "Refusing to bootstrap '{}': {} handshakes are already in flight \
+                 (the cap). Something is inducing bootstraps faster than they complete.",
+                peer_name,
+                pending.len()
+            );
+
+            return Err(Error::InvalidPeer(format!(
+                "Too many relayed bootstraps in flight to start one for '{}'",
+                peer_name
+            )));
+        }
+
+        pending.insert((peer_name.to_string(), magic.clone()), tx);
+    }
+
+    // the connection to the relay is normally still being dialled by
+    // paddington's own event loop when a caller bootstraps at startup
+    // (see `bootstrap_all_as_client`) - `exchange::send` fails immediately
+    // rather than queuing if that connection doesn't exist yet, so retry
+    // for a while rather than giving up on the first attempt.
+    let mut retries_remaining =
+        RELAY_CONNECT_TIMEOUT.as_millis() / RELAY_CONNECT_RETRY_DELAY.as_millis();
+    loop {
+        match exchange::send(Message::send_to(&relay, &peer.relay_zone, &payload)).await {
+            Ok(()) => break,
+            Err(e) if retries_remaining > 0 => {
+                retries_remaining -= 1;
+                tracing::debug!(
+                    "Not yet connected to relay '{}' to bootstrap '{}' ({:?}) - retrying shortly.",
+                    relay,
+                    peer_name,
+                    e
+                );
+                tokio::time::sleep(RELAY_CONNECT_RETRY_DELAY).await;
+            }
+            Err(e) => {
+                PENDING_BOOTSTRAPS
+                    .lock()
+                    .await
+                    .remove(&(peer_name.to_string(), magic.clone()));
+                return Err(e);
+            }
+        }
+    }
+
+    let accepted = match tokio::time::timeout(BOOTSTRAP_TIMEOUT, rx).await {
+        Ok(Ok(accepted)) => accepted,
+        Ok(Err(_)) => {
+            return Err(Error::InvalidPeer(format!(
+                "Relayed bootstrap to '{}' was cancelled before completing.",
+                peer_name
+            )));
+        }
+        Err(_) => {
+            PENDING_BOOTSTRAPS
+                .lock()
+                .await
+                .remove(&(peer_name.to_string(), magic.clone()));
+            return Err(Error::InvalidPeer(format!(
+                "Timed out waiting for '{}' to accept the relayed connection.",
+                peer_name
+            )));
+        }
+    };
+
+    assert_session_key_not_null(&accepted.session_inner_key, "inner", peer_name)?;
+
+    let session = RelayedSession {
+        generation: next_session_generation(),
+        inner_key: accepted.session_inner_key,
+        outer_key,
+        inner_key_salt,
+        outer_key_salt,
+        next_nonce: 0,
+        replay_window: ReplayWindow::new(),
+        peer_supports_nonce: accepted.supports_nonce,
+    };
+
+    SESSIONS
+        .write()
+        .await
+        .insert(peer_name.to_string(), session);
+
+    tracing::info!(
+        "Relayed connection established with {} (via {}), engine {} version {}",
+        peer_name,
+        relay,
+        accepted.engine,
+        accepted.version
+    );
+
+    // synthesise the "connected" control event, exactly as a direct
+    // connection does (connection.rs) - so Register/Sync just work.
+    exchange::received(
+        Command::connected(peer_name, &peer.zone, &accepted.engine, &accepted.version).into(),
+    )?;
+
+    Ok(())
+}
+
+///
+/// Bootstrap every configured relayed peer for which we are the relayed
+/// *client* - call at startup, alongside connecting to any direct
+/// `servers`. Peers for which we are the relayed *server* are left alone;
+/// they wait for their own client to initiate.
+///
+/// Spawns one persistent background task per peer (see
+/// `maintain_relayed_client`) rather than bootstrapping once and stopping -
+/// exactly as `client::run` keeps retrying a direct connection forever,
+/// each relayed peer keeps retrying its bootstrap forever too, so a
+/// startup-ordering race (the other side not connected to the proxy yet)
+/// or a later drop of the underlying relay connection both resolve
+/// themselves without needing anything else to trigger a fresh attempt.
+///
+pub async fn bootstrap_all_as_client() -> Result<(), Error> {
+    let names: Vec<String> = {
+        let config = RELAY_CONFIG.read().await;
+        match config.as_ref() {
+            Some(config) => config
+                .peers
+                .iter()
+                .filter_map(|(name, peer)| match peer.role {
+                    RelayedRole::Client { .. } => Some(name.clone()),
+                    RelayedRole::Server { .. } => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    };
+
+    for name in names {
+        tokio::spawn(maintain_relayed_client(name));
+    }
+
+    Ok(())
+}
+
+///
+/// Keep a relayed-client peer bootstrapped for as long as this process
+/// runs: bootstrap, then watch the real connection to the relay for as
+/// long as it stays up; once bootstrapped or once the relay connection
+/// drops, retry after [`BOOTSTRAP_RETRY_DELAY`] - the same cadence
+/// `client::run` uses for direct connections. Runs forever; intended to
+/// be spawned once per peer and never awaited.
+///
+async fn maintain_relayed_client(peer_name: String) {
+    loop {
+        match bootstrap(&peer_name).await {
+            Ok(()) => {
+                wait_while_relay_connected(&peer_name).await;
+                SESSIONS.write().await.remove(&peer_name);
+                tracing::info!(
+                    "Real connection to the relay for '{}' has dropped - will re-bootstrap \
+                     once it reconnects.",
+                    peer_name
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not bootstrap relayed peer '{}': {:?} - retrying in {}s.",
+                    peer_name,
+                    e,
+                    BOOTSTRAP_RETRY_DELAY.as_secs()
+                );
+            }
+        }
+
+        tokio::time::sleep(BOOTSTRAP_RETRY_DELAY).await;
+    }
+}
+
+///
+/// Blocks until the real, direct connection to `peer_name`'s relay is no
+/// longer present in paddington's connection registry (or forever, if
+/// `peer_name` isn't a configured relayed-client peer at all - this
+/// should never actually happen since only `maintain_relayed_client`
+/// calls this, for a peer name it just read from `RELAY_CONFIG` itself).
+/// A session built on a dropped connection is no longer trustworthy - the
+/// proxy may have restarted and lost nothing (it's stateless), but *we*
+/// have no way to know whether the other real hop's process also
+/// restarted meanwhile, so the safest assumption is to redo the bootstrap
+/// (and get fresh session keys in the process - fresh, not forward-secret;
+/// see `docs/specifications/security-model.md` §2.5).
+///
+async fn wait_while_relay_connected(peer_name: &str) {
+    let peer = match get_peer(peer_name).await {
+        Ok(peer) => peer,
+        Err(_) => return,
+    };
+
+    let relay = match &peer.role {
+        RelayedRole::Client { relay } => relay.clone(),
+        RelayedRole::Server { .. } => return,
+    };
+
+    loop {
+        tokio::time::sleep(RELAY_HEALTH_POLL_INTERVAL).await;
+
+        if !exchange::is_connected(&relay, &peer.relay_zone) {
+            return;
+        }
+    }
+}
+
+///
+/// Tell `peer_name` that we have no relayed session with it - see
+/// [`BootstrapMessage::SessionUnknown`]. Encrypted with the permanent
+/// pre-shared key, exactly like a real bootstrap message, sent over the
+/// real connection to `peer`'s relay - so a restarted relayed *server*
+/// (which cannot initiate a bootstrap itself) can still prompt its
+/// relayed *client* peer to redo the handshake, rather than silently
+/// dropping every message the client sends until something else notices.
+///
+async fn notify_session_unknown(peer_name: &str, peer: &RelayedPeer) -> Result<(), Error> {
+    // Debounce: one notification per peer per `SESSION_UNKNOWN_MIN_INTERVAL`. The
+    // legitimate case needs exactly one (the peer re-bootstraps immediately), so
+    // rate-limiting costs nothing there while removing the amplification a hostile
+    // relay could drive. See finding R28.
+    {
+        let mut last = LAST_SESSION_UNKNOWN.lock().await;
+        let now = tokio::time::Instant::now();
+
+        if let Some(previous) = last.get(peer_name) {
+            if now.duration_since(*previous) < SESSION_UNKNOWN_MIN_INTERVAL {
+                tracing::debug!(
+                    "Already told '{}' we have no session with it within the last {:?} \
+                     - not repeating it.",
+                    peer_name,
+                    SESSION_UNKNOWN_MIN_INTERVAL
+                );
+                return Ok(());
+            }
+        }
+
+        last.insert(peer_name.to_string(), now);
+    }
+
+    let nonce = take_bootstrap_nonce(peer_name).await;
+    let bootstrap_salt = bootstrap_salt()?;
+    let ciphertext = encrypt_with_keys(
+        &BootstrapMessage::SessionUnknown {
+            nonce,
+            epoch: Some(crate::anti_replay::process_epoch()),
+        },
+        &peer.inner_key,
+        &peer.outer_key,
+        &bootstrap_salt,
+        &bootstrap_salt,
+    )?;
+
+    let my_name = my_name().await?;
+
+    let relay = match &peer.role {
+        RelayedRole::Client { relay } | RelayedRole::Server { relay } => relay.clone(),
+    };
+
+    let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
+        from: my_name,
+        to: peer_name.to_string(),
+        zone: peer.zone.clone(),
+        ciphertext,
+    };
+
+    let payload = serde_json::to_string(&envelope)
+        .with_context(|| "Could not serialise relay envelope")
+        .map_err(Error::Any)?;
+
+    exchange::send(Message::send_to(&relay, &peer.relay_zone, &payload)).await
+}
+
+async fn handle_start(
+    from: &str,
+    zone: &str,
+    peer: &RelayedPeer,
+    relay: &str,
+    start: StartRelayedConnection,
+) -> Result<(), Error> {
+    // checked first, before generating any session key material or
+    // touching SESSIONS - this is the check that actually matters (see
+    // docs/plans/replay-protection-design.md §10.1): this message alone
+    // is sufficient to reset our live session for `from`, so a replayed
+    // `Start` must never get this far.
+    if !check_bootstrap_replay(from, start.epoch, start.nonce).await {
+        return Err(Error::InvalidPeer(format!(
+            "Rejected replayed (or too-old) StartRelayedConnection from '{}' (nonce {})",
+            from, start.nonce
+        )));
+    }
+
+    let inner_key = Key::generate();
+    let nonce = take_bootstrap_nonce(from).await;
+
+    let accepted = RelayedConnectionAccepted {
+        session_inner_key: inner_key.clone(),
+        magic: start.magic.clone(),
+        engine: env!("CARGO_PKG_NAME").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        supports_nonce: true,
+        nonce,
+        epoch: Some(crate::anti_replay::process_epoch()),
+    };
+
+    let bootstrap_salt = bootstrap_salt()?;
+    let ciphertext = encrypt_with_keys(
+        &BootstrapMessage::Accepted(accepted),
+        &peer.inner_key,
+        &peer.outer_key,
+        &bootstrap_salt,
+        &bootstrap_salt,
+    )?;
+
+    let my_name = my_name().await?;
+
+    let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
+        from: my_name,
+        to: from.to_string(),
+        zone: zone.to_string(),
+        ciphertext,
+    };
+
+    let payload = serde_json::to_string(&envelope)
+        .with_context(|| "Could not serialise relay envelope")
+        .map_err(Error::Any)?;
+
+    exchange::send(Message::send_to(relay, &peer.relay_zone, &payload)).await?;
+
+    assert_session_key_not_null(&start.session_outer_key, "outer", from)?;
+
+    let session = RelayedSession {
+        generation: next_session_generation(),
+        inner_key,
+        outer_key: start.session_outer_key,
+        inner_key_salt: start.inner_key_salt,
+        outer_key_salt: start.outer_key_salt,
+        next_nonce: 0,
+        replay_window: ReplayWindow::new(),
+        peer_supports_nonce: start.supports_nonce,
+    };
+
+    SESSIONS.write().await.insert(from.to_string(), session);
+
+    tracing::info!(
+        "Accepted relayed connection from {} (via {}), engine {} version {}",
+        from,
+        relay,
+        start.engine,
+        start.version
+    );
+
+    exchange::received(Command::connected(from, zone, &start.engine, &start.version).into())?;
+
+    Ok(())
+}
+
+/// Log when a relayed envelope's `zone` disagrees with the zone we have
+/// configured for that peer.
+///
+/// `RelayEnvelope` is plaintext JSON *outside* the AEAD - `Key::encrypt` passes
+/// no associated data - so `from`, `to` and `zone` are all unauthenticated.
+/// `to` is checked against our own name and `from` is implicitly bound (it
+/// selects which permanent key we decrypt with, so a wrong value simply fails),
+/// but `zone` was bound to nothing and propagated verbatim into
+/// `Message::received_from` and the synthesised `Connected` event. Since
+/// templemeads treats `{name}@{zone}` as the peer *identity* - boards, job
+/// routing and the peer registry all key on it - a malicious proxy, or the
+/// relayed peer itself, could choose which identity its traffic was filed
+/// under. The receive side now uses the configured `peer.zone` throughout and
+/// ignores the wire value; this records the disagreement so a genuine
+/// misconfiguration is still visible. See
+/// `docs/specifications/security-review-2.md` (finding R15).
+fn warn_on_zone_mismatch(envelope: &RelayEnvelope, peer: &RelayedPeer) {
+    if envelope.zone != peer.zone {
+        tracing::warn!(
+            "Relay envelope from '{}' declared zone '{}', but this peer is \
+             configured in zone '{}' - using the configured zone.",
+            envelope.from,
+            envelope.zone,
+            peer.zone
+        );
+    }
+}
+
+async fn handle_incoming_envelope(
+    envelope: RelayEnvelope,
+    arrived_from: &str,
+    arrived_zone: &str,
+) -> Result<Option<Message>, Error> {
+    let my_name = my_name().await?;
+
+    if envelope.to != my_name {
+        tracing::warn!(
+            "Received a relay envelope addressed to '{}', not us ('{}') - ignoring.",
+            envelope.to,
+            my_name
+        );
+        return Ok(None);
+    }
+
+    let peer = get_peer(&envelope.from).await?;
+
+    // The peer named in `envelope.from` is a wire field. Require the envelope to
+    // have actually arrived over the connection to the relay our own config names
+    // for that peer - `arrived_from`/`arrived_zone` are stamped by paddington from
+    // the authenticated connection, not by the sender.
+    //
+    // F7 bound `envelope.from` to the authenticated sender on the *proxy*; this is
+    // the missing receive-side counterpart. Without it, any direct peer of ours -
+    // our portal, a second proxy - could inject `{from:"A",to:"us",...}` for a
+    // relayed pair it has no part in, and we would emit a genuine PSK-signed
+    // `SessionUnknown` to A for every such packet, churning their session and
+    // (per R28) spawning a bootstrap task each time. See
+    // `docs/specifications/security-review-2.md` (findings R16 and R28).
+    if !arrived_over_configured_relay(&peer, arrived_from, arrived_zone) {
+        tracing::warn!(
+            "Dropping a relay envelope claiming to be from '{}': it arrived over the \
+             connection to '{}@{}', but that peer is configured to be relayed through \
+             '{}@{}'.",
+            envelope.from,
+            arrived_from,
+            arrived_zone,
+            peer.relay(),
+            peer.relay_zone
+        );
+        return Ok(None);
+    }
+
+    let bootstrap_salt = bootstrap_salt()?;
+
+    // try the permanent pre-shared key first - only ever used for the two
+    // bootstrap message types.
+    if let Ok(bootstrap_message) = decrypt_with_keys::<BootstrapMessage>(
+        &envelope.ciphertext,
+        &peer.inner_key,
+        &peer.outer_key,
+        &bootstrap_salt,
+        &bootstrap_salt,
+    ) {
+        match bootstrap_message {
+            BootstrapMessage::Start(start) => {
+                let relay = match &peer.role {
+                    RelayedRole::Server { relay } => relay.clone(),
+                    RelayedRole::Client { .. } => {
+                        tracing::warn!(
+                            "Received a StartRelayedConnection from '{}', but we relay to it as a client, not a server - ignoring.",
+                            envelope.from
+                        );
+                        return Ok(None);
+                    }
+                };
+                // The configured zone for this relayed peer, not the wire
+                // field - see `warn_on_zone_mismatch` (finding R15).
+                warn_on_zone_mismatch(&envelope, &peer);
+                handle_start(&envelope.from, &peer.zone, &peer, &relay, start).await?;
+            }
+            BootstrapMessage::Accepted(accepted) => {
+                let mut pending = PENDING_BOOTSTRAPS.lock().await;
+                // Keyed on (peer, magic): a reply only satisfies the handshake we
+                // sent to *that* peer - see `PENDING_BOOTSTRAPS` (finding R33).
+                if let Some(tx) = pending.remove(&(envelope.from.clone(), accepted.magic.clone())) {
+                    // redundant with `magic`'s existing single-use
+                    // protection (see docs/plans/replay-protection-design.md
+                    // §10.1) - kept for uniformity across all three
+                    // bootstrap message types.
+                    if check_bootstrap_replay(&envelope.from, accepted.epoch, accepted.nonce).await
+                    {
+                        let _ = tx.send(accepted);
+                    } else {
+                        tracing::warn!(
+                            "Rejected replayed (or too-old) RelayedConnectionAccepted from '{}' (nonce {})",
+                            envelope.from, accepted.nonce
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "Received a RelayedConnectionAccepted with unrecognised magic from '{}' - ignoring (stale or forged).",
+                        envelope.from
+                    );
+                }
+            }
+            BootstrapMessage::SessionUnknown { nonce, epoch } => {
+                if !check_bootstrap_replay(&envelope.from, epoch, nonce).await {
+                    tracing::warn!(
+                        "Rejected replayed (or too-old) SessionUnknown from '{}' (nonce {})",
+                        envelope.from,
+                        nonce
+                    );
+                    return Ok(None);
+                }
+
+                tracing::info!(
+                    "'{}' reports it has no relayed session with us (it likely just \
+                     restarted) - clearing our own session for it, if any.",
+                    envelope.from
+                );
+                SESSIONS.write().await.remove(&envelope.from);
+
+                // only the relayed *client* can initiate a fresh
+                // bootstrap - if we're the relayed server for this peer,
+                // there's nothing more to do than wait for it to
+                // re-bootstrap with us (which it should do immediately,
+                // having just told us the same problem exists for it).
+                if matches!(peer.role, RelayedRole::Client { .. }) {
+                    let peer_name = envelope.from.clone();
+
+                    // Single-flight: one re-bootstrap attempt in flight per peer.
+                    // This used to spawn a task per `SessionUnknown`, so a burst
+                    // produced a task and a `PENDING_BOOTSTRAPS` entry each, every
+                    // one held for up to 30 s. See finding R28.
+                    let already_running = !BOOTSTRAPPING.lock().await.insert(peer_name.clone());
+
+                    if already_running {
+                        tracing::debug!(
+                            "A re-bootstrap for '{}' is already in flight - not starting another.",
+                            peer_name
+                        );
+                    } else {
+                        tokio::spawn(async move {
+                            if let Err(e) = bootstrap(&peer_name).await {
+                                tracing::warn!(
+                                    "Immediate re-bootstrap for '{}' after SessionUnknown failed: \
+                                     {:?} - the regular retry loop will keep trying.",
+                                    peer_name,
+                                    e
+                                );
+                            }
+
+                            BOOTSTRAPPING.lock().await.remove(&peer_name);
+                        });
+                    }
+                }
+            }
+        }
+        return Ok(None);
+    }
+
+    // not decryptable with the permanent key - must be ongoing traffic
+    // under an established session.
+    let session = SESSIONS.read().await.get(&envelope.from).cloned();
+
+    let session = match session {
+        Some(session) => session,
+        None => {
+            // we have no session for this peer - most likely because *we*
+            // restarted and lost our in-memory session state while the
+            // sender (which never restarted) still thinks its old session
+            // is valid. Unlike a sender-side restart (which self-heals by
+            // re-bootstrapping at its own startup), the sender has no way
+            // to notice this happened on its own, so tell it directly -
+            // see `notify_session_unknown`.
+            if let Err(e) = notify_session_unknown(&envelope.from, &peer).await {
+                tracing::warn!(
+                    "Could not notify '{}' that we have no session with it: {:?}",
+                    envelope.from,
+                    e
+                );
+            }
+
+            return Err(Error::InvalidPeer(format!(
+                "No relayed session established with '{}' yet - dropping message \
+                 (told it to re-bootstrap).",
+                envelope.from
+            )));
+        }
+    };
+
+    // Remember which incarnation we are about to decrypt with, so the replay check
+    // below can confirm it is still the installed one (finding R33).
+    let session_generation = session.generation;
+
+    let wrapped: NoncedPayload = decrypt_with_keys(
+        &envelope.ciphertext,
+        &session.inner_key,
+        &session.outer_key,
+        &session.inner_key_salt,
+        &session.outer_key_salt,
+    )?;
+    let (nonce, payload) = wrapped.into_parts();
+
+    // check for replay against the *stored* session's window, not the
+    // clone we decrypted with above - a write lock, since this mutates it.
+    // See docs/plans/replay-protection-design.md.
+    let accepted = match SESSIONS.write().await.get_mut(&envelope.from) {
+        // Only record against the *same incarnation* we decrypted with. A
+        // re-bootstrap landing between the read-clone above and this write lock
+        // installs a fresh window, which would accept a replayed old-session nonce
+        // by first-nonce initialisation - so a generation change means this message
+        // belongs to a session that no longer exists. See finding R33.
+        Some(session) if session.generation == session_generation => {
+            let supports_nonce = session.peer_supports_nonce;
+            session
+                .replay_window
+                .check_and_record_negotiated(nonce, supports_nonce, &envelope.from)
+        }
+        Some(session) => {
+            tracing::warn!(
+                "Dropping a message from '{}': it was decrypted against session \
+                 generation {}, but generation {} is now installed - the session was \
+                 replaced mid-flight.",
+                envelope.from,
+                session_generation,
+                session.generation
+            );
+            false
+        }
+        None => {
+            // The session vanished between the read-clone and now. Previously this
+            // returned `true` - "nothing to check against, let it through" - but
+            // that is exactly the window a replay wants, and a message whose
+            // session no longer exists has nowhere legitimate to go. Reject; a
+            // genuine sender re-bootstraps and resends.
+            tracing::warn!(
+                "Dropping a message from '{}': its relayed session disappeared while \
+                 the message was being processed.",
+                envelope.from
+            );
+            false
+        }
+    };
+
+    if !accepted {
+        return Err(Error::InvalidPeer(format!(
+            "Rejected replayed (or too-old) message from '{}' (nonce {:?})",
+            envelope.from, nonce
+        )));
+    }
+
+    // synthesised messages are dispatched directly to the inner handler
+    // (see `relay_dispatch_handler` below), bypassing paddington's own
+    // `exchange::event_loop` - which is what normally calls
+    // `set_recipient` on a real message just before handing it to the
+    // registered handler (see `exchange.rs`). Without this, templemeads'
+    // `process_message` rejects it: `MessageType::Message` payloads are
+    // checked against `message.recipient()`, which `received_from` always
+    // leaves blank.
+    // `peer.zone` (from our own configuration), not `envelope.zone` (from the
+    // wire) - see `warn_on_zone_mismatch` (finding R15).
+    warn_on_zone_mismatch(&envelope, &peer);
+    let mut message = Message::received_from(&envelope.from, &peer.zone, &payload);
+    message.set_recipient(&my_name);
+
+    Ok(Some(message))
+}
+
+///
+/// Message handler wrapper for a relayed agent: recognises `RelayEnvelope`
+/// payloads and either bootstraps/relays them or unwraps them into a
+/// synthesised direct message before calling the real registered handler
+/// (see [`set_inner_handler`]) - everything else passes through unchanged.
+/// Register this with `paddington::set_handler` in place of your real
+/// handler.
+///
+pub fn relay_dispatch_handler(
+    message: Message,
+) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
+    Box::pin(async move {
+        match serde_json::from_str::<RelayEnvelope>(message.payload()) {
+            Ok(envelope) => {
+                match handle_incoming_envelope(envelope, message.sender(), message.zone()).await {
+                    Ok(Some(synthesised)) => call_inner_handler(synthesised).await,
+                    Ok(None) => Ok(()),
+                    Err(e) => {
+                        tracing::warn!("Error handling relay envelope: {:?}", e);
+                        Ok(())
+                    }
+                }
+            }
+            Err(_) => call_inner_handler(message).await,
+        }
+    })
+}
+
+///
+/// Send `payload` to the relayed peer `to`, bootstrapping a fresh session
+/// first if none exists yet (relayed-client role only - a relayed server
+/// cannot proactively bootstrap, it can only wait for one).
+///
+pub async fn send(to: &str, payload: &str) -> Result<(), Error> {
+    let peer = get_peer(to).await?;
+
+    if !SESSIONS.read().await.contains_key(to) {
+        match &peer.role {
+            RelayedRole::Client { .. } => bootstrap(to).await?,
+            RelayedRole::Server { .. } => {
+                return Err(Error::InvalidPeer(format!(
+                    "No relayed session with '{}' yet - it must initiate (it is our relayed client).",
+                    to
+                )));
+            }
+        }
+    }
+
+    let relay = match &peer.role {
+        RelayedRole::Client { relay } | RelayedRole::Server { relay } => relay.clone(),
+    };
+
+    let my_name = my_name().await?;
+
+    let ciphertext = {
+        // a write lock, not a read lock - assigning the next nonce
+        // mutates the session (see docs/plans/replay-protection-design.md).
+        let mut sessions = SESSIONS.write().await;
+        let session = sessions.get_mut(to).ok_or_else(|| {
+            Error::InvalidPeer(format!("No relayed session established with '{}'.", to))
+        })?;
+        let nonce = session.next_nonce;
+        session.next_nonce += 1;
+        let wrapped =
+            NoncedPayload::for_peer(nonce, payload.to_string(), session.peer_supports_nonce);
+
+        encrypt_with_keys(
+            &wrapped,
+            &session.inner_key,
+            &session.outer_key,
+            &session.inner_key_salt,
+            &session.outer_key_salt,
+        )?
+    };
+
+    let envelope = RelayEnvelope {
+        kind: RelayEnvelopeKind::V1,
+        from: my_name,
+        to: to.to_string(),
+        zone: peer.zone.clone(),
+        ciphertext,
+    };
+
+    let payload = serde_json::to_string(&envelope)
+        .with_context(|| "Could not serialise relay envelope")
+        .map_err(Error::Any)?;
+
+    exchange::send(Message::send_to(&relay, &peer.relay_zone, &payload)).await
+}
+
+///
+/// Explicit, default-deny allow-list of `(from, to)` pairs a proxy agent
+/// will relay between - see `docs/plans/archive/blind-relay-proxy-design.md` §4.3.
+/// Checked in both directions: allowing `(a, b)` also allows `(b, a)`.
+///
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelayPolicy {
+    pairs: Vec<(String, String)>,
+}
+
+impl RelayPolicy {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn allow(&mut self, a: &str, b: &str) {
+        self.pairs.push((a.to_string(), b.to_string()));
+    }
+
+    pub fn permits(&self, from: &str, to: &str) -> bool {
+        self.pairs
+            .iter()
+            .any(|(a, b)| (a == from && b == to) || (a == to && b == from))
+    }
+}
+
+///
+/// Set the policy a proxy agent's [`proxy_handler`] enforces. Call once at
+/// startup (or whenever the policy changes).
+///
+pub async fn set_proxy_policy(policy: RelayPolicy) {
+    let mut p = PROXY_POLICY.write().await;
+    *p = policy;
+}
+
+///
+/// Configure the proxy's own view of its real `clients` connections - call
+/// once at startup, alongside [`set_proxy_policy`]. Needed so
+/// [`proxy_handler`] can forward on the zone each real hop actually
+/// connected under, rather than the zone the *relayed relationship*
+/// happens to use (which is meaningful to the two relayed peers, not to
+/// the proxy's own connection registry, and is very often different -
+/// e.g. two peers connect to the proxy in zone `default`, but relay to
+/// each other in a peer-specific zone like `ukri>brics`).
+///
+pub async fn configure_proxy(config: &ServiceConfig) -> Result<(), Error> {
+    // A relayed peer is addressed by name alone, both in a `RelayEnvelope` and in
+    // the `allow` policy, so a proxy must not have two clients sharing a name even
+    // in different zones - the pair would be ambiguous and this map would silently
+    // keep only one of them. The relayed agents enforce the same rule in
+    // `configure`; enforcing it here too is what keeps the name unambiguous
+    // end-to-end. See `docs/specifications/security-review-2.md` (finding R33).
+    let zones = proxy_client_zones(config)?;
+
+    let mut state = PROXY_CLIENT_ZONES.write().await;
+    *state = zones;
+
+    Ok(())
+}
+
+/// The name -> zone map [`configure_proxy`] installs, or an error if two clients
+/// share a name.
+///
+/// Split out so the uniqueness rule is testable without mutating the global
+/// `PROXY_CLIENT_ZONES` - which another test asserts on, so testing through
+/// `configure_proxy` made the two race.
+fn proxy_client_zones(config: &ServiceConfig) -> Result<HashMap<String, String>, Error> {
+    let mut zones: HashMap<String, String> = HashMap::new();
+
+    for client in config.clients() {
+        if let Some(existing) = zones.get(&client.name()) {
+            return Err(Error::InvalidPeer(format!(
+                "This proxy has two clients both named '{}' (in zones '{}' and '{}'). \
+                 Relayed peers are addressed by name alone, so a proxy cannot connect \
+                 two peers with the same name - give them distinct names.",
+                client.name(),
+                existing,
+                client.zone()
+            )));
+        }
+
+        zones.insert(client.name(), client.zone());
+    }
+
+    Ok(zones)
+}
+
+///
+/// Message handler for a pure relay/proxy agent - register this via
+/// `paddington::set_handler` on the proxy. Forwards a `RelayEnvelope`
+/// payload unchanged to its `to` peer if [`RelayPolicy`] allows the
+/// `(from, to)` pair; drops (and logs) everything else, including any
+/// non-`RelayEnvelope` payload and any disallowed pair. Never inspects
+/// `ciphertext` - it is opaque to the proxy in every case.
+///
+pub fn proxy_handler(message: Message) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
+    Box::pin(async move {
+        let envelope = match serde_json::from_str::<RelayEnvelope>(message.payload()) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                tracing::warn!(
+                    "Proxy received a non-relay payload from {} - dropping.",
+                    message.sender()
+                );
+                return Ok(());
+            }
+        };
+
+        // Bind `envelope.from` to the peer identity this connection actually
+        // authenticated as (`message.sender()`, set by the framework from the
+        // handshake - see connection.rs). Without this, any authenticated
+        // client of the proxy could assert an arbitrary `from` label to
+        // satisfy a RelayPolicy pair it is not part of. The claimed `from`
+        // must match the authenticated sender. See
+        // docs/specifications/security-review.md (finding F7).
+        if envelope.from != message.sender() {
+            tracing::warn!(
+                "Proxy received an envelope claiming from='{}' over the connection \
+                 authenticated as '{}' - dropping (from-spoofing).",
+                envelope.from,
+                message.sender()
+            );
+            return Ok(());
+        }
+
+        if !PROXY_POLICY
+            .read()
+            .await
+            .permits(&envelope.from, &envelope.to)
+        {
+            tracing::warn!(
+                "Proxy policy does not permit {} -> {} - dropping.",
+                envelope.from,
+                envelope.to
+            );
+            return Ok(());
+        }
+
+        // `envelope.zone` is the zone of the *relayed relationship* between
+        // `from` and `to` - meaningful to those two peers, not to the
+        // proxy's own connection registry. The proxy must instead address
+        // this send using the zone `to` actually connected to *it* under
+        // (see `configure_proxy`), which is very often a different zone.
+        let real_zone = match PROXY_CLIENT_ZONES.read().await.get(&envelope.to).cloned() {
+            Some(zone) => zone,
+            None => {
+                tracing::warn!(
+                    "'{}' is not a known client of this proxy (or configure_proxy() was never \
+                     called) - falling back to the relayed relationship's own zone '{}', which \
+                     will likely fail.",
+                    envelope.to,
+                    envelope.zone
+                );
+                envelope.zone.clone()
+            }
+        };
+
+        let outgoing = Message::send_to(&envelope.to, &real_zone, message.payload());
+
+        if let Err(e) = exchange::send(outgoing).await {
+            tracing::warn!(
+                "Could not relay message from {} to {}: {:?}",
+                envelope.from,
+                envelope.to,
+                e
+            );
+        }
+
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secrecy::ExposeSecret;
+
+    fn test_peer(role: RelayedRole) -> RelayedPeer {
+        RelayedPeer {
+            zone: "default".to_string(),
+            relay_zone: "default".to_string(),
+            role,
+            inner_key: Key::generate(),
+            outer_key: Key::generate(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_nonce_state_persists_and_rejects_replay_across_bootstraps() {
+        // unlike RelayedSession's ongoing-traffic nonce (reset on every
+        // bootstrap), this must survive across bootstrap attempts - see
+        // docs/plans/replay-protection-design.md §10.2. A name unique to
+        // this test avoids colliding with the global registry other tests
+        // might touch.
+        let peer_name = "test-bootstrap-nonce-persists";
+
+        let first = take_bootstrap_nonce(peer_name).await;
+        let second = take_bootstrap_nonce(peer_name).await;
+        assert_eq!(second, first + 1);
+
+        // Same epoch throughout - the same process incarnation
+        // re-bootstrapping, which must not reset the window.
+        let epoch = Some(crate::anti_replay::process_epoch());
+
+        assert!(check_bootstrap_replay(peer_name, epoch, first).await);
+        assert!(check_bootstrap_replay(peer_name, epoch, second).await);
+
+        // simulates a captured Start/Accepted/SessionUnknown replayed
+        // against a *later* bootstrap attempt for the same peer - must
+        // still be rejected, proving the window survived rather than
+        // resetting the way RelayedSession's does.
+        assert!(!check_bootstrap_replay(peer_name, epoch, first).await);
+        assert!(!check_bootstrap_replay(peer_name, epoch, second).await);
+
+        // A restarted relayed peer sends the same low nonces under a new
+        // epoch, and must be accepted - otherwise a restart deadlocks the
+        // bootstrap, and `SessionUnknown` (the message that exists to recover
+        // from exactly that restart) is itself rejected. See
+        // docs/specifications/security-review-2.md (finding R10).
+        let after_restart = Some(crate::anti_replay::process_epoch() ^ 0xFFFF);
+        assert!(check_bootstrap_replay(peer_name, after_restart, first).await);
+        assert!(check_bootstrap_replay(peer_name, after_restart, second).await);
+
+        // The superseded epoch's window is retained, so the old replay still
+        // fails.
+        assert!(!check_bootstrap_replay(peer_name, epoch, first).await);
+    }
+
+    #[test]
+    fn test_bootstrap_message_roundtrip() {
+        let peer = test_peer(RelayedRole::Server {
+            relay: "proxy".to_string(),
+        });
+        let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("bootstrap_salt: {:?}", e));
+
+        let start = StartRelayedConnection {
+            session_outer_key: Key::generate(),
+            inner_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            outer_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 0,
+            epoch: Some(1),
+        };
+
+        let ciphertext = encrypt_with_keys(
+            &BootstrapMessage::Start(start),
+            &peer.inner_key,
+            &peer.outer_key,
+            &salt,
+            &salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        let decrypted: BootstrapMessage =
+            decrypt_with_keys(&ciphertext, &peer.inner_key, &peer.outer_key, &salt, &salt)
+                .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+
+        match decrypted {
+            BootstrapMessage::Start(start) => assert_eq!(start.magic, "abc123"),
+            BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
+            BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Start"),
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_messages_without_epoch_field_default_to_none() {
+        // A relayed peer built before the `epoch` field (finding R10) sends
+        // bootstrap messages without it. All three must deserialise with
+        // `epoch: None`, which gets its own replay window and so behaves
+        // exactly as before. This matters most for `Start` and
+        // `SessionUnknown`, the two the design doc (§10.1) identifies as
+        // actually disruptable by a replay.
+        let start = StartRelayedConnection {
+            session_outer_key: Key::generate(),
+            inner_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            outer_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 5,
+            epoch: Some(1),
+        };
+
+        let mut value =
+            serde_json::to_value(&start).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+        let start: StartRelayedConnection =
+            serde_json::from_value(value).unwrap_or_else(|e| unreachable!("deserialise: {:?}", e));
+        assert_eq!(start.epoch, None);
+        assert_eq!(start.nonce, 5);
+
+        let accepted = RelayedConnectionAccepted {
+            session_inner_key: Key::generate(),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 6,
+            epoch: Some(1),
+        };
+
+        let mut value =
+            serde_json::to_value(&accepted).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+        let accepted: RelayedConnectionAccepted =
+            serde_json::from_value(value).unwrap_or_else(|e| unreachable!("deserialise: {:?}", e));
+        assert_eq!(accepted.epoch, None);
+        assert_eq!(accepted.nonce, 6);
+
+        let unknown = BootstrapMessage::SessionUnknown {
+            nonce: 7,
+            epoch: Some(1),
+        };
+
+        let mut value =
+            serde_json::to_value(&unknown).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+        let unknown: BootstrapMessage =
+            serde_json::from_value(value).unwrap_or_else(|e| unreachable!("deserialise: {:?}", e));
+        match unknown {
+            BootstrapMessage::SessionUnknown { nonce, epoch } => {
+                assert_eq!(epoch, None);
+                assert_eq!(nonce, 7);
+            }
+            other => unreachable!("expected SessionUnknown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_start_relayed_connection_without_supports_nonce_field_defaults_to_false() {
+        // what a not-yet-upgraded peer's `StartRelayedConnection` looks
+        // like on the wire - serialised before this field existed, so it's
+        // simply absent. Build a real one, then strip the field from its
+        // JSON (rather than hand-writing the wire format of `SecretKey`/
+        // `Salt`, which isn't this test's concern) - `#[serde(default)]`
+        // must make the stripped JSON still deserialise, as `false`.
+        let start = StartRelayedConnection {
+            session_outer_key: Key::generate(),
+            inner_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            outer_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 0,
+            epoch: Some(1),
+        };
+        let mut value = serde_json::to_value(&start).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("supports_nonce");
+
+        let start: StartRelayedConnection = serde_json::from_value(value).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert!(!start.supports_nonce);
+    }
+
+    #[test]
+    fn test_relayed_connection_accepted_without_supports_nonce_field_defaults_to_false() {
+        let accepted = RelayedConnectionAccepted {
+            session_inner_key: Key::generate(),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 0,
+            epoch: Some(1),
+        };
+        let mut value = serde_json::to_value(&accepted).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("supports_nonce");
+
+        let accepted: RelayedConnectionAccepted =
+            serde_json::from_value(value).unwrap_or_else(|e| {
+                unreachable!("deserialise: {:?}", e);
+            });
+        assert!(!accepted.supports_nonce);
+    }
+
+    #[test]
+    fn test_session_unknown_message_roundtrips_and_is_forgeable_only_with_the_permanent_key() {
+        // A restarted relayed server (which cannot initiate a fresh
+        // bootstrap itself) tells its relayed client peer to redo the
+        // handshake via this message - it must round-trip correctly with
+        // the real permanent key, and fail to decrypt with any other key
+        // (so the proxy - or anyone else without the permanent key - can
+        // never forge it and force spurious re-bootstraps).
+        let peer = test_peer(RelayedRole::Client {
+            relay: "proxy".to_string(),
+        });
+        let wrong_inner_key = Key::generate();
+        let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("bootstrap_salt: {:?}", e));
+
+        let ciphertext = encrypt_with_keys(
+            &BootstrapMessage::SessionUnknown {
+                nonce: 0,
+                epoch: Some(1),
+            },
+            &peer.inner_key,
+            &peer.outer_key,
+            &salt,
+            &salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        let decrypted: BootstrapMessage =
+            decrypt_with_keys(&ciphertext, &peer.inner_key, &peer.outer_key, &salt, &salt)
+                .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+        assert!(matches!(decrypted, BootstrapMessage::SessionUnknown { .. }));
+
+        let forged: Result<BootstrapMessage, Error> =
+            decrypt_with_keys(&ciphertext, &wrong_inner_key, &peer.outer_key, &salt, &salt);
+        assert!(forged.is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_message_wrong_key_fails() {
+        let peer = test_peer(RelayedRole::Server {
+            relay: "proxy".to_string(),
+        });
+        let wrong_inner_key = Key::generate();
+        let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("bootstrap_salt: {:?}", e));
+
+        let start = StartRelayedConnection {
+            session_outer_key: Key::generate(),
+            inner_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            outer_key_salt: Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e)),
+            magic: "abc123".to_string(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 0,
+            epoch: Some(1),
+        };
+
+        let ciphertext = encrypt_with_keys(
+            &BootstrapMessage::Start(start),
+            &peer.inner_key,
+            &peer.outer_key,
+            &salt,
+            &salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        // simulates the proxy (or anyone else) trying to forge a message
+        // without the real pre-shared key
+        let decrypted: Result<BootstrapMessage, Error> =
+            decrypt_with_keys(&ciphertext, &wrong_inner_key, &peer.outer_key, &salt, &salt);
+
+        assert!(decrypted.is_err());
+    }
+
+    #[test]
+    fn test_ciphertext_never_contains_plaintext() {
+        let peer = test_peer(RelayedRole::Client {
+            relay: "proxy".to_string(),
+        });
+        let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("bootstrap_salt: {:?}", e));
+
+        let secret_payload = "add_user alice.myproject.myportal - top secret instruction";
+
+        let ciphertext = encrypt_with_keys(
+            &secret_payload.to_string(),
+            &peer.inner_key,
+            &peer.outer_key,
+            &salt,
+            &salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        assert!(!ciphertext.contains("add_user"));
+        assert!(!ciphertext.contains("alice"));
+        assert!(!ciphertext.contains("top secret"));
+
+        // the RelayEnvelope JSON (what the proxy actually sees) must not
+        // leak the payload either
+        let envelope = RelayEnvelope {
+            kind: RelayEnvelopeKind::V1,
+            from: "brics".to_string(),
+            to: "airr".to_string(),
+            zone: "default".to_string(),
+            ciphertext,
+        };
+        let wire_json =
+            serde_json::to_string(&envelope).unwrap_or_else(|e| unreachable!("json: {:?}", e));
+        assert!(!wire_json.contains("add_user"));
+        assert!(!wire_json.contains("alice"));
+        assert!(!wire_json.contains("top secret"));
+    }
+
+    #[test]
+    fn test_a_relay_envelope_is_bound_to_the_connection_it_arrived_on() {
+        // `envelope.from` is a wire field. Without this check any direct peer of
+        // ours - our portal, a second proxy - could inject
+        // `{from:"A",to:"us",...}` for a relayed pair it has no part in, and we
+        // would emit a genuine PSK-signed `SessionUnknown` to A for each one,
+        // churning their session. See findings R16 and R28.
+        let peer = RelayedPeer {
+            zone: "ukri>brics".to_string(),
+            // the *direct* connection to the proxy is in a different zone to the
+            // relayed relationship - very often the case, and easy to conflate
+            relay_zone: "default".to_string(),
+            role: RelayedRole::Client {
+                relay: "proxy".to_string(),
+            },
+            inner_key: Key::generate(),
+            outer_key: Key::generate(),
+        };
+
+        // The real path: it arrived over our connection to the proxy.
+        assert!(arrived_over_configured_relay(&peer, "proxy", "default"));
+
+        // A different peer entirely - the injection this closes.
+        assert!(!arrived_over_configured_relay(
+            &peer,
+            "ourportal",
+            "default"
+        ));
+
+        // The right relay name, but not the connection we hold to it. This is the
+        // case that conflating `zone` and `relay_zone` would wave through.
+        assert!(!arrived_over_configured_relay(&peer, "proxy", "ukri>brics"));
+        assert!(!arrived_over_configured_relay(&peer, "proxy", ""));
+
+        // A second proxy we do use - but not for *this* peer.
+        assert!(!arrived_over_configured_relay(&peer, "proxy2", "default"));
+
+        // The same holds when we are the relayed server rather than the client.
+        let as_server = RelayedPeer {
+            role: RelayedRole::Server {
+                relay: "proxy".to_string(),
+            },
+            ..peer
+        };
+        assert!(arrived_over_configured_relay(
+            &as_server, "proxy", "default"
+        ));
+        assert!(!arrived_over_configured_relay(
+            &as_server,
+            "elsewhere",
+            "default"
+        ));
+    }
+
+    #[test]
+    fn test_a_proxy_refuses_two_clients_sharing_a_name() {
+        // A relayed peer is addressed by name alone - in the envelope and in the
+        // `allow` policy - so the same name in two zones is ambiguous, and this map
+        // used to silently keep only one of them. Both the proxy and the relayed
+        // agents now refuse such a configuration. See finding R33.
+        let mut proxy = ServiceConfig::new(
+            "proxy",
+            "http://localhost:9000",
+            "127.0.0.1",
+            &9000,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service: {:?}", e));
+
+        proxy
+            .add_client("airr", "127.0.0.1", &None, &None)
+            .unwrap_or_else(|e| unreachable!("add airr: {:?}", e));
+        proxy
+            .add_client("brics", "127.0.0.1", &Some("other".to_string()), &None)
+            .unwrap_or_else(|e| unreachable!("add brics: {:?}", e));
+
+        // distinct names in different zones are fine
+        assert!(proxy_client_zones(&proxy).is_ok());
+
+        // ...but the same name in a second zone is refused
+        proxy
+            .add_client("airr", "127.0.0.1", &Some("elsewhere".to_string()), &None)
+            .unwrap_or_else(|e| unreachable!("add duplicate airr: {:?}", e));
+
+        assert!(
+            proxy_client_zones(&proxy).is_err(),
+            "a duplicate client name must be refused"
+        );
+    }
+
+    #[test]
+    fn test_an_all_zero_session_key_is_refused() {
+        // F15 checked the two direct handshake paths; the relay key-transport points
+        // did not. `Key::derive` HKDFs happily from all-zero input, so an all-zero
+        // session key silently worked - defeating the point of a per-session key.
+        // See finding R33.
+        let null_key = Key::null();
+        assert!(assert_session_key_not_null(&null_key, "outer", "brics").is_err());
+
+        let real_key = Key::generate();
+        assert!(assert_session_key_not_null(&real_key, "outer", "brics").is_ok());
+    }
+
+    #[test]
+    fn test_a_relay_envelope_is_identified_positively() {
+        // Classification used to be purely structural, so any future payload with
+        // these four fields would be read as an envelope. It now needs the tag, and
+        // rejects extra fields. See finding R33.
+        let envelope = RelayEnvelope {
+            kind: RelayEnvelopeKind::V1,
+            from: "brics".to_string(),
+            to: "airr".to_string(),
+            zone: "default".to_string(),
+            ciphertext: "00".to_string(),
+        };
+
+        let json =
+            serde_json::to_string(&envelope).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        assert!(json.contains("openportal-relay-v1"));
+        assert!(serde_json::from_str::<RelayEnvelope>(&json).is_ok());
+
+        // The old, untagged shape is no longer an envelope...
+        let untagged = r#"{"from":"brics","to":"airr","zone":"default","ciphertext":"00"}"#;
+        assert!(serde_json::from_str::<RelayEnvelope>(untagged).is_err());
+
+        // ...nor is a tagged one carrying anything extra.
+        let extra = r#"{"kind":"openportal-relay-v1","from":"a","to":"b","zone":"c",
+                        "ciphertext":"00","something_else":1}"#;
+        assert!(serde_json::from_str::<RelayEnvelope>(extra).is_err());
+
+        // ...nor a wrong tag.
+        let wrong = r#"{"kind":"something","from":"a","to":"b","zone":"c","ciphertext":"00"}"#;
+        assert!(serde_json::from_str::<RelayEnvelope>(wrong).is_err());
+    }
+
+    #[test]
+    fn test_session_generations_are_distinct_per_incarnation() {
+        // The replay check records a nonce against the *stored* session, having
+        // decrypted against a clone. A re-bootstrap between the two installs a fresh
+        // window that would accept a replayed old-session nonce by first-nonce
+        // initialisation; the generation is what detects that. See finding R33.
+        let first = next_session_generation();
+        let second = next_session_generation();
+
+        assert_ne!(first, second);
+        assert!(second > first, "generations must increase monotonically");
+    }
+
+    #[test]
+    fn test_relay_policy_default_deny() {
+        let policy = RelayPolicy::new();
+        assert!(!policy.permits("airr", "brics"));
+    }
+
+    #[test]
+    fn test_relay_policy_bidirectional() {
+        let mut policy = RelayPolicy::new();
+        policy.allow("airr", "brics");
+
+        assert!(policy.permits("airr", "brics"));
+        assert!(policy.permits("brics", "airr"));
+        assert!(!policy.permits("airr", "someone_else"));
+    }
+
+    #[tokio::test]
+    async fn test_configure_proxy_captures_client_zones() {
+        // The proxy must forward using the zone each real client actually
+        // connected to *it* under, not the zone the relayed relationship
+        // between two of its clients happens to use (see `proxy_handler`).
+        // NOTE: like `configure()`, `configure_proxy()` writes to a
+        // process-global static (`PROXY_CLIENT_ZONES`) - this is the only
+        // test that calls it, deliberately, to avoid racing another test
+        // that also calls it concurrently.
+        let mut proxy = ServiceConfig::new(
+            "proxy-czones",
+            "http://localhost",
+            "127.0.0.1",
+            &6005,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service config: {}", e));
+
+        proxy
+            .add_client("ukri", "127.0.0.1", &None, &None)
+            .unwrap_or_else(|e| unreachable!("add_client: {}", e));
+        proxy
+            .add_client(
+                "cloud",
+                "127.0.0.1",
+                &Some("special-zone".to_string()),
+                &None,
+            )
+            .unwrap_or_else(|e| unreachable!("add_client: {}", e));
+
+        configure_proxy(&proxy)
+            .await
+            .unwrap_or_else(|e| unreachable!("configure_proxy: {:?}", e));
+
+        let zones = PROXY_CLIENT_ZONES.read().await;
+        assert_eq!(zones.get("ukri").cloned(), Some("default".to_string()));
+        assert_eq!(
+            zones.get("cloud").cloned(),
+            Some("special-zone".to_string())
+        );
+        assert_eq!(zones.get("nonexistent"), None);
+    }
+
+    #[tokio::test]
+    async fn test_configure_reads_relayed_peers_from_service_config() {
+        // NOTE: every assertion that depends on `configure()`'s effect on
+        // the global `RELAY_CONFIG`/`my_name()` state lives in this single
+        // test function, deliberately - `RELAY_CONFIG` is a process-wide
+        // static, and `cargo test` runs test functions concurrently by
+        // default, so two tests each calling `configure()` race and
+        // clobber each other's state. Add new `configure()`-based
+        // assertions here rather than in a new `#[tokio::test]`.
+        let mut airr =
+            ServiceConfig::new("airr", "http://localhost", "127.0.0.1", &6001, &None, &None)
+                .unwrap_or_else(|e| unreachable!("service config: {}", e));
+        let mut proxy = ServiceConfig::new(
+            "proxy",
+            "http://localhost",
+            "127.0.0.1",
+            &6002,
+            &None,
+            &None,
+        )
+        .unwrap_or_else(|e| unreachable!("service config: {}", e));
+
+        let invite = proxy
+            .add_client("airr", "127.0.0.1", &None, &None)
+            .unwrap_or_else(|e| unreachable!("add_client: {}", e));
+        airr.add_server(&invite)
+            .unwrap_or_else(|e| unreachable!("add_server: {}", e));
+
+        let invite = airr
+            .add_relayed_client("brics", "proxy", &None, &None)
+            .unwrap_or_else(|e| unreachable!("add_relayed_client: {}", e));
+        let _ = invite; // brics's side isn't configured in this test
+
+        // "ukri" is introduced via the same proxy but in a *different*
+        // zone - the real connection to the proxy itself stays in the
+        // default zone (§ above), but this relayed peer's own zone
+        // differs. Bootstrap/relay traffic must be addressed using the
+        // *proxy's* zone (`relay_zone`), not the relayed peer's own zone
+        // (`zone`) - otherwise `exchange::send` looks up a connection key
+        // that doesn't exist ("proxy@custom-zone" instead of
+        // "proxy@default") and fails with `UnnamedConnection`, even though
+        // the real connection to the proxy is up.
+        airr.add_relayed_client("ukri", "proxy", &Some("custom-zone".to_string()), &None)
+            .unwrap_or_else(|e| unreachable!("add_relayed_client: {}", e));
+
+        configure(&airr)
+            .await
+            .unwrap_or_else(|e| unreachable!("configure: {}", e));
+
+        let peer = get_peer("brics")
+            .await
+            .unwrap_or_else(|e| unreachable!("get_peer: {}", e));
+        assert!(matches!(peer.role, RelayedRole::Server { .. }));
+        assert_eq!(peer.zone, "default");
+        assert_eq!(peer.relay_zone, "default");
+        assert_eq!(my_name().await.unwrap_or_default(), "airr");
+
+        let peer = get_peer("ukri")
+            .await
+            .unwrap_or_else(|e| unreachable!("get_peer: {}", e));
+        assert_eq!(peer.zone, "custom-zone");
+        assert_eq!(peer.relay_zone, "default");
+
+        assert!(get_peer("nonexistent").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_full_bootstrap_and_message_exchange_in_process() {
+        // Simulates airr (relayed server) and brics (relayed client)
+        // bootstrapping and exchanging a message, entirely in-process
+        // (no live connections/proxy involved) - directly exercising the
+        // same functions each side's dispatch handler would call, proving
+        // the protocol itself is correct independent of any network layer.
+        let permanent_inner = Key::generate();
+        let permanent_outer = Key::generate();
+
+        let airr_peer_for_brics = RelayedPeer {
+            zone: "default".to_string(),
+            relay_zone: "default".to_string(),
+            role: RelayedRole::Server {
+                relay: "proxy".to_string(),
+            },
+            inner_key: permanent_inner.clone(),
+            outer_key: permanent_outer.clone(),
+        };
+        let brics_peer_for_airr = RelayedPeer {
+            zone: "default".to_string(),
+            relay_zone: "default".to_string(),
+            role: RelayedRole::Client {
+                relay: "proxy".to_string(),
+            },
+            inner_key: permanent_inner,
+            outer_key: permanent_outer,
+        };
+
+        // brics builds the StartRelayedConnection it would send
+        let outer_key = Key::generate();
+        let inner_key_salt = Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
+        let outer_key_salt = Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
+        let magic = generate_magic().unwrap_or_else(|e| unreachable!("magic: {:?}", e));
+
+        let start = StartRelayedConnection {
+            session_outer_key: outer_key.clone(),
+            inner_key_salt: inner_key_salt.clone(),
+            outer_key_salt: outer_key_salt.clone(),
+            magic: magic.clone(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 0,
+            epoch: Some(1),
+        };
+
+        let bootstrap_salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
+        let start_ciphertext = encrypt_with_keys(
+            &BootstrapMessage::Start(start),
+            &brics_peer_for_airr.inner_key,
+            &brics_peer_for_airr.outer_key,
+            &bootstrap_salt,
+            &bootstrap_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        // airr decrypts it with what it believes are brics's permanent keys
+        let decrypted: BootstrapMessage = decrypt_with_keys(
+            &start_ciphertext,
+            &airr_peer_for_brics.inner_key,
+            &airr_peer_for_brics.outer_key,
+            &bootstrap_salt,
+            &bootstrap_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+
+        let start = match decrypted {
+            BootstrapMessage::Start(start) => start,
+            BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
+            BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Start"),
+        };
+        assert_eq!(start.magic, magic);
+
+        // airr generates its own inner key and responds
+        let airr_inner_key = Key::generate();
+        let accepted = RelayedConnectionAccepted {
+            session_inner_key: airr_inner_key.clone(),
+            magic: start.magic.clone(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            supports_nonce: true,
+            nonce: 0,
+            epoch: Some(1),
+        };
+
+        let accepted_ciphertext = encrypt_with_keys(
+            &BootstrapMessage::Accepted(accepted),
+            &airr_peer_for_brics.inner_key,
+            &airr_peer_for_brics.outer_key,
+            &bootstrap_salt,
+            &bootstrap_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        // brics decrypts the response
+        let decrypted: BootstrapMessage = decrypt_with_keys(
+            &accepted_ciphertext,
+            &brics_peer_for_airr.inner_key,
+            &brics_peer_for_airr.outer_key,
+            &bootstrap_salt,
+            &bootstrap_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+
+        let accepted = match decrypted {
+            BootstrapMessage::Accepted(accepted) => accepted,
+            BootstrapMessage::Start(_) => unreachable!("expected Accepted"),
+            BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Accepted"),
+        };
+        assert_eq!(accepted.magic, magic);
+
+        // both sides now hold the identical {inner_key (from airr),
+        // outer_key (from brics)} session pair
+        let brics_session = RelayedSession {
+            generation: next_session_generation(),
+            inner_key: accepted.session_inner_key.clone(),
+            outer_key: outer_key.clone(),
+            inner_key_salt: inner_key_salt.clone(),
+            outer_key_salt: outer_key_salt.clone(),
+            next_nonce: 0,
+            replay_window: ReplayWindow::new(),
+            peer_supports_nonce: true,
+        };
+        let mut airr_session = RelayedSession {
+            generation: next_session_generation(),
+            inner_key: airr_inner_key,
+            outer_key,
+            inner_key_salt,
+            outer_key_salt,
+            next_nonce: 0,
+            replay_window: ReplayWindow::new(),
+            peer_supports_nonce: true,
+        };
+
+        // brics sends real, ongoing traffic using the session keys, wrapped
+        // with a nonce exactly as `relay::send` does
+        let real_payload = "portal.cluster add_user alice.myproject.myportal";
+        let ciphertext = encrypt_with_keys(
+            &NoncedPayload::new(0, real_payload.to_string()),
+            &brics_session.inner_key,
+            &brics_session.outer_key,
+            &brics_session.inner_key_salt,
+            &brics_session.outer_key_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+        // this is exactly what the proxy would see - and it cannot recover
+        // the payload from it
+        assert!(!ciphertext.contains("add_user"));
+        assert!(!ciphertext.contains("alice"));
+
+        // airr decrypts using its side of the *same* session keys
+        let wrapped: NoncedPayload = decrypt_with_keys(
+            &ciphertext,
+            &airr_session.inner_key,
+            &airr_session.outer_key,
+            &airr_session.inner_key_salt,
+            &airr_session.outer_key_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+        let (nonce, decrypted) = wrapped.into_parts();
+
+        assert_eq!(decrypted, real_payload);
+        assert_eq!(nonce, Some(0));
+        assert!(airr_session.replay_window.check_and_record_optional(nonce));
+
+        // replaying the exact same (still perfectly validly-encrypted)
+        // ciphertext a second time - e.g. captured and re-injected by the
+        // proxy or anyone else who saw it on the wire - must now be
+        // rejected, even though decryption succeeds identically both times.
+        let wrapped: NoncedPayload = decrypt_with_keys(
+            &ciphertext,
+            &airr_session.inner_key,
+            &airr_session.outer_key,
+            &airr_session.inner_key_salt,
+            &airr_session.outer_key_salt,
+        )
+        .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+        let (replayed_nonce, _) = wrapped.into_parts();
+        assert!(!airr_session
+            .replay_window
+            .check_and_record_optional(replayed_nonce));
+    }
+
+    #[tokio::test]
+    async fn test_two_bootstraps_produce_different_session_keys() {
+        // Per-session key freshness (not forward secrecy): each bootstrap must
+        // produce fresh keys, not a deterministic derivation from the permanent
+        // pre-shared key. See security-model.md §2.5.
+        let inner_key = Key::generate();
+        let outer_key = Key::generate();
+
+        let mut session_keys = Vec::new();
+
+        for _ in 0..2 {
+            let outer = Key::generate();
+            let inner_salt = Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
+            let outer_salt = Salt::generate().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
+
+            let start = StartRelayedConnection {
+                session_outer_key: outer,
+                inner_key_salt: inner_salt,
+                outer_key_salt: outer_salt,
+                magic: generate_magic().unwrap_or_else(|e| unreachable!("magic: {:?}", e)),
+                engine: "test".to_string(),
+                version: "0.0.0".to_string(),
+                supports_nonce: true,
+                nonce: 0,
+                epoch: Some(1),
+            };
+
+            let salt = bootstrap_salt().unwrap_or_else(|e| unreachable!("salt: {:?}", e));
+            let ciphertext = encrypt_with_keys(
+                &BootstrapMessage::Start(start),
+                &inner_key,
+                &outer_key,
+                &salt,
+                &salt,
+            )
+            .unwrap_or_else(|e| unreachable!("encrypt: {:?}", e));
+
+            let decrypted: BootstrapMessage =
+                decrypt_with_keys(&ciphertext, &inner_key, &outer_key, &salt, &salt)
+                    .unwrap_or_else(|e| unreachable!("decrypt: {:?}", e));
+
+            match decrypted {
+                // Cloned rather than Debug-formatted: `Key`'s Debug redacts its
+                // bytes now, so formatting it compared nothing (finding R33).
+                BootstrapMessage::Start(start) => {
+                    session_keys.push(start.session_outer_key.expose_secret().clone())
+                }
+                BootstrapMessage::Accepted(_) => unreachable!("expected Start"),
+                BootstrapMessage::SessionUnknown { .. } => unreachable!("expected Start"),
+            }
+        }
+
+        assert!(
+            !session_keys[0].equals(&session_keys[1]),
+            "each bootstrap must derive a fresh session key"
+        );
+    }
+}

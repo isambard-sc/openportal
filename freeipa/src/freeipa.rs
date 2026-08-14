@@ -4,6 +4,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use chrono::Utc;
+use greatwestern::grammar::{ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping};
 use once_cell::sync::Lazy;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -13,10 +14,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use templemeads::grammar::{
-    PortalIdentifier, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
-};
 use templemeads::job::assert_not_expired;
+use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 use tokio::sync::Mutex;
 
@@ -314,7 +313,7 @@ impl IPAServer {
 
     fn is_logged_in(&self) -> bool {
         // check if the jar has a session cookie for this server
-        let url = format!("{}/ipa", &self.server);
+        let url = format!("{}/ipa", self.server);
 
         match url.parse() {
             Ok(url) => {
@@ -487,10 +486,9 @@ async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedI
 }
 
 fn should_allow_invalid_certs() -> bool {
-    match std::env::var("OPENPORTAL_ALLOW_INVALID_SSL_CERTS") {
-        Ok(value) => value.to_lowercase() == "true",
-        Err(_) => false,
-    }
+    // One shared implementation of the rule, so a copy here cannot drift into
+    // being more permissive than the other agent's.
+    templemeads::validate::allow_invalid_ssl_certs()
 }
 
 ///
@@ -527,13 +525,12 @@ async fn login(
     let result = client
         .post(&url)
         .header("Referer", format!("{}/ipa", server))
-        .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "text/plain")
-        .body(format!(
-            "user={}&password={}",
-            user,
-            password.expose_secret()
-        ))
+        // Use `.form()` so the credentials are correctly URL-encoded (it also
+        // sets the application/x-www-form-urlencoded Content-Type). Hand-building
+        // the body would corrupt auth for a user/password containing `&`, `=`,
+        // or `%` (finding F15).
+        .form(&[("user", user), ("password", password.expose_secret())])
         .send()
         .await
         .with_context(|| format!("Could not login calling URL: {}", url))?;
@@ -1031,18 +1028,17 @@ impl IPAGroup {
             // this is a legacy group if the group name is "group.project"
             let parts: Vec<&str> = groupid.split('.').collect();
 
-            if parts.len() != 2 {
+            // Destructured rather than indexed - the group names come from
+            // FreeIPA, not from us. See
+            // docs/specifications/security-review-2.md (finding R1).
+            let ["group", project_part] = parts.as_slice() else {
                 continue;
-            }
+            };
 
-            if parts[0] != "group" {
-                continue;
-            }
-
-            let project = match ProjectIdentifier::parse(&format!("{}.{}", parts[1], portal)) {
+            let project = match ProjectIdentifier::parse(&format!("{}.{}", project_part, portal)) {
                 Ok(project) => project,
                 Err(e) => {
-                    tracing::warn!("Could not parse project: {}. Error: {}", parts[1], e);
+                    tracing::warn!("Could not parse project: {}. Error: {}", project_part, e);
                     continue;
                 }
             };
@@ -1189,12 +1185,12 @@ impl IPAGroup {
         for group in groups.split(',') {
             let parts: Vec<&str> = group.split(':').collect();
 
-            if parts.len() != 2 {
+            let [instance, group_name] = parts.as_slice() else {
                 errors.push(group);
                 continue;
-            }
+            };
 
-            let instance = parts[0].trim();
+            let instance = instance.trim();
 
             if instance.is_empty() {
                 errors.push(group);
@@ -1210,7 +1206,7 @@ impl IPAGroup {
                 }
             };
 
-            let group = parts[1].trim();
+            let group = group_name.trim();
 
             if group.is_empty() {
                 errors.push(group);
@@ -1260,16 +1256,22 @@ impl IPAGroup {
         &self.description
     }
 
-    pub fn is_system_group(&self) -> bool {
-        self.identifier.portal() == "system"
-    }
-
     pub fn is_instance_group(&self) -> bool {
         self.identifier.portal() == "instance"
     }
 
     pub fn is_project_group(&self) -> bool {
-        !(self.is_system_group() || self.is_instance_group())
+        // Reject every internal portal name, not just `system` and `instance` - this
+        // subsumes the former `is_system_group()`, which is why that method is gone.
+        // `openportal` was admitted, so `remove_project openportal.openportal` passed
+        // this guard and resolved to the *managed* group - `identifier_to_projectid`
+        // returns the bare project component for all three internal portals. The blast
+        // radius was zero only by accident (an unrelated filter two layers down skips
+        // every user, so the group is never emptied or deleted), which is not something
+        // a guard should rely on. `get_users`/`force_get_user` already refuse internal
+        // portals outright; this brings the predicate into line. See
+        // `docs/specifications/security-review-2.md` (finding R33).
+        !is_internal_portal(&self.identifier.portal())
     }
 }
 
@@ -3324,4 +3326,84 @@ pub async fn unblock_user(
     tracing::info!("Unblocked user: {}", user.identifier());
 
     Ok(user)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_internal_portals_map_to_bare_group_names() {
+        // These three portal names map to a *bare* group name rather than the
+        // usual `{portal}.{project}`, so `bob.docker.system` resolves to the
+        // host's real `docker` group. That is why `force_get_user`/`get_users`
+        // refuse them when they arrive from a peer, and why
+        // `op-localaccount` had to be brought into line - see
+        // docs/specifications/security-review-2.md (finding R13).
+        let projectid = |s: &str| {
+            let project = match ProjectIdentifier::parse(s) {
+                Ok(p) => p,
+                Err(e) => unreachable!("project {:?}: {:?}", s, e),
+            };
+            match identifier_to_projectid(&project, false) {
+                Ok(id) => id,
+                Err(e) => unreachable!("projectid {:?}: {:?}", s, e),
+            }
+        };
+
+        for portal in ["openportal", "system", "instance"] {
+            assert!(is_internal_portal(portal));
+            assert_eq!(projectid(&format!("docker.{}", portal)), "docker");
+        }
+
+        // Anything else is namespaced by its portal, so it can never collide
+        // with a pre-existing host group.
+        assert!(!is_internal_portal("brics"));
+        assert!(!is_internal_portal("Système"));
+        assert!(!is_internal_portal(""));
+        assert_eq!(projectid("proj.brics"), "brics.proj");
+    }
+
+    #[test]
+    fn test_legacy_project_ids_keep_the_group_prefix() {
+        let project = match ProjectIdentifier::parse("proj.brics") {
+            Ok(p) => p,
+            Err(e) => unreachable!("project: {:?}", e),
+        };
+
+        assert_eq!(
+            match identifier_to_projectid(&project, true) {
+                Ok(id) => id,
+                Err(e) => unreachable!("legacy: {:?}", e),
+            },
+            "group.proj"
+        );
+    }
+
+    #[test]
+    fn test_group_member_uids_come_from_member_user() {
+        // FreeIPA's JSON-RPC returns group members as `member_user` (with the
+        // underscore), not `memberuser`. Reading the wrong key silently yields
+        // an empty set, which makes every membership test succeed vacuously -
+        // so pin the key name.
+        let group = serde_json::json!({
+            "cn": ["brics.proj"],
+            "member_user": ["alice", "bob"],
+        });
+
+        let uids = raw_group_member_uids(&group);
+        assert_eq!(uids.len(), 2);
+        assert!(uids.contains("alice"));
+        assert!(uids.contains("bob"));
+
+        // Absent, wrong-typed and non-string entries degrade to "no members"
+        // rather than panicking on a hostile or unexpected response.
+        assert!(raw_group_member_uids(&serde_json::json!({})).is_empty());
+        assert!(raw_group_member_uids(&serde_json::json!({"memberuser": ["alice"]})).is_empty());
+        assert!(raw_group_member_uids(&serde_json::json!({"member_user": "alice"})).is_empty());
+        assert_eq!(
+            raw_group_member_uids(&serde_json::json!({"member_user": ["alice", 42, null]})).len(),
+            1
+        );
+    }
 }

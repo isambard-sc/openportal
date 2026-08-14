@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 use crate::agent_core::Config;
+use crate::domain::Domain;
 use crate::error::Error;
-use crate::handler::{process_message, set_my_service_details};
+use crate::handler::{run_with_relay, set_my_service_details};
 use crate::runnable::AsyncRunnable;
 
 ///
 /// Run the filesystem service
 ///
-pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
+pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<(), Error> {
     if config.service().name().is_empty() {
         return Err(Error::Misconfigured("Service name is empty".to_string()));
     }
@@ -24,8 +25,7 @@ pub async fn run(config: Config, runner: AsyncRunnable) -> Result<(), Error> {
     .await?;
 
     // run the Provider OpenPortal agent
-    paddington::set_handler(process_message).await?;
-    paddington::run(config.service()).await?;
+    run_with_relay::<L>(config.service()).await?;
 
     Ok(())
 }

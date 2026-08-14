@@ -9,8 +9,9 @@
 use crate::agent::{self, Peer, Type as AgentType};
 use crate::command::Command;
 use crate::diagnostics;
-use crate::grammar::NamedType;
+use crate::domain::Domain;
 use crate::jobtiming;
+use crate::named::NamedType;
 use crate::state;
 use crate::systeminfo;
 
@@ -400,8 +401,8 @@ impl HealthInfo {
 }
 
 impl NamedType for HealthInfo {
-    fn type_name() -> &'static str {
-        "HealthInfo"
+    fn type_name() -> String {
+        "HealthInfo".to_string()
     }
 }
 
@@ -496,6 +497,18 @@ static HEALTH_CACHE: Lazy<RwLock<HashMap<String, HealthInfo>>> =
 ///
 /// Store a health response in the global cache
 ///
+/// Upper bound on the number of agents held in the health cache.
+///
+/// The cache is keyed on the agent name carried *inside* the response, so its
+/// size is not bounded by the number of peers we actually have. A fleet of any
+/// realistic size is far below this; reaching it means something is generating
+/// names, so the oldest entry is evicted rather than growing without limit. See
+/// `docs/specifications/security-review-2.md` (finding R20).
+const MAX_CACHED_HEALTH_ENTRIES: usize = 1024;
+
+///
+/// Store a health response in the global cache
+///
 pub async fn cache_health_response(mut health: HealthInfo) {
     let name = health.name.clone();
 
@@ -503,6 +516,26 @@ pub async fn cache_health_response(mut health: HealthInfo) {
     health.last_updated = Utc::now();
 
     let mut cache = HEALTH_CACHE.write().await;
+
+    if cache.len() >= MAX_CACHED_HEALTH_ENTRIES && !cache.contains_key(&name) {
+        // Evict the least recently updated entry to make room.
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, h)| h.last_updated)
+            .map(|(k, _)| k.clone());
+
+        if let Some(oldest) = oldest {
+            tracing::warn!(
+                "Health cache is full ({} entries) - evicting the oldest ('{}') to \
+                 make room for '{}'.",
+                MAX_CACHED_HEALTH_ENTRIES,
+                oldest,
+                name
+            );
+            cache.remove(&oldest);
+        }
+    }
+
     cache.insert(name.clone(), health);
 
     tracing::debug!("Cached health response for agent: {}", name);
@@ -529,9 +562,31 @@ pub async fn get_cached_health() -> HashMap<String, HealthInfo> {
 /// - `requester`: The agent that requested this health check
 /// - `visited`: Chain of agents already visited in this health check (to prevent circular loops)
 ///
-pub async fn collect_health(
+pub async fn collect_health<L: Domain>(
     requester: &str,
     visited: Vec<String>,
+) -> Result<HealthInfo, anyhow::Error> {
+    collect_health_inner::<L>(requester, visited, true).await
+}
+
+///
+/// Collect health information for **this agent only**, with no cascade to peers.
+///
+/// Used by the resource monitor, which wants a local snapshot for the log when
+/// this process crosses a CPU or memory threshold. Calling `collect_health` there
+/// instead fanned a full health check out to every peer in every direction -
+/// including *upstream* - at exactly the moment the agent was already under
+/// load, and then threw the aggregate away into a local log line. See
+/// `docs/specifications/security-review-2.md` (finding R19, follow-up).
+///
+pub async fn collect_own_health<L: Domain>() -> Result<HealthInfo, anyhow::Error> {
+    collect_health_inner::<L>("", Vec::new(), false).await
+}
+
+async fn collect_health_inner<L: Domain>(
+    requester: &str,
+    visited: Vec<String>,
+    cascade: bool,
 ) -> Result<HealthInfo, anyhow::Error> {
     tracing::debug!(
         "Collecting health information (visited chain length: {})",
@@ -555,7 +610,7 @@ pub async fn collect_health(
     );
 
     // Get aggregated job stats from all boards
-    let stats = state::aggregate_job_stats().await;
+    let stats = state::aggregate_job_stats::<L>().await?;
 
     health.active_jobs = stats.active;
     health.pending_jobs = stats.pending;
@@ -593,13 +648,23 @@ pub async fn collect_health(
     health.total_expired = diagnostics_stats.total_expired;
     health.total_slow = diagnostics_stats.total_slow;
 
-    // Cascade health check to downstream peers (if enabled for this agent)
+    // Cascade health check to peers (if enabled for this agent)
     // Leaf nodes (like FreeIPA or Filesystem) have cascade_health=false
-    if agent::should_cascade_health().await {
+    if cascade && agent::should_cascade_health().await {
+        // `downstream_peers` below is a misnomer kept for continuity: this is
+        // *every* peer minus the requester and the visited chain, so a check
+        // propagates in all directions, not only downwards. That is deliberate -
+        // an operator asking the portal for health expects the whole deployment,
+        // across zones, including agents in private networks reachable no other
+        // way. `visited` prevents loops, not upward travel. See
+        // docs/specifications/security-review-2.md (finding R19).
+        //
         // Exclude:
         // - The requester (to avoid immediate loops)
         // - Any agents in the visited chain (to avoid circular loops across zones)
-        // - Other portals (security: portals must not query other portals)
+        // - Other portals (security: portals must not query other portals - a
+        //   different estate is run by a different operator team, and this is the
+        //   boundary that actually matters)
         let all_peers = agent::real_peers().await;
 
         // Filter based on basic rules first
@@ -631,7 +696,7 @@ pub async fn collect_health(
             let mut new_visited = visited.clone();
             new_visited.push(agent_name.clone());
 
-            cascade_health_checks(&mut health, &downstream_peers, new_visited).await;
+            cascade_health_checks::<L>(&mut health, &downstream_peers, new_visited).await;
         }
     } else {
         tracing::debug!("Health cascade disabled for this agent (leaf node)");
@@ -646,7 +711,7 @@ pub async fn collect_health(
 /// Parameters:
 /// - `visited`: Chain of agents already visited (will be passed to downstream peers)
 ///
-async fn cascade_health_checks(
+async fn cascade_health_checks<L: Domain>(
     health: &mut HealthInfo,
     downstream_peers: &[Peer],
     visited: Vec<String>,
@@ -665,7 +730,7 @@ async fn cascade_health_checks(
     let mut disconnected_peers = Vec::new();
 
     for peer in downstream_peers.iter() {
-        let health_check = Command::health_check_with_visited(visited.clone());
+        let health_check = Command::<L>::health_check_with_visited(visited.clone());
         match health_check.send_to(peer).await {
             Ok(_) => {
                 successfully_contacted.push(peer.name().to_owned());

@@ -10,10 +10,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use greatwestern::grammar::{ProjectMapping, UserMapping, UserOrProjectMapping};
+use greatwestern::storage::{QuotaLimit, Volume};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use templemeads::grammar::{ProjectMapping, UserMapping, UserOrProjectMapping};
-use templemeads::storage::{QuotaLimit, Volume};
 use templemeads::Error;
 
 use crate::quotaengine::QuotaEngineConfig;
@@ -253,6 +253,41 @@ impl FilesystemConfig {
         self.project_volumes.clone()
     }
 
+    ///
+    /// Every configured volume root, across all user and project volumes.
+    ///
+    /// This is the set of trees this agent is permitted to manage. Used to bound
+    /// operations whose two paths legitimately live under *different* roots - a
+    /// `links` entry pointing from one root of a volume into another, for example -
+    /// where checking against one specific root would wrongly refuse the other. See
+    /// `filesystem::clean_and_check_path` and
+    /// `docs/specifications/security-review-2.md` (finding R33).
+    ///
+    pub fn all_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = Vec::new();
+
+        let mut add = |root: &str| {
+            let root = PathBuf::from(root);
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        };
+
+        for volume in self.user_volumes.values() {
+            for path_config in volume.path_configs() {
+                add(path_config.root());
+            }
+        }
+
+        for volume in self.project_volumes.values() {
+            for path_config in volume.path_configs() {
+                add(path_config.root());
+            }
+        }
+
+        roots
+    }
+
     /// Return the named quota engine configuration
     ///
     /// This returns the configuration which can then be used to create an engine
@@ -303,6 +338,17 @@ impl PathConfig {
 
     pub fn permission(&self) -> &str {
         &self.permission
+    }
+
+    /// The configured root of this path - every path this `PathConfig` produces is
+    /// `{root}/{expanded_subpath}`.
+    ///
+    /// Exposed so the filesystem agent can verify at operation time that the path it
+    /// is about to create, chown or recycle really does resolve inside this root -
+    /// see `filesystem::clean_and_check_path` and
+    /// `docs/specifications/security-review-2.md` (finding R33).
+    pub fn root(&self) -> &str {
+        &self.root
     }
 
     pub fn project_path(&self, mapping: &ProjectMapping) -> Result<PathBuf, Error> {
@@ -544,9 +590,17 @@ impl UserVolumeConfig {
             ));
         }
 
-        Ok(self.path_configs()[0]
-            .path(mapping.clone().into())?
-            .to_path_buf())
+        // A home volume with no configured root is a misconfiguration, not a
+        // reason to abort the process - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let path_configs = self.path_configs();
+        let Some(first) = path_configs.first() else {
+            return Err(Error::Misconfigured(
+                "Home user volume has no configured roots".to_string(),
+            ));
+        };
+
+        Ok(first.path(mapping.clone().into())?.to_path_buf())
     }
 
     /// Get the quota engine name
@@ -584,14 +638,29 @@ impl UserVolumeConfig {
         let num_roots = self.roots.len();
         let mut paths = Vec::with_capacity(num_roots);
 
-        for i in 0..num_roots {
+        // Iterate the roots directly and read `permissions` via `get`:
+        // `permissions` is independently configured and may be a shorter list
+        // than `roots`, in which case indexing it with a root's index would
+        // abort the process. See
+        // docs/specifications/security-review-2.md (finding R1).
+        for (i, root) in self.roots.iter().enumerate() {
             let permission = match &self.permissions {
                 StringOrVec::Single(s) => s.clone(),
-                StringOrVec::Vec(v) => v[i].clone(),
+                StringOrVec::Vec(v) => match v.get(i) {
+                    Some(p) => p.clone(),
+                    None => {
+                        tracing::warn!(
+                            "No permission configured for root {} ('{}') - skipping it",
+                            i,
+                            root
+                        );
+                        continue;
+                    }
+                },
             };
 
             paths.push(PathConfig::new(
-                self.roots[i].clone(),
+                root.clone(),
                 self.subpath.clone(),
                 permission,
                 None,
@@ -759,25 +828,35 @@ impl ProjectVolumeConfig {
         let num_roots = self.roots.len();
         let mut paths = Vec::with_capacity(num_roots);
 
-        for i in 0..num_roots {
+        // As above: `permissions` and `links` are independently configured
+        // lists that may be shorter than `roots`, so both are read via `get`
+        // rather than indexed. See
+        // docs/specifications/security-review-2.md (finding R1).
+        for (i, root) in self.roots.iter().enumerate() {
             let permission = match &self.permissions {
                 StringOrVec::Single(s) => s.clone(),
-                StringOrVec::Vec(v) => v[i].clone(),
+                StringOrVec::Vec(v) => match v.get(i) {
+                    Some(p) => p.clone(),
+                    None => {
+                        tracing::warn!(
+                            "No permission configured for root {} ('{}') - skipping it",
+                            i,
+                            root
+                        );
+                        continue;
+                    }
+                },
             };
 
-            let link = if !self.links.is_empty() {
-                let link_str = self.links[i].trim();
-                if link_str.is_empty() {
-                    None
-                } else {
-                    Some(link_str.to_string())
-                }
-            } else {
-                None
-            };
+            let link = self
+                .links
+                .get(i)
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string());
 
             paths.push(PathConfig::new(
-                self.roots[i].clone(),
+                root.clone(),
                 self.subpath.clone(),
                 permission,
                 link,

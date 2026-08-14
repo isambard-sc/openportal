@@ -6,70 +6,41 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
 
-use crate::error::Error;
+use templemeads::Error;
 
 use crate::grammar::{
-    Allocation, Date, DateRange, NamedType, Node, PortalIdentifier, ProjectIdentifier,
-    UserIdentifier, UserMapping,
+    Allocation, Date, DateRange, Node, ProjectIdentifier, UserIdentifier, UserMapping,
 };
+use templemeads::named::NamedType;
+use templemeads::portal_identifier::PortalIdentifier;
 
 impl NamedType for Usage {
-    fn type_name() -> &'static str {
-        "Usage"
-    }
-}
-
-impl NamedType for Vec<Usage> {
-    fn type_name() -> &'static str {
-        "Vec<Usage>"
+    fn type_name() -> String {
+        "Usage".to_string()
     }
 }
 
 impl NamedType for UserUsageReport {
-    fn type_name() -> &'static str {
-        "UserUsageReport"
-    }
-}
-
-impl NamedType for Vec<UserUsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<UserUsageReport>"
+    fn type_name() -> String {
+        "UserUsageReport".to_string()
     }
 }
 
 impl NamedType for DailyProjectUsageReport {
-    fn type_name() -> &'static str {
-        "DailyProjectUsageReport"
-    }
-}
-
-impl NamedType for Vec<DailyProjectUsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<DailyProjectUsageReport>"
+    fn type_name() -> String {
+        "DailyProjectUsageReport".to_string()
     }
 }
 
 impl NamedType for ProjectUsageReport {
-    fn type_name() -> &'static str {
-        "ProjectUsageReport"
-    }
-}
-
-impl NamedType for Vec<ProjectUsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<ProjectUsageReport>"
+    fn type_name() -> String {
+        "ProjectUsageReport".to_string()
     }
 }
 
 impl NamedType for UsageReport {
-    fn type_name() -> &'static str {
-        "UsageReport"
-    }
-}
-
-impl NamedType for Vec<UsageReport> {
-    fn type_name() -> &'static str {
-        "Vec<UsageReport>"
+    fn type_name() -> String {
+        "UsageReport".to_string()
     }
 }
 
@@ -82,7 +53,7 @@ pub struct Usage {
 impl std::iter::Sum for Usage {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::default(), |a, b| Self {
-            seconds: a.seconds + b.seconds,
+            seconds: a.seconds.saturating_add(b.seconds),
         })
     }
 }
@@ -171,7 +142,9 @@ impl Usage {
 
         let parts: Vec<&str> = duration.split_whitespace().collect();
 
-        if parts.is_empty() {
+        // Split rather than indexed, so a missing count cannot panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let Some((count_part, unit_parts)) = parts.split_first() else {
             tracing::error!(
                 "get_limit failed to parse '{}'. No duration found",
                 duration
@@ -180,10 +153,10 @@ impl Usage {
                 "get_limit failed to parse '{}'. No duration found",
                 duration
             )));
-        }
+        };
 
-        if parts.len() > 1 {
-            units = match parts[1].to_ascii_lowercase().as_str() {
+        if let Some(unit_part) = unit_parts.first() {
+            units = match unit_part.to_ascii_lowercase().as_str() {
                 "seconds" | "second" | "s" => 1,
                 "minutes" | "minute" | "m" => 60,
                 "hours" | "hour" | "h" => 3600,
@@ -191,22 +164,26 @@ impl Usage {
                 _ => {
                     tracing::error!(
                                 "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
-                                &parts[1..].join(" "),
+                                unit_parts.join(" "),
                             );
                     return Err(Error::Parse(format!(
                                 "get_limit failed to parse '{}'. Units should be seconds, minutes, hours or days",
-                                &parts[1..].join(" "),
+                                unit_parts.join(" "),
                             )));
                 }
             };
         }
 
-        let seconds = parts[0]
+        let seconds = count_part
             .parse::<u64>()
             .with_context(|| format!("Failed to parse seconds from '{}'", duration))?;
 
         Ok(Self {
-            seconds: seconds * units,
+            // Saturating: `seconds` is parsed from a peer-supplied string and
+            // `units` can be 86400, so the product overflows well inside the
+            // range `u64` accepts. See
+            // docs/specifications/security-review-2.md (finding R33).
+            seconds: seconds.saturating_mul(units),
         })
     }
 
@@ -314,14 +291,17 @@ impl Usage {
 // add the += operator for Usage
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
-        self.seconds += other.seconds;
+        self.seconds = self.seconds.saturating_add(other.seconds);
     }
 }
 
 // add the -= operator for Usage
 impl std::ops::SubAssign for Usage {
     fn sub_assign(&mut self, other: Self) {
-        self.seconds -= other.seconds;
+        // Saturating, matching `Sub` below, which already clamped at zero. This
+        // was a bare `-=`, so an underflow wrapped to near `u64::MAX` - silently
+        // in release, where `overflow-checks` used to be off.
+        self.seconds = self.seconds.saturating_sub(other.seconds);
     }
 }
 
@@ -350,7 +330,7 @@ impl std::ops::Add for Usage {
 
     fn add(self, other: Self) -> Self {
         Self {
-            seconds: self.seconds + other.seconds,
+            seconds: self.seconds.saturating_add(other.seconds),
         }
     }
 }
@@ -360,13 +340,11 @@ impl std::ops::Sub for Usage {
     type Output = Self;
 
     fn sub(self, other: Self) -> Self {
-        let mut seconds = self.seconds as i64 - other.seconds as i64;
-        if seconds < 0 {
-            seconds = 0;
-        }
-
         Self {
-            seconds: seconds as u64,
+            // `saturating_sub` clamps at zero directly. The previous form went
+            // via `i64`, which silently gave the wrong answer for any value
+            // above `i64::MAX`.
+            seconds: self.seconds.saturating_sub(other.seconds),
         }
     }
 }
@@ -457,19 +435,27 @@ impl std::fmt::Display for DailyProjectUsageReport {
         users.sort();
 
         for user in users {
+            // `HashMap`'s `Index` panics on a missing key. `users` comes from
+            // this same map's keys, so it cannot miss - looked up via `get`
+            // anyway, since a panic in a `Display` impl would abort the
+            // process. See docs/specifications/security-review-2.md (R1).
+            let Some(report) = self.reports.get(user) else {
+                continue;
+            };
+
             let jobs = self.num_jobs_for_user(user);
             if jobs > 0 {
                 writeln!(
                     f,
                     "{}: {} | {} {} | Average wait: {}",
                     user,
-                    self.reports[user],
+                    report,
                     jobs,
                     if jobs == 1 { "job" } else { "jobs" },
                     Usage::new(self.average_wait_seconds_for_user(user))
                 )?;
             } else {
-                writeln!(f, "{}: {}", user, self.reports[user])?;
+                writeln!(f, "{}: {}", user, report)?;
             }
         }
 
@@ -509,19 +495,23 @@ impl std::fmt::Display for DailyProjectUsageReportHoursDisplay<'_> {
         users.sort();
 
         for user in users {
+            let Some(user_report) = report.reports.get(user) else {
+                continue;
+            };
+
             let jobs = report.num_jobs_for_user(user);
             if jobs > 0 {
                 writeln!(
                     f,
                     "{}: {} | {} {} | Average wait: {}",
                     user,
-                    report.reports[user].in_hours(),
+                    user_report.in_hours(),
                     jobs,
                     if jobs == 1 { "job" } else { "jobs" },
                     Usage::new(report.average_wait_seconds_for_user(user)).in_hours()
                 )?;
             } else {
-                writeln!(f, "{}: {}", user, report.reports[user].in_hours())?;
+                writeln!(f, "{}: {}", user, user_report.in_hours())?;
             }
         }
 
@@ -608,7 +598,7 @@ impl DailyProjectUsageReport {
     /// per-user map and the scalar total.
     pub fn add_wait_seconds(&mut self, user: &str, seconds: u64) {
         *self.user_wait_seconds.entry(user.to_string()).or_default() += seconds;
-        self.total_wait_seconds += seconds;
+        self.total_wait_seconds = self.total_wait_seconds.saturating_add(seconds);
     }
 
     pub fn num_jobs_for_user(&self, user: &str) -> u64 {
@@ -820,7 +810,9 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             *self.user_wait_seconds.entry(user.clone()).or_default() += secs;
         }
         self.num_jobs += other.num_jobs;
-        self.total_wait_seconds += other.total_wait_seconds;
+        self.total_wait_seconds = self
+            .total_wait_seconds
+            .saturating_add(other.total_wait_seconds);
 
         self.is_complete = false; // combine reports are never complete
     }
@@ -1464,11 +1456,11 @@ impl ProjectUsageReport {
     }
 
     pub fn combine(reports: &[ProjectUsageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        let Some(first) = reports.first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = ProjectUsageReport::new(&reports[0].project);
+        let mut combined = ProjectUsageReport::new(&first.project);
 
         for report in reports.iter() {
             if report.portal() != combined.portal() {
@@ -1609,13 +1601,64 @@ impl ProjectUsageReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+/// A portal-level usage report.
+///
+/// Deserialised via `try_from` so a wire-supplied report cannot carry map keys that
+/// disagree with its own `portal` field - `set_report` enforces that on the
+/// programmatic path, but the derive inserted whatever it was given. It only matters
+/// for a receiver that trusts the keys rather than re-inserting, but a type whose
+/// invariant holds only on one of two construction paths is a trap. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct UsageReport {
     #[ts(as = "String")]
     portal: PortalIdentifier,
     #[ts(as = "HashMap<String, ProjectUsageReport>")]
     reports: HashMap<ProjectIdentifier, ProjectUsageReport>,
+}
+
+/// The wire shape of a [`UsageReport`] - identical to what the derive produced, so the
+/// format is unchanged. Deserialising goes through [`UsageReport::set_report`] so a
+/// report whose keys disagree with its `portal` is rejected rather than accepted.
+#[derive(Deserialize)]
+struct UsageReportRepr {
+    portal: PortalIdentifier,
+    reports: HashMap<ProjectIdentifier, ProjectUsageReport>,
+}
+
+impl TryFrom<UsageReportRepr> for UsageReport {
+    type Error = Error;
+
+    fn try_from(repr: UsageReportRepr) -> Result<Self, Self::Error> {
+        let mut report = UsageReport::new(&repr.portal);
+
+        for (project, project_report) in repr.reports {
+            if project != project_report.project() {
+                return Err(Error::InvalidState(format!(
+                    "Usage report is keyed on project {} but the report it holds is for \
+                     {}",
+                    project,
+                    project_report.project()
+                )));
+            }
+
+            report.set_report(project_report)?;
+        }
+
+        Ok(report)
+    }
+}
+
+impl<'de> Deserialize<'de> for UsageReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UsageReportRepr::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl std::fmt::Display for UsageReport {
@@ -1901,11 +1944,11 @@ impl UsageReport {
     }
 
     pub fn combine(reports: &[UsageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        let Some(first) = reports.first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = UsageReport::new(&reports[0].portal);
+        let mut combined = UsageReport::new(&first.portal);
 
         for report in reports.iter() {
             if report.portal() != combined.portal() {
@@ -2020,5 +2063,59 @@ impl Allocation {
 
     pub fn from_billing_hours(usage: &Usage, node: &Node) -> Result<Self, Error> {
         Allocation::from_size_and_units(usage.hours() / node.billing() as f64, "BHR")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usage_arithmetic_saturates_rather_than_wrapping() {
+        // Release builds now set `overflow-checks = true`, so an unchecked
+        // overflow would abort - and with `panic = "abort"` that is a remote
+        // process kill, since these values come from peer-supplied reports.
+        // Every operator must saturate. See
+        // docs/specifications/security-review-2.md (finding R33).
+        let max = Usage::new(u64::MAX);
+        let one = Usage::new(1);
+
+        assert_eq!((max + one).seconds(), u64::MAX);
+        assert_eq!([max, one].into_iter().sum::<Usage>().seconds(), u64::MAX);
+
+        let mut acc = max;
+        acc += one;
+        assert_eq!(acc.seconds(), u64::MAX);
+
+        // Underflow clamps at zero rather than wrapping to near u64::MAX. The
+        // `-=` form used to wrap while `-` already clamped, so the two
+        // disagreed.
+        assert_eq!((one - max).seconds(), 0);
+
+        let mut acc = one;
+        acc -= max;
+        assert_eq!(acc.seconds(), 0);
+
+        // Ordinary values are unaffected.
+        assert_eq!((Usage::new(60) + Usage::new(30)).seconds(), 90);
+        assert_eq!((Usage::new(60) - Usage::new(30)).seconds(), 30);
+    }
+
+    #[test]
+    fn test_usage_parse_saturates_on_a_huge_duration() {
+        // Multiplying this many days out by 86400 overflows u64 - and the
+        // string is short enough to arrive in any instruction.
+        let huge = match Usage::parse("184467440737095516 days") {
+            Ok(u) => u,
+            Err(e) => unreachable!("parse failed: {:?}", e),
+        };
+        assert_eq!(huge.seconds(), u64::MAX);
+
+        // ...while a normal duration still converts exactly.
+        let day = match Usage::parse("1 days") {
+            Ok(u) => u,
+            Err(e) => unreachable!("parse failed: {:?}", e),
+        };
+        assert_eq!(day.seconds(), 86400);
     }
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // internal API
+mod anti_replay;
 mod client;
 mod connection;
 mod crypto;
@@ -14,7 +15,7 @@ mod server;
 // public API
 pub mod command;
 pub mod config;
-pub use crypto::{Key, SecretKey, Signature};
+pub use crypto::{constant_time_eq, Key, SecretKey, Signature};
 pub use error::Error;
 pub use eventloop::run;
 pub use exchange::disconnect;
@@ -27,3 +28,4 @@ pub use exchange::worker_count;
 pub use exchange::SoftRestartGuard;
 pub mod invite;
 pub mod message;
+pub mod relay;

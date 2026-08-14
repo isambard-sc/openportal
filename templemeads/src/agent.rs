@@ -3,11 +3,12 @@
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use tokio::sync::RwLock;
 use ts_rs::TS;
 
+use crate::domain::Domain;
 use crate::error::Error;
 
 #[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, Deserialize, TS)]
@@ -22,6 +23,29 @@ pub enum Type {
     Filesystem,
     Scheduler,
     Virtual,
+}
+
+impl Type {
+    /// Parse an agent type from the string form used by config files and by
+    /// `Display` (e.g. `"bridge"`). Case- and whitespace-insensitive.
+    ///
+    /// Used to interpret a peer's declared `type = "..."` so it can be compared
+    /// against the type the peer actually claims when it registers - see
+    /// `docs/specifications/security-review-2.md` (finding R3).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "portal" => Some(Type::Portal),
+            "provider" => Some(Type::Provider),
+            "platform" => Some(Type::Platform),
+            "instance" => Some(Type::Instance),
+            "bridge" => Some(Type::Bridge),
+            "account" => Some(Type::Account),
+            "filesystem" => Some(Type::Filesystem),
+            "scheduler" => Some(Type::Scheduler),
+            "virtual" => Some(Type::Virtual),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Type {
@@ -68,6 +92,7 @@ pub mod instance {
     pub use crate::agent_core::Config;
     pub use crate::agent_core::Defaults;
     pub use crate::instance::run;
+    pub use crate::instance::run_delegated;
 }
 
 pub mod platform {
@@ -115,12 +140,14 @@ impl Peer {
     pub fn parse(name: &str) -> Result<Self, Error> {
         let parts: Vec<&str> = name.split('@').collect();
 
-        if parts.len() != 2 {
+        // Destructured rather than indexed - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let [peer_name, peer_zone] = parts.as_slice() else {
             return Err(Error::InvalidPeer(name.to_string()));
-        }
+        };
 
-        let peer_name = parts[0].trim();
-        let peer_zone = parts[1].trim();
+        let peer_name = peer_name.trim();
+        let peer_zone = peer_zone.trim();
 
         if peer_name.is_empty() || peer_zone.is_empty() {
             return Err(Error::InvalidPeer(name.to_string()));
@@ -150,6 +177,21 @@ impl Display for Peer {
 struct Registrar {
     peers: HashMap<Peer, Type>,
     peers_by_type: HashMap<Type, Vec<Peer>>,
+    /// The `Domain` a peer identified itself as speaking, if known - either
+    /// because it sent one, or because `Domain::assume_legacy_domain_version`
+    /// resolved one on its behalf. Peers with neither are simply absent here.
+    peer_domains: HashMap<Peer, PeerDomain>,
+    /// The agent type each peer was *declared* as in our own configuration
+    /// (`type = "..."` on a `clients`/`servers` entry). A peer absent from this
+    /// map was not declared, and is not checked - see `expected_peer_type` and
+    /// `docs/specifications/security-review-2.md` (finding R3).
+    expected_types: HashMap<Peer, Type>,
+    /// Peers that advertised `supports_portal_routes` when they registered.
+    /// Used both to decide whether to push routes to them, and whether to
+    /// *enforce* a route against Jobs they deliver - a peer that could never
+    /// have sent us a route must not have one held against it. See
+    /// `crate::portalroutes`.
+    route_capable: HashSet<Peer>,
     name: String,
     typ: Type,
     zones: Vec<String>,
@@ -166,6 +208,9 @@ impl Registrar {
         Self {
             peers: HashMap::new(),
             peers_by_type: HashMap::new(),
+            peer_domains: HashMap::new(),
+            expected_types: HashMap::new(),
+            route_capable: HashSet::new(),
             name: String::new(),
             typ: Type::Portal,
             zones: Vec::new(),
@@ -192,7 +237,15 @@ impl Registrar {
         self.cascade_health = cascade_health;
     }
 
-    fn register_peer(&mut self, peer: &Peer, agent_type: &Type, _engine: &str, _version: &str) {
+    fn register_peer(
+        &mut self,
+        peer: &Peer,
+        agent_type: &Type,
+        _engine: &str,
+        _version: &str,
+        domain: Option<&str>,
+        domain_version: Option<&str>,
+    ) {
         if self.peers.contains_key(peer) {
             // we cannot register a virtual agent that overwrites an existing agent
             if agent_type == &Type::Virtual {
@@ -209,12 +262,29 @@ impl Registrar {
             .or_default()
             .push(peer.clone());
 
+        match (domain, domain_version) {
+            (Some(name), Some(version)) => {
+                self.peer_domains.insert(
+                    peer.clone(),
+                    PeerDomain {
+                        name: name.to_owned(),
+                        version: version.to_owned(),
+                    },
+                );
+            }
+            _ => {
+                self.peer_domains.remove(peer);
+            }
+        }
+
         if !self.zones.contains(&peer.zone) {
             self.zones.push(peer.zone().to_owned());
         }
     }
 
     fn remove(&mut self, peer: &Peer) {
+        self.peer_domains.remove(peer);
+
         if let Some(agent_type) = self.peers.remove(peer) {
             if let Some(v) = self.peers_by_type.get_mut(&agent_type) {
                 v.retain(|p| *p != *peer);
@@ -224,7 +294,7 @@ impl Registrar {
             // there are better ways to do it ;-)
             self.zones.clear();
 
-            for (peer, _) in self.peers.iter() {
+            for peer in self.peers.keys() {
                 if !self.zones.contains(&peer.zone) {
                     self.zones.push(peer.zone.clone());
                 }
@@ -285,17 +355,181 @@ impl Registrar {
     }
 }
 
+/// The `Domain` a connected peer identified itself as speaking - its name
+/// (e.g. `"greatwestern"`) and version. See `agent::peer_domain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDomain {
+    pub name: String,
+    pub version: String,
+}
+
 static REGISTRAR: Lazy<RwLock<Registrar>> = Lazy::new(|| RwLock::new(Registrar::create_null()));
 
 ///
 /// Register that the peer agent called 'name' is of type 'agent_type'
-/// and is connecting from zone `zone`
+/// and is connecting from zone `zone`. `domain`/`domain_version` are the
+/// peer's `Domain` identity, already resolved (including any legacy
+/// fallback) by the caller - `None` if genuinely unknown.
 ///
-pub async fn register_peer(peer: &Peer, agent_type: &Type, engine: &str, version: &str) {
+pub async fn register_peer(
+    peer: &Peer,
+    agent_type: &Type,
+    engine: &str,
+    version: &str,
+    domain: Option<&str>,
+    domain_version: Option<&str>,
+) {
     REGISTRAR
         .write()
         .await
-        .register_peer(peer, agent_type, engine, version)
+        .register_peer(peer, agent_type, engine, version, domain, domain_version)
+}
+
+///
+/// Return the `Domain` the given peer identified itself as speaking, if
+/// known - either because it told us directly, or because we resolved it
+/// via `Domain::assume_legacy_domain_version` for an older peer.
+///
+pub async fn peer_domain(peer: &Peer) -> Option<PeerDomain> {
+    REGISTRAR.read().await.peer_domains.get(peer).cloned()
+}
+
+///
+/// Check that `peer` is confirmed to be speaking the same `Domain` (`L`)
+/// this agent is compiled against, forcibly disconnecting it otherwise.
+/// This is fail-closed: a peer whose domain is genuinely unknown (no
+/// `Register` fields, and no `Domain::assume_legacy_domain_version`
+/// resolved one) is treated the same as a peer confirmed to be speaking a
+/// *different* domain - both get disconnected, since neither can be
+/// trusted to exchange `Instruction`s/`NotificationEvent`s meaningfully
+/// with this agent.
+///
+/// This is opt-in: call it wherever your agent needs the guarantee (e.g.
+/// after `ControlCommand::Connected`, or from your own `Register` handling) -
+/// templemeads never calls this itself, since a `Domain` mismatch is
+/// otherwise harmless to the framework (it just means the two agents will
+/// never usefully exchange Jobs/Notifications; nothing about the transport,
+/// board sync, or health checks depends on both sides matching).
+///
+pub async fn ensure_domain_matches<L: Domain>(peer: &Peer) -> Result<(), Error> {
+    let expected = L::name();
+    let actual = peer_domain(peer).await;
+
+    // A peer that has explicitly identified itself as `templemeads::erased::Erased`
+    // is always accepted here, regardless of `L` - it's templemeads' own
+    // built-in, domain-oblivious router implementation (not a foreign
+    // vocabulary that happens to have a matching name), and by construction
+    // it never inspects or executes Instruction/NotificationEvent content -
+    // only relays it - so it poses none of the risk this connection-level
+    // check exists to catch. The content-level risk (a message that reached
+    // this agent via such a router but doesn't actually belong to `L`) is
+    // what `ensure_job_domain_matches`/`ensure_notification_domain_matches`
+    // guard against instead, at the point of execution - deliberately NOT
+    // given the same exception, since accepting "erased" as a message's own
+    // provenance there would defeat the reason those checks exist. See
+    // `docs/plans/archive/multi-domain-routing-design.md` §8.1.
+    let peer_is_known_router = actual
+        .as_ref()
+        .is_some_and(|d| d.name == crate::erased::Erased::name());
+
+    if peer_is_known_router || actual.as_ref().is_some_and(|d| d.name == expected) {
+        return Ok(());
+    }
+
+    let message = match actual {
+        Some(d) => format!(
+            "Peer {} speaks domain '{}' (version {}), but this agent speaks '{}' - disconnecting",
+            peer, d.name, d.version, expected
+        ),
+        None => format!(
+            "Peer {} did not report a domain (and none could be assumed for it) - \
+             this agent speaks '{}' - disconnecting",
+            peer, expected
+        ),
+    };
+
+    tracing::warn!("{}", message);
+    if let Err(e) = paddington::disconnect(peer.name(), peer.zone()).await {
+        // Not fatal to reporting the incompatibility - the peer may
+        // already be gone, or never had a live connection to begin with.
+        tracing::warn!("Failed to disconnect incompatible peer {}: {}", peer, e);
+    }
+
+    Err(Error::Incompatible(message))
+}
+
+///
+/// Verify that `job`'s own recorded `Domain` (see `Job::domain`) matches
+/// this agent's `L`, before executing it. Falls back to `sender`'s
+/// connection-level domain (`peer_domain`, which already folds in
+/// `Domain::assume_legacy_domain_version`) for a Job with no domain of its
+/// own - e.g. one from a peer running templemeads from before this field
+/// existed. Fail-closed: if neither signal resolves a match, returns
+/// `Err(Error::Incompatible(...))`.
+///
+/// Unlike `ensure_domain_matches`, this never disconnects `sender` - a
+/// single misrouted Job (e.g. one that passed through a domain-oblivious
+/// router, see `docs/plans/archive/multi-domain-routing-design.md`) doesn't mean
+/// the connection itself is bad. Opt-in: call this as the first thing your
+/// runner does, if your agent needs the guarantee.
+///
+pub async fn ensure_job_domain_matches<L: Domain>(
+    job: &crate::job::Job<L>,
+    sender: &Peer,
+) -> Result<(), Error> {
+    let expected = L::name();
+
+    let actual_domain = match job.domain() {
+        Some(d) => Some(d.to_string()),
+        None => peer_domain(sender).await.map(|d| d.name),
+    };
+
+    if actual_domain.as_deref() == Some(expected) {
+        return Ok(());
+    }
+
+    Err(Error::Incompatible(format!(
+        "Job {} has domain '{}', but this agent speaks '{}'",
+        job.id(),
+        actual_domain.as_deref().unwrap_or("unknown"),
+        expected
+    )))
+}
+
+///
+/// Verify that `notification`'s own recorded `Domain` (see
+/// `Notification::domain`) matches this agent's `L`, before handing it to a
+/// notify runner. Same fallback/fail-closed logic as
+/// `ensure_job_domain_matches`.
+///
+/// Notifications already have no delivery guarantee and no return channel
+/// ([notification-protocol.md](../../docs/specifications/notification-protocol.md)
+/// §8), so a mismatch here simply means the notification should be dropped
+/// (logged, not delivered) - one more entry in the same "best-effort"
+/// bucket every other notification delivery failure already falls into, not
+/// a new kind of error a caller needs to handle specially.
+///
+pub async fn ensure_notification_domain_matches<L: Domain>(
+    notification: &crate::notification::Notification<L>,
+    sender: &Peer,
+) -> Result<(), Error> {
+    let expected = L::name();
+
+    let actual_domain = match notification.domain() {
+        Some(d) => Some(d.to_string()),
+        None => peer_domain(sender).await.map(|d| d.name),
+    };
+
+    if actual_domain.as_deref() == Some(expected) {
+        return Ok(());
+    }
+
+    Err(Error::Incompatible(format!(
+        "Notification {} has domain '{}', but this agent speaks '{}'",
+        notification.id(),
+        actual_domain.as_deref().unwrap_or("unknown"),
+        expected
+    )))
 }
 
 ///
@@ -388,6 +622,53 @@ pub async fn start_time() -> chrono::DateTime<chrono::Utc> {
 ///
 /// Return the agent type of this agent
 ///
+/// Record the agent types each peer was declared as in our own configuration.
+///
+/// Called once at startup from `handler::run_with_relay`, which has the
+/// `ServiceConfig` and so can read each `clients`/`servers` entry's optional
+/// `type = "..."`. Peers with no declared type are simply absent, and are not
+/// checked. See `docs/specifications/security-review-2.md` (finding R3).
+pub async fn set_expected_peer_types(expected: HashMap<Peer, Type>) {
+    let mut registrar = REGISTRAR.write().await;
+
+    for (peer, typ) in &expected {
+        tracing::info!("Peer {} is declared as agent type '{}'", peer, typ);
+    }
+
+    registrar.expected_types = expected;
+}
+
+/// Every peer whose agent type our own configuration declares.
+pub async fn expected_peer_types() -> HashMap<Peer, Type> {
+    REGISTRAR.read().await.expected_types.clone()
+}
+
+/// The agent type `peer` was declared as in our own configuration, or `None` if
+/// the operator did not declare one.
+pub async fn expected_peer_type(peer: &Peer) -> Option<Type> {
+    REGISTRAR.read().await.expected_types.get(peer).cloned()
+}
+
+/// Record whether `peer` understands `Command::PortalRoutes`, as advertised in
+/// its `Register`.
+pub async fn set_route_capable(peer: &Peer, capable: bool) {
+    let mut registrar = REGISTRAR.write().await;
+
+    match capable {
+        true => {
+            registrar.route_capable.insert(peer.clone());
+        }
+        false => {
+            registrar.route_capable.remove(peer);
+        }
+    }
+}
+
+/// Whether `peer` advertised support for `Command::PortalRoutes`.
+pub async fn is_route_capable(peer: &Peer) -> bool {
+    REGISTRAR.read().await.route_capable.contains(peer)
+}
+
 pub async fn my_agent_type() -> Type {
     REGISTRAR.read().await.typ.clone()
 }
@@ -646,7 +927,7 @@ pub async fn find(name: &str, wait: u64) -> Option<Peer> {
     loop {
         let registrar = REGISTRAR.read().await;
 
-        for (peer, _) in registrar.peers.iter() {
+        for peer in registrar.peers.keys() {
             if peer.name() == name {
                 return Some(peer.clone());
             }
@@ -669,6 +950,65 @@ pub async fn find(name: &str, wait: u64) -> Option<Peer> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_agent_type_parse_round_trips_with_display() {
+        // The declared `type = "..."` in a peer's config is compared against the
+        // type the peer claims on the wire, so the string form the config uses
+        // must agree with the string form `Display` produces (finding R3).
+        for typ in [
+            Type::Portal,
+            Type::Provider,
+            Type::Platform,
+            Type::Instance,
+            Type::Bridge,
+            Type::Account,
+            Type::Filesystem,
+            Type::Scheduler,
+            Type::Virtual,
+        ] {
+            assert_eq!(
+                Type::parse(&typ.to_string()),
+                Some(typ.clone()),
+                "'{}' must parse back to itself",
+                typ
+            );
+        }
+
+        // Tolerant of case and surrounding whitespace, since these come from a
+        // hand-edited config file.
+        assert_eq!(Type::parse("Bridge"), Some(Type::Bridge));
+        assert_eq!(Type::parse("  portal  "), Some(Type::Portal));
+        assert_eq!(Type::parse("INSTANCE"), Some(Type::Instance));
+
+        // An unrecognised value is `None`, which the caller treats as "not
+        // declared" after logging loudly - never as a silently different type.
+        assert_eq!(Type::parse("bridg"), None);
+        assert_eq!(Type::parse(""), None);
+        assert_eq!(Type::parse("root"), None);
+    }
+
+    #[tokio::test]
+    async fn test_expected_peer_type_is_absent_until_declared() {
+        // An undeclared peer returns `None`, which is what preserves backwards
+        // compatibility: its claimed type is accepted unchecked (finding R3).
+        let undeclared = Peer::new("never-declared-in-any-test", "default");
+        assert_eq!(expected_peer_type(&undeclared).await, None);
+
+        let declared = Peer::new("declared-bridge", "default");
+        let mut expected = HashMap::new();
+        expected.insert(declared.clone(), Type::Bridge);
+        set_expected_peer_types(expected).await;
+
+        assert_eq!(expected_peer_type(&declared).await, Some(Type::Bridge));
+        // ...and declaring one peer does not invent entries for anyone else.
+        assert_eq!(expected_peer_type(&undeclared).await, None);
+
+        // Zone is part of the identity, so the same name in another zone is a
+        // different peer and remains undeclared.
+        let other_zone = Peer::new("declared-bridge", "other");
+        assert_eq!(expected_peer_type(&other_zone).await, None);
+    }
+
     ///
     /// Only used by testing to clear out the registry
     ///
@@ -677,6 +1017,7 @@ mod tests {
 
         registrar.peers.clear();
         registrar.peers_by_type.clear();
+        registrar.peer_domains.clear();
     }
 
     #[tokio::test]
@@ -691,6 +1032,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         let agents = get_all(&Type::Portal).await;
@@ -702,6 +1045,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         remove(&Peer::new("test", "internal")).await;
@@ -714,13 +1059,30 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            Some("test-domain"),
+            Some("0.0.0"),
         )
         .await;
         let agent = portal(0).await;
+        assert_eq!(
+            peer_domain(&Peer::new("test", "internal")).await,
+            Some(PeerDomain {
+                name: "test-domain".to_owned(),
+                version: "0.0.0".to_owned(),
+            })
+        );
         assert_eq!(agent, Some(Peer::new("test", "internal")));
 
         clear().await;
-        register_peer(&Peer::new("test", "local"), &Type::Account, engine, version).await;
+        register_peer(
+            &Peer::new("test", "local"),
+            &Type::Account,
+            engine,
+            version,
+            None,
+            None,
+        )
+        .await;
         let agent = account(0).await;
         assert_eq!(agent, Some(Peer::new("test", "local")));
 
@@ -730,6 +1092,8 @@ mod tests {
             &Type::Filesystem,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         let agent = filesystem(0).await;
@@ -741,6 +1105,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         register_peer(
@@ -748,6 +1114,8 @@ mod tests {
             &Type::Portal,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         register_peer(
@@ -755,6 +1123,8 @@ mod tests {
             &Type::Provider,
             engine,
             version,
+            None,
+            None,
         )
         .await;
         remove(&Peer::new("test1", "internal")).await;
@@ -767,5 +1137,126 @@ mod tests {
         assert_eq!(portal(0).await, Some(Peer::new("test2", "default")));
         assert_eq!(account(0).await, None);
         assert_eq!(filesystem(0).await, None);
+
+        // ensure_domain_matches - kept in this same serial test (rather
+        // than its own #[tokio::test]) for the reason noted at the top:
+        // parallel tests would otherwise race on the shared REGISTRAR.
+        use crate::test_domain::TestDomain;
+
+        clear().await;
+        let matching = Peer::new("matching", "domaintest");
+        let mismatched = Peer::new("mismatched", "domaintest");
+        let unknown = Peer::new("unknown", "domaintest");
+
+        register_peer(
+            &matching,
+            &Type::Portal,
+            engine,
+            version,
+            Some("test-domain"),
+            Some("0.0.0"),
+        )
+        .await;
+        assert!(ensure_domain_matches::<TestDomain>(&matching).await.is_ok());
+
+        register_peer(
+            &mismatched,
+            &Type::Portal,
+            engine,
+            version,
+            Some("greatwestern"),
+            Some("0.32.2"),
+        )
+        .await;
+        assert!(ensure_domain_matches::<TestDomain>(&mismatched)
+            .await
+            .is_err());
+
+        // never registered at all - fail closed, same as a known mismatch
+        assert!(ensure_domain_matches::<TestDomain>(&unknown).await.is_err());
+
+        // a peer that identifies as the built-in Erased router is always
+        // accepted here, regardless of L - see the doc comment above.
+        let router = Peer::new("router", "domaintest");
+        register_peer(
+            &router,
+            &Type::Provider,
+            engine,
+            version,
+            Some(crate::erased::Erased::name()),
+            Some(crate::erased::Erased::version()),
+        )
+        .await;
+        assert!(ensure_domain_matches::<TestDomain>(&router).await.is_ok());
+
+        // ensure_job_domain_matches / ensure_notification_domain_matches -
+        // same reasoning for staying in this serial test as above.
+        use crate::job::Job;
+        use crate::notification::Notification;
+        use crate::test_domain::TestNotificationEvent;
+
+        #[allow(clippy::expect_used)]
+        let job = Job::<TestDomain>::parse("a.b something", false).expect("valid instruction");
+        // Job::parse always stamps the agent's own domain - matches by construction.
+        assert_eq!(job.domain(), Some("test-domain"));
+        assert!(ensure_job_domain_matches::<TestDomain>(&job, &unknown)
+            .await
+            .is_ok());
+
+        // Simulate a Job relayed from a different domain: same shape, but
+        // its own recorded `domain` doesn't match this agent's.
+        #[allow(clippy::expect_used)]
+        let mut job_json: serde_json::Value =
+            serde_json::from_str(&job.to_json().expect("serialises")).expect("valid json");
+        job_json["domain"] = serde_json::Value::String("greatwestern".to_string());
+        #[allow(clippy::expect_used)]
+        let foreign_job: Job<TestDomain> =
+            serde_json::from_value(job_json).expect("still deserialises");
+        assert_eq!(foreign_job.domain(), Some("greatwestern"));
+        assert!(
+            ensure_job_domain_matches::<TestDomain>(&foreign_job, &unknown)
+                .await
+                .is_err()
+        );
+
+        // Simulate a legacy Job with no `domain` field at all: falls back
+        // to the sender peer's connection-level domain.
+        #[allow(clippy::expect_used)]
+        let mut legacy_json: serde_json::Value =
+            serde_json::from_str(&job.to_json().expect("serialises")).expect("valid json");
+        #[allow(clippy::expect_used)]
+        legacy_json
+            .as_object_mut()
+            .expect("job serialises as an object")
+            .remove("domain");
+        #[allow(clippy::expect_used)]
+        let legacy_job: Job<TestDomain> =
+            serde_json::from_value(legacy_json).expect("still deserialises, domain defaults");
+        assert_eq!(legacy_job.domain(), None);
+        // `matching` was registered above with domain "test-domain".
+        assert!(
+            ensure_job_domain_matches::<TestDomain>(&legacy_job, &matching)
+                .await
+                .is_ok()
+        );
+        // `unknown` was never registered - fails closed.
+        assert!(
+            ensure_job_domain_matches::<TestDomain>(&legacy_job, &unknown)
+                .await
+                .is_err()
+        );
+
+        #[allow(clippy::expect_used)]
+        let destination = crate::destination::Destination::parse("a.b").expect("valid destination");
+        let notification = Notification::<TestDomain>::new(
+            destination,
+            TestNotificationEvent::Echo("hello".to_string()),
+        );
+        assert_eq!(notification.domain(), Some("test-domain"));
+        assert!(
+            ensure_notification_domain_matches::<TestDomain>(&notification, &unknown)
+                .await
+                .is_ok()
+        );
     }
 }

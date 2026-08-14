@@ -7,34 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
 
-use crate::error::Error;
+use templemeads::Error;
 
-use crate::grammar::{
-    Date, DateRange, NamedType, PortalIdentifier, ProjectIdentifier, UserIdentifier, UserMapping,
-};
+use crate::grammar::{Date, DateRange, ProjectIdentifier, UserIdentifier, UserMapping};
 use crate::storage::{Quota, Volume};
+use templemeads::named::NamedType;
+use templemeads::portal_identifier::PortalIdentifier;
 
 impl NamedType for StorageReport {
-    fn type_name() -> &'static str {
-        "StorageReport"
-    }
-}
-
-impl NamedType for Vec<StorageReport> {
-    fn type_name() -> &'static str {
-        "Vec<StorageReport>"
+    fn type_name() -> String {
+        "StorageReport".to_string()
     }
 }
 
 impl NamedType for ProjectStorageReport {
-    fn type_name() -> &'static str {
-        "ProjectStorageReport"
-    }
-}
-
-impl NamedType for Vec<ProjectStorageReport> {
-    fn type_name() -> &'static str {
-        "Vec<ProjectStorageReport>"
+    fn type_name() -> String {
+        "ProjectStorageReport".to_string()
     }
 }
 
@@ -68,7 +56,7 @@ impl DailyStorageReport {
     pub(crate) fn remap_project(
         &mut self,
         new_project: &ProjectIdentifier,
-    ) -> Result<(), crate::error::Error> {
+    ) -> Result<(), templemeads::Error> {
         self.project = new_project.clone();
 
         let old_quotas = std::mem::take(&mut self.user_quotas);
@@ -205,6 +193,18 @@ impl ProjectStorageReport {
 
     /// Record the mapping from a portal user to their local username.
     pub fn add_mapping(&mut self, mapping: &UserMapping) -> Result<(), Error> {
+        // Mirror `ProjectUsageReport::add_mapping`'s guard. This returned `Result`,
+        // and so advertised a check, while inserting whatever it was given - so a
+        // mapping for a different project silently landed in this report's user list.
+        // See `docs/specifications/security-review-2.md` (finding R33).
+        if mapping.user().project_identifier() != *self.project() {
+            return Err(Error::InvalidState(format!(
+                "Mapping for wrong project: {}. This report is for {}",
+                mapping,
+                self.project()
+            )));
+        }
+
         self.users
             .insert(mapping.user().clone(), mapping.local_user().to_string());
         Ok(())
@@ -495,13 +495,15 @@ impl ProjectStorageReport {
     /// the merge semantics: newest snapshot wins at the top level, older
     /// snapshots are retained in `daily_reports` (one per date, newest wins).
     pub fn combine(reports: &[ProjectStorageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        // Split rather than indexed, so an empty slice cannot panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let Some((first, rest)) = reports.split_first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = reports[0].clone();
+        let mut combined = first.clone();
 
-        for report in &reports[1..] {
+        for report in rest {
             if report.project != combined.project {
                 return Err(Error::Incompatible(format!(
                     "Cannot combine reports for different projects: {} and {}",
@@ -677,13 +679,58 @@ impl std::fmt::Display for ProjectStorageReport {
 
 /// A portal-level storage report containing per-project storage reports for
 /// all projects associated with a portal.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+/// Deserialised via a validating impl rather than the derive, so a wire-supplied report
+/// cannot carry map keys that disagree with its own `portal` field - `set_report`
+/// enforces that on the programmatic path. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+#[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct StorageReport {
     #[ts(as = "String")]
     portal: PortalIdentifier,
     #[ts(as = "HashMap<String, ProjectStorageReport>")]
     reports: HashMap<ProjectIdentifier, ProjectStorageReport>,
+}
+
+/// The wire shape of a [`StorageReport`] - identical to what the derive produced.
+#[derive(Deserialize)]
+struct StorageReportRepr {
+    portal: PortalIdentifier,
+    reports: HashMap<ProjectIdentifier, ProjectStorageReport>,
+}
+
+impl TryFrom<StorageReportRepr> for StorageReport {
+    type Error = Error;
+
+    fn try_from(repr: StorageReportRepr) -> Result<Self, Self::Error> {
+        let mut report = StorageReport::new(&repr.portal);
+
+        for (project, project_report) in repr.reports {
+            if project != *project_report.project() {
+                return Err(Error::InvalidState(format!(
+                    "Storage report is keyed on project {} but the report it holds is \
+                     for {}",
+                    project,
+                    project_report.project()
+                )));
+            }
+
+            report.set_report(project_report)?;
+        }
+
+        Ok(report)
+    }
+}
+
+impl<'de> Deserialize<'de> for StorageReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StorageReportRepr::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl StorageReport {
@@ -831,11 +878,11 @@ impl StorageReport {
     /// Combine a slice of `StorageReport`s for the same portal into a single
     /// report, merging per-project history.
     pub fn combine(reports: &[StorageReport]) -> Result<Self, Error> {
-        if reports.is_empty() {
+        let Some(first) = reports.first() else {
             return Err(Error::InvalidState("No reports to combine".to_string()));
-        }
+        };
 
-        let mut combined = StorageReport::new(&reports[0].portal);
+        let mut combined = StorageReport::new(&first.portal);
 
         for report in reports.iter() {
             if report.portal() != combined.portal() {

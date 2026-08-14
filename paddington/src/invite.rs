@@ -4,6 +4,7 @@
 use crate::crypto::SecretKey;
 use crate::error::Error;
 use anyhow::Context;
+use secrecy::zeroize::Zeroizing;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
@@ -16,6 +17,29 @@ pub struct Invite {
     zone: String,
     inner_key: SecretKey,
     outer_key: SecretKey,
+    /// Name of the blind relay proxy the issuer reaches this peer through,
+    /// if any (see `docs/plans/archive/blind-relay-proxy-design.md`) - carried in
+    /// the invite so the importing side doesn't need to be told separately
+    /// which relay to use: it reads everything it needs from this file.
+    #[serde(default)]
+    proxy: Option<String>,
+    /// The agent type of the *issuing* service, i.e. the type the importing
+    /// side should expect this peer to present itself as.
+    ///
+    /// This is the issuer describing **itself**, not the client it is inviting.
+    /// The client's own expected type is never carried here: it is declared on
+    /// the issuing side with `client --add --type`, from information the two
+    /// operators exchange out-of-band. Trusting this field is sound for the same
+    /// reason trusting `name` and the keys is - the invite file reaches the
+    /// importing side by deliberate operator action, not over the wire. What
+    /// finding R3 distrusts is the role a peer *claims at registration*, which
+    /// is then checked against this.
+    ///
+    /// `None` (the field absent) means the issuer did not declare one, so the
+    /// importing side does not check - which is how invites written by older
+    /// versions keep working.
+    #[serde(default, rename = "type")]
+    agent_type: Option<String>,
 }
 
 impl Invite {
@@ -25,6 +49,7 @@ impl Invite {
         zone: &str,
         inner_key: &SecretKey,
         outer_key: &SecretKey,
+        proxy: &Option<String>,
     ) -> Self {
         Invite {
             name: name.to_string(),
@@ -32,6 +57,8 @@ impl Invite {
             zone: zone.to_string(),
             inner_key: inner_key.clone(),
             outer_key: outer_key.clone(),
+            proxy: proxy.clone(),
+            agent_type: None,
         }
     }
 
@@ -53,6 +80,33 @@ impl Invite {
 
     pub fn outer_key(&self) -> SecretKey {
         self.outer_key.clone()
+    }
+
+    /// The blind relay proxy this peer must be reached through, if any -
+    /// `None` for an ordinary, directly-dialled peer.
+    pub fn proxy(&self) -> Option<String> {
+        self.proxy.clone()
+    }
+
+    ///
+    /// Declare the issuing service's own agent type, so the importing side can
+    /// check what this peer claims at registration against what it was invited
+    /// as.
+    ///
+    /// Set by the agent layer (`templemeads`) rather than by `paddington`, which
+    /// has no notion of agent types - it only carries the string through.
+    ///
+    pub fn with_agent_type(mut self, agent_type: Option<String>) -> Self {
+        self.agent_type = agent_type;
+        self
+    }
+
+    ///
+    /// The agent type the issuing service declared for itself, if any. `None`
+    /// means "not declared, do not check" - see the field's documentation.
+    ///
+    pub fn agent_type(&self) -> Option<String> {
+        self.agent_type.clone()
     }
 
     pub fn assert_valid(&self) -> Result<(), Error> {
@@ -104,8 +158,16 @@ impl Invite {
     }
 
     pub fn load(filename: &path::Path) -> Result<Self, Error> {
-        let invite = std::fs::read_to_string(filename)
-            .with_context(|| format!("Could not read invite file: {:?}", filename))?;
+        // `Zeroizing` so the plaintext TOML - which contains both peer keys in hex -
+        // is wiped from the heap when this scope ends, rather than left for a core dump
+        // or swap. `SecretBox` zeroizes the parsed `Key`s, but the buffer they were
+        // parsed *from* was a plain `String`. Destroying the file itself remains the
+        // operator's job (round 1 §5.1). See
+        // docs/specifications/security-review-2.md (finding R33).
+        let invite = Zeroizing::new(
+            std::fs::read_to_string(filename)
+                .with_context(|| format!("Could not read invite file: {:?}", filename))?,
+        );
 
         let invite: Invite = toml::from_str(&invite)
             .with_context(|| format!("Could not parse invite file from toml: {:?}", filename))?;
@@ -118,8 +180,10 @@ impl Invite {
     pub fn save(&self, filename: &path::Path) -> Result<(), Error> {
         self.assert_valid()?;
 
-        let invite_toml =
-            toml::to_string(&self).with_context(|| "Could not serialise invite to toml")?;
+        // As `load`: the serialised form carries both keys in the clear.
+        let invite_toml = Zeroizing::new(
+            toml::to_string(&self).with_context(|| "Could not serialise invite to toml")?,
+        );
 
         let invite_file_string = filename.to_string_lossy();
 
@@ -137,7 +201,7 @@ impl Invite {
             )
         })?;
 
-        std::fs::write(filename, invite_toml)
+        crate::config::write_secret_file(filename, &invite_toml)
             .with_context(|| format!("Could not write invite file: {:?}", filename))?;
 
         Ok(())
@@ -146,18 +210,28 @@ impl Invite {
 
 impl Display for Invite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Invite {{ name: {}, url: {}, zone: {} }}",
-            self.name, self.url, self.zone
-        )
+        match &self.proxy {
+            Some(proxy) => write!(
+                f,
+                "Invite {{ name: {}, proxy: {}, zone: {} }}",
+                self.name, proxy, self.zone
+            ),
+            None => write!(
+                f,
+                "Invite {{ name: {}, url: {}, zone: {} }}",
+                self.name, self.url, self.zone
+            ),
+        }
     }
 }
 
 pub fn load(invite_file: &path::PathBuf) -> Result<Invite, Error> {
-    // read the invite file
-    let invite = std::fs::read_to_string(invite_file)
-        .with_context(|| format!("Could not read invite file: {:?}", invite_file))?;
+    // read the invite file - `Zeroizing`, as `Invite::load`, since the plaintext
+    // carries both peer keys in hex (finding R33)
+    let invite = Zeroizing::new(
+        std::fs::read_to_string(invite_file)
+            .with_context(|| format!("Could not read invite file: {:?}", invite_file))?,
+    );
 
     // parse the invite file
     let invite: Invite = toml::from_str(&invite)
@@ -193,7 +267,7 @@ pub fn save(invite: &Invite, invite_file: &path::PathBuf) -> Result<(), Error> {
         )
     })?;
 
-    std::fs::write(invite_file, invite_toml)
+    crate::config::write_secret_file(invite_file, &invite_toml)
         .with_context(|| format!("Could not write invite file: {:?}", invite_file))?;
 
     Ok(())

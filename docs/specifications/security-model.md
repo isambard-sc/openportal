@@ -10,6 +10,11 @@ designed to address, how cryptographic keys are structured and provisioned, how
 connections are authenticated, and how zone isolation limits the blast radius of
 any compromise.
 
+> For an independent, code-level *evaluation* of this model — graded findings,
+> known gaps, and residual risks — see the
+> [security review](security-review.md). This document describes how the model
+> is intended to work; the review assesses how strong it actually is.
+
 ---
 
 ## 1. Design Goals
@@ -79,6 +84,41 @@ A fresh random 32-byte `info` value is generated for each message, ensuring
 that no two messages are encrypted with the same key even if the session salt is
 reused. See [wire-protocol.md](wire-protocol.md) §3 for the full wire frame
 format.
+
+### 2.5 Session Keys — and the Deliberate Absence of Forward Secrecy
+
+Every connection (and every relayed-session bootstrap) uses a **fresh, randomly
+generated session key pair**. These session keys are **key-transported** to the
+peer — that is, sent already encrypted under the two peers' long-term pre-shared
+keys — rather than agreed via an in-band exchange such as Diffie-Hellman.
+
+This is a deliberate design decision: **OpenPortal provides no in-band mechanism
+for agents to share or change key material themselves.** All key material is
+provisioned out-of-band (§3), and the only key ever placed on the wire is a
+random session key sealed under the permanent pre-shared keys. Adding a
+Diffie-Hellman exchange to obtain forward secrecy would reintroduce exactly the
+in-band key-agreement path the design excludes.
+
+The consequences, stated plainly so nothing here is mistaken for forward secrecy:
+
+- **There is no forward secrecy.** An attacker who records a connection's traffic
+  *and* later obtains the permanent pre-shared keys could recover that
+  connection's session keys and decrypt the captured traffic. Fresh session keys
+  per connection mean one session's keys do not expose another's, but they do not
+  protect past traffic against later compromise of the *permanent* keys.
+- **The permanent keys are hard to attack from the wire.** They are only ever
+  used to encrypt the initial, randomly generated, **high-entropy** session keys.
+  There is no low-entropy or known plaintext sealed under a permanent key to act
+  as a crib, so an attacker observing the wire sees only high-entropy plaintext
+  under a high-entropy key — no leverage for reverse-guessing the permanent key.
+  "Obtaining the permanent keys" therefore means compromising a config or invite
+  file out-of-band, not cracking traffic.
+- **Security rests on the secrecy of the permanent keys**, which is why key
+  rotation is a first-class, out-of-band operation (§3.3): rotating periodically
+  bounds the traffic any single key pair ever covers.
+
+See also the [security review](security-review.md) F14, which records this as an
+accepted, deliberate trade-off.
 
 ---
 
@@ -168,15 +208,33 @@ sequence. **All four must pass** before the connection is accepted.
 ### 4.1 Layer 1: IP Address Allowlisting
 
 The server maintains a list of `ClientConfig` entries, each with an expected IP
-address or CIDR range. The first thing the server does after accepting a TCP
-connection is check the client's IP against this list.
+address, CIDR range, or comma-separated list of several of either. The first
+thing the server does after accepting a TCP connection is check the client's
+IP against this list - a connection is allowed if it matches *any* entry in
+a multi-entry list, not all of them.
 
 If no `ClientConfig` matches the connecting IP, the connection is immediately
 rejected before any message processing occurs.
 
-IP ranges are specified in CIDR notation (e.g. `10.0.0.0/24`). A reverse proxy
-may be configured via `proxy_header` to extract the real client IP from a
-header such as `X-Forwarded-For`.
+IP ranges are specified in CIDR notation (e.g. `10.0.0.0/24` or
+`2001:db8::/32`) - both IPv4 and IPv6 addresses and ranges are supported,
+with identical syntax either way, and can be freely mixed within a
+comma-separated list (`IpOrRange`, `paddington/src/config.rs`; see
+[ipv6-support-design.md](../plans/ipv6-support-design.md) for how IPv6
+support was added, and [agent-configuration.md](agent-configuration.md)
+§1.2 for the multi-entry list syntax). A reverse proxy may be configured
+via `proxy_header` to extract the real client IP from a header such as
+`X-Forwarded-For`.
+
+**Dual-stack listening is outside OpenPortal's control.** Whether a
+listener bound to an IPv6 address also accepts IPv4-mapped connections is
+governed by the OS-level `IPV6_V6ONLY` socket option, which varies by
+platform default and which plain socket binding (as used here) does not
+expose a way to override. An operator who needs both families reachable
+should either rely on their OS's dual-stack default or run two listeners
+(one per family, on different ports or interfaces) - this is a deployment
+decision, not something OpenPortal's allowlisting or binding code can
+resolve on its own.
 
 ### 4.2 Layer 2: Cryptographic Authentication
 
@@ -216,8 +274,12 @@ selected in Layer 2. A mismatched name causes the connection to be rejected.
 
 ## 5. Configuration File Encryption at Rest
 
-The `ServiceConfig` (stored in TOML on disk) contains all peer keys. It can be
-encrypted at rest using one of two schemes controlled by the `encryption` field:
+The `encryption` field controls how **secret values stored in the config's
+`extras` map** (e.g. a FreeIPA bind password or Slurm token, added via the
+`secret` CLI command) are encrypted at rest. (The pre-shared peer keys
+themselves are stored as hex in the TOML and are protected by restrictive file
+permissions - `0600` on Unix - rather than by this scheme.) Two schemes are
+available:
 
 ### 5.1 Environment Variable Scheme
 
@@ -227,10 +289,10 @@ type = "Environment"
 key  = "OPENPORTAL_SECRET_KEY"
 ```
 
-The named environment variable is read at startup. Its value is passed through
-**Argon2** key derivation (`Key::from_password`) to produce a 32-byte
-encryption key, which is then used to encrypt/decrypt the config file contents
-with XChaCha20-Poly1305. This is the recommended scheme for production.
+The named environment variable is read at startup. Its value is used as the
+password for **Argon2** key derivation to produce a 32-byte key, which encrypts
+/decrypts each stored secret with XChaCha20-Poly1305. This is the recommended
+scheme for production; its strength is that of the operator-supplied secret.
 
 ### 5.2 Simple Scheme
 
@@ -239,24 +301,32 @@ with XChaCha20-Poly1305. This is the recommended scheme for production.
 type = "Simple"
 ```
 
-The service's own name is used as the password for `Key::from_password`. This
-provides obfuscation but not strong protection, since the "password" is not
-secret. Suitable for development or low-security deployments only.
+The service's own name is used as the password. Because the name is **not
+secret** (it appears in this same config file, in every issued invite, and in
+logs), this scheme is **obfuscation, not encryption** - anyone who can read the
+config can re-derive the key. Suitable for development or low-security
+deployments only; use `Environment` in production.
 
 ### 5.3 Password-Based Key Derivation
 
-`Key::from_password` uses **Argon2** (via the `orion::kdf` module) with a
-fixed application-defined salt and the following parameters:
+Secrets are stored in a **versioned format**. New secrets (v1,
+`Key::from_password_with_salt`) use a fresh random per-secret salt stored
+alongside the ciphertext, with strong Argon2 parameters:
 
 | Parameter | Value |
 |-----------|-------|
 | Iterations | 3 |
-| Memory | 8 blocks |
+| Memory | 19456 KiB (19 MiB) |
 | Output length | 32 bytes |
+| Salt | 16 random bytes, stored with the ciphertext |
 
-The fixed salt ensures reproducible key derivation from the same password, which
-is necessary so the config can be decrypted on restart without storing the
-derived key.
+The random salt means identical passwords no longer produce identical keys
+across deployments. For backward compatibility, older (v0) secrets - which used
+`Key::from_password` with a fixed application-defined salt and orion's minimum
+Argon2 cost (3 iterations / 8 KiB) - are still decryptable; re-running the
+`secret` command re-encrypts them in the v1 format. See
+[security-review.md](security-review.md) F2 for the assessment that motivated
+this.
 
 ---
 
@@ -300,6 +370,68 @@ Portal ←—key-pair-A—→ Provider ←—key-pair-B—→ Platform ←—key
 
 ---
 
+## 7.1 Blind Relay Proxy Trust Model
+
+An `op-proxy` agent (see
+[blind-relay-proxy-design.md](../plans/archive/blind-relay-proxy-design.md)) lets a
+pair of agents that can each only make *outbound* connections communicate,
+without either becoming a listening server the other can reach. It does
+**not** add itself as a trusted intermediary in the sense every other agent
+in §7's topology is - it is deliberately kept blind:
+
+- The relayed pair (say `airr` and `brics`) share their own pre-shared key
+  pair, generated and exchanged exactly as in §3, transferred out-of-band
+  exactly as any other invite file is. **The proxy never sees this key
+  pair.** It is a separate trust relationship from either agent's key pair
+  with the proxy itself.
+- Each relayed peer additionally holds an ordinary key pair with the proxy
+  (again, provisioned exactly as in §3) - this secures only the
+  agent↔proxy hop, and authenticates each agent to the proxy as itself. It
+  grants no ability to read agent↔agent traffic.
+- On top of the permanent pre-shared key, every relayed session establishes
+  a **fresh** session key pair via a mutual-contribution bootstrap (one
+  side contributes `session_outer_key`, the other `session_inner_key`) -
+  see [wire-protocol.md](wire-protocol.md) §7.1. Compromise of one past
+  session's keys does not expose any other session between the same pair.
+  This is per-session key freshness, **not** forward secrecy: the session
+  keys are key-transported under the permanent pre-shared keys, not agreed
+  in-band, so it does not protect past traffic against later compromise of
+  the permanent keys - see §2.5.
+- The proxy enforces an explicit, default-deny `RelayPolicy`: it forwards
+  a `(from, to)` pair only if an operator has explicitly `allow`ed it.
+  Every other pair is dropped and logged, never silently forwarded.
+- The proxy's role is reduced to: verify the agent↔proxy hop (§4, applied
+  twice, independently, once per hop), check `RelayPolicy`, and forward
+  opaque ciphertext. It never attempts to decrypt agent↔agent traffic, and
+  the ciphertext it forwards is, by construction, indistinguishable from
+  random bytes without the relayed pair's own keys.
+- The recovery signal a restarted relayed peer's counterpart sends
+  ([wire-protocol.md](wire-protocol.md) §7.3, `SessionUnknown`) is
+  encrypted with the same permanent pre-shared key as the bootstrap
+  itself, so the proxy cannot forge one to force a peer into spurious
+  re-bootstraps.
+
+This means a compromised proxy can, at worst, deny service (drop or refuse
+to relay) or observe *metadata* (which pairs communicate, message
+timing/size) - it cannot read message content, and it cannot impersonate
+either relayed agent to the other without their pre-shared key pair, which
+it never possesses.
+
+An agent is free to use a *different* proxy for each relayed peer (there
+is no requirement to route everything through one proxy) - each relayed
+pair's trust properties above stand entirely on that pair's own
+out-of-band key exchange and are unaffected by how many different proxies
+are involved elsewhere in the agent's own connection graph.
+
+A side effect of this trust model, unrelated to security but worth noting
+here: because the proxy relays purely by peer identity and never
+distinguishes *which* physical process behind that identity it's talking
+to, several redundant server processes can share one identity behind a
+proxy and get automatic failover between them - see
+[highavailability.md](highavailability.md) §3.
+
+---
+
 ## 8. Memory Safety
 
 All key material is managed with the `secrecy` crate:
@@ -316,7 +448,103 @@ memory safety and error-handling bugs.
 
 ---
 
-## 9. Source File Reference
+## 9. Replay Protection
+
+See [replay-protection-design.md](../plans/replay-protection-design.md) for
+the full design; this section is the trust-model summary.
+
+Authentication and encryption (§2-§4) do not, on their own, stop an
+attacker (or the blind relay proxy itself) from capturing a legitimate,
+validly-encrypted ongoing message and replaying it later to re-trigger its
+effect. The per-message `info` value mixed into key derivation (§2.4)
+guards against key reuse between *different* messages; it does not
+protect a single message against being resent, since a replayed message
+carries its original `info` value with it and re-derives the same key.
+
+Ongoing message traffic (post-handshake application messages - Jobs,
+Notifications, keepalives) carries a monotonically increasing per-sender
+nonce, checked against a receiver-side sliding window - the standard
+IPsec/WireGuard-style anti-replay scheme: a
+high-water-mark plus a fixed-size bitmap of recently-accepted values,
+rejecting anything already seen or too old to have a slot in the window.
+The nonce lives inside the AEAD-authenticated ciphertext (not a plaintext
+field), so the proxy - which never holds either relayed peer's keys - can
+no more forge or strip it than it can read the payload itself; the same
+mechanism applies uniformly to direct and relayed connections
+(`paddington::anti_replay`, wired into both `Connection` and
+`RelayedSession`), without either the proxy or any higher-level code
+needing to know it exists. Window state resets alongside the session keys
+it protects on every reconnect/re-bootstrap, rather than being persisted
+across one.
+
+**Rollout is negotiated, not a coordinated flag-day.** Each peer
+advertises `supports_nonce: bool` in its `PeerDetails` (direct connections)
+or `StartRelayedConnection`/`RelayedConnectionAccepted` (relayed
+bootstrap) - fields that were already structured, safely-extensible
+messages, so adding this one is as safe as `domain`/`domain_version` on
+`Register`. A not-yet-upgraded peer's message simply lacks the field and
+so is read as `supports_nonce: false`, correctly. Each side remembers the
+other's confirmed support for the lifetime of the connection/session
+(`Connection::peer_supports_nonce`, `RelayedSession::peer_supports_nonce`)
+and only sends the wrapped `{nonce, payload}` shape to a peer that
+confirmed it; a peer that hasn't is sent exactly the bare-string shape it
+already expects (`NoncedPayload::for_peer`), not a degraded encoding of the
+new one. The trust-relevant consequence: **a pair where either end hasn't
+been upgraded gets no replay protection for that pair** - exactly the
+pre-nonce behaviour, not a weaker version of the new one - while every
+pair where both ends have been upgraded gets full protection immediately,
+independent of the rest of the fleet's rollout state. See the design doc
+§5 for the full mechanism.
+
+**Handshake and bootstrap messages** (`Handshake`/`PeerDetails` for direct
+connections; `StartRelayedConnection`/`RelayedConnectionAccepted`/
+`SessionUnknown` for relayed bootstrap) carry the same kind of nonce,
+checked against a *separate*, longer-lived window per peer that - unlike
+the ongoing-traffic window above - does **not** reset on reconnect, since
+these messages are encrypted (at least partly) under the *permanent*
+pre-shared key pair, which itself never changes across reconnects; a
+window that reset per connection would accept a replay against any fresh
+connection attempt. Tracing through what a captured message here can
+actually be used for shows the real risk is narrower than "the whole
+handshake is unforgeable": `StartRelayedConnection` and `SessionUnknown`
+can each unilaterally cause the receiver to reset session state or
+re-bootstrap from a single captured message with no further live input
+needed, which nonce-checking now closes; `Handshake`/`PeerDetails` cannot
+be used to hijack or impersonate a session even without this (each
+connection's session keys are freshly random and never derivable from
+captured bytes), and `RelayedConnectionAccepted` was already effectively
+replay-proof via its single-use `magic` correlation. All five message
+types are nonce-checked uniformly regardless. For direct connections, this
+needed no capability negotiation at all (unlike ongoing traffic): `nonce`
+is `#[serde(default)] Option<u64>` on messages that were already
+structured objects, so an old peer's message simply lacks the field
+(read as `None`, skip the check) and serde already ignores the field on
+an old peer's *receiving* end - there is no wire-shape change to gate. For
+relayed bootstrap, no backward compatibility was needed at all (`op-proxy`
+isn't deployed yet), so `nonce: u64` there is a plain, required field. See
+the design doc §10 for the full mechanism and its threat-model reasoning.
+
+**Per-incarnation windows.** Because the nonce *counter* is also only held in
+memory, a restarted process starts counting from zero again while its peer's
+window still remembers where the old incarnation had got to - which made every
+reconnect after a restart look exactly like a replay, and locked the link out
+for as long as it took the counter to climb back. Each message therefore also
+carries an `epoch`: a random 64-bit value identifying the sending *process
+incarnation*, inside the AEAD like the nonce. The receiver keeps **one window
+per epoch** (bounded, least-recently-used evicted), so a new incarnation is
+accepted at once while the superseded one's window is retained and its replays
+still fail. Retaining rather than discarding the old window is what keeps this
+no weaker than a single window, and per-epoch separation is also what allows
+client HA, where several processes deliberately share one peer identity
+([highavailability.md](highavailability.md) §2) and each contributes an epoch -
+which is why the epoch is random and unordered rather than clock-derived. Also
+`#[serde(default)] Option<u64>`, so a peer without the field keeps the previous
+behaviour. See the design doc §11 and
+[security-review-2.md](security-review-2.md) (finding R10).
+
+---
+
+## 10. Source File Reference
 
 | Concept | Source file |
 |---------|-------------|
@@ -326,3 +554,5 @@ memory safety and error-handling bugs.
 | Connection authentication sequence | `paddington/src/connection.rs` |
 | Wire encryption format | `paddington/src/connection.rs` (`envelope_message`) |
 | Zone enforcement | `paddington/src/connection.rs` (§726, §1255) |
+| Blind relay bootstrap, session keys, `RelayPolicy` | `paddington/src/relay.rs` |
+| Anti-replay window, `NoncedPayload` | `paddington/src/anti_replay.rs` |

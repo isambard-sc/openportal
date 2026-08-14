@@ -15,7 +15,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Configuration
 
@@ -175,6 +175,91 @@ fn version() -> &'static str {
 /// if this is requested. If nothing is returned then the program can
 /// cleanly exit.
 ///
+///
+/// Validate a `--type` argument, returning the canonical string form to store in
+/// the config (or `None` if the operator did not pass one).
+///
+/// A typo would otherwise be recorded silently and then discarded at startup as
+/// unrecognised, leaving the operator believing a peer was being checked when it
+/// was not - so this fails at add-time, when there is someone there to read the
+/// error. See `docs/specifications/security-review-2.md` (finding R3).
+///
+///
+/// Obtain the secret to store, from `--value`, `--value-file`, or stdin.
+///
+/// `--value` puts the secret in this process's argv, where it is visible in `ps` to
+/// every local user for as long as the command runs. It is kept for compatibility with
+/// existing scripts but warns, and the file/stdin routes exist so a secret need never
+/// be exposed that way. See `docs/specifications/security-review-2.md` (finding R33).
+///
+fn read_secret_value(value: Option<&str>, value_file: Option<&Path>) -> Result<String, Error> {
+    match (value, value_file) {
+        (Some(_), Some(_)) => Err(Error::PeerEdit(
+            "Pass either --value or --value-file, not both".to_string(),
+        )),
+
+        (Some(value), None) => {
+            tracing::warn!(
+                "The secret was passed on the command line, so it was visible in `ps` \
+                 to any local user while this command ran. Consider --value-file (or \
+                 piping it to stdin) instead, and check your shell history."
+            );
+            Ok(value.to_string())
+        }
+
+        (None, Some(path)) => {
+            let contents = match path == Path::new("-") {
+                true => {
+                    let mut buffer = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                        .with_context(|| "Could not read the secret from stdin")?;
+                    buffer
+                }
+                false => std::fs::read_to_string(path)
+                    .with_context(|| format!("Could not read the secret from {:?}", path))?,
+            };
+
+            // A trailing newline is almost always an artefact of how the file was
+            // written rather than part of the secret.
+            Ok(contents.trim_end_matches(['\n', '\r']).to_string())
+        }
+
+        (None, None) => {
+            // No secret given at all - read stdin, so `echo -n s | op-x secret -k k`
+            // works and an interactive operator can paste it.
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .with_context(|| "Could not read the secret from stdin")?;
+
+            let secret = buffer.trim_end_matches(['\n', '\r']).to_string();
+
+            if secret.is_empty() {
+                return Err(Error::PeerEdit(
+                    "No secret supplied - pass --value-file, or pipe the secret to stdin"
+                        .to_string(),
+                ));
+            }
+
+            Ok(secret)
+        }
+    }
+}
+
+pub(crate) fn validate_agent_type(agent_type: &Option<String>) -> Result<Option<String>, Error> {
+    let Some(agent_type) = agent_type else {
+        return Ok(None);
+    };
+
+    match AgentType::parse(agent_type) {
+        Some(typ) => Ok(Some(typ.to_string())),
+        None => Err(Error::PeerEdit(format!(
+            "'{}' is not a recognised agent type. Valid values are: portal, provider, \
+             platform, instance, bridge, account, filesystem, scheduler, virtual.",
+            agent_type
+        ))),
+    }
+}
+
 pub async fn process_args<T>(defaults: &Defaults<T>) -> Result<Option<Config<T>>, Error>
 where
     T: Serialize + for<'de> Deserialize<'de> + Clone + std::fmt::Debug + Default,
@@ -196,6 +281,7 @@ where
             port,
             healthcheck_port,
             proxy_header,
+            trusted_proxy,
             force,
         }) => {
             let local_healthcheck_port;
@@ -206,7 +292,7 @@ where
                 local_healthcheck_port = defaults.service.healthcheck_port();
             }
 
-            let config = Config {
+            let mut config = Config {
                 service: {
                     ServiceConfig::new(
                         &service.clone().unwrap_or(defaults.service.name()),
@@ -228,15 +314,17 @@ where
                 one_shot_zone: None,
             };
 
+            config.service.set_trusted_proxy(trusted_proxy.as_deref())?;
+
             if config_file.try_exists()? {
                 if *force {
                     std::fs::remove_file(&config_file)
                         .context("Could not remove existing config file.")?;
                 } else {
-                    tracing::warn!("Config file already exists: {}", &config_file.display());
+                    tracing::warn!("Config file already exists: {}", config_file.display());
                     return Err(Error::ConfigExists(format!(
                         "Config file already exists: {}",
-                        &config_file.display()
+                        config_file.display()
                     )));
                 }
             }
@@ -257,6 +345,8 @@ where
             remove,
             zone,
             rotate,
+            proxy,
+            r#type,
         }) => {
             if *list {
                 let config = load_config::<Config<T>>(&config_file)?;
@@ -267,20 +357,37 @@ where
             }
 
             if let Some(client) = add {
-                if ip.is_none() {
-                    return Err(Error::PeerEdit(format!(
-                        "No IP address or IP range provided for client {}.",
-                        client
-                    )));
-                }
+                let agent_type = validate_agent_type(r#type)?;
 
                 let mut config = load_config::<Config<T>>(&config_file)?;
 
-                let invite = config.service.add_client(
-                    client,
-                    &ip.clone().unwrap_or_else(|| "".to_string()),
-                    zone,
-                )?;
+                let invite = match proxy {
+                    Some(relay) => {
+                        config
+                            .service
+                            .add_relayed_client(client, relay, zone, &agent_type)?
+                    }
+                    None => {
+                        if ip.is_none() {
+                            return Err(Error::PeerEdit(format!(
+                                "No IP address or IP range provided for client {}.",
+                                client
+                            )));
+                        }
+
+                        config.service.add_client(
+                            client,
+                            &ip.clone().unwrap_or_else(|| "".to_string()),
+                            zone,
+                            &agent_type,
+                        )?
+                    }
+                };
+
+                // ...and tell the client what *we* are, so its side of the
+                // expectation needs no hand-editing. We know our own type for
+                // certain, so this is always declared.
+                let invite = invite.with_agent_type(Some(defaults.agent.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -288,7 +395,18 @@ where
                     &PathBuf::from(format!("./invite_{}_{}.toml", invite.name(), invite.zone())),
                 )?;
 
-                tracing::info!("Client '{}' added.", client);
+                match &agent_type {
+                    Some(t) => tracing::info!(
+                        "Client '{}' added, and must present itself as a '{}' agent.",
+                        client,
+                        t
+                    ),
+                    None => tracing::warn!(
+                        "Client '{}' added with no expected agent type, so whatever role it \
+                         claims will be accepted. Pass --type to check it.",
+                        client
+                    ),
+                }
                 return Ok(None);
             }
 
@@ -302,7 +420,10 @@ where
 
             if let Some(client) = rotate {
                 let mut config = load_config::<Config<T>>(&config_file)?;
-                let invite = config.service.rotate_client_keys(client, zone)?;
+                let invite = config
+                    .service
+                    .rotate_client_keys(client, zone)?
+                    .with_agent_type(Some(defaults.agent.to_string()));
 
                 save_config(&config, &config_file)?;
                 save_invite(
@@ -348,7 +469,13 @@ where
                 }
 
                 let mut config = load_config::<Config<T>>(&config_file)?;
+
+                // if the invite names a blind relay proxy (i.e. it was
+                // created with `client --add --proxy` on the issuing side),
+                // this is added as a relayed server automatically - nothing
+                // else needs to be passed in here.
                 config.service.add_server(&invite)?;
+
                 save_config(&config, &config_file)?;
                 tracing::info!("Server '{}' added.", server.display());
                 return Ok(None);
@@ -383,6 +510,18 @@ where
         }) => {
             let mut config = load_config::<Config<T>>(&config_file)?;
 
+            // Changing the scheme changes the key every stored secret was encrypted
+            // under, and nothing re-encrypts them - so they silently stop decrypting
+            // until each `secret` command is re-run. Say so, naming the keys, rather
+            // than letting the operator discover it at the next startup. See
+            // docs/specifications/security-review-2.md (finding R33).
+            let stored_secrets: Vec<String> = config
+                .extras
+                .iter()
+                .filter(|(_, value)| value.starts_with("op-secret-v1:"))
+                .map(|(key, _)| key.clone())
+                .collect();
+
             match environment {
                 Some(env) => {
                     config.service.set_environment_encryption(env)?;
@@ -393,12 +532,30 @@ where
                     }
                 }
             }
+
+            if !stored_secrets.is_empty() {
+                tracing::warn!(
+                    "The encryption scheme has changed, but the {} secret(s) already \
+                     stored in this config were encrypted under the old one and are NOT \
+                     re-encrypted. They will fail to decrypt until you re-run \
+                     `secret --key <key>` for each of: {}",
+                    stored_secrets.len(),
+                    stored_secrets.join(", ")
+                );
+            }
+
             save_config(&config, &config_file)?;
             return Ok(None);
         }
-        Some(Commands::Secret { key, value }) => {
+        Some(Commands::Secret {
+            key,
+            value,
+            value_file,
+        }) => {
+            let secret = read_secret_value(value.as_deref(), value_file.as_deref())?;
+
             let mut config = load_config::<Config<T>>(&config_file)?;
-            let value = config.service().encrypt(value)?;
+            let value = config.service().encrypt(&secret)?;
             config.extras.insert(key.clone(), value.clone());
             save_config(&config, &config_file)?;
             return Ok(None);
@@ -488,6 +645,26 @@ enum Commands {
             help = "Name of the client whose keys are being rotated"
         )]
         rotate: Option<String>,
+
+        #[arg(
+            long,
+            short = 'p',
+            help = "Name of a blind relay proxy (an op-proxy server already added to this \
+                    service) this client can only be reached through - if set, --ip is not \
+                    required and is ignored"
+        )]
+        proxy: Option<String>,
+
+        #[arg(
+            long,
+            short = 't',
+            help = "The agent type this client must present itself as, e.g. 'bridge'. \
+                    Communicated out-of-band by the operator of that agent - it is never \
+                    taken from anything the client sends. If omitted, the client's claimed \
+                    type is not checked. One of: portal, provider, platform, instance, \
+                    bridge, account, filesystem, scheduler, virtual"
+        )]
+        r#type: Option<String>,
     },
 
     /// Adding and removing servers
@@ -565,6 +742,14 @@ enum Commands {
         )]
         proxy_header: Option<String>,
 
+        #[arg(
+            long,
+            help = "IP address(es)/range(s) of trusted reverse proxies whose proxy_header may be \
+                    trusted (comma-separated, CIDR allowed, e.g. 127.0.0.0/8). Required for \
+                    proxy_header to have any effect."
+        )]
+        trusted_proxy: Option<String>,
+
         #[arg(long, short = 'f', help = "Force reinitialisation")]
         force: bool,
     },
@@ -583,8 +768,22 @@ enum Commands {
         #[arg(long, short = 'k', help = "Key for the secret configuration option")]
         key: String,
 
-        #[arg(long, short = 'v', help = "Value for the secret configuration option")]
-        value: String,
+        #[arg(
+            long,
+            short = 'v',
+            help = "Value for the secret configuration option. AVOID: this appears in \
+                    `ps` output for every local user while the command runs. Prefer \
+                    --value-file, or omit both to be prompted on stdin"
+        )]
+        value: Option<String>,
+
+        #[arg(
+            long,
+            short = 'f',
+            help = "Read the secret from this file instead of the command line (use '-' \
+                    for stdin). Unlike --value, the secret never appears in `ps`"
+        )]
+        value_file: Option<PathBuf>,
     },
 
     /// Add commands to control encryption of the config file and secrets
@@ -631,4 +830,39 @@ enum Commands {
         )]
         zone: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_type_typos_are_rejected_at_add_time() {
+        // A misspelled --type would otherwise be written into the config and
+        // then discarded at startup as unrecognised, leaving the operator
+        // believing the peer was checked when it was not. Fail while there is
+        // someone there to read the error. See finding R3.
+        assert_eq!(
+            validate_agent_type(&Some("bridge".to_string())).ok(),
+            Some(Some("bridge".to_string()))
+        );
+
+        // ...and normalise, so `--type BRIDGE` and `--type " bridge "` record
+        // the same canonical value the startup check parses.
+        assert_eq!(
+            validate_agent_type(&Some("  BRIDGE ".to_string())).ok(),
+            Some(Some("bridge".to_string()))
+        );
+
+        for bad in ["bridges", "brigde", "portal ninja", "", "Portal!"] {
+            assert!(
+                validate_agent_type(&Some(bad.to_string())).is_err(),
+                "{:?} must be rejected",
+                bad
+            );
+        }
+
+        // Omitting it entirely is legitimate - it means "do not check".
+        assert_eq!(validate_agent_type(&None).ok(), Some(None));
+    }
 }

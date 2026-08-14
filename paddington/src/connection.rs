@@ -7,8 +7,10 @@ use anyhow::Error as AnyError;
 use futures::{SinkExt, StreamExt};
 use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt};
+use once_cell::sync::Lazy;
 use secrecy::ExposeSecret;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -16,20 +18,95 @@ use std::sync::Mutex as StdMutex;
 use std::vec::Vec;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
-use tokio_tungstenite::connect_async;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::RwLock as TokioRwLock;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::Message as TokioMessage;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::handshake::server::{
     ErrorResponse as HandshakeErrorResponse, Request as HandshakeRequest,
     Response as HandshakeResponse,
 };
 
+use crate::anti_replay::{HandshakeNonceState, NoncedPayload, ReplayWindow};
 use crate::command::Command;
 use crate::config::{ClientConfig, PeerConfig, ServiceConfig};
 use crate::crypto::{random_bytes, Key, Salt, SecretKey, KEY_SIZE};
 use crate::error::Error;
 use crate::exchange;
 use crate::message::Message;
+
+/// Largest WebSocket message (and frame) either side will accept.
+///
+/// Without an explicit `WebSocketConfig`, tungstenite defaults to a 16 MiB
+/// frame and a 64 MiB message limit, and `read_frame` *reserves* the declared
+/// payload length before any of it arrives - so ~14 attacker-controlled bytes
+/// buy a 16 MiB allocation, pre-authentication, per connection. The largest
+/// legitimate OpenPortal frame is a board `Sync` dump, which is orders of
+/// magnitude below this; 2 MiB leaves generous headroom while bounding a
+/// flood. Note the double-hex-plus-JSON envelope inflates a payload roughly
+/// 4x on the wire, so this corresponds to a ~512 KiB plaintext message. See
+/// `docs/specifications/security-review-2.md` (finding R22).
+const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
+
+/// How long a connection may remain unauthenticated before it is dropped.
+///
+/// The pre-authentication phase (WebSocket upgrade, first frame, peer
+/// selection, `Handshake`, `PeerDetails`) previously had no deadline at all,
+/// so a peer that completed the TCP handshake and then sent nothing held its
+/// slot in the `MAX_UNAUTHENTICATED_CONNECTIONS` pool indefinitely - 2048 idle
+/// sockets were enough to stop the listener accepting any new connection,
+/// including from legitimate peers. Real handshakes complete in milliseconds;
+/// 30 seconds is far above any plausible round-trip while still bounding a
+/// slowloris. See `docs/specifications/security-review-2.md` (finding R21).
+pub(crate) const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
+
+/// The `WebSocketConfig` used by both the client and the server, bounding
+/// per-connection buffer growth (see `MAX_WEBSOCKET_MESSAGE_SIZE`).
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_WEBSOCKET_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_WEBSOCKET_MESSAGE_SIZE))
+        .max_write_buffer_size(MAX_WEBSOCKET_MESSAGE_SIZE)
+}
+
+/// Per-peer, process-lifetime nonce state for `Handshake`/`PeerDetails` -
+/// unlike `ConnectionState`'s nonce fields, this must **not** reset per
+/// connection, since it protects messages encrypted (at least partly)
+/// under the permanent pre-shared key pair, which doesn't change across
+/// reconnects. Keyed the same way `exchange.rs`'s connection registry
+/// keys peers: `"{name}@{zone}"`. See
+/// `docs/plans/replay-protection-design.md` §10.
+static HANDSHAKE_NONCE_STATE: Lazy<TokioRwLock<HashMap<String, HandshakeNonceState>>> =
+    Lazy::new(|| TokioRwLock::new(HashMap::new()));
+
+fn handshake_peer_key(name: &str, zone: &str) -> String {
+    format!("{}@{}", name, zone)
+}
+
+async fn take_handshake_nonce(name: &str, zone: &str) -> u64 {
+    HANDSHAKE_NONCE_STATE
+        .write()
+        .await
+        .entry(handshake_peer_key(name, zone))
+        .or_default()
+        .take_next_nonce()
+}
+
+async fn check_handshake_replay(
+    name: &str,
+    zone: &str,
+    epoch: Option<u64>,
+    nonce: Option<u64>,
+) -> bool {
+    HANDSHAKE_NONCE_STATE
+        .write()
+        .await
+        .entry(handshake_peer_key(name, zone))
+        .or_default()
+        .check_replay(epoch, nonce)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum ConnectionStatus {
@@ -44,6 +121,15 @@ enum ConnectionStatus {
 struct ConnectionState {
     status: ConnectionStatus,
     last_activity: chrono::DateTime<chrono::Utc>,
+    /// Nonce to assign to the *next* ongoing message this side sends -
+    /// see `docs/plans/replay-protection-design.md`. Reset for free every
+    /// time a fresh `ConnectionState` is created (i.e. every new physical
+    /// connection), matching that a replayed message from a previous
+    /// connection's traffic is meaningless once new session keys exist.
+    next_nonce: u64,
+    /// Tracks which nonces this side has already accepted from the peer,
+    /// for detecting a replayed (or too-old) ongoing message.
+    replay_window: ReplayWindow,
 }
 
 impl Default for ConnectionState {
@@ -51,11 +137,32 @@ impl Default for ConnectionState {
         ConnectionState {
             status: ConnectionStatus::None,
             last_activity: chrono::Utc::now(),
+            next_nonce: 0,
+            replay_window: ReplayWindow::new(),
         }
     }
 }
 
 impl ConnectionState {
+    /// Returns the nonce to use for the next outgoing message, and
+    /// advances the counter for the one after that.
+    fn take_next_nonce(&mut self) -> u64 {
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
+        nonce
+    }
+
+    /// Whether `nonce` should be accepted as a genuinely new message from
+    /// the peer (`true`), or rejected as a replay / too old to tell
+    /// (`false`) - see `docs/plans/replay-protection-design.md` §4.2. A
+    /// payload with no nonce at all (`None` - a not-yet-upgraded peer) is
+    /// always accepted; there is nothing to check it against, but if the peer
+    /// *advertised* nonce support this is now logged - see finding R33.
+    fn check_replay(&mut self, nonce: Option<u64>, peer_supports_nonce: bool, peer: &str) -> bool {
+        self.replay_window
+            .check_and_record_negotiated(nonce, peer_supports_nonce, peer)
+    }
+
     fn set_error(&mut self) {
         self.status = ConnectionStatus::Error;
         self.last_activity = chrono::Utc::now();
@@ -107,6 +214,18 @@ pub struct Connection {
     outer_key_salt: Option<Salt>,
     peer: Option<PeerConfig>,
     tx: Option<Arc<TokioMutex<UnboundedSender<TokioMessage>>>>,
+    /// Whether the peer on the other end confirmed (via `PeerDetails`,
+    /// exchanged once during the handshake) that it understands
+    /// `NoncedPayload` for ongoing traffic. Set once, alongside
+    /// `inner_key`/`outer_key`, and never changed again for the lifetime
+    /// of this connection - a plain field rather than something behind
+    /// `state`'s mutex, since (unlike the nonce counter/window) it never
+    /// mutates per-message. Gates whether `send_message` wraps its
+    /// outgoing payload with a nonce at all: sending the new shape to a
+    /// peer that never confirmed support for it would break that peer
+    /// outright, not degrade gracefully - see
+    /// `docs/plans/replay-protection-design.md` §9.
+    peer_supports_nonce: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +287,23 @@ struct PeerDetails {
     zone: String,
     version: u32,
     standby_status: StandbyStatus,
+    /// Whether the sender of *this* `PeerDetails` understands
+    /// `NoncedPayload` for ongoing traffic - see
+    /// `docs/plans/replay-protection-design.md` §9 and
+    /// `docs/specifications/security-model.md` §9. `#[serde(default)]` so
+    /// a pre-upgrade peer (whose `PeerDetails` simply has no such field)
+    /// deserialises as `false`, which is the correct answer for it: it
+    /// genuinely doesn't support this yet.
+    #[serde(default)]
+    supports_nonce: bool,
+    /// Replay-protection nonce for this `PeerDetails` message - see
+    /// `Handshake::nonce` and `docs/plans/replay-protection-design.md`
+    /// §10. Same `#[serde(default)]` backward-compatibility reasoning.
+    #[serde(default)]
+    nonce: Option<u64>,
+    /// Sending process incarnation - see `Handshake::epoch`.
+    #[serde(default)]
+    epoch: Option<u64>,
 }
 
 impl Display for PeerDetails {
@@ -177,13 +313,16 @@ impl Display for PeerDetails {
 }
 
 impl PeerDetails {
-    fn new(name: &str, zone: &str, status: &StandbyStatus) -> Self {
+    fn new(name: &str, zone: &str, status: &StandbyStatus, nonce: u64) -> Self {
         // everything is currently version 2
         PeerDetails {
             name: name.to_string(),
             zone: zone.to_string(),
             version: 2,
             standby_status: status.clone(),
+            supports_nonce: true,
+            nonce: Some(nonce),
+            epoch: Some(crate::anti_replay::process_epoch()),
         }
     }
 
@@ -202,6 +341,18 @@ impl PeerDetails {
     fn status(&self) -> &StandbyStatus {
         &self.standby_status
     }
+
+    fn supports_nonce(&self) -> bool {
+        self.supports_nonce
+    }
+
+    fn nonce(&self) -> Option<u64> {
+        self.nonce
+    }
+
+    fn epoch(&self) -> Option<u64> {
+        self.epoch
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,7 +364,7 @@ impl CheckStandby {
     }
 }
 
-fn envelope_message<T>(
+pub(crate) fn envelope_message<T>(
     message: T,
     inner_key: &SecretKey,
     outer_key: &SecretKey,
@@ -244,7 +395,7 @@ where
     ))
 }
 
-fn deenvelope_message<T>(
+pub(crate) fn deenvelope_message<T>(
     message: TokioMessage,
     inner_key: &SecretKey,
     outer_key: &SecretKey,
@@ -261,9 +412,23 @@ where
         return Err(Error::Incompatible("Message too short to de-envelop".to_string()).into());
     }
 
+    // Slice with `str::get` rather than `&message[..]`: the byte offsets
+    // below (64, 128) land mid-way through a multi-byte UTF-8 character if an
+    // attacker crafts a text frame with one straddling those positions, and
+    // direct `str` byte-indexing panics on a non-char-boundary. `get` returns
+    // `None` instead, which we turn into a clean de-envelope error. A
+    // legitimate frame is always pure ASCII hex, so this never rejects real
+    // traffic.
+    let too_short = || Error::Incompatible("Message too short to de-envelop".to_string());
+
     // the hex-encoded string is 2 times the number of bytes
-    let inner_info = hex::decode(&message[0..(2 * KEY_SIZE)])?;
-    let outer_info = hex::decode(&message[(2 * KEY_SIZE)..(4 * KEY_SIZE)])?;
+    let inner_info = hex::decode(message.get(0..(2 * KEY_SIZE)).ok_or_else(too_short)?)?;
+    let outer_info = hex::decode(
+        message
+            .get((2 * KEY_SIZE)..(4 * KEY_SIZE))
+            .ok_or_else(too_short)?,
+    )?;
+    let ciphertext = message.get((4 * KEY_SIZE)..).ok_or_else(too_short)?;
 
     let inner_key = inner_key
         .expose_secret()
@@ -273,11 +438,9 @@ where
         .expose_secret()
         .derive(outer_key_salt, Some(&outer_info))?;
 
-    Ok(inner_key.expose_secret().decrypt::<T>(
-        &outer_key
-            .expose_secret()
-            .decrypt::<String>(&message[(4 * KEY_SIZE)..])?,
-    )?)
+    Ok(inner_key
+        .expose_secret()
+        .decrypt::<T>(&outer_key.expose_secret().decrypt::<String>(ciphertext)?)?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +448,28 @@ struct Handshake {
     session_key: SecretKey,
     engine: String,
     version: String,
+    /// Replay-protection nonce for this handshake message, checked against
+    /// a per-peer window that (unlike ongoing traffic's) persists across
+    /// reconnects - see `docs/plans/replay-protection-design.md` §10.
+    /// `#[serde(default)]` so a pre-upgrade peer's `Handshake` (which
+    /// predates this field) deserialises as `None`, meaning "nothing to
+    /// check, accept unconditionally" - safe, since serde already ignores
+    /// unknown fields, so this side sending a nonce to an old peer never
+    /// breaks it either.
+    #[serde(default)]
+    nonce: Option<u64>,
+    /// Identifies the *sending process incarnation*, so the receiver can tell
+    /// a restart (whose in-memory nonce counter legitimately restarted at
+    /// zero) from a replay of an old message. The receiver keeps one replay
+    /// window per epoch - see `anti_replay::HandshakeNonceState` and
+    /// `docs/specifications/security-review-2.md` (finding R10). Rides inside
+    /// the AEAD like the nonce, so it cannot be forged or stripped by an
+    /// on-path attacker. `#[serde(default)]` for the same
+    /// backward-compatibility reason as `nonce`: a pre-epoch peer's message
+    /// deserialises as `None`, which gets its own window and so behaves
+    /// exactly as it did before.
+    #[serde(default)]
+    epoch: Option<u64>,
 }
 
 impl Connection {
@@ -298,6 +483,7 @@ impl Connection {
             outer_key_salt: None,
             peer: None,
             tx: None,
+            peer_supports_nonce: false,
         }
     }
 
@@ -404,8 +590,20 @@ impl Connection {
             Error::InvalidPeer("No outer key salt to send message with!".to_string())
         })?;
 
+        let nonce = match self.state.lock() {
+            Ok(mut state) => state.take_next_nonce(),
+            Err(e) => {
+                return Err(Error::Poison(format!(
+                    "Error getting connection state lock to assign a nonce: {}",
+                    e
+                )));
+            }
+        };
+
+        let payload = NoncedPayload::for_peer(nonce, message.to_string(), self.peer_supports_nonce);
+
         tx.send(envelope_message(
-            message.to_string(),
+            payload,
             inner_key,
             outer_key,
             inner_key_salt,
@@ -515,36 +713,42 @@ impl Connection {
 
         tracing::info!("Connecting to WebSocket at: {} - initiating handshake", url);
 
-        // add the salts to the headers, xor'd with the server's keys
-        // (just to keep them more secret)
+        // Send the HKDF salts in the clear. HKDF salts are public by design, so
+        // there is no need to hide them - and message security does not rely on
+        // salt secrecy (a fresh random per-message `info` is mixed into every
+        // derivation regardless, see §3.3). We advertise this "plain" format
+        // with an explicit header; a server reading it knows not to un-XOR (an
+        // old server, lacking this negotiation, would instead un-XOR and fail,
+        // so upgrade listening/server sides before initiating/client sides). See
+        // docs/specifications/security-review.md (finding F15).
         let mut request = url
             .clone()
             .into_client_request()
             .with_context(|| format!("Error creating client request for WebSocket at: {}", url))?;
 
         request.headers_mut().insert(
-            "openportal-inner-salt",
-            inner_key_salt
-                .xor(server.outer_key().expose_secret())
-                .to_string()
+            "openportal-salt-format",
+            "plain"
                 .parse()
-                .with_context(|| {
-                    format!("Error parsing inner key salt for WebSocket at: {}", url)
-                })?,
+                .with_context(|| format!("Error setting salt format for WebSocket at: {}", url))?,
+        );
+
+        request.headers_mut().insert(
+            "openportal-inner-salt",
+            inner_key_salt.to_string().parse().with_context(|| {
+                format!("Error parsing inner key salt for WebSocket at: {}", url)
+            })?,
         );
 
         request.headers_mut().insert(
             "openportal-outer-salt",
-            outer_key_salt
-                .xor(server.inner_key().expose_secret())
-                .to_string()
-                .parse()
-                .with_context(|| {
-                    format!("Error parsing outer key salt for WebSocket at: {}", url)
-                })?,
+            outer_key_salt.to_string().parse().with_context(|| {
+                format!("Error parsing outer key salt for WebSocket at: {}", url)
+            })?,
         );
 
-        let socket = match connect_async(request).await {
+        let socket = match connect_async_with_config(request, Some(websocket_config()), false).await
+        {
             Ok((socket, _)) => socket,
             Err(e) => {
                 tracing::warn!("Error connecting to WebSocket at: {} - {:?}", url, e);
@@ -560,11 +764,14 @@ impl Connection {
         // the name of its comms engine and version, and sends this to the server
         // using the pre-shared client/server inner and outer keys
         let outer_key = Key::generate();
+        let handshake_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
 
         let handshake = Handshake {
             session_key: outer_key.clone(),
             engine: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            nonce: Some(handshake_nonce),
+            epoch: Some(crate::anti_replay::process_epoch()),
         };
 
         let message = match envelope_message(
@@ -626,13 +833,41 @@ impl Connection {
             }
         };
 
+        if !check_handshake_replay(&peer_name, &peer_zone, handshake.epoch, handshake.nonce).await {
+            tracing::warn!(
+                "Rejected replayed (or too-old) Handshake response from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                handshake.nonce
+            );
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Rejected replayed Handshake response - closing connection.".to_string(),
+            ));
+        }
+
         let inner_key = handshake.session_key.clone();
+
+        // Reject a null (all-zero) session key from the peer (finding F15).
+        // Only the peer could send this, and it would weaken the session, so
+        // refuse rather than proceed with a degenerate key.
+        if inner_key.expose_secret().is_null() {
+            tracing::warn!("Rejected null session key from server - closing connection.");
+            return Err(Error::InvalidPeer(
+                "Peer sent a null session key - closing connection.".to_string(),
+            ));
+        }
 
         // the final step is for the client to send the server its PeerDetails,
         // and for the server to respond. These should match up with
         // what we expect
-        let peer_details =
-            PeerDetails::new(&self.config.name(), &peer_zone, &StandbyStatus::primary());
+        let peer_details_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
+        let peer_details = PeerDetails::new(
+            &self.config.name(),
+            &peer_zone,
+            &StandbyStatus::primary(),
+            peer_details_nonce,
+        );
 
         let message = match envelope_message(
             peer_details,
@@ -690,6 +925,26 @@ impl Connection {
                 return Err(e.into());
             }
         };
+
+        if !check_handshake_replay(
+            &peer_name,
+            &peer_zone,
+            peer_details.epoch(),
+            peer_details.nonce(),
+        )
+        .await
+        {
+            tracing::warn!(
+                "Rejected replayed (or too-old) PeerDetails from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                peer_details.nonce()
+            );
+            self.set_error().await;
+            return Err(Error::InvalidPeer(
+                "Rejected replayed PeerDetails - closing connection.".to_string(),
+            ));
+        }
 
         tracing::info!(
             "Connecting to peer {}, comms engine {} version {}",
@@ -831,6 +1086,7 @@ impl Connection {
         self.outer_key = Some(outer_key.clone());
         self.inner_key_salt = Some(inner_key_salt.clone());
         self.outer_key_salt = Some(outer_key_salt.clone());
+        self.peer_supports_nonce = peer_details.supports_nonce();
 
         // finally, we need to create a new channel for sending messages
         let (tx, rx) = unbounded::<TokioMessage>();
@@ -871,34 +1127,57 @@ impl Connection {
             }
 
             // we need to deenvelope the message
-            let msg: String = match deenvelope_message(
+            let wrapped: NoncedPayload = match deenvelope_message(
                 msg,
                 &inner_key,
                 &outer_key,
                 &inner_key_salt,
                 &outer_key_salt,
             ) {
-                Ok(msg) => msg,
+                Ok(wrapped) => wrapped,
                 Err(e) => {
                     tracing::warn!("Error de-enveloping message: {:?}", e);
                     return future::ok(());
                 }
             };
 
+            let (nonce, msg) = wrapped.into_parts();
+
+            // check for replay and record the last time we successfully
+            // received a message in the same lock scope - see
+            // docs/plans/replay-protection-design.md. Fail closed (treat
+            // as a replay) if the state lock itself is unavailable, since
+            // we can no longer verify the message wasn't already seen.
+            let accepted = match self.state.lock() {
+                Ok(mut state) => {
+                    let accepted = state.check_replay(nonce, self.peer_supports_nonce, &peer_name);
+                    state.register_activity();
+                    accepted
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Error getting connection state lock to check for replay - \
+                         dropping message: {}",
+                        e
+                    );
+                    false
+                }
+            };
+
+            if !accepted {
+                tracing::warn!(
+                    "Rejected replayed (or too-old) message from {}@{} (nonce {:?})",
+                    peer_name,
+                    peer_zone,
+                    nonce
+                );
+                return future::ok(());
+            }
+
             exchange::received(Message::received_from(&peer_name, &peer_zone, &msg))
                 .unwrap_or_else(|e| {
                     tracing::warn!("Error handling message: {:?}", e);
                 });
-
-            // record the last time we successfully received a message
-            match self.state.lock() {
-                Ok(mut state) => {
-                    state.register_activity();
-                }
-                Err(e) => {
-                    tracing::warn!("Error registering activity: {:?}", e);
-                }
-            }
 
             future::ok(())
         });
@@ -958,7 +1237,23 @@ impl Connection {
     /// loop to handle the sending and receiving of messages.
     ///
     #[allow(clippy::result_large_err)]
-    pub async fn handle_connection(&mut self, stream: TcpStream) -> Result<(), Error> {
+    pub async fn handle_connection(
+        &mut self,
+        stream: TcpStream,
+        permit: OwnedSemaphorePermit,
+        authenticated: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<(), Error> {
+        // Hold the unauthenticated-connection slot (finding F11) until this peer
+        // authenticates. Kept in an `Option` so it can be released explicitly
+        // at that point; if the handshake fails first, it is released when this
+        // function returns and `permit` is dropped.
+        let mut permit = Some(permit);
+
+        // Signals the caller's handshake watchdog (finding R21) that this
+        // connection authenticated in time. Dropped without sending if the
+        // handshake fails, which the watchdog also treats as "stop watching".
+        let mut authenticated = Some(authenticated);
+
         // Reject new connections during soft restart
         if crate::exchange::is_soft_restart_in_progress() {
             tracing::warn!("Rejecting new connection - soft restart in progress");
@@ -1003,6 +1298,16 @@ impl Connection {
         let mut inner_key_salt: String = String::new();
         let mut outer_key_salt: String = String::new();
 
+        // Whether the client sent its salts in the clear (new format) or
+        // XOR-masked with the pre-shared keys (legacy). The client advertises
+        // the plain format with the `openportal-salt-format: plain` header; an
+        // old client omits it, so we default to the legacy un-masking. The
+        // client initiates and cannot negotiate before this first message, so
+        // it commits to one encoding - detecting it here per-connection is what
+        // lets an upgraded server keep talking to not-yet-upgraded clients. See
+        // docs/specifications/security-review.md (finding F15).
+        let mut client_salt_is_plain = false;
+
         let process_headers = |request: &HandshakeRequest,
                                response: HandshakeResponse|
          -> Result<HandshakeResponse, HandshakeErrorResponse> {
@@ -1015,6 +1320,13 @@ impl Connection {
                     proxy_client = Some(value.to_string());
                 }
             }
+
+            client_salt_is_plain = request
+                .headers()
+                .get("openportal-salt-format")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.eq_ignore_ascii_case("plain"))
+                .unwrap_or(false);
 
             inner_key_salt = request
                 .headers()
@@ -1033,28 +1345,91 @@ impl Connection {
             Ok(response)
         };
 
-        let ws_stream = tokio_tungstenite::accept_hdr_async(stream, process_headers)
-            .await
-            .with_context(|| {
-                format!(
-                    "Error accepting WebSocket connection from: {}. Closing connection.",
-                    client_ip
-                )
-            })?;
+        let ws_stream = tokio_tungstenite::accept_hdr_async_with_config(
+            stream,
+            process_headers,
+            Some(websocket_config()),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Error accepting WebSocket connection from: {}. Closing connection.",
+                client_ip
+            )
+        })?;
 
-        let inner_key_salt: Salt = inner_key_salt
-            .parse()
-            .with_context(|| "Error parsing inner key salt")?;
+        // `Salt::from_str` requires exactly `SALT_SIZE` bytes. An **absent** header
+        // reaches here as `""` via the `unwrap_or_default()` above, which used to
+        // decode to an empty salt and connect anyway - orion's HMAC accepts an empty
+        // key, so the per-connection salt defence silently vanished with no error and
+        // no log. Distinguish missing from malformed so the operator can tell which.
+        // See docs/specifications/security-review-2.md (finding R33).
+        //
+        // Note the legacy XOR-masked salt format is unaffected: un-masking happens
+        // further down, on an already-parsed salt, and both operands are now
+        // guaranteed to be `SALT_SIZE` (`Salt::xor` zips, so a short salt used to
+        // silently shorten the result too).
+        let parse_salt = |value: &str, which: &str| -> Result<Salt, Error> {
+            if value.is_empty() {
+                return Err(Error::InvalidPeer(format!(
+                    "Connection from {} sent no `openportal-{}-salt` header. Every \
+                     client must supply both handshake salts.",
+                    client_ip, which
+                )));
+            }
 
-        let outer_key_salt: Salt = outer_key_salt
-            .parse()
-            .with_context(|| "Error parsing outer key salt")?;
+            value
+                .parse::<Salt>()
+                .with_context(|| {
+                    format!(
+                        "Connection from {} sent an invalid `openportal-{}-salt` header",
+                        client_ip, which
+                    )
+                })
+                .map_err(Error::Any)
+        };
 
+        let inner_key_salt: Salt = parse_salt(&inner_key_salt, "inner")?;
+        let outer_key_salt: Salt = parse_salt(&outer_key_salt, "outer")?;
+
+        // `client_ip` is currently the real TCP peer address. A proxy-supplied
+        // client address (from `proxy_header`) is only honoured when that peer
+        // is a configured trusted proxy; otherwise the header is ignored and
+        // the real peer address is kept. This closes the X-Forwarded-For-style
+        // spoofing of the IP allow-list described in
+        // docs/specifications/security-review.md (finding F6). Fails closed: if
+        // `proxy_header` is set but no `trusted_proxy` is configured, forwarded
+        // addresses are never trusted.
         if let Some(proxy_client) = proxy_client {
-            tracing::info!("Proxy client: {:?}", proxy_client);
-            client_ip = proxy_client
-                .parse()
-                .with_context(|| "Error parsing proxy client address")?;
+            let peer_ip = client_ip;
+            match self.config.trusted_proxy() {
+                Some(trusted) if trusted.matches(&peer_ip) => {
+                    let forwarded: std::net::IpAddr = proxy_client
+                        .parse()
+                        .with_context(|| "Error parsing proxy client address")?;
+                    tracing::info!(
+                        "Trusted proxy {} supplied client address {}",
+                        peer_ip,
+                        forwarded
+                    );
+                    client_ip = forwarded;
+                }
+                Some(_) => {
+                    tracing::warn!(
+                        "Ignoring proxy header from {}: it is not a configured trusted proxy. \
+                         Set `trusted_proxy` to the proxy's address/range to honour it.",
+                        peer_ip
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        "Ignoring proxy header from {}: `proxy_header` is set but no \
+                         `trusted_proxy` is configured, so a forwarded client address cannot \
+                         be trusted. Set `trusted_proxy` to the proxy's address/range.",
+                        peer_ip
+                    );
+                }
+            }
         }
 
         // this doesn't need to be mutable any more
@@ -1108,12 +1483,25 @@ impl Connection {
                 // but then we would lose tracing messages - these are very helpful
                 // to debug issues
 
+                // Un-mask the salts unless the client advertised the plain
+                // format (finding F15). Legacy clients XOR the salts with the
+                // pre-shared keys; the un-masking key is the client's own key,
+                // which is why this is done per candidate client here.
+                let (eff_inner_salt, eff_outer_salt) = if client_salt_is_plain {
+                    (inner_key_salt.clone(), outer_key_salt.clone())
+                } else {
+                    (
+                        inner_key_salt.xor(client.outer_key().expose_secret()),
+                        outer_key_salt.xor(client.inner_key().expose_secret()),
+                    )
+                };
+
                 match deenvelope_message::<Handshake>(
                     message.clone(),
                     &client.inner_key(),
                     &client.outer_key(),
-                    &inner_key_salt.xor(client.outer_key().expose_secret()),
-                    &outer_key_salt.xor(client.inner_key().expose_secret()),
+                    &eff_inner_salt,
+                    &eff_outer_salt,
                 ) {
                     Ok(_) => {
                         tracing::info!(
@@ -1129,16 +1517,6 @@ impl Connection {
             .cloned()
             .collect();
 
-        if clients.is_empty() {
-            tracing::warn!(
-                "No matching peer could authenticate for address: {}",
-                client_ip
-            );
-            return Err(Error::InvalidPeer(
-                "No matching peer could authenticate for address.".to_string(),
-            ));
-        }
-
         if clients.len() > 1 {
             tracing::warn!(
                 "Multiple matching peers found for address: {} - \
@@ -1148,7 +1526,18 @@ impl Connection {
             );
         }
 
-        let peer = clients[0].clone();
+        // Taken via `first()` rather than `[0]` so that "no peer matched" is
+        // a single error path that cannot panic - see
+        // docs/specifications/security-review-2.md (finding R1).
+        let Some(peer) = clients.first().cloned() else {
+            tracing::warn!(
+                "No matching peer could authenticate for address: {}",
+                client_ip
+            );
+            return Err(Error::InvalidPeer(
+                "No matching peer could authenticate for address.".to_string(),
+            ));
+        };
 
         let peer_name = peer.name();
         let peer_zone = peer.zone();
@@ -1167,8 +1556,17 @@ impl Connection {
         );
 
         // we have found the right client to xor the salts
-        let inner_key_salt = inner_key_salt.xor(peer.outer_key().expose_secret());
-        let outer_key_salt = outer_key_salt.xor(peer.inner_key().expose_secret());
+        // Un-mask the selected peer's salts (unless plain - see the filter above).
+        let inner_key_salt = if client_salt_is_plain {
+            inner_key_salt
+        } else {
+            inner_key_salt.xor(peer.outer_key().expose_secret())
+        };
+        let outer_key_salt = if client_salt_is_plain {
+            outer_key_salt
+        } else {
+            outer_key_salt.xor(peer.inner_key().expose_secret())
+        };
 
         // the peer has sent us the new session outer key that should be used,
         // wrapped in the client/server inner and outer keys
@@ -1181,7 +1579,28 @@ impl Connection {
         )
         .with_context(|| "Error de-enveloping message - closing connection.")?;
 
+        if !check_handshake_replay(&peer_name, &peer_zone, handshake.epoch, handshake.nonce).await {
+            tracing::warn!(
+                "Rejected replayed (or too-old) Handshake from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                handshake.nonce
+            );
+            return Err(Error::InvalidPeer(
+                "Rejected replayed Handshake - closing connection.".to_string(),
+            ));
+        }
+
         let outer_key = handshake.session_key.clone();
+
+        // Reject a null (all-zero) session key from the peer (finding F15) -
+        // see the matching check on the client side.
+        if outer_key.expose_secret().is_null() {
+            tracing::warn!("Rejected null session key from client - closing connection.");
+            return Err(Error::InvalidPeer(
+                "Peer sent a null session key - closing connection.".to_string(),
+            ));
+        }
 
         let peer_engine = handshake.engine;
         let peer_version = handshake.version;
@@ -1189,11 +1608,14 @@ impl Connection {
         // we will create a new session inner key and send it back to the
         // client, wrapped in the client/server inner key and session outer key
         let inner_key = Key::generate();
+        let handshake_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
 
         let handshake = Handshake {
             session_key: inner_key.clone(),
             engine: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            nonce: Some(handshake_nonce),
+            epoch: Some(crate::anti_replay::process_epoch()),
         };
 
         let response = envelope_message(
@@ -1224,6 +1646,29 @@ impl Connection {
             &outer_key_salt,
         )
         .with_context(|| "Error de-enveloping message - closing connection.")?;
+
+        if !check_handshake_replay(
+            &peer_name,
+            &peer_zone,
+            peer_details.epoch(),
+            peer_details.nonce(),
+        )
+        .await
+        {
+            tracing::warn!(
+                "Rejected replayed (or too-old) PeerDetails from {}@{} (nonce {:?})",
+                peer_name,
+                peer_zone,
+                peer_details.nonce()
+            );
+            return Err(Error::InvalidPeer(
+                "Rejected replayed PeerDetails - closing connection.".to_string(),
+            ));
+        }
+
+        // captured now, before `peer_details` is shadowed below by the
+        // `PeerDetails` we send back describing ourselves.
+        let peer_supports_nonce = peer_details.supports_nonce();
 
         tracing::info!(
             "Connected to peer {}, using engine {}, version {}",
@@ -1264,6 +1709,19 @@ impl Connection {
             ));
         }
 
+        // Peer is now fully authenticated (key possession + name + zone +
+        // version). Release the unauthenticated-connection slot so long-lived
+        // authenticated peers never occupy the pool (finding F11); any
+        // remaining work below runs on behalf of a trusted peer.
+        drop(permit.take());
+
+        // Stand the handshake watchdog down (finding R21) - everything from
+        // here on is a long-lived authenticated connection, which must not be
+        // subject to the pre-authentication deadline.
+        if let Some(authenticated) = authenticated.take() {
+            let _ = authenticated.send(());
+        }
+
         // now we know that the peer is valid, check to see if either we or the
         // peer are 'standby' (secondary), and so would need to wait until
         // the primary fails before completing the connection
@@ -1279,7 +1737,9 @@ impl Connection {
         );
 
         // now send back our PeerDetials
-        let peer_details = PeerDetails::new(&service_name, &peer_zone, &standby);
+        let peer_details_nonce = take_handshake_nonce(&peer_name, &peer_zone).await;
+        let peer_details =
+            PeerDetails::new(&service_name, &peer_zone, &standby, peer_details_nonce);
 
         let message = envelope_message(
             peer_details,
@@ -1410,6 +1870,7 @@ impl Connection {
         self.inner_key_salt = Some(inner_key_salt.clone());
         self.outer_key_salt = Some(outer_key_salt.clone());
         self.peer = Some(peer.to_peer().clone());
+        self.peer_supports_nonce = peer_supports_nonce;
 
         match self.state.lock() {
             Ok(mut state) => {
@@ -1437,34 +1898,57 @@ impl Connection {
         // handle the sending of messages to others
         let received_from_peer = incoming.try_for_each(|msg| {
             // we need to deenvelope the message
-            let msg: String = match deenvelope_message(
+            let wrapped: NoncedPayload = match deenvelope_message(
                 msg,
                 &inner_key,
                 &outer_key,
                 &inner_key_salt,
                 &outer_key_salt,
             ) {
-                Ok(msg) => msg,
+                Ok(wrapped) => wrapped,
                 Err(e) => {
                     tracing::warn!("Error de-enveloping message: {:?}", e);
                     return future::ok(());
                 }
             };
 
+            let (nonce, msg) = wrapped.into_parts();
+
+            // check for replay and record the last time we successfully
+            // received a message in the same lock scope - see
+            // docs/plans/replay-protection-design.md. Fail closed (treat
+            // as a replay) if the state lock itself is unavailable, since
+            // we can no longer verify the message wasn't already seen.
+            let accepted = match self.state.lock() {
+                Ok(mut state) => {
+                    let accepted = state.check_replay(nonce, self.peer_supports_nonce, &peer_name);
+                    state.register_activity();
+                    accepted
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Error getting connection state lock to check for replay - \
+                         dropping message: {}",
+                        e
+                    );
+                    false
+                }
+            };
+
+            if !accepted {
+                tracing::warn!(
+                    "Rejected replayed (or too-old) message from {}@{} (nonce {:?})",
+                    peer_name,
+                    peer_zone,
+                    nonce
+                );
+                return future::ok(());
+            }
+
             exchange::received(Message::received_from(&peer_name, &peer_zone, &msg))
                 .unwrap_or_else(|e| {
                     tracing::warn!("Error handling message: {:?}", e);
                 });
-
-            // record the last time we successfully received a message
-            match self.state.lock() {
-                Ok(mut state) => {
-                    state.register_activity();
-                }
-                Err(e) => {
-                    tracing::warn!("Error registering activity: {:?}", e);
-                }
-            }
 
             future::ok(())
         });
@@ -1506,6 +1990,47 @@ impl Connection {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn test_handshake_nonce_state_persists_and_rejects_replay_across_connections() {
+        // unlike ConnectionState's ephemeral nonce state, this must NOT
+        // reset per "connection attempt" - simulated here by calling
+        // take/check repeatedly against the same peer identity, standing
+        // in for what would otherwise be several distinct reconnects. Use
+        // a name unique to this test to avoid colliding with the global
+        // registry other tests might touch.
+        let name = "test-handshake-nonce-persists";
+        let zone = "default";
+
+        let first = take_handshake_nonce(name, zone).await;
+        let second = take_handshake_nonce(name, zone).await;
+        assert_eq!(second, first + 1);
+
+        // Same epoch throughout - i.e. the same process incarnation
+        // reconnecting, which is what must not reset the window.
+        let epoch = Some(crate::anti_replay::process_epoch());
+
+        assert!(check_handshake_replay(name, zone, epoch, Some(first)).await);
+        assert!(check_handshake_replay(name, zone, epoch, Some(second)).await);
+
+        // a later "connection attempt" replaying an already-seen nonce
+        // must still be rejected - proving the window survived rather
+        // than resetting.
+        assert!(!check_handshake_replay(name, zone, epoch, Some(first)).await);
+        assert!(!check_handshake_replay(name, zone, epoch, Some(second)).await);
+
+        // ...but the same nonces sent under a *different* epoch (the peer
+        // restarted, so its counter legitimately went back) are accepted,
+        // which is what stops a restart wedging the link. See
+        // docs/specifications/security-review-2.md (finding R10).
+        let after_restart = Some(crate::anti_replay::process_epoch() ^ 0xFFFF);
+        assert!(check_handshake_replay(name, zone, after_restart, Some(first)).await);
+        assert!(check_handshake_replay(name, zone, after_restart, Some(second)).await);
+
+        // and the superseded epoch's window is still there, so the replay
+        // under the *old* epoch continues to fail.
+        assert!(!check_handshake_replay(name, zone, epoch, Some(first)).await);
+    }
+
     #[test]
     fn test_enveloping() {
         let inner_key = Key::generate();
@@ -1540,5 +2065,132 @@ mod tests {
         });
 
         assert_eq!(message, deenvelope);
+    }
+
+    #[test]
+    fn test_peer_details_new_supports_nonce() {
+        let details = PeerDetails::new("airr", "default", &StandbyStatus::primary(), 0);
+        assert!(details.supports_nonce());
+    }
+
+    #[test]
+    fn test_peer_details_new_carries_its_nonce() {
+        let details = PeerDetails::new("airr", "default", &StandbyStatus::primary(), 42);
+        assert_eq!(details.nonce(), Some(42));
+    }
+
+    #[test]
+    fn test_peer_details_without_supports_nonce_field_defaults_to_false() {
+        // what a not-yet-upgraded peer's `PeerDetails` looks like on the
+        // wire - it was serialised before this field existed, so it simply
+        // isn't present. `#[serde(default)]` must make this deserialise as
+        // `false`, the correct answer: that peer genuinely doesn't support
+        // `NoncedPayload` yet.
+        let json = r#"{"name":"airr","zone":"default","version":2,"standby_status":{"server_is_secondary":false,"client_is_secondary":false}}"#;
+        let details: PeerDetails = serde_json::from_str(json).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert!(!details.supports_nonce());
+    }
+
+    #[test]
+    fn test_peer_details_without_nonce_field_defaults_to_none() {
+        // same wire shape as above - old peers predate both fields at
+        // once, but this confirms `nonce` specifically defaults correctly
+        // (see docs/plans/replay-protection-design.md §10).
+        let json = r#"{"name":"airr","zone":"default","version":2,"standby_status":{"server_is_secondary":false,"client_is_secondary":false}}"#;
+        let details: PeerDetails = serde_json::from_str(json).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert_eq!(details.nonce(), None);
+    }
+
+    #[test]
+    fn test_handshake_without_nonce_field_defaults_to_none() {
+        // what a not-yet-upgraded peer's `Handshake` looks like on the
+        // wire - serialised before this field existed. Build a real one,
+        // then strip the field from its JSON (rather than hand-writing
+        // the wire format of `SecretKey`, which isn't this test's
+        // concern) - `#[serde(default)]` must still deserialise it, as
+        // `nonce: None`.
+        let handshake = Handshake {
+            session_key: Key::generate(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            nonce: Some(7),
+            epoch: Some(11),
+        };
+        let mut value = serde_json::to_value(&handshake).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("nonce");
+
+        let handshake: Handshake = serde_json::from_value(value).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert_eq!(handshake.nonce, None);
+    }
+
+    #[test]
+    fn test_handshake_without_epoch_field_defaults_to_none() {
+        // A peer built before the `epoch` field (finding R10) sends a
+        // `Handshake` without it. `#[serde(default)]` must deserialise that as
+        // `epoch: None`, which gets its own replay window and so behaves
+        // exactly as it did before epochs existed - this is what makes the
+        // change a non-breaking addition rather than a flag day.
+        let handshake = Handshake {
+            session_key: Key::generate(),
+            engine: "test".to_string(),
+            version: "0.0.0".to_string(),
+            nonce: Some(7),
+            epoch: Some(11),
+        };
+
+        let mut value = serde_json::to_value(&handshake).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+
+        let handshake: Handshake = serde_json::from_value(value).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert_eq!(handshake.epoch, None);
+        // ...and the nonce it does carry is still read normally.
+        assert_eq!(handshake.nonce, Some(7));
+    }
+
+    #[test]
+    fn test_peer_details_without_epoch_field_defaults_to_none() {
+        let details = PeerDetails::new("peer", "default", &StandbyStatus::primary(), 3);
+
+        let mut value = serde_json::to_value(&details).unwrap_or_else(|e| {
+            unreachable!("serialise: {:?}", e);
+        });
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| unreachable!("expected a JSON object"))
+            .remove("epoch");
+
+        let details: PeerDetails = serde_json::from_value(value).unwrap_or_else(|e| {
+            unreachable!("deserialise: {:?}", e);
+        });
+        assert_eq!(details.epoch(), None);
+        assert_eq!(details.nonce(), Some(3));
+    }
+
+    #[test]
+    fn test_peer_details_new_carries_the_process_epoch() {
+        let details = PeerDetails::new("peer", "default", &StandbyStatus::primary(), 0);
+        assert_eq!(
+            details.epoch(),
+            Some(crate::anti_replay::process_epoch()),
+            "outgoing PeerDetails must advertise this process's epoch"
+        );
     }
 }

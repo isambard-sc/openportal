@@ -4,7 +4,7 @@
 [package]
 name = "op-cloudaccount"
 version = "0.91.0"
-description = "Agent that represents a cloud account (e.g. an AWS account) assigned to a project"
+description = "Agent that represents a cloud account (e.g. an AWS account) assigned to a project [temporary]"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/chryswoods/openportal/"

@@ -153,10 +153,45 @@ A JSON array of filesystem path strings.
 Returned by: `get_user_mapping`
 
 Serialised as a plain string in the instruction protocol format (see
-[instruction-protocol.md](instruction-protocol.md)).
+[instruction-protocol.md](instruction-protocol.md)), in the form
+`<user_id>:<local_user>:<local_group>`.
 
 ```json
 "alice.myproject.waldur:alice_hpc:hpc_myproject"
+```
+
+**`local_user` takes one of two forms**, depending on which layer produced the
+mapping:
+
+| Form | Produced by | Grammar |
+|------|-------------|---------|
+| Unix account name | account agents (`op-freeipa`, `op-localaccount`) and anything below them | `A-Za-z0-9`, `_`, `-`, `.`; no leading `-`, no leading/trailing `.`, no `..`; max 64 characters |
+| Email address | portals, whose members have no Unix account (see [project-portal-api.md](project-portal-api.md)) | local part from `A-Za-z0-9._+-` (max 64, same `.`/`-` rules as above), `@`, then a hostname of at least two labels drawn from `A-Za-z0-9-`; max 254 characters overall |
+
+The form is decided by whether an `@` is present, and each is validated against
+its own grammar — an address that a portal holds in `AwardDetails.members` may
+still be too exotic for a `UserMapping` (quoted local parts and the rarely-used
+`!#$%&'*/=?^`{|}~` characters are rejected). Agents that need a Unix account
+name accept only the first form and fail the job on the second, so a portal
+mapping can never be spliced into a path, an operand, or an RPC parameter.
+
+`local_group` is **not** widened this way: it names a Unix group at every layer,
+so it always follows the Unix account grammar above. A portal reports the
+project identifier (e.g. `myproject.waldur`), which already satisfies it.
+
+---
+
+### `Vec<UserMapping>`
+
+Returned by: `get_users`
+
+A JSON array of `UserMapping` strings.
+
+```json
+[
+  "alice.myproject.waldur:alice@example.ac.uk:myproject.waldur",
+  "bob.myproject.waldur:bob@example.ac.uk:myproject.waldur"
+]
 ```
 
 ---
@@ -175,7 +210,9 @@ Serialised as a plain string in the instruction protocol format.
 
 ### `Vec<UserIdentifier>`
 
-Returned by: `get_users`
+Not currently returned by any instruction — `get_users` returns
+`Vec<UserMapping>` (above) at every layer. Listed here because the type appears
+inside the usage and storage reports.
 
 A JSON array of user identifier strings, each in `username.project.portal` format.
 
@@ -307,9 +344,25 @@ All three fields are always present.
 
 ---
 
+### `Vec<ProjectMapping>`
+
+Returned by: `get_projects`
+
+A JSON array of `ProjectMapping` strings — *not* an array of `ProjectDetails`
+objects. Use `get_awards` when the details are what you want.
+
+```json
+[
+  "projecta.waldur:hpc_projecta",
+  "projectb.waldur:hpc_projectb"
+]
+```
+
+---
+
 ### `Vec<ProjectDetails>`
 
-Returned by: `get_projects`, `get_awards`
+Returned by: `get_awards`
 
 A JSON array of `ProjectDetails` objects.
 
@@ -752,10 +805,11 @@ structure:
 | `"String"` | JSON string | `get_home_dir`, `get_local_home_dir` |
 | `"Vec<String>"` | JSON array of strings | `get_project_dirs`, `get_local_project_dirs` |
 | `"UserMapping"` | Mapping string | `get_user_mapping` |
-| `"ProjectMapping"` | Mapping string | `get_project_mapping` |
-| `"Vec<UserIdentifier>"` | Array of identifier strings | `get_users` |
+| `"ProjectMapping"` | Mapping string | `get_project_mapping`, `create_project`, `update_project`, `remove_project` |
+| `"Vec<UserMapping>"` | Array of mapping strings | `get_users` |
+| `"Vec<ProjectMapping>"` | Array of mapping strings | `get_projects` |
 | `"ProjectDetails"` | Object | `get_project`, `get_award` |
-| `"Vec<ProjectDetails>"` | Array of objects | `get_projects`, `get_awards` |
+| `"Vec<ProjectDetails>"` | Array of objects | `get_awards` |
 | `"Usage"` | `{"seconds": <u64>}` | `get_limit`, `get_local_limit` |
 | `"Quota"` | `{"limit": "…", "usage": "…"}` | `get_*_quota` |
 | `"HashMap<Volume, Quota>"` | Object: volume → Quota | `get_*_quotas` |

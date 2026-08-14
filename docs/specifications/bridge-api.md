@@ -850,18 +850,27 @@ are placed on the bridge board for the portal to handle:
 | Instruction | Description |
 |-------------|-------------|
 | `create_project` / `create_award` | Create a new project |
-| `remove_project` | Remove an existing project |
+| `remove_project` / `remove_award` | Remove an existing project |
 | `update_project` / `update_award` | Update project details |
 | `get_project` | Get details of a project |
 | `get_projects` | Get all projects |
 | `get_award` | Get award details for a project |
 | `get_awards` | Get award details for all projects |
 | `get_project_mapping` | Get the local group mapping for a project |
+| `get_users` | Get the members of a project |
 | `get_usage_report` | Get compute usage for a project over a date range |
 | `get_usage_reports` | Get compute usage for all projects over a date range |
+| `get_storage_report` | Get storage quotas and usage for a project |
+| `get_storage_reports` | Get storage quotas and usage for all projects |
 
 See [instruction-protocol.md](instruction-protocol.md) for the full instruction
 grammar and argument formats.
+
+**Implementing the portal side of these:**
+[project-portal-api.md](project-portal-api.md) specifies what the connected
+portal must return for each one, and how portal-to-portal requests (an awarding
+portal creating and querying awards on a project portal) arrive through the
+bridge. That is the document to hand to someone connecting a new portal.
 
 ---
 

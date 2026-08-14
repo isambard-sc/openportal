@@ -368,7 +368,7 @@ async fn create_user_dirs(
                     filesystem::create_dir(
                         &path,
                         &config.all_roots(),
-                        mapping.local_user(),
+                        mapping.local_user().unix()?,
                         mapping.local_group(),
                         path_config.permission(),
                     )

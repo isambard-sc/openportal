@@ -951,7 +951,7 @@ impl LustreEngine {
     ) -> Result<u64, Error> {
         let strategy = self.get_id_strategy(volume)?;
 
-        let uid = self.get_uid(mapping.local_user()).await?;
+        let uid = self.get_uid(mapping.local_user().unix()?).await?;
         let gid = self.get_gid(mapping.local_group()).await?;
 
         strategy.compute_id(Some(uid), Some(gid))

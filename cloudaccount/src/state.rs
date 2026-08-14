@@ -502,7 +502,7 @@ mod tests {
 
         let users_after_restart = get_users(&project).await.unwrap();
         assert_eq!(users_after_restart.len(), 1);
-        assert_eq!(users_after_restart[0].local_user(), "alice");
+        assert_eq!(users_after_restart[0].local_user().as_str(), "alice");
 
         remove_user(&user).await.unwrap();
         assert_eq!(get_users(&project).await.unwrap().len(), 0);

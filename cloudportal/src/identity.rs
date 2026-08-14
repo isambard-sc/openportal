@@ -8,6 +8,9 @@
 //! local "username" segment is a sanitised form of the email, while
 //! `UserMapping`'s `local_user` stays the real email, matching `op-portal`'s
 //! own convention that the email *is* the portal-level "local username".
+//! That address is carried as a `LocalUser::Email`, so it can be reported to
+//! a portal but never reaches anything that would use it as a Unix account
+//! name - see `templemeads::validate::LocalUser`.
 //!
 //! This is a kludge, not a bijection: two different emails that sanitise
 //! to the same string (e.g. `a.b@x.com` and `a_b@x.com`) would collide.

@@ -6,7 +6,7 @@ use crate::usagereport::Usage;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::named::NamedType;
 use templemeads::portal_identifier::PortalIdentifier;
-use templemeads::validate::{validate_identifier_component, validate_mapping_target};
+use templemeads::validate::{validate_identifier_component, validate_mapping_target, LocalUser};
 use templemeads::Error;
 
 use anyhow::Context;
@@ -299,10 +299,18 @@ impl<'de> Deserialize<'de> for ProjectMapping {
 /// Struct that holds the mapping of a UserIdentifier to a local
 /// username on a system
 ///
+/// The `local_user` is a [`LocalUser`] rather than a `String` because the two
+/// layers that produce mappings mean different things by it: an account agent
+/// reports a Unix account name, while a portal reports the member's email
+/// address. Consumers must therefore say which they need -
+/// [`LocalUser::unix`] for anything that becomes a Unix name, a path, or a
+/// command operand, [`LocalUser::as_str`] for display and reports. See the
+/// [`LocalUser`] docs for why the distinction is made at parse time rather
+/// than by widening `validate_mapping_target`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserMapping {
     user: UserIdentifier,
-    local_user: String,
+    local_user: LocalUser,
     local_group: String,
 }
 
@@ -314,17 +322,23 @@ impl NamedType for UserMapping {
 
 impl UserMapping {
     pub fn new(user: &UserIdentifier, local_user: &str, local_group: &str) -> Result<Self, Error> {
-        let local_user = local_user.trim();
         let local_group = local_group.trim();
 
         // Allow-list rather than deny-list - see `ProjectMapping::new` and
         // `docs/specifications/security-review-2.md` (finding R14).
-        validate_mapping_target(local_user, "local_user", local_user)?;
+        //
+        // `local_user` may be either a Unix account name or an email address,
+        // so it is parsed into a `LocalUser`, which applies whichever of the
+        // two grammars fits. `local_group` stays a strict mapping target: it
+        // names a Unix group at every layer (a portal reports the project
+        // identifier, which already satisfies these rules), so nothing needs
+        // the email form there.
+        let local_user = LocalUser::parse(local_user)?;
         validate_mapping_target(local_group, "local_group", local_group)?;
 
         Ok(Self {
             user: user.clone(),
-            local_user: local_user.to_string(),
+            local_user,
             local_group: local_group.to_string(),
         })
     }
@@ -347,7 +361,12 @@ impl UserMapping {
         &self.user
     }
 
-    pub fn local_user(&self) -> &str {
+    /// The local user this mapping points at.
+    ///
+    /// Call [`LocalUser::unix`] on the result to use it as a Unix account name
+    /// (which fails if the mapping came from a portal and carries an email
+    /// address), or [`LocalUser::as_str`] to display or record it.
+    pub fn local_user(&self) -> &LocalUser {
         &self.local_user
     }
 
@@ -3163,7 +3182,7 @@ impl Instruction {
                     )))
                 }
             },
-            "remove_project" => match ProjectIdentifier::parse(&rest(1)) {
+            "remove_project" | "remove_award" => match ProjectIdentifier::parse(&rest(1)) {
                 Ok(project) => Ok(Instruction::RemoveProject(project)),
                 Err(_) => {
                     tracing::error!("remove_project failed to parse: {}", &rest(1));
@@ -4895,7 +4914,7 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let mapping = UserMapping::new(&user, "local_user", "local_group").unwrap();
         assert_eq!(mapping.user(), &user);
-        assert_eq!(mapping.local_user(), "local_user");
+        assert_eq!(mapping.local_user().as_str(), "local_user");
         assert_eq!(mapping.local_group(), "local_group");
         assert_eq!(
             mapping.to_string(),
@@ -5293,6 +5312,7 @@ mod tests {
             "get_awards",
             "add_project",
             "remove_project",
+            "remove_award",
             "add_local_project",
             "remove_local_project",
             "add_user",
@@ -5378,6 +5398,108 @@ mod tests {
         assert!(UserMapping::new(&user, "local_user", "grp/../x").is_err());
         assert!(ProjectMapping::new(&project, "-g").is_err());
         assert!(ProjectMapping::new(&project, "a/b").is_err());
+    }
+
+    #[test]
+    fn test_user_mapping_accepts_an_email_but_keeps_it_away_from_unix_use() {
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("alice.project.portal").unwrap();
+
+        // A portal reports the member's email as the local user - this is what
+        // `get_users` returns from `op-portal` and `op-cloudportal`, and it was
+        // rejected outright before `LocalUser` existed.
+        let mapping = UserMapping::new(&user, "alice@example.com", "project.portal")
+            .unwrap_or_else(|e| unreachable!("an email local_user must parse: {:?}", e));
+
+        assert!(mapping.local_user().is_email());
+        assert_eq!(mapping.local_user().as_str(), "alice@example.com");
+
+        // ...but it is not a Unix account name, and the only accessor that
+        // yields one says so.
+        assert!(mapping.local_user().unix().is_err());
+
+        // The wire form is unchanged - still `user:local_user:local_group` -
+        // and survives the round trip through a space-delimited instruction.
+        assert_eq!(
+            mapping.to_string(),
+            "alice.project.portal:alice@example.com:project.portal"
+        );
+        assert_eq!(
+            UserMapping::parse(&mapping.to_string())
+                .unwrap_or_else(|e| unreachable!("reparse: {:?}", e)),
+            mapping
+        );
+
+        // An account agent's mapping still yields a usable Unix name.
+        let unix = UserMapping::new(&user, "alice.project", "project.portal")
+            .unwrap_or_else(|e| unreachable!("a Unix local_user must parse: {:?}", e));
+        assert_eq!(
+            unix.local_user()
+                .unix()
+                .unwrap_or_else(|e| unreachable!("unix: {:?}", e)),
+            "alice.project"
+        );
+
+        // `local_group` is not widened: it names a Unix group at every layer.
+        assert!(UserMapping::new(&user, "alice@example.com", "grp@example.com").is_err());
+
+        // And the email form does not become a hole in the wire parser - a
+        // mapping whose address is malformed is still rejected.
+        for bad in [
+            "alice.project.portal:alice evil@example.com:project.portal",
+            "alice.project.portal:alice@localhost:project.portal",
+            "alice.project.portal:a,b@example.com:project.portal",
+        ] {
+            assert!(
+                UserMapping::parse(bad).is_err(),
+                "{:?} must be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_award_aliases_parse_to_the_project_instructions() {
+        // The `*_award` spellings are the vocabulary a portal-to-portal caller
+        // uses; they must be exact synonyms of the `*_project` forms rather
+        // than a parallel set of instructions.
+        #[allow(clippy::unwrap_used)]
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+
+        assert_eq!(
+            Instruction::parse("remove_award proj.portal")
+                .unwrap_or_else(|e| unreachable!("remove_award: {:?}", e)),
+            Instruction::RemoveProject(project.clone())
+        );
+
+        for (award, canonical) in [
+            ("remove_award proj.portal", "remove_project proj.portal"),
+            ("get_award proj.portal", "get_award proj.portal"),
+            (
+                "create_award proj.portal {\"name\":\"p\"}",
+                "create_project proj.portal {\"name\":\"p\"}",
+            ),
+            (
+                "update_award proj.portal {\"name\":\"p\"}",
+                "update_project proj.portal {\"name\":\"p\"}",
+            ),
+        ] {
+            assert_eq!(
+                Instruction::parse(award).unwrap_or_else(|e| unreachable!("{}: {:?}", award, e)),
+                Instruction::parse(canonical)
+                    .unwrap_or_else(|e| unreachable!("{}: {:?}", canonical, e)),
+                "'{}' must parse the same as '{}'",
+                award,
+                canonical
+            );
+        }
+
+        // The canonical spelling is what goes back out on the wire, so an
+        // alias cannot leak into a destination or a log line.
+        assert_eq!(
+            Instruction::RemoveProject(project).command(),
+            "remove_project"
+        );
     }
 
     #[test]

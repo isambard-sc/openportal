@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **A specification of what a connected project portal must implement**
+  ([docs/specifications/project-portal-api.md](docs/specifications/project-portal-api.md)):
+  the requests that arrive on the bridge board, the exact result type each one must
+  return, the two-minute answering deadline, and how portal-to-portal working hangs
+  together - offerings, the `forwarded_for` tag that identifies the awarding portal,
+  and the fact that identifiers name that portal rather than the local one. Written
+  to be handed to someone connecting a new portal; `bridge-api.md` continues to
+  specify the HTTP transport itself.
+- `remove_award` is accepted as a synonym for `remove_project`, completing the
+  `*_award` spellings alongside `create_award` and `update_award`.
+
+### Fixed
+
+- **A portal could not report its members.** `get_users` returns each member's email
+  address as the `UserMapping` local user - the portal-level equivalent of a Unix
+  username - but mapping validation rejected `@`, so every such mapping failed to
+  parse and the whole response errored. `local_user` is now a `LocalUser`, parsed as
+  either a Unix account name (unchanged rules) or an email address (a deliberately
+  conservative grammar), with the form chosen by whether an `@` is present.
+
+  The two are kept apart at the type level rather than by widening the shared
+  validator: `local_user()` hands back a `LocalUser`, so a consumer must call
+  `unix()` - which fails on an address - to obtain a name for a path, an operand, or
+  an RPC parameter. Nothing that reaches a Unix account, Slurm, FreeIPA or a
+  filesystem path accepts the wider charset. `local_group` is unchanged: it names a
+  Unix group at every layer.
+
+  This also fixes `op-cloudportal`'s `get_users`, which was constructing exactly such
+  a mapping and could never have succeeded.
+- Documentation errors in [docs/specifications/json-types.md](docs/specifications/json-types.md):
+  `get_projects` returns `Vec<ProjectMapping>` (not `Vec<ProjectDetails>`), `get_users`
+  returns `Vec<UserMapping>` (not `Vec<UserIdentifier>`), and `get_project` returns
+  `AwardDetails` (not `ProjectMapping`, as the summary table in
+  `instruction-protocol.md` claimed). The bridge board instruction list in
+  `bridge-api.md` was missing `get_users`, `get_storage_report` and
+  `get_storage_reports`.
+
 ## [0.91.0] - 2026-08-04
 
 ### Added

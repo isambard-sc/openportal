@@ -59,6 +59,7 @@ assert openportal.is_config_loaded()
 | `run` | `(command: str, max_ms: int = 0) → Job` | Submit a command to OpenPortal and return a `Job`. If `max_ms > 0`, blocks until the job finishes or the timeout elapses. If `max_ms < 0`, blocks indefinitely. If `max_ms == 0` (default), returns immediately without waiting. |
 | `status` | `(job: Job) → Job` | Fetch the latest version of the given job from the bridge. |
 | `get` | `(job_id: str \| Uuid) → Job` | Fetch the job with the specified ID. Raises `OSError` if the job does not exist. |
+| `error_from_message` | `(message: str) → OpenPortalError` | Build the typed exception described by an OpenPortal error message. Accepts the raw `RuntimeError{…}` form or the bare `"<ClassName>: <message>"`. |
 | `notify` | `(command: str) → None` | Send a fire-and-forget notification into the OpenPortal agent network. `command` is a notification string: `<destination> <event> [<argument>]`. Returns immediately — no result or acknowledgement is ever received. Raises `OSError` if the portal is not connected or the destination is invalid. See [notification-protocol.md](notification-protocol.md) for the full notification grammar and routing rules. |
 
 ### Bridge board (portal callbacks)
@@ -121,7 +122,8 @@ Represents a unit of work in the OpenPortal system.
 | `is_expired` | `bool` | `True` if the job expired before completion |
 | `is_duplicate` | `bool` | `True` if the job was detected as a duplicate of another pending job |
 | `result` | `Any` | The deserialized job result once finished. Raises `OSError` if the job is not yet finished, or if the job is in an error state (use `error_message` instead). Returns `None` if the job completed with no result value. |
-| `error_message` | `str` | Error description if `is_error`, otherwise `""` |
+| `error_message` | `str` | Error description if `is_error`, otherwise `""`. The raw string, including any `<ClassName>: ` prefix. |
+| `error` | `OpenPortalError \| None` | The failure as a typed exception, or `None` if the job did not fail. |
 | `progress_message` | `str` | In-progress status message if set, otherwise `""` |
 
 **Methods:**
@@ -131,7 +133,8 @@ Represents a unit of work in the OpenPortal system.
 | `update` | `() → None` | Refresh this job in-place by fetching its latest status from the bridge. No-op if already finished. |
 | `wait` | `(max_ms: int = 1000) → bool` | Block until the job is finished or `max_ms` milliseconds elapse. Pass a negative value to wait indefinitely. Returns `True` if the job is now finished. |
 | `completed` | `(result) → Job` | Return a new copy of this job marked as complete with the given result. `result` may be a `str`, `bool`, `UserIdentifier`, `ProjectIdentifier`, `AwardDetails`, `ProjectUsageReport`, `UsageReport`, `ProjectStorageReport`, `StorageReport`, `Quota`, `Volume`, `StorageSize`, `StorageUsage`, `QuotaLimit`, `ProjectTemplate`, `DateRange`, or a `list` or `dict` of those types. Used when handling bridge-board jobs. |
-| `errored` | `(error: str) → Job` | Return a new copy of this job marked as failed with the given error message. Used when handling bridge-board jobs. |
+| `errored` | `(error: str \| BaseException) → Job` | Return a new copy of this job marked as failed. Pass one of the exception classes below and the class travels with the message, so the caller recovers it; pass a plain string for an untyped failure. Used when handling bridge-board jobs. |
+| `raise_for_error` | `() → None` | Raise this job's error as the matching exception class. Does nothing if the job did not fail. |
 | `to_json` | `() → str` | Serialise the job to a JSON string. |
 | `from_json` | `(json: str) → Job` | *(static)* Deserialise a job from a JSON string. |
 
@@ -730,10 +733,51 @@ string (e.g. `job.id == "abc123…"`). Usable as a `dict` key or in a `set`.
 
 ## Error handling
 
-All functions raise `OSError` on failure. The error message contains the
-underlying Rust error chain. There is no separate exception hierarchy — check
-`job.is_error` and `job.error_message` for job-level failures, and catch
-`OSError` for connectivity or protocol failures.
+Every exception this module raises derives from `OpenPortalError`, which derives
+from `OSError`. Existing code that catches `OSError` therefore keeps working
+unchanged, and code that wants to know *which* failure it was can catch a
+specific class instead.
+
+| Class | Base | Meaning |
+|---|---|---|
+| `OpenPortalError` | `OSError` | Base of the hierarchy. Catch this to catch everything. |
+| `OpenPortalOtherError` | `OpenPortalError` | A failure with no more specific class — including anything the module could not classify. |
+| `OpenPortalUnsupportedCommandError` | `OpenPortalError` | The portal that received the instruction does not implement it. |
+| `ManagedProjectPermissionError` | `OpenPortalError` | Base for the two award decisions below. |
+| `ManagedProjectPendingError` | `ManagedProjectPermissionError` | The award is accepted but not in place yet, typically awaiting human approval. **Not a fault — ask again later.** |
+| `ManagedProjectRejectedError` | `ManagedProjectPermissionError` | The award was refused. Re-sending it unchanged will fail again. |
+
+A job carries its failure as one string, so the class is encoded into it as
+`"<ClassName>: <message>"`, and the portal agent wraps that as
+`RuntimeError{…}` in transit. The module does both halves for you:
+
+```python
+# Answering a job — the class travels with the message
+job = job.errored(openportal.ManagedProjectPendingError("awaiting approval"))
+openportal.send_result(job)
+
+# Reading a job you submitted — the same class comes back
+job = openportal.run("ukri.aip1.isambard-ai create_award myproj.ukri {…}", max_ms=30_000)
+
+if job.is_error:
+    match job.error:
+        case openportal.ManagedProjectPendingError():
+            pass                      # expected; retry on the next cycle
+        case openportal.ManagedProjectRejectedError() as e:
+            give_up(str(e))           # terminal; do not retry
+        case e:
+            log(str(e))
+```
+
+`job.result` raises the typed error too, so `try: … except
+ManagedProjectPendingError:` around a result access works directly. There is
+also `job.raise_for_error()` when you want to re-raise without reading a result,
+and `openportal.error_from_message(text)` to build the exception from a raw
+message you already hold.
+
+Which error a project portal should return, and what an awarding portal does
+with each, is specified in
+[project-portal-api.md §3.3](project-portal-api.md).
 
 ---
 

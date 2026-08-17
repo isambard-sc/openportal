@@ -29,6 +29,8 @@ use templemeads::server::{sign_api_call, SignatureVersion, SIGNATURE_VERSION_HEA
 use templemeads::Error;
 use url::Url;
 
+mod errors;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
     url: Url,
@@ -1550,13 +1552,52 @@ impl Job {
         Err(PyErr::new::<PyOSError, _>("Could not extract result type"))
     }
 
-    fn errored(&self, error: &str) -> PyResult<Job> {
-        let result = match self.0.errored(error) {
+    /// Mark this job as failed.
+    ///
+    /// `error` is either a plain string, or an exception instance - typically
+    /// one of the classes in `openportal` (`ManagedProjectPendingError`,
+    /// `ManagedProjectRejectedError`, ...). An exception is encoded as
+    /// `"<ClassName>: <message>"` so the awarding portal can recover which
+    /// class it was; see `docs/specifications/project-portal-api.md` §3.3.
+    fn errored(&self, error: &Bound<'_, PyAny>) -> PyResult<Job> {
+        let message = if error.is_instance_of::<pyo3::exceptions::PyBaseException>() {
+            errors::from_exception(error)?
+        } else {
+            error.extract::<String>()?
+        };
+
+        let result = match self.0.errored(&message) {
             Ok(result) => result,
             Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
         };
 
         Ok(result.into())
+    }
+
+    /// The typed error this job failed with, or `None` if it did not fail.
+    ///
+    /// The class is recovered from the error message, so a failure raised as
+    /// `ManagedProjectPendingError` on the far side of the network arrives
+    /// back as one here. An unrecognised message becomes
+    /// `OpenPortalOtherError` with its text intact.
+    #[getter]
+    fn error(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if !self.0.is_error() {
+            return Ok(py.None());
+        }
+
+        Ok(errors::to_pyerr(&self.error_message()?)
+            .into_value(py)
+            .into_any())
+    }
+
+    /// Raise this job's error, if it has one. A no-op otherwise.
+    fn raise_for_error(&self) -> PyResult<()> {
+        if self.0.is_error() {
+            return Err(errors::to_pyerr(&self.error_message()?));
+        }
+
+        Ok(())
     }
 
     #[getter]
@@ -1566,7 +1607,9 @@ impl Job {
         }
 
         if self.0.is_error() {
-            return Err(PyErr::new::<PyOSError, _>(self.error_message()?));
+            // Typed rather than a bare OSError, and compatible with it:
+            // every class in the hierarchy derives from OSError.
+            return Err(errors::to_pyerr(&self.error_message()?));
         }
 
         let result_type = match self.0.result_type() {
@@ -6007,6 +6050,20 @@ impl From<greatwestern::storage::Volume> for Volume {
     }
 }
 
+///
+/// Build the typed exception described by an OpenPortal error message.
+///
+/// Accepts either the raw form the portal agent produces
+/// (`"RuntimeError{ManagedProjectPendingError: ...}"`) or the inner
+/// `"<ClassName>: <message>"` on its own, and returns an instance of the
+/// matching class. A message with no recognised class becomes an
+/// `OpenPortalOtherError` carrying the whole text.
+///
+#[pyfunction]
+fn error_from_message(py: Python<'_>, message: &str) -> PyResult<Py<PyAny>> {
+    Ok(errors::to_pyerr(message).into_value(py).into_any())
+}
+
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn get_portal() -> PyResult<PortalIdentifier> {
@@ -6038,6 +6095,7 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_notification, m)?)?;
     m.add_function(wrap_pyfunction!(get, m)?)?;
     m.add_function(wrap_pyfunction!(get_offerings, m)?)?;
+    m.add_function(wrap_pyfunction!(error_from_message, m)?)?;
     m.add_function(wrap_pyfunction!(get_portal, m)?)?;
     m.add_function(wrap_pyfunction!(diagnostics, m)?)?;
     m.add_function(wrap_pyfunction!(health, m)?)?;
@@ -6050,6 +6108,8 @@ fn openportal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(send_result, m)?)?;
     m.add_function(wrap_pyfunction!(status, m)?)?;
     m.add_function(wrap_pyfunction!(sync_offerings, m)?)?;
+
+    errors::register(m)?;
 
     m.add_class::<Health>()?;
     m.add_class::<RestartResponse>()?;

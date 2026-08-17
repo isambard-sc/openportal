@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **A typed error hierarchy in the `openportal` Python module**, replacing the
+  hand-rolled classes and string parser that every portal implementation had to
+  write for itself: `OpenPortalError` (deriving from `OSError`, so existing
+  `except OSError` code is unaffected), `OpenPortalOtherError`,
+  `OpenPortalUnsupportedCommandError`, `ManagedProjectPermissionError`, and its
+  two subclasses `ManagedProjectPendingError` and `ManagedProjectRejectedError`.
+
+  The distinction the hierarchy exists to carry is that **pending is not a
+  failure**. An award waiting on human approval has no `ProjectMapping` to
+  return, so it answers with an error — and the awarding portal must retry that
+  one while treating a rejection as final. Losing the class loses that
+  difference.
+
+  A job carries one error string, so the class rides inside it as
+  `"<ClassName>: <message>"`. `job.errored(exc)` encodes it, `job.error` decodes
+  it back to the same class, `job.result` and `job.raise_for_error()` raise it,
+  and `openportal.error_from_message()` converts a raw message you already hold.
+  Decoding fixes two faults in the implementation it replaces: the wrapper is
+  removed by prefix rather than by trimming a character set (which ate the start
+  of any message beginning with those letters), and the message is no longer
+  off-by-one for `OpenPortalError`.
+
 ### Removed
 
 - **`op-cloudaccount` and `op-cloudportal`.** Both were prototypes written to give
@@ -24,6 +48,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **The project portal contract corrected against a real implementation.**
+  [project-portal-api.md](docs/specifications/project-portal-api.md) was written
+  without sight of `waldur-mastermind`'s side of it. Reading that implementation
+  changed several things it claimed:
+
+  - **`create_award` and `update_award` do not always return a mapping.** The
+    document said a portal queueing awards for approval "still returns the
+    mapping immediately"; it cannot, because there is no local project to name
+    yet. It answers with `ManagedProjectPendingError` (§3.3, §4.1).
+  - **Everything is retried, so everything must be idempotent** (new §3.5). The
+    awarding portal re-sends `create_award` for awards it already holds on every
+    synchronisation cycle — "add it again just to be sure" — and `update_award`
+    for an award the portal has never seen is treated as a create.
+  - **Usage and storage reports are independent** (§4.3). They are issued by
+    separate scheduled tasks; the previous claim that "an error fails both" was
+    backwards.
+  - **A portal implements as much of the contract as it wants** (new §4.0), and
+    declines the rest with `OpenPortalUnsupportedCommandError`. The reference
+    implementation does not implement `get_users` — members travel in
+    `AwardDetails.members` instead (§4.2).
+  - **The answering budget is 30 seconds, not 90** (§3.4). The awarding portal
+    gives up long before the two-minute job expiry.
+  - **`state` is capitalised on the wire** (`"Pending"`, not `"pending"`) — also
+    corrected in [bridge-api.md](docs/specifications/bridge-api.md) — and
+    `remove_award` answers with `<project_id>:None`.
+  - The signal endpoint's job id is a shared secret, and the reference
+    implementation answers an unknown one with 403 (§3.1).
+
+  §7 now points at `waldur-mastermind`'s `src/waldur_openportal/`, file by file,
+  as the worked implementation of each part.
 - **A specification of what a connected project portal must implement**
   ([docs/specifications/project-portal-api.md](docs/specifications/project-portal-api.md)):
   the requests that arrive on the bridge board, the exact result type each one must
@@ -36,6 +90,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `*_award` spellings alongside `create_award` and `update_award`.
 
 ### Fixed
+
+- **The portal agent sent malformed error sentinels.** `ExpirationError{{}}` and
+  `UnknownError{{}}` were written as plain string literals, where `{{` is not an
+  escape — only `format!` treats it as one, which is why the neighbouring
+  `RuntimeError{…}` was correct. Both reached the portal with doubled braces, so
+  a portal matching the documented `ExpirationError{}` never matched. They now
+  say what they are documented to say.
 
 - **A portal could not report its members.** `get_users` returns each member's email
   address as the `UserMapping` local user - the portal-level equivalent of a Unix

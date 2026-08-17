@@ -19,10 +19,11 @@ the other direction: the requests OpenPortal sends **to** the portal, which the
 portal must answer.
 
 Those requests are how another portal — an *awarding portal* running its own
-OpenPortal agents — creates and queries awards on your infrastructure. If you
-implement everything in §4, an awarding portal can create an award on your
+OpenPortal agents — creates and queries awards on your infrastructure. Between
+them, the instructions in §4 let an awarding portal create an award on your
 portal, ask what happened to it, and collect usage and storage reports, without
-either side sharing a database or a credential.
+either side sharing a database or a credential. You implement as many of them as
+you have answers for (§4.0).
 
 This is deliberately a separate document from
 [bridge-api.md](bridge-api.md). That one specifies the HTTP transport — how
@@ -37,7 +38,9 @@ mechanics; use this one when writing the handler.
 | What to return for `get_award`, and by when | this document |
 | The exact JSON of `AwardDetails`, `UsageReport`, … | [json-types.md](json-types.md) |
 | The instruction string grammar | [instruction-protocol.md](instruction-protocol.md) |
+| Which error to raise, and what the caller does with it | this document, §3.3 |
 | Doing it in Python | [python-api.md](python-api.md) |
+| A portal that already does all this | `waldur-mastermind`, `src/waldur_openportal/` (§7) |
 
 ---
 
@@ -150,6 +153,18 @@ Configure `signal_url` at `op-bridge init --signal-url …`. If it is unset the
 bridge logs a warning and the job simply waits to be polled — workable for
 development, but see the deadline in §3.4.
 
+The signal endpoint carries no credential of its own. The job id is what
+authorises the call: it is a random UUID known only to the bridge and to you, so
+a signal naming an id the bridge does not have is not a request you should act
+on. The reference implementation answers an unknown id with `403 Forbidden` and
+treats the id as the shared secret it is — do the same rather than leaving the
+endpoint open to anything that can reach it.
+
+Signals repeat. The same job id can arrive more than once (a retried signal
+racing a `/fetch_jobs` sweep is the common case), so key your own record of the
+job on its id and drop the duplicate rather than running the work twice — see
+§3.5.
+
 A fetched job looks like:
 
 ```json
@@ -160,12 +175,17 @@ A fetched job looks like:
   "expires":       1700000120,
   "version":       2,
   "command":       "aip1.bridge.isambard-ai get_award myproj.ukri",
-  "state":         "pending",
+  "state":         "Pending",
   "result":        null,
   "result_type":   null,
   "forwarded_for": "ukri.aip1.isambard-ai"
 }
 ```
+
+`state` is capitalised on the wire — `Created`, `Pending`, `Running`,
+`Complete`, `Error`, `Duplicate`. Python lower-cases it for display, so
+`str(job.state)` is `"pending"` while the JSON says `"Pending"`; compare with
+`job.state == "pending"` and let the binding handle it.
 
 `command` is the destination path followed by the instruction. Parse the
 instruction rather than the whole string: in Python, `job.instruction.command`
@@ -189,28 +209,103 @@ Note the double encoding: `result` is a JSON **string containing JSON**. A
 `ProjectMapping` result appears on the wire as:
 
 ```json
+"state": "Complete",
 "result": "\"myproj.ukri:grp001\"",
 "result_type": "ProjectMapping"
 ```
 
-### 3.3 Failing
+A failure is not double-encoded — the message is carried as-is, and
+`result_type` names the failure rather than a type:
+
+```json
+"state": "Error",
+"result": "ManagedProjectPendingError: awaiting approval",
+"result_type": "Error"
+```
+
+### 3.3 Failing, and saying *why*
 
 Return a failure as a completed exchange, not by staying silent: set the state
-to `error` with a message (`job.errored("no such project")` in Python) and post
-it. The awarding portal receives it as `RuntimeError{no such project}`.
+to `error` with a message (`job.errored(...)` in Python) and post it. Silence is
+the one thing to avoid — it turns a clear failure into a timeout for whoever is
+waiting.
 
-Silence is the one thing to avoid — it turns a clear failure into a timeout for
-whoever is waiting.
+For half the contract, failing *is* the answer. An award that needs human
+approval, an award whose template you do not offer, an award whose allocation
+exceeds what you will grant — none of these have a `ProjectMapping` to return
+(§4.1), and all of them are ordinary outcomes rather than faults. So the error
+carries the meaning, and the awarding portal acts on it.
+
+#### The error classes
+
+The convention is a **typed error carried in the message**: the class name, a
+colon and a space, then the human-readable detail.
+
+```
+ManagedProjectPendingError: awaiting approval by a site administrator
+```
+
+Your message is wrapped once more on its way back — the portal agent turns it
+into `RuntimeError{…}` — so the awarding portal sees:
+
+```
+RuntimeError{ManagedProjectPendingError: awaiting approval by a site administrator}
+```
+
+The `openportal` Python module defines this hierarchy, raises the right class
+when a job comes back in error, and encodes it again when you fail one. Use the
+classes rather than hand-writing the prefix; the string form is specified here
+so that non-Python portals can produce and read it too.
+
+| Class | Base | Meaning to the caller |
+|-------|------|-----------------------|
+| `OpenPortalError` | `OSError` | Base of the hierarchy. Catch this to catch everything. |
+| `OpenPortalOtherError` | `OpenPortalError` | An unexpected failure with no more specific class. What an unrecognised message decodes to. |
+| `OpenPortalUnsupportedCommandError` | `OpenPortalError` | The instruction is not implemented here. Distinguishes "I don't do that" from "that went wrong". |
+| `ManagedProjectPermissionError` | `OpenPortalError` | Base for the two award-decision outcomes below. |
+| `ManagedProjectPendingError` | `ManagedProjectPermissionError` | **Not yet — ask again.** The request was understood and accepted, and is waiting on something (typically human approval). Not a fault. |
+| `ManagedProjectRejectedError` | `ManagedProjectPermissionError` | **No.** The request was refused, and re-sending it unchanged will be refused again. |
+
+#### Pending and rejected are treated very differently
+
+This distinction is the reason the taxonomy exists, so it is worth being precise
+about what the awarding portal does with each.
+
+**`ManagedProjectPendingError` is benign and expected.** `waldur-mastermind`
+logs it at debug, skips that synchronisation cycle, and tries again later
+(`tasks.py`, `sync_remote_allocation_usage` and friends). The award stays
+healthy in its records. An award parked awaiting approval for a week produces
+this error on every cycle for a week, and nothing is wrong. Raise it whenever
+the honest answer is "come back later" — and expect to be taken at your word.
+
+**`ManagedProjectRejectedError` is terminal.** The awarding portal records the
+award as errored, marks its allocation erred, and writes an audit entry
+(`remote_project_service.py`, `record_award_rejected`). It stops treating the
+award as workable. Raise it when re-asking cannot help: an unknown template, a
+missing entitlement key, an end date already in the past, an allocation above
+what you will ever grant.
+
+Getting these the wrong way round is costly in both directions. A rejection
+where you meant "pending" strands an award that only needed approving. A pending
+where you meant "rejected" leaves the awarding portal retrying forever against a
+decision that will never change.
 
 ### 3.4 Deadlines
 
 **Jobs expire two minutes after creation.** After that the awarding portal
 receives `ExpirationError{}` and your late result is discarded.
 
-That budget covers the whole round trip, so treat it as roughly 90 seconds of
-processing time. If you cannot answer in that window — a report that takes
-minutes to compute — answer immediately from cache and compute out of band, or
-have the awarding portal ask again later.
+That is the outer limit, and it is not the one that will bite you. The awarding
+portal has its own, shorter patience: `waldur-mastermind` abandons a request
+after **30 seconds** and raises a timeout locally, long before the job expires
+(`remoteclient.py`, `RemoteOpenPortalClient.run`). A result you post at 45
+seconds is still accepted by the bridge and still travels back, but the caller
+has already stopped waiting for it.
+
+**Budget 30 seconds, not 90.** If you cannot answer in that window — a report
+that takes minutes to compute — answer immediately from whatever you have
+cached and compute out of band. The next request will collect the fresh figure,
+and because callers retry (§3.5) there will be a next request.
 
 Consequences worth designing around:
 
@@ -222,6 +317,44 @@ Consequences worth designing around:
   the board and errors it*, so a slow or flapping signal endpoint fails
   requests outright.
 
+The reference implementation does exactly this: the signal handler records the
+job and hands it to a Celery worker, then returns 200 immediately
+(`api.py`, `fetch_job`). The work — and the answer — happens in the worker.
+
+### 3.5 Everything is retried, so make everything idempotent
+
+This is the single most important property to design for, and the one most
+easily missed: **the awarding portal re-sends requests it has already sent
+successfully.**
+
+`waldur-mastermind` re-issues `create_award` on every synchronisation cycle for
+every award it believes exists — the code comment reads "add it again just to be
+sure" (`remotebackend.py`, `check_added_allocation`). It is not asking you to
+create a second project. It is re-asserting the award's current state and
+expecting you to reconcile. Alongside that, a periodic sweep
+(`refresh_remote_projects`) re-reads awards in case a notification was missed.
+
+What follows from this:
+
+* **`create_award` for an award you already hold is normal traffic, not an
+  error.** Look it up by identifier, merge the supplied details into what you
+  have, and return the same mapping you returned last time. The reference
+  implementation keys on `(destination, project_id)` and does a
+  get-or-create.
+* **`update_award` for an award you have never seen is also normal.** The
+  reference implementation treats it as a create — it builds the award and
+  routes it through its approval path rather than failing.
+* **Failing a request is cheap.** A request you reject or cannot answer today
+  will be asked again on the next cycle. Missing one is not a lost update, so
+  prefer a clean, honest failure over a guess.
+* **Duplicate deliveries of the *same* job must not do the work twice.** Record
+  the job id and skip a job you have already run (`api.py` does a get-or-create
+  on the id and only dispatches a job still in `pending`).
+
+Retrying applies to your answers too: post the result, and if the post itself
+fails, post it again. The reference implementation retries `send_result` five
+times at one-second intervals before giving up.
+
 ---
 
 ## 4. The contract
@@ -229,6 +362,29 @@ Consequences worth designing around:
 For each instruction the portal may receive: the arguments it carries, and what
 a successful result must contain. Types are as specified in
 [json-types.md](json-types.md).
+
+### 4.0 You may implement as much or as little of this as you need
+
+This section is a menu, not a checklist. A connected portal implements the
+instructions it has something to say about and declines the rest — there is no
+minimum set, and no instruction whose absence stops the others from working.
+`waldur-mastermind`, the reference implementation, does not implement every
+entry below.
+
+What matters is that you decline *clearly*. An instruction you do not implement
+should come back as `OpenPortalUnsupportedCommandError` (§3.3), so the caller
+can tell "this portal doesn't do that" apart from "that portal is broken". The
+reference implementation raises a plain `Unknown command <name>` for anything
+its dispatcher does not recognise (`tasks.py`, `run_job`), and callers sniff for
+that text — so either form is understood in practice, and the typed class is the
+better one to send.
+
+Decline; never ignore. An unimplemented instruction that goes unanswered is
+indistinguishable from an outage until the job expires (§3.4).
+
+Which instructions you *will* be sent depends on what the awarding portal wants
+from you. If it only ever creates awards and collects usage figures, that is all
+you need to answer.
 
 ### 4.1 Awards
 
@@ -248,10 +404,18 @@ Notes:
 * **`ProjectMapping`** is `<project_id>:<local_group>` — the identifier the
   awarding portal used, paired with whatever you call that project locally. It
   is a string, not an object.
-* **`create_*` returns a mapping, not a status.** Returning it means "recorded",
-  which is not the same as "provisioned" — a portal that queues awards for
-  human approval still returns the mapping immediately and reflects the real
-  state in `get_award` afterwards.
+* **A mapping is returned only on success.** `create_award` and `update_award`
+  answer with a mapping when the award is in place; when it is not, they answer
+  with an *error*, and that error is how the outcome is reported. This is not an
+  edge case — a portal that queues awards for human approval has no local
+  project, and therefore no local group to name, until someone approves it.
+  There is nothing truthful it could put in a mapping. See §3.3 for which error
+  to raise; `ManagedProjectPendingError` is the one that means "not yet, ask me
+  again".
+* **`remove_award` answers with `<project_id>:None`.** The award is gone, so
+  there is no local group left to name; the literal string `None` fills the
+  slot. The same form appears in `get_projects` for an award that has no local
+  project yet.
 * **`update_*` is a merge.** Only the fields present in the supplied
   `AwardDetails` change; absent fields keep their current values. `members`,
   when present, replaces the member set wholesale.
@@ -301,6 +465,16 @@ convention.
 
 Returning an empty array is a valid answer for a project with no members.
 
+**In practice members travel with the award, not through `get_users`.**
+`waldur-mastermind` is one of the portals that does not implement `get_users`
+(§4.0) — a request for it comes back as an unsupported command. What it does
+instead is fold the live project membership into the `AwardDetails.members` it
+returns from `get_award` (`board.py`, `get_award`), mapping each local role back
+to the awarding portal's spelling.
+
+So populate `AwardDetails.members` whether or not you implement `get_users`:
+that is the route callers actually read today.
+
 ### 4.3 Usage and storage reports
 
 | Instruction | Arguments | Must return |
@@ -321,9 +495,18 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
   `ProjectStorageReport` are the *latest* snapshot; `daily_reports` holds older
   ones, at most one per date. The date range therefore selects history, not the
   current figure.
-* **Empty is better than absent.** For storage, an empty report for a project
-  with no storage is the expected answer — a caller typically asks for usage and
-  storage together and an error fails both.
+* **Usage and storage are independent requests.** They are issued separately, by
+  separate scheduled tasks, in no particular order
+  (`sync_remote_allocation_usage` and `sync_remote_allocation_storage` in
+  `tasks.py`). Neither waits for the other and neither is abandoned because the
+  other failed. A portal that serves usage but not storage is a coherent
+  position: answer `get_usage_report` properly and let `get_storage_report`
+  fail, and the usage figures still arrive.
+* **Empty still beats absent.** Where you genuinely have no storage to report,
+  an empty `ProjectStorageReport` says "nothing here" and an error says
+  "something is broken". The first is the truth and it is what a caller can act
+  on — but since the two requests are independent, choosing the error costs you
+  only the storage figures.
 
 ### 4.4 What you will not receive
 
@@ -364,19 +547,27 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 
 1. Register offerings at startup with `POST /sync_offerings`, and re-register
    whenever the set changes (§1.1).
-2. Expose a `signal_url` endpoint that queues the job id and returns 2xx
-   immediately (§3.1, §3.4).
+2. Expose a `signal_url` endpoint that treats the job id as a shared secret,
+   queues it, and returns 2xx immediately (§3.1, §3.4).
 3. Fetch with `POST /fetch_job`; also run a slower `GET /fetch_jobs` sweep to
    catch anything a missed signal left behind.
 4. Dispatch on the canonical instruction name — the `*_award` spellings arrive
    as their `*_project` equivalents (§2).
 5. Authorise against `forwarded_for`, and store records under the full
    awarding-portal identifier (§1.2).
-6. Return the exact type in §4 for each instruction, or an explicit error.
-   Never let a job go unanswered (§3.3).
-7. Answer within the two-minute expiry; serve slow reports from cache (§3.4).
-8. Handle `membership_control` and reject unknown `template` values (§4.1).
-9. Fetch and acknowledge notifications (§5).
+6. Pick the instructions you will answer; decline the rest with
+   `OpenPortalUnsupportedCommandError` (§4.0). Return the exact type in §4 for
+   the ones you keep, and never let a job go unanswered (§3.3).
+7. Fail with the right class — `ManagedProjectPendingError` for "not yet",
+   `ManagedProjectRejectedError` for "no" — because the caller treats them
+   completely differently (§3.3).
+8. Make every handler idempotent: `create_award` for an award you already hold
+   is normal traffic, and duplicate job ids must not do the work twice (§3.5).
+9. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
+   cache (§3.4).
+10. Handle `membership_control` and reject unknown `template` values (§4.1), and
+    populate `AwardDetails.members` (§4.2).
+11. Fetch and acknowledge notifications (§5).
 
 ---
 
@@ -393,3 +584,22 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 | `local_user` Unix/email forms and the guard on Unix use | `templemeads/src/validate.rs` (`LocalUser`) |
 | Usage and storage report types | `greatwestern/src/usagereport.rs`, `greatwestern/src/storagereport.rs` |
 | Generated TypeScript definitions for every result type | `greatwestern/bindings/` |
+| The error classes and their wire encoding | `python/src/lib.rs` (`OpenPortalError` and subclasses) |
+
+### 7.1 The reference implementation
+
+`waldur-mastermind` implements this contract on both sides, in
+`src/waldur_openportal/` (branch `feature_airrportal`). It is the most useful
+thing to read alongside this document, because it shows what a real portal
+actually does rather than what it minimally must.
+
+| What you want to see | File |
+|----------------------|------|
+| Every instruction handler — create/update/remove/get award, reports | `board.py` (`OpenPortalBoard`) |
+| Instruction dispatch, and failure turned into an errored job | `tasks.py` (`run_job`) |
+| The signal endpoint: 403 on unknown id, queue, return 200 | `api.py` (`fetch_job`, `fetch_notification`) |
+| Re-sending `create_award` "just to be sure" — the idempotency contract | `remotebackend.py` (`check_added_allocation`) |
+| Pending treated as benign and retried; rejection treated as terminal | `tasks.py` (`sync_remote_allocation_*`), `remote_project_service.py` |
+| Usage and storage synchronised independently | `tasks.py` (`sync_remote_allocation_usage`, `sync_remote_allocation_storage`) |
+| The 30-second caller timeout | `remoteclient.py` (`RemoteOpenPortalClient.run`) |
+| The error taxonomy before it moved into `openportal` | `op.py` |

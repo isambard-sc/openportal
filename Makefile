@@ -16,8 +16,16 @@ clean:
 TESTS = ""
 # No --lib: that silently skipped every test in the agent binary crates, which
 # is where most of the privileged logic lives.
+#
+# The `python` crate is not a workspace default-member and needs a second
+# invocation. `--no-default-features` turns off `pyo3/extension-module`, which
+# tells pyo3 not to link libpython - correct when building the module that
+# Python itself loads, but it leaves a test binary with no interpreter to link
+# against. `--lib` for the same reason the stub_gen binary is gated: it needs
+# maturin's build environment.
 test:
 	@cargo test $(TESTS) --offline --all-targets -- --color=always --nocapture
+	@cargo test -p openportal --lib --offline --no-default-features -- --color=always --nocapture
 
 docs: build
 	@cargo doc --no-deps

@@ -284,7 +284,7 @@ async fn main() -> Result<()> {
 
                             if southbound_job.is_expired() {
                                 tracing::error!("{} : {} : Error - job expired!", destination, instruction);
-                                job = job.errored("ExpirationError{{}}")?;
+                                job = job.errored("ExpirationError{}")?;
                             } else if (southbound_job.is_error()) {
                                 if let Some(message) = southbound_job.error_message() {
                                     tracing::error!("{} : {} : Error - {}", destination, instruction, message);
@@ -292,7 +292,7 @@ async fn main() -> Result<()> {
                                 }
                                 else {
                                     tracing::error!("{} : {} : Error - unknown error", destination, instruction);
-                                    job = job.errored("UnknownError{{}}")?;
+                                    job = job.errored("UnknownError{}")?;
                                 }
                             }
                             else {

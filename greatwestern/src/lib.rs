@@ -4,7 +4,7 @@
 //! `greatwestern` is the HPC/Waldur command vocabulary that rides on top of
 //! `paddington` and `templemeads` - the reference [`Domain`] every built-in
 //! OpenPortal agent (freeipa, slurm, filesystem, cluster, portal, bridge,
-//! cloudaccount, localaccount, cloudportal, ...) is compiled against.
+//! localaccount, ...) is compiled against.
 //!
 //! Everything domain-specific that used to live inside `templemeads` - the
 //! `Instruction` enum, `ProjectIdentifier`/`UserIdentifier`, usage/storage

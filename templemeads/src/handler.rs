@@ -1363,10 +1363,10 @@ mod tests {
     #[test]
     fn test_check_portal_ownership_is_skipped_when_not_enabled() {
         // Account/Filesystem/Scheduler agents, and `instance::run_delegated`
-        // Instances such as `op-cloudaccount`, receive Jobs whose destination is
-        // rooted at the *delegating* agent rather than at the owning portal. For
-        // them the property does not hold and must not be enforced.
-        let delegated = job("cloudportal.cloudaccount add_user bob.proj.waldur");
+        // Instances, receive Jobs whose destination is rooted at the
+        // *delegating* agent rather than at the owning portal. For them the
+        // property does not hold and must not be enforced.
+        let delegated = job("delegator.instance add_user bob.proj.waldur");
 
         assert!(check_portal_ownership(&delegated, false).is_ok());
         // ...and it would indeed have been rejected had it been enabled, which

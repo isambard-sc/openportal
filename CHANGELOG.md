@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Removed
+
+- **`op-cloudaccount` and `op-cloudportal`.** Both were prototypes written to give
+  cloud operators something to work against while they had no portal software of
+  their own, and both held state - project/user assignment, Award approval - inside
+  an agent, which is not where OpenPortal state belongs. The same need is met
+  without either agent: the operators run a stock `op-portal` and `op-bridge` and
+  put their own software behind the bridge, holding that state on their side of it.
+  [project-portal-api.md](docs/specifications/project-portal-api.md) specifies what
+  that software has to implement. The archived design documents are kept, marked
+  withdrawn, as a record of the reasoning.
+
+  Nothing that came in alongside them is withdrawn: `templemeads::portal::run()`'s
+  one-shot mode, `instance::run_delegated`, and `UserMapping`'s acceptance of an
+  email address as the local user are all general-purpose and remain.
+
 ### Added
 
 - **A specification of what a connected project portal must implement**

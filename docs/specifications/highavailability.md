@@ -273,22 +273,19 @@ commands are idempotent. In practice, a failover-induced gap is expected
 to be seen by portal software as, at worst, one retried request rather
 than a lost or duplicated one.
 
-### 4.3 Agents are stateless (with one temporary, known exception)
+### 4.3 Agents are stateless
 
-OpenPortal agents are designed to hold no state of their own beyond a
-`Job`'s board entry - which is exactly the state §4.1's board sync already
-reconciles on reconnect. This is *why* any replica can pick up from any
-other with no special handover step: there is nothing replica-specific to
-lose.
+OpenPortal agents hold no state of their own beyond a `Job`'s board entry -
+which is exactly the state §4.1's board sync already reconciles on
+reconnect. This is *why* any replica can pick up from any other with no
+special handover step: there is nothing replica-specific to lose.
 
-The one current exception is the cloud agents (`op-cloudaccount`,
-`op-cloudportal`) - see the crate notes in
-[../../CLAUDE.md](../../CLAUDE.md). They hold project/user assignment or
-Award state as local JSON files because there is not yet any real
-cloud-side portal software to push that state to. This is understood to
-be a temporary gap tied to the cloud integration's maturity, not a
-statement that OpenPortal agents are meant to be stateful in general - it
-should close once proper portal software exists on that side.
+State that a deployment genuinely needs to keep - which projects exist,
+who is a member of them, what has been approved - belongs to the portal
+software on the far side of `op-bridge`, not to an agent. A portal that
+does not yet have somewhere to put that state should hold it itself; see
+[project-portal-api.md](project-portal-api.md) for what such a portal has
+to implement.
 
 ### 4.4 What this doesn't claim
 

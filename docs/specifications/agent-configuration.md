@@ -117,7 +117,7 @@ rejecting the peer.
 
 `proxy` is set only when this peer can only be reached through a blind
 relay proxy (an `op-proxy` agent) rather than directly — see
-[§3.11](#311-blind-relay-proxy-op-proxy) and
+[§3.9](#39-blind-relay-proxy-op-proxy) and
 [blind-relay-proxy-design.md](../plans/archive/blind-relay-proxy-design.md). A
 relayed `[[clients]]` entry has no `ip` (authentication comes from
 completing the relayed handshake, not an IP allowlist); a relayed
@@ -216,7 +216,7 @@ through a blind relay proxy (`relay-name` must already be a known
 `server --add`) rather than a direct IP allowlist; `--ip` is not required
 and is ignored if given alongside `--proxy`. The generated invite carries
 the relay's name, so the importing side's `server --add` (below) picks it
-up automatically. See [§3.11.1](#3111-connecting-two-real-agents-through-a-proxy)
+up automatically. See [§3.9.1](#391-connecting-two-real-agents-through-a-proxy)
 for a full worked example.
 
 `--rotate` generates new keys and writes a rotation invite file
@@ -870,110 +870,7 @@ All of the sacctmgr-mode options above apply, plus:
 
 ---
 
-### 3.9 Cloud Account (`op-cloudaccount`)
-
-The cloud account agent represents a single cloud account (e.g. one AWS
-account) assigned to a project. Unlike the cluster/slurm split, it is a
-single agent that merges the Instance and Scheduler roles: there is no
-cloud-side API yet to record project/user assignment or to query usage, so
-this agent is both the source of truth for assignment and the thing that
-turns whatever cost-report files the cloud operators drop into a
-`ProjectUsageReport`. See `docs/plans/archive/op-cloudaccount-design.md` for the
-full design and rationale.
-
-| Default | Value |
-|---------|-------|
-| Name | `cloudaccount` |
-| Config file | `~/.config/openportal/cloudaccount-config.toml` |
-| WebSocket port | `8049` |
-| Agent type | `Instance` |
-
-**Optional extras:**
-
-| Key | Set via | Default | Description |
-|-----|---------|---------|-------------|
-| `state-dir` | `extra` | `~/.config/openportal/cloudaccount-state` | Directory holding one JSON file per assigned project, recording which projects/users have been added to this cloud account. Written to atomically; safe to inspect or edit by hand while debugging. |
-| `accounting-dir` | `extra` | `~/.config/openportal/cloudaccount-accounting` | Directory the cloud operators' cron job drops cost-report JSON files into (same shape as `cost_payload_example.json`). Read-only to this agent - files here are never modified or deleted. |
-| `currency` | `extra` | `"USD"` | Expected currency code. A cost-report file reporting a different currency is logged as a warning, not converted (no FX support). |
-
-**Usage reporting:**
-
-`Usage` (normally a count of compute-seconds elsewhere in OpenPortal) is
-reinterpreted here as micro-currency-units: 1 `Usage` second = 1e-6 of the
-configured currency. Cost-report totals are cumulative from
-`time_period.start`, so usage reports are reconstructed by diffing
-consecutive reports and spreading the delta evenly across the calendar
-days it spans - see the design doc for the full algorithm. Anything
-consuming a cloud account's `ProjectUsageReport` needs to know to divide
-by 1e6 and format as currency rather than using `Usage`'s default
-duration-formatting `Display` impl.
-
-**Typical peer relationships:**
-- **Server:** one `provider` agent (this agent plays the Instance role
-  directly - it has no platform agent equivalent to `op-clusters` yet, and
-  no separate account/filesystem/scheduler peers)
-
----
-
-### 3.10 Cloud Portal (`op-cloudportal`)
-
-The cloud portal agent is a self-contained `Portal` agent representing the
-"cloud" side of a portal-to-portal relationship (e.g. a central "airr"
-portal creating Awards on it). There is no real portal management
-software (no Waldur) behind it - like `op-cloudaccount`, it is a
-deliberately rough prototype that stores Award state itself instead of
-relaying to a bridge. See `docs/plans/archive/op-cloudportal-design.md` for the
-full design and rationale.
-
-| Default | Value |
-|---------|-------|
-| Name | `cloudportal` |
-| Config file | `~/.config/openportal/cloudportal-config.toml` |
-| WebSocket port | `8050` |
-| Agent type | `Portal` |
-
-**Optional extras:**
-
-| Key | Set via | Default | Description |
-|-----|---------|---------|-------------|
-| `state-dir` | `extra` | `~/.config/openportal/cloudportal-state` | Directory holding one JSON file per Award, recording its `AwardDetails`, approval `status` (`pending`/`approved`/`rejected`), and which members have been provisioned so far. Written to atomically; read fresh from disk on every instruction (no in-memory cache - see the design doc §5). |
-| `offerings` | `extra` | `""` | Comma-separated `template:peer` pairs mapping an `AwardDetails.template` value to the `op-cloudaccount` peer name that offering should provision against, e.g. `"aws:cloudaccount-aws,azure:cloudaccount-azure"`. `create_project` fails with a clear error if `template` is missing or not present in this table - there's no sensible default cloud provider to fall back to. |
-
-**Addressing model:** `airr` (or whichever upstream portal) addresses
-`cloudportal` directly - a plain, ordinary portal-to-portal connection,
-no different in kind from any other pair of connected agents. There is
-no virtual-resource/offering indirection (`op-portal`'s
-`sync_offerings`/`virtual_resource_runner` mechanism does not work for
-this - see the design doc §4 for why); which cloud provider an Award
-targets is carried entirely in `AwardDetails.template`.
-
-**Approval workflow:** Award creation (`create_project`) and
-infrastructure provisioning are deliberately decoupled - there is a
-human in the loop, since provisioning spends real money on a real cloud
-account. Three bespoke CLI subcommands, alongside the common ones in
-§2, manage this (they are pure state-file edits and never touch the
-network themselves):
-
-```bash
-op-cloudportal list-pending
-op-cloudportal approve --project someproject.cloud
-op-cloudportal reject  --project someproject.cloud --reason "..."
-```
-
-`approve` only flips the Award's status - the actual `add_project`/
-`add_user` calls against the resolved `op-cloudaccount` are made by a
-background poller inside the running `op-cloudportal run` process
-(checks every 30 seconds), so provisioning naturally retries if it
-partially fails.
-
-**Typical peer relationships:**
-- **Server:** the upstream portal (e.g. `airr`)
-- **Client:** one or more `op-cloudaccount` agents, resolved per-Award via
-  the `offerings` table
-
----
-
-### 3.11 Blind Relay Proxy (`op-proxy`)
+### 3.9 Blind Relay Proxy (`op-proxy`)
 
 Unlike every other agent in this document, `op-proxy` is **not** built on
 `templemeads::agent_core` - it depends only on `paddington`, has no
@@ -1034,12 +931,12 @@ table by hand and restart to revoke one.
   relayed "client" role connect to the proxy the same way - as an ordinary
   paddington client)
 
-#### 3.11.1 Connecting two real agents through a proxy
+#### 3.9.1 Connecting two real agents through a proxy
 
 Every other agent in this document (all built on the common CLI in §2)
 can act as one of the two relayed peers - the `client`/`server`
 subcommands take a `--proxy <relay-name>` flag for exactly this. Worked
-example: `airr` (an `op-portal`) and `brics` (an `op-cloudportal`) can
+example: `airr` (an `op-portal`) and `brics` (an `op-provider`) can
 each only make outbound connections, so they talk through a shared
 `proxy` (`op-proxy`).
 
@@ -1076,8 +973,8 @@ re-bootstraps (with fresh session keys) on every reconnect - nothing
 templemeads-level (`Register`, `Sync`, Jobs, Notifications, health
 cascades, ...) needs to know a proxy is involved at all.
 
-Validated end-to-end with real compiled `op-proxy`/`op-portal`/
-`op-cloudportal` processes: the bootstrap completes, both sides log their
+Validated end-to-end with real compiled `op-proxy` and two real agent
+processes: the bootstrap completes, both sides log their
 synthesised `Connected` event, and `Register` (part of every agent's
 normal post-handshake sequence) is relayed and processed correctly.
 
@@ -1111,8 +1008,6 @@ same time. Each relayed peer entry names its own proxy independently.
 | FreeIPA | `op-freeipa` | 8046 |
 | Filesystem | `op-filesystem` | 8047 |
 | Slurm | `op-slurm` | 8048 |
-| Cloud Account | `op-cloudaccount` | 8049 |
-| Cloud Portal | `op-cloudportal` | 8050 |
 | Blind Relay Proxy | `op-proxy` | 8060 |
 
 Note: `op-cluster` and `op-freeipa` share the same default port (8046) because
@@ -1174,12 +1069,6 @@ op-freeipa  run
 | Slurm main (option names) | `slurm/src/main.rs` |
 | Filesystem volume config | `filesystem/src/volumeconfig.rs` |
 | Lustre quota engine | `filesystem/src/lustreengine.rs` |
-| Cloud account main (option names) | `cloudaccount/src/main.rs` |
-| Cloud account assignment state | `cloudaccount/src/state.rs` |
-| Cloud account usage-report reconstruction | `cloudaccount/src/accounting.rs` |
-| Cloud portal main (option names, CLI subcommands, poller) | `cloudportal/src/main.rs` |
-| Cloud portal Award state | `cloudportal/src/state.rs` |
-| Cloud portal email/UserIdentifier mapping | `cloudportal/src/identity.rs` |
 | Portal one-shot CLI mode | `templemeads/src/portal.rs` |
 | Blind relay proxy main (CLI subcommands) | `proxy/src/main.rs` |
 | Blind relay protocol, `RelayPolicy` | `paddington/src/relay.rs` |

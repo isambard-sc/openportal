@@ -393,4 +393,3 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 | `local_user` Unix/email forms and the guard on Unix use | `templemeads/src/validate.rs` (`LocalUser`) |
 | Usage and storage report types | `greatwestern/src/usagereport.rs`, `greatwestern/src/storagereport.rs` |
 | Generated TypeScript definitions for every result type | `greatwestern/bindings/` |
-| A worked portal implementation | `cloudportal/src/main.rs` |

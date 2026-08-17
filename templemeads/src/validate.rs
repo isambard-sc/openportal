@@ -28,7 +28,7 @@ pub const MAX_IDENTIFIER_COMPONENT_LEN: usize = 64;
 ///
 /// Identifier components flow, unescaped, into privileged operations: Unix
 /// `useradd`/`groupadd` operands, filesystem paths, Slurm account names,
-/// FreeIPA RPC parameters, and (for `op-cloudaccount`) state-file names.
+/// FreeIPA RPC parameters, and state-file names.
 /// Restricting them to `[A-Za-z0-9_-]`, forbidding a leading `-`, and capping
 /// the length closes argument-injection (a leading-dash name read as a flag by
 /// a spawned tool), path-traversal (a `/` or `.` in a name), and

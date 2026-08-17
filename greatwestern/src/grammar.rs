@@ -5389,8 +5389,8 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let project = ProjectIdentifier::parse("project.portal").unwrap();
 
-        // A '.'-containing local group is still allowed (cloudaccount reuses
-        // "project.portal" as a placeholder group).
+        // A '.'-containing local group is still allowed (a portal with no Unix
+        // groups of its own reuses "project.portal" as a placeholder group).
         assert!(ProjectMapping::new(&project, "project.portal").is_ok());
 
         // Path separators and leading dashes in local names are rejected.
@@ -5406,8 +5406,8 @@ mod tests {
         let user = UserIdentifier::parse("alice.project.portal").unwrap();
 
         // A portal reports the member's email as the local user - this is what
-        // `get_users` returns from `op-portal` and `op-cloudportal`, and it was
-        // rejected outright before `LocalUser` existed.
+        // `get_users` returns from `op-portal`, and it was rejected outright
+        // before `LocalUser` existed.
         let mapping = UserMapping::new(&user, "alice@example.com", "project.portal")
             .unwrap_or_else(|e| unreachable!("an email local_user must parse: {:?}", e));
 

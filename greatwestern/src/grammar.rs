@@ -2644,12 +2644,19 @@ impl AwardDetails {
         }
     }
 
+    /// Replace the allow-list with exactly what is given.
+    ///
+    /// An empty list is stored as an empty list, not as "no restriction". The
+    /// three states are distinct and all of them are reachable: `None` permits
+    /// everything, `Some([])` permits nothing, and a populated list permits what
+    /// it names. Use [`Self::clear_allowed_domains`] to reach `None`.
+    ///
+    /// This used to normalise an empty list to `None`, which silently inverted
+    /// the strictest setting a caller could ask for into the most permissive
+    /// one - and contradicted both `json-types.md` and `python-api.md`, which
+    /// have always specified the three states.
     pub fn set_allowed_domains(&mut self, domains: Vec<DomainPattern>) {
-        if domains.is_empty() {
-            self.allowed_domains = None;
-        } else {
-            self.allowed_domains = Some(domains);
-        }
+        self.allowed_domains = Some(domains);
     }
 
     pub fn clear_allowed_domains(&mut self) {
@@ -5744,6 +5751,101 @@ mod tests {
             // Explicit email allowance overrides domain restriction
             details.add_allowed_domain(DomainPattern::parse("chris@gmail.com").unwrap());
             assert!(details.add_member("chris@gmail.com", "member").is_ok());
+        }
+    }
+
+    /// `allowed_domains` has three distinct states and all of them must be
+    /// reachable through the setter. The empty list is the strictest setting a
+    /// caller can ask for, and normalising it to `None` turned it into the most
+    /// permissive one - silently, and in the direction that widens access.
+    #[test]
+    fn test_set_allowed_domains_keeps_an_empty_list_empty() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+
+            // Unset: no restriction.
+            assert_eq!(details.allowed_domains(), None);
+            assert!(details.is_domain_allowed("evil.com"));
+            assert!(details.is_email_allowed("bob@evil.com"));
+
+            // A populated list restricts to what it names.
+            details.set_allowed_domains(vec![DomainPattern::parse("*.ac.uk").unwrap()]);
+            assert!(!details.is_domain_allowed("evil.com"));
+            assert!(details.is_domain_allowed("bristol.ac.uk"));
+
+            // An empty list denies everything, and is stored as an empty list.
+            details.set_allowed_domains(vec![]);
+            assert_eq!(details.allowed_domains(), Some(vec![]));
+            assert!(!details.is_domain_allowed("evil.com"));
+            assert!(!details.is_domain_allowed("bristol.ac.uk"));
+            assert!(!details.is_email_allowed("bob@evil.com"));
+
+            // No member may be added while nothing is permitted.
+            assert!(details.add_member("bob@bristol.ac.uk", "member").is_err());
+
+            // `clear` is how a caller asks for "no restriction", and still works.
+            details.clear_allowed_domains();
+            assert_eq!(details.allowed_domains(), None);
+            assert!(details.is_domain_allowed("evil.com"));
+        }
+    }
+
+    /// The empty list has to survive the wire, not just the setter - a portal
+    /// that means "nobody" must be able to say so to another portal.
+    #[test]
+    fn test_an_empty_allow_list_round_trips_through_json() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.set_allowed_domains(vec![]);
+
+            let json = details.to_string();
+            let back = AwardDetails::parse(&json).unwrap();
+
+            assert_eq!(back.allowed_domains(), Some(vec![]));
+            assert!(!back.is_email_allowed("bob@evil.com"));
+
+            // ...and the unset state stays distinguishable from it.
+            let unset = AwardDetails::default();
+            let back = AwardDetails::parse(&unset.to_string()).unwrap();
+            assert_eq!(back.allowed_domains(), None);
+            assert!(back.is_email_allowed("bob@evil.com"));
+        }
+    }
+
+    /// Pins what `merge` currently does with allow-lists: it takes the union,
+    /// so an update can only ever *widen* one. An update carrying an empty list
+    /// therefore does not narrow an existing list to "nobody" - it is a no-op.
+    ///
+    /// This is deliberate as far as the union goes (an award accumulates the
+    /// domains it has been granted), but it does mean `Some([])` cannot be
+    /// delivered through `update_award` to a project that already has entries.
+    /// Recorded here so the behaviour is a decision rather than a surprise.
+    #[test]
+    fn test_merge_unions_allow_lists_and_so_cannot_narrow_one() {
+        #[allow(clippy::unwrap_used)]
+        {
+            // Onto an unset list, an update applies wholesale - including empty.
+            let base = AwardDetails::default();
+            let mut deny_all = AwardDetails::default();
+            deny_all.set_allowed_domains(vec![]);
+
+            let merged = base.merge(&deny_all).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![]));
+            assert!(!merged.is_email_allowed("bob@evil.com"));
+
+            // Onto a populated list, the union means an empty update changes
+            // nothing - the existing entries survive.
+            let mut base = AwardDetails::default();
+            base.set_allowed_domains(vec![DomainPattern::parse("*.ac.uk").unwrap()]);
+
+            let merged = base.merge(&deny_all).unwrap();
+            assert_eq!(
+                merged.allowed_domains(),
+                Some(vec![DomainPattern::parse("*.ac.uk").unwrap()])
+            );
+            assert!(merged.is_domain_allowed("bristol.ac.uk"));
         }
     }
 

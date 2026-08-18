@@ -134,6 +134,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **`AwardDetails.set_allowed_domains([])` meant the opposite of what it said.**
+  The setter normalised an empty list to `None`, so the strictest setting a
+  caller could ask for - permit nobody - silently became the most permissive
+  one, permit everybody. The failure was invisible and it widened access:
+
+  ```python
+  d.allowed_domains = []          # intent: nobody may join
+  d.is_domain_allowed("evil.com") # -> True
+  ```
+
+  `allowed_domains` has three distinct states and both `json-types.md` and
+  `python-api.md` have always specified them, so this was the setter
+  contradicting the type rather than a policy. It now stores what it is given;
+  `clear_allowed_domains()` and passing `None` remain the ways to reach "no
+  restriction". `from_json`, `to_json` and `merge` already preserved the empty
+  list, so the setter was the only path that lost it.
+
+  Note a related limit that is unchanged: `update_award` **unions** allow-lists,
+  so an update can widen one but never narrow it. Sending an empty list to a
+  project that already has entries is a no-op - now documented in both specs and
+  pinned by a test.
 - Documentation: `python-api.md` listed a `Status.expired()` that does not
   exist - expiry is not one of the six job states, and is read from
   `job.is_expired` - and omitted `Status.created()`, which does.

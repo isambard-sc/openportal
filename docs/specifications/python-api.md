@@ -460,7 +460,7 @@ compatibility; both refer to the same class.
 | `is_domain_allowed` | `(domain: str) → bool` | Return `True` if the bare domain (e.g. `"example.com"`) is permitted by the allow-list. Email patterns in the list are ignored. |
 | `is_email_allowed` | `(email: str) → bool` | Return `True` if the full email address is permitted. Checks exact email patterns and domain patterns against the address's domain. |
 | `add_allowed_domain` | `(domain: str \| DomainPattern) → None` | Append one entry to the allow-list. Accepts a domain pattern (`"example.com"`, `"*.example.com"`) or an exact email address (`"user@example.com"`). |
-| `set_allowed_domains` | `(domains: list[str \| DomainPattern] \| None) → None` | Replace the allow-list. Pass `None` to remove all restrictions. |
+| `set_allowed_domains` | `(domains: list[str \| DomainPattern] \| None) → None` | Replace the allow-list with exactly what is given. Pass `[]` to permit nobody, or `None` to remove all restrictions. |
 | `clear_allowed_domains` | `() → None` | Remove the allow-list (all emails become permitted). |
 
 **Allow-list behaviour:**
@@ -474,6 +474,16 @@ compatibility; both refer to the same class.
 `add_member`, `add_members`, and `set_members` enforce the allow-list at call
 time. Existing members are never retroactively removed if the allow-list changes
 after they were added.
+
+All three states are reachable and distinct, and they survive a JSON round trip:
+`details.allowed_domains = []` permits nobody, `= None` (or
+`clear_allowed_domains()`) removes the restriction.
+
+One caveat on merging: `update_award` **unions** allow-lists rather than
+replacing them, so an update can widen one but never narrow it. Sending an empty
+list to a project that already has entries leaves those entries in place. To
+reduce an allow-list, send the state you want to a project whose list is unset,
+or clear it first.
 
 **Related types used in `AwardDetails`:**
 

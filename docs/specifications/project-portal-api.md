@@ -40,7 +40,8 @@ mechanics; use this one when writing the handler.
 | The instruction string grammar | [instruction-protocol.md](instruction-protocol.md) |
 | Which error to raise, and what the caller does with it | this document, §3.3 |
 | Doing it in Python | [python-api.md](python-api.md) |
-| A portal that already does all this | `waldur-mastermind`, `src/waldur_openportal/` (§7) |
+| A worked implementation to read | [`python/examples/portal/`](../../python/examples/portal/) |
+| A portal that already does all this in production | `waldur-mastermind`, `src/waldur_openportal/` (§7) |
 
 ---
 
@@ -602,7 +603,19 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 | Generated TypeScript definitions for every result type | `greatwestern/bindings/` |
 | The error classes and their wire encoding | `python/src/lib.rs` (`OpenPortalError` and subclasses) |
 
-### 7.1 The reference implementation
+### 7.1 The example portal
+
+[`python/examples/portal/`](../../python/examples/portal/) implements this
+document — every instruction, the approval path, the retry contract, the
+answer-everything guarantee — in about 400 lines of commented Python, with a
+test suite that drives each handler without needing a bridge. It is written to be
+read rather than deployed, and its README is explicit about what a production
+portal would have to add.
+
+Start there if you are implementing this contract. Then read
+`waldur-mastermind` below for what it looks like at full size.
+
+### 7.2 The production implementation
 
 `waldur-mastermind` implements this contract on both sides, in
 `src/waldur_openportal/` (branch `feature_airrportal`). It is the most useful

@@ -4813,7 +4813,15 @@ struct AwardDetails(grammar::AwardDetails);
 #[gen_stub_pymethods]
 #[pymethods]
 impl AwardDetails {
+    /// Construct an `AwardDetails`, optionally from JSON.
+    ///
+    /// `AwardDetails()` gives an empty one to fill in with the setters, which is
+    /// what code building an award from scratch wants. `AwardDetails(json)`
+    /// parses the supplied JSON, as it always has - the default argument is
+    /// exactly the empty object that produces an empty award, so no existing
+    /// caller changes behaviour.
     #[new]
+    #[pyo3(signature = (details = "{}"))]
     fn new(details: &str) -> PyResult<Self> {
         match grammar::AwardDetails::parse(details) {
             Ok(project_details) => Ok(Self(project_details)),

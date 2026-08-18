@@ -8,6 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **An example project portal** ([python/examples/portal/](python/examples/portal/)):
+  a complete, small, heavily commented implementation of
+  [project-portal-api.md](docs/specifications/project-portal-api.md) - every
+  instruction as one function, the approval path, the retry contract, and the
+  answer-everything guarantee - behind a FastAPI application, with a test suite
+  that drives every handler without a bridge, an agent or a network.
+
+  It is written to be **read, not deployed**, and its README is explicit about
+  what it deliberately lacks: no authentication on its operator API, no real
+  state storage, no durability. The point is the shape, and in particular the
+  five things that are easy to get wrong and hard to discover - failing being a
+  normal answer and *which* failure mattering, idempotency under retries, never
+  leaving a job unanswered, a thirty-second budget rather than two minutes, and
+  that a portal may implement as much or as little of the contract as it wants.
+
+  Nothing in it is Python-specific except the convenience of the module, so an
+  equivalent in another language belongs alongside it.
+- **The six `openportal` types that the contract needs but the reference did not
+  describe**: `ProjectMapping` and `UserMapping` - the required return type of
+  five of the eight award instructions - plus `Allocation`, `DateRange`, `Link`
+  and `Note`. `Destination.agents` and the recognised `Allocation` units are
+  documented too; an unrecognised unit is silently accepted and matches no
+  predicate, which is worth knowing before it bites.
+- **`AwardDetails()` with no arguments** gives an empty award to fill in with the
+  setters, which is what code building one from scratch wants.
+  `AwardDetails(json)` is unchanged - the default argument is exactly the `"{}"`
+  that produced an empty award before, so no existing caller behaves differently.
 - **Structured errors on the wire.** A job's failure was a `String`, so every
   agent that wanted to *act* on one rather than log it had to parse prose - and
   crossing an agent boundary flattened whatever the failing agent had known. A
@@ -134,6 +161,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- A job failure whose `kind` has no exception class of its own no longer loses
+  the class its message names. `OpenPortalError` raised by a portal came back as
+  `OpenPortalOtherError`, because the kind-first path flattened everything it
+  could not place; it now defers to the message in that case, which is what the
+  older prose-only path always did.
 - **`AwardDetails.set_allowed_domains([])` meant the opposite of what it said.**
   The setter normalised an empty list to `None`, so the strictest setting a
   caller could ask for - permit nobody - silently became the most permissive

@@ -164,7 +164,8 @@ pub fn to_pyerr_from_kind(error: &JobError) -> PyErr {
     let message = error.message();
 
     // The prose still carries the class prefix for older readers; strip it so
-    // the exception's own message is not "ClassName: ClassName: ...".
+    // an exception built from a kind below does not read
+    // "ClassName: ClassName: ...".
     let (_, detail) = decode(message);
 
     match error.kind() {
@@ -173,10 +174,13 @@ pub fn to_pyerr_from_kind(error: &JobError) -> PyErr {
         gw_kind::AWARD_PERMISSION => ManagedProjectPermissionError::new_err(detail),
         kind::UNSUPPORTED => OpenPortalUnsupportedCommandError::new_err(detail),
         _ => {
-            // No specific class for this kind - including every kind a future
-            // domain might add. The text is preserved whole rather than
-            // guessed at.
-            OpenPortalOtherError::new_err(detail)
+            // No class is tied to this kind - a transport kind such as
+            // `expired`, or one a future domain added. The prose may still name
+            // a class, though (`OpenPortalError: ...` does), so defer to it
+            // rather than flattening everything to `OpenPortalOtherError`.
+            // Anything it cannot place becomes `OpenPortalOtherError` with its
+            // text intact, which is the same answer as before.
+            to_pyerr(message)
         }
     }
 }
@@ -248,6 +252,18 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kind_with_no_class_defers_to_what_the_prose_names() {
+        // `OpenPortalError` has no kind of its own, so the kind is `unknown`.
+        // The prose still names the class, and flattening it to
+        // `OpenPortalOtherError` would lose fidelity the fallback path keeps.
+        let e = JobError::new(kind::UNKNOWN, "OpenPortalError: no such award");
+        let (class, message) = decode(e.message());
+
+        assert_eq!(class, "OpenPortalError");
+        assert_eq!(message, "no such award");
+    }
 
     #[test]
     fn encode_uses_the_class_default_when_no_message_is_given() {

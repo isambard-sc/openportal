@@ -25,6 +25,7 @@ use templemeads::set_notify_runner;
 use templemeads::agent::Type::Bridge;
 use templemeads::destination::{Destination, Destinations};
 use templemeads::job::send_queued;
+use templemeads::joberror::{self, JobError};
 use templemeads::portal_identifier::PortalIdentifier;
 use templemeads::Error;
 
@@ -284,15 +285,39 @@ async fn main() -> Result<()> {
 
                             if southbound_job.is_expired() {
                                 tracing::error!("{} : {} : Error - job expired!", destination, instruction);
-                                job = job.errored("ExpirationError{}")?;
+                                job = job.errored_with(
+                                    JobError::new(joberror::kind::EXPIRED, joberror::EXPIRATION_ERROR)
+                                        .with_origin(&destination.to_string()),
+                                )?;
                             } else if (southbound_job.is_error()) {
                                 if let Some(message) = southbound_job.error_message() {
                                     tracing::error!("{} : {} : Error - {}", destination, instruction, message);
-                                    job = job.errored(&format!("RuntimeError{{{}}}", message))?;
+
+                                    // The prose is wrapped exactly as it always
+                                    // has been, so a peer reading only `result`
+                                    // sees no change. The kind, though, is
+                                    // carried through rather than re-derived:
+                                    // the agent that actually failed knows what
+                                    // went wrong, and wrapping used to discard
+                                    // that. Only fall back to reading the text
+                                    // when the failure came from a peer too old
+                                    // to have sent a kind.
+                                    let kind = southbound_job
+                                        .error_or_infer()
+                                        .map(|e| e.kind().to_owned())
+                                        .unwrap_or_else(|| joberror::kind::RUN.to_owned());
+
+                                    job = job.errored_with(
+                                        JobError::new(&kind, &format!("RuntimeError{{{}}}", message))
+                                            .with_origin(&destination.to_string()),
+                                    )?;
                                 }
                                 else {
                                     tracing::error!("{} : {} : Error - unknown error", destination, instruction);
-                                    job = job.errored("UnknownError{}")?;
+                                    job = job.errored_with(
+                                        JobError::new(joberror::kind::UNKNOWN, joberror::UNKNOWN_ERROR)
+                                            .with_origin(&destination.to_string()),
+                                    )?;
                                 }
                             }
                             else {

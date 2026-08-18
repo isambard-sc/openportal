@@ -39,6 +39,7 @@ The top-level container transmitted between agents. Every instruction creates a
   "state":           "<status>",
   "result":          "<json-string>" | null,
   "result_type":     "<type-name>" | null,
+  "error":           {"kind": "<kind>", "message": "<text>"} | absent,
   "forwarded_for":   "<destination>" | null,
   "domain":          "<domain-name>" | null,
   "domain_version":  "<domain-version>" | null
@@ -58,6 +59,7 @@ The top-level container transmitted between agents. Every instruction creates a
 | `state` | string | One of `created`, `pending`, `running`, `complete`, `error`, `duplicate` |
 | `result` | string or null | JSON-encoded result payload (see below); null when not yet complete |
 | `result_type` | string or null | Rust type name of the result (see [Result Types](#result-types)) |
+| `error` | object or absent | Why the job failed, structured. Present only on a failed job, and only from a peer that advertised `supports_structured_errors`. `kind` is a stable machine-readable discriminant - branch on this; `message` repeats verbatim what `result` holds, so a reader that only knows about `result` loses nothing. See [Error Kinds](#error-kinds). |
 | `forwarded_for` | string or null | Original job destination before the portal rewrote it for the bridge (e.g. `ukri.brics.isambard-ai`). Set by the portal's `virtual_resource_runner` when creating a bridge-board job; absent (`null`) on all other jobs. Web-portal code can use this to identify the true originating portal rather than reconstructing the path from the bridge destination. Absent from older jobs (treated as `null`). |
 | `domain` | string or null | The `Domain::name()` (e.g. `"greatwestern"`) that authored this Job's instruction, set once when the Job was created and unchanged thereafter - including by any domain-oblivious routing hop it passes through. `null` only for a Job from a peer running templemeads from before this field existed. See [writing-a-domain.md](writing-a-domain.md#1-the-domain-trait). |
 | `domain_version` | string or null | The domain's version, alongside `domain`. |
@@ -819,6 +821,41 @@ structure:
 | `"StorageReport"` | Object (see above) | `get_storage_reports` |
 | `"Destinations"` | String | `get_offerings` |
 | `"Error"` | plain-text string | Any failed job |
+
+### Error Kinds
+
+A failed job carries its reason twice: as prose in `result`, which is what it
+has always carried and what an older peer reads, and as a structured `error`
+object beside it. Only the `kind` is machine-readable, and it is the field to
+branch on.
+
+`kind` is an open string, not an enum. `templemeads` defines the kinds that
+belong to the transport, and each `Domain` contributes its own, so a routing hop
+carries a kind it has never heard of without needing to understand it. **Treat
+an unrecognised kind as you would `unknown`** rather than as an error in itself.
+
+Transport kinds (`templemeads::joberror::kind`):
+
+| `kind` | Meaning |
+|--------|---------|
+| `expired` | The job passed its expiry while still unfinished |
+| `unroutable` | No agent could be found to handle it |
+| `unsupported` | The receiving agent does not implement the instruction |
+| `invalid` | Refused before it ran - failed authorisation, unparseable instruction |
+| `run` | The handling agent failed while running it, with no more specific kind |
+| `unknown` | No information about the failure at all |
+
+`greatwestern` kinds (`greatwestern::errorkind::kind`):
+
+| `kind` | Meaning |
+|--------|---------|
+| `award_pending` | Accepted but not in place yet, typically awaiting human approval. **Not a fault** - the caller retries |
+| `award_rejected` | Refused. Re-sending unchanged will be refused again |
+| `award_permission` | An award decision with no more specific kind |
+
+An `origin` field naming the agent the failure happened at may appear on a job
+*inside* the agent network. It is stripped from everything the bridge serves, so
+a connected portal never sees it.
 
 ---
 

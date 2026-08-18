@@ -220,8 +220,14 @@ A failure is not double-encoded — the message is carried as-is, and
 ```json
 "state": "Error",
 "result": "ManagedProjectPendingError: awaiting approval",
-"result_type": "Error"
+"result_type": "Error",
+"error": {"kind": "award_pending", "message": "ManagedProjectPendingError: awaiting approval"}
 ```
+
+`error` is the same failure with a machine-readable `kind` beside the prose.
+Read it if you can — it is what the sending agent decided, rather than something
+recovered from text — and fall back to `result` when it is absent, which means
+the far side predates it.
 
 ### 3.3 Failing, and saying *why*
 
@@ -256,6 +262,13 @@ The `openportal` Python module defines this hierarchy, raises the right class
 when a job comes back in error, and encodes it again when you fail one. Use the
 classes rather than hand-writing the prefix; the string form is specified here
 so that non-Python portals can produce and read it too.
+
+Inside the agent network the class is also carried as a structured `kind` on the
+job — `award_pending`, `award_rejected` — so the agents in between do not have
+to read prose to route a failure. You do not have to produce that yourself: the
+bridge derives it from the class name you send, which is why sending the
+specified spelling matters. `job.error_kind` reads it back, and
+[json-types.md](json-types.md) lists the kinds.
 
 | Class | Base | Meaning to the caller |
 |-------|------|-----------------------|

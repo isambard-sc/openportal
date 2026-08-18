@@ -12,6 +12,7 @@
 //! that templemeads itself stays generic over any `Domain` a developer
 //! wants to bring for a different kind of infrastructure entirely.
 
+pub mod errorkind;
 pub mod grammar;
 mod job_bindings;
 pub mod notification;
@@ -60,6 +61,10 @@ impl Domain for Hpc {
 
     fn owning_portal(instruction: &Self::Instruction) -> Option<PortalIdentifier> {
         grammar::owning_portal(instruction)
+    }
+
+    fn error_kind_for(message: &str) -> Option<&'static str> {
+        errorkind::classify(message)
     }
 
     fn assume_legacy_domain_version(engine_version: &str) -> Option<&'static str> {

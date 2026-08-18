@@ -5,10 +5,15 @@ SPDX-License-Identifier: CC0-1.0
 
 # Structured errors: keeping the kind, not just the sentence
 
-Status: **proposed**. Nothing below is implemented. The Python half of the
-problem — errors arriving in Python as an untyped `OSError` — is fixed already
-(see `python/src/errors.rs` and the changelog); this document is about the half
-underneath it, which the fix works around rather than solves.
+Status: **implemented**, as described below. `templemeads::joberror::JobError`
+carries a job's failure, `greatwestern::errorkind` contributes this domain's
+kinds, `Register` negotiates the capability, and the Python bindings prefer the
+structured field and fall back to parsing prose only for an older peer.
+
+The compatibility design in §3 is the part that matters and it held: the prose
+in `result` is byte-for-byte what it always was, so nothing deployed has to
+change, and a job from a peer that predates the field still yields a usable
+kind. §5's smaller items are still open.
 
 ## 1. The problem
 
@@ -29,8 +34,8 @@ Watch a single failure travel. A portal decides an award needs human approval:
 
 Steps 2 and 4 are a private encoding smuggling a type through a field that
 cannot hold one, and step 3 wraps it in a second one. `python/src/errors.rs`
-now owns both ends, so the two sides cannot drift — but the encoding is still
-there, still ad hoc, and still the only reason the awarding portal can tell
+owns both ends, so the two sides cannot drift — but the encoding was still
+there, still ad hoc, and still the only reason the awarding portal could tell
 "approve this" from "give up".
 
 It is worse inside Rust, where there is no encoding at all.
@@ -38,7 +43,7 @@ It is worse inside Rust, where there is no encoding at all.
 `#[error("{0}")]` — a wrapper around a string. Cross an agent boundary and the
 variant is lost: `MissingAgent`, `InvalidInstruction` and `Delivery` all arrive
 as the same anonymous sentence. Nothing downstream can branch on what went
-wrong, only log it.
+wrong, only log it. (That part is still true — see §5.1.)
 
 Three consequences worth naming:
 
@@ -50,6 +55,7 @@ Three consequences worth naming:
 * **The sentinels are fragile.** `ExpirationError{}` and `UnknownError{}` spent
   their whole life with doubled braces (fixed in this release) precisely because
   nothing typed was checking them — a compiler cannot spot a typo in a string.
+  They are now `const`s in `joberror`, written and read from one place.
 
 ## 2. What a fix looks like
 
@@ -70,9 +76,10 @@ pub struct JobError {
 domain-agnostic (see `docs/plans/archive/grammar-split-design.md`): it cannot
 own a vocabulary of award decisions, because a different `Domain` will have
 entirely different failures. So templemeads defines the *envelope* and a small
-set of transport kinds (`expired`, `unroutable`, `timeout`, `internal`), and
-each `Domain` contributes its own — `greatwestern` supplying `award_pending`,
-`award_rejected`, `unsupported_command`.
+set of transport kinds — as built, `expired`, `unroutable`, `unsupported`,
+`invalid`, `run` and `unknown` — and each `Domain` contributes its own, with
+`greatwestern` supplying `award_pending`, `award_rejected` and
+`award_permission`.
 
 That keeps the split the workspace already has: the router carries the failure
 without understanding it, and the domain at each end knows what it means.
@@ -97,27 +104,45 @@ Version negotiation already exists for exactly this kind of change — agents
 exchange domain name and version on `Register` (`5da7ecc`) — so a peer's ability
 to read the structured field is knowable rather than guessable.
 
-## 4. Scope
+## 4. What was built
 
-Touches `templemeads` (the `JobError` type, `Job::errored`, the `Error` enum's
-variants gaining kinds), `greatwestern` (its own kinds), `portal` (the
-`RuntimeError{…}` wrapping becomes a kind, not a format string), `bridge` and
-`python` (prefer the structured field, keep the parser as fallback), plus the
-wire-protocol and JSON type specifications.
+| Piece | Where |
+|-------|-------|
+| `JobError`, the transport kinds, and inference from prose | `templemeads/src/joberror.rs` |
+| `Job::errored_with`, `Job::error`, `Job::error_or_infer`, `Job::redact_error_origin` | `templemeads/src/job.rs` |
+| `Domain::error_kind_for`, the hook a domain classifies through | `templemeads/src/domain.rs` |
+| This domain's kinds (`award_pending`, `award_rejected`, …) | `greatwestern/src/errorkind.rs` |
+| `Register`'s `supports_structured_errors`, and the per-peer record | `templemeads/src/command.rs`, `agent.rs`, `handler.rs` |
+| Kind propagated through the portal instead of flattened | `portal/src/main.rs` |
+| `origin` stripped from everything served to a portal | `templemeads/src/bridge_server.rs` (`outbound`) |
+| Python prefers the kind, falls back to prose | `python/src/errors.rs`, `python/src/lib.rs` |
 
-It is a bigger change than it first looks, almost entirely because of §3, and it
-is not urgent: the Python fix already gives portal authors the typed errors they
-actually branch on. This is the tidier foundation underneath, worth doing when
-the wire protocol is next opened up rather than on its own.
+Two decisions worth recording:
 
-## 5. Smaller things worth doing first
+**`Job::errored(message)` was kept, and infers a kind.** Rewriting every call
+site was neither necessary nor desirable — the transport's own sentinels and the
+domain's class names are recognisable, so existing callers acquired a kind
+without being touched. `errored_with` is the honest path for new code, because
+inference is a reading of prose and an explicit kind is not.
 
-Each of these is independently useful and none needs the above:
+**`origin` does not leave the agent network.** It names the agent a failure
+happened at, which is useful to an operator and is internal topology to anyone
+else. `bridge_server::outbound` is the single funnel every job served to a
+portal passes through, so a new endpoint cannot quietly skip the redaction. If
+you later decide a portal should see it, deleting one line in `outbound` is the
+whole change.
 
-1. **Give `templemeads::Error`'s variants real payloads.** Even without wire
-   changes, `#[error("{0}")]` on all fourteen makes in-process matching useless.
-2. **Make the sentinels constants.** `ExpirationError{}` and `UnknownError{}`
-   are written in one crate and parsed in another. A shared `const` removes a
-   whole class of typo.
-3. **Count failures by kind in diagnostics** once kinds exist — the reporting
-   is already there, and only the grouping is missing.
+## 5. Still open
+
+1. **`templemeads::Error`'s variants have no payloads.** All fourteen are
+   `#[error("{0}")]`, so matching on one in-process tells you nothing the string
+   did not. Unrelated to the wire, and the larger remaining piece.
+2. **Count failures by kind in diagnostics.** The reporting is already there and
+   only the grouping is missing, now that kinds exist.
+3. **Let agents other than the portal set kinds explicitly.** Every agent still
+   calls `errored()` and relies on inference; the ones that know exactly why
+   they failed should say so with `errored_with`.
+
+The sentinels are now `templemeads::joberror::EXPIRATION_ERROR` and
+`UNKNOWN_ERROR` rather than string literals in two crates, which was item 2 of
+this list.

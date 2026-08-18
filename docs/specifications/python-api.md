@@ -124,6 +124,7 @@ Represents a unit of work in the OpenPortal system.
 | `result` | `Any` | The deserialized job result once finished. Raises `OSError` if the job is not yet finished, or if the job is in an error state (use `error_message` instead). Returns `None` if the job completed with no result value. |
 | `error_message` | `str` | Error description if `is_error`, otherwise `""`. The raw string, including any `<ClassName>: ` prefix. |
 | `error` | `OpenPortalError \| None` | The failure as a typed exception, or `None` if the job did not fail. |
+| `error_kind` | `str` | The machine-readable kind of the failure (e.g. `"award_pending"`, `"expired"`), or `""` if the job did not fail. Branch on this when the exception classes are not granular enough — notably for a kind contributed by a domain this module has no class for. Reconstructed from the message when the failure came from a peer that predates structured errors. |
 | `progress_message` | `str` | In-progress status message if set, otherwise `""` |
 
 **Methods:**
@@ -256,12 +257,18 @@ delivered more than once if a retry races with a successful fetch.
 Represents the state of a job. String representation matches the job state
 names used throughout the protocol.
 
-**Static constructors:** `Status.pending()`, `Status.running()`,
-`Status.complete()`, `Status.error()`, `Status.expired()`, `Status.duplicate()`
+**Static constructors:** `Status.created()`, `Status.pending()`,
+`Status.running()`, `Status.complete()`, `Status.error()`, `Status.duplicate()`
+
+There is no `Status.expired()` — expiry is not one of the six states. A job
+expires by passing its `expires` timestamp while still unfinished, which is why
+it is read from `job.is_expired` rather than compared against a state.
 
 `Status("running")` constructs from a string. `str(s)` returns the lowercase
-state name. Supports `==` and `!=` against another `Status` or a plain string
-(e.g. `job.state == "complete"`). Usable as a `dict` key or in a `set`.
+state name, while the JSON on the wire is capitalised (`"Running"`); compare
+against the lowercase form and let the binding handle it. Supports `==` and
+`!=` against another `Status` or a plain string (e.g. `job.state ==
+"complete"`). Usable as a `dict` key or in a `set`.
 
 ---
 
@@ -626,6 +633,7 @@ call. Reflects the current (point-in-time) storage quota state for a single proj
 | `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys (in `users`, `user_quotas`, and historical snapshots) so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping the project name unchanged. |
 | `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
+| `to_storage_report` | `() → StorageReport` | Wrap this single-project report in a portal-level `StorageReport`. The mirror of `ProjectUsageReport.to_usage_report`; use it to lift per-project reports before combining them for `get_storage_reports`. |
 | `to_json` | `() → str` | Serialise to a JSON string |
 | `from_json` | `(json: str) → ProjectStorageReport` | *(static)* Deserialise from a JSON string |
 
@@ -774,6 +782,13 @@ ManagedProjectPendingError:` around a result access works directly. There is
 also `job.raise_for_error()` when you want to re-raise without reading a result,
 and `openportal.error_from_message(text)` to build the exception from a raw
 message you already hold.
+
+The class is chosen from the structured `kind` the failing agent attached, and
+only falls back to reading the message when the job came from a peer that
+predates it — so the class you catch is the class that was raised, not a guess.
+`job.error_kind` exposes that kind directly, which is the way to handle a kind
+this module has no class for (it arrives as `OpenPortalOtherError` with its text
+intact). The kinds are listed in [json-types.md](json-types.md).
 
 Which error a project portal should return, and what an awarding portal does
 with each, is specified in

@@ -129,7 +129,8 @@ identity, engine name and version, and (since templemeads 0.33.0) the
   "version":        "<engine-semver-string>",
   "domain":         "<domain-name-string>" | null,
   "domain_version": "<domain-semver-string>" | null,
-  "supports_portal_routes": <boolean>
+  "supports_portal_routes": <boolean>,
+  "supports_structured_errors": <boolean>
 }
 ```
 
@@ -141,6 +142,7 @@ identity, engine name and version, and (since templemeads 0.33.0) the
 | `domain` | string or null | The sender's `Domain::name()`, e.g. `"greatwestern"`. `null` (and absent from the JSON entirely) from a peer running templemeads <= 0.32.2, from before this field existed |
 | `domain_version` | string or null | The sender's `Domain::version()`, alongside `domain` |
 | `supports_portal_routes` | boolean | Whether the sender understands `PortalRoutes` (§below). `#[serde(default)]`, so a peer that predates the field reads as `false`. Used in both directions: routes are not pushed to a peer that would not understand them, and a route is not enforced against a peer that could never have sent one. See [portal-route-discovery-design.md](../plans/portal-route-discovery-design.md) §7 |
+| `supports_structured_errors` | boolean | Whether the sender attaches a structured `error` object to a failed `Job` (§below). `#[serde(default)]`, so a peer that predates the field reads as `false`. Nothing depends on it for correctness - the field is additive and a missing error object is reconstructed from the message - but it separates "this peer could not have sent a kind" from "this failure genuinely had none". See [structured-errors-design.md](../plans/structured-errors-design.md) |
 
 #### `PortalRoutes`
 

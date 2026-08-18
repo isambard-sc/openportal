@@ -533,6 +533,7 @@ async fn process_command<L: Domain>(
             domain,
             domain_version,
             supports_portal_routes,
+            supports_structured_errors,
         } => {
             // A peer that didn't send a domain at all (pre-0.33.0) may still
             // be one this Domain recognises by historical version alone -
@@ -590,6 +591,7 @@ async fn process_command<L: Domain>(
             }
 
             agent::set_route_capable(&sender_peer, *supports_portal_routes).await;
+            agent::set_structured_error_capable(&sender_peer, *supports_structured_errors).await;
 
             agent::register_peer(
                 &Peer::new(sender, zone),

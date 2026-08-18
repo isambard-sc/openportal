@@ -8,6 +8,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Structured errors on the wire.** A job's failure was a `String`, so every
+  agent that wanted to *act* on one rather than log it had to parse prose - and
+  crossing an agent boundary flattened whatever the failing agent had known. A
+  failed job now also carries `templemeads::joberror::JobError`: a stable,
+  machine-readable `kind` beside the message.
+
+  `kind` is an open string rather than an enum, because templemeads is
+  domain-agnostic and cannot own a vocabulary of award decisions. It defines the
+  transport kinds (`expired`, `unroutable`, `unsupported`, `invalid`, `run`,
+  `unknown`); a `Domain` contributes its own through the new
+  `Domain::error_kind_for`, with `greatwestern` supplying `award_pending`,
+  `award_rejected` and `award_permission`. A routing hop relays a kind it has
+  never heard of without needing to understand it.
+
+  **Nothing deployed has to change.** The prose in `result` is byte-for-byte
+  what it always was, including the portal agent's `RuntimeError{…}` wrapper, so
+  a peer that reads only that is unaffected. The structured field is additive
+  and optional, and a failure arriving without one has its kind reconstructed
+  from the message by `Job::error_or_infer`. `Register` gains
+  `supports_structured_errors` alongside `supports_portal_routes` - not needed
+  for correctness, but it separates "this peer could not have sent a kind" from
+  "this failure genuinely had none".
+
+  `Job::errored(message)` keeps its signature and infers a kind, so every
+  existing call site acquired one without being rewritten; `Job::errored_with`
+  is the explicit path for code that already knows. The portal agent now carries
+  a downstream failure's kind through its wrapping instead of discarding it.
+
+  A `JobError` may also record the `origin` agent, for diagnostics. It does not
+  leave the agent network: `bridge_server::outbound` is the single funnel every
+  job served to a connected portal passes through, and it strips the origin
+  there, so internal topology is not volunteered to software outside. The kind
+  and message both survive, so nothing a portal acts on is lost.
+
+  In Python the exception class is now chosen from the kind rather than from the
+  message, with prose-parsing kept only as the fallback for an older peer, and
+  `job.error_kind` exposes the raw kind for anything the class hierarchy does
+  not cover.
+- **`ProjectStorageReport.to_storage_report()`**, the mirror of
+  `ProjectUsageReport.to_usage_report()`. A portal answering
+  `get_storage_reports` builds one project report at a time and has to lift each
+  into a portal-level `StorageReport` before combining them; without this the
+  path raised `AttributeError`.
 - **A typed error hierarchy in the `openportal` Python module**, replacing the
   hand-rolled classes and string parser that every portal implementation had to
   write for itself: `OpenPortalError` (deriving from `OSError`, so existing
@@ -90,6 +133,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `*_award` spellings alongside `create_award` and `update_award`.
 
 ### Fixed
+
+- Documentation: `python-api.md` listed a `Status.expired()` that does not
+  exist - expiry is not one of the six job states, and is read from
+  `job.is_expired` - and omitted `Status.created()`, which does.
 
 - **The portal agent sent malformed error sentinels.** `ExpirationError{{}}` and
   `UnknownError{{}}` were written as plain string literals, where `{{` is not an

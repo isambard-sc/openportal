@@ -61,6 +61,19 @@ pub enum Command<L: Domain> {
         /// could never have sent us one.
         #[serde(default)]
         supports_portal_routes: bool,
+        /// Whether the sender attaches a structured `JobError` to a failed
+        /// `Job`, rather than only the prose in `result` - see
+        /// `crate::joberror` and `docs/plans/structured-errors-design.md`.
+        ///
+        /// `#[serde(default)]`, so a peer that predates the field deserialises
+        /// as `false`. Nothing depends on this for correctness: the field is
+        /// additive and a missing structured error is reconstructed from the
+        /// prose by `Job::error_or_infer`. It is here so an agent can tell a
+        /// peer that *cannot* send one from a peer that simply did not, which
+        /// is the difference between "inference is the best available answer"
+        /// and "this failure genuinely had no kind".
+        #[serde(default)]
+        supports_structured_errors: bool,
     },
     Sync {
         state: SyncState<L>,
@@ -122,6 +135,7 @@ impl<L: Domain> std::fmt::Display for Command<L> {
                 domain,
                 domain_version,
                 supports_portal_routes: _,
+                supports_structured_errors: _,
             } => write!(
                 f,
                 "Register: {}, engine={} version={} domain={} domain_version={}",
@@ -195,6 +209,7 @@ impl<L: Domain> Command<L> {
             domain_version: Some(domain_version.to_owned()),
             // This build understands portal routes, so always advertise it.
             supports_portal_routes: true,
+            supports_structured_errors: true,
         }
     }
 
@@ -303,6 +318,7 @@ impl<L: Domain> Command<L> {
                 domain: _,
                 domain_version: _,
                 supports_portal_routes: _,
+                supports_structured_errors: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -334,6 +350,7 @@ impl<L: Domain> Command<L> {
                 domain: _,
                 domain_version: _,
                 supports_portal_routes: _,
+                supports_structured_errors: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -365,6 +382,7 @@ impl<L: Domain> Command<L> {
                 domain: _,
                 domain_version: _,
                 supports_portal_routes: _,
+                supports_structured_errors: _,
             } => None,
             Command::Error { error: _ } => None,
             Command::HealthCheck { visited: _ } => None,
@@ -432,6 +450,7 @@ mod tests {
                 domain: Some(domain.to_owned()),
                 domain_version: Some(domain_version.to_owned()),
                 supports_portal_routes: true,
+                supports_structured_errors: true,
             }
         );
     }
@@ -457,8 +476,45 @@ mod tests {
                 // predates the field cannot understand portal routes, and must
                 // not have one enforced against it.
                 supports_portal_routes: false,
+                supports_structured_errors: false,
             }
         );
+    }
+
+    /// A `Register` from a peer that predates `supports_structured_errors`
+    /// must deserialise with it `false`. Nothing breaks either way - a missing
+    /// structured error is reconstructed from the prose - but the flag is what
+    /// separates "could not have sent one" from "did not send one", so it has
+    /// to default honestly rather than optimistically.
+    #[test]
+    fn test_command_register_structured_error_capability_defaults_to_false() {
+        let legacy = r#"{"Register":{"agent":"Portal","engine":"templemeads","version":"0.91.0","domain":"d","domain_version":"1","supports_portal_routes":true}}"#;
+        #[allow(clippy::expect_used)]
+        let command: Command = serde_json::from_str(legacy).expect("legacy Register should parse");
+
+        match command {
+            Command::Register {
+                supports_portal_routes,
+                supports_structured_errors,
+                ..
+            } => {
+                assert!(supports_portal_routes, "this peer does support routes");
+                assert!(
+                    !supports_structured_errors,
+                    "a peer that predates the field cannot send structured errors"
+                );
+            }
+            other => unreachable!("expected Register, got {:?}", other),
+        }
+
+        // ...and this build advertises support.
+        match Command::register(&AgentType::Portal, "templemeads", "0.91.0", "d", "1") {
+            Command::Register {
+                supports_structured_errors,
+                ..
+            } => assert!(supports_structured_errors),
+            other => unreachable!("expected Register, got {:?}", other),
+        }
     }
 
     /// A `Register` that predates `supports_portal_routes` must deserialise with

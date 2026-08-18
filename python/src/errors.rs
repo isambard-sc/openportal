@@ -20,9 +20,11 @@
 //! two implementations happening to match. See
 //! `docs/specifications/project-portal-api.md` §3.3.
 
+use greatwestern::errorkind::kind as gw_kind;
 use pyo3::create_exception;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
+use templemeads::joberror::{kind, JobError};
 
 create_exception!(
     openportal,
@@ -153,7 +155,36 @@ pub fn decode(raw: &str) -> (&'static str, String) {
     ("OpenPortalOtherError", inner.to_string())
 }
 
+/// Build the Python exception for a structured [`JobError`].
+///
+/// The preferred path: the kind was decided by the agent that failed, so
+/// nothing here has to read prose. [`to_pyerr`] is the fallback for a peer too
+/// old to have sent one.
+pub fn to_pyerr_from_kind(error: &JobError) -> PyErr {
+    let message = error.message();
+
+    // The prose still carries the class prefix for older readers; strip it so
+    // the exception's own message is not "ClassName: ClassName: ...".
+    let (_, detail) = decode(message);
+
+    match error.kind() {
+        gw_kind::AWARD_PENDING => ManagedProjectPendingError::new_err(detail),
+        gw_kind::AWARD_REJECTED => ManagedProjectRejectedError::new_err(detail),
+        gw_kind::AWARD_PERMISSION => ManagedProjectPermissionError::new_err(detail),
+        kind::UNSUPPORTED => OpenPortalUnsupportedCommandError::new_err(detail),
+        _ => {
+            // No specific class for this kind - including every kind a future
+            // domain might add. The text is preserved whole rather than
+            // guessed at.
+            OpenPortalOtherError::new_err(detail)
+        }
+    }
+}
+
 /// Build the Python exception a wire error message describes.
+///
+/// The fallback path, for a failure carrying no structured kind. Prefer
+/// [`to_pyerr_from_kind`].
 pub fn to_pyerr(raw: &str) -> PyErr {
     let (class, message) = decode(raw);
 

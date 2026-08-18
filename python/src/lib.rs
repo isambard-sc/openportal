@@ -1280,6 +1280,21 @@ fn restart(restart_type: &str, destination: &str) -> PyResult<RestartResponse> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Job(job::Job<greatwestern::Hpc>);
 
+impl Job {
+    /// This job's failure as a Python exception.
+    ///
+    /// Prefers the structured `JobError` the failing agent attached, and falls
+    /// back to reading the message only when the job came from a peer that
+    /// predates it. Not a `#[pymethods]` entry - it returns a `PyErr`, which is
+    /// how a failure is raised, not a value Python is handed.
+    fn typed_error(&self) -> PyErr {
+        match self.0.error() {
+            Some(error) => errors::to_pyerr_from_kind(error),
+            None => errors::to_pyerr(&self.0.error_message().unwrap_or_default()),
+        }
+    }
+}
+
 impl From<job::Job<greatwestern::Hpc>> for Job {
     fn from(job: job::Job<greatwestern::Hpc>) -> Self {
         Job(job)
@@ -1586,15 +1601,30 @@ impl Job {
             return Ok(py.None());
         }
 
-        Ok(errors::to_pyerr(&self.error_message()?)
-            .into_value(py)
-            .into_any())
+        Ok(self.typed_error().into_value(py).into_any())
+    }
+
+    /// The machine-readable kind of this job's failure, or `""` if it did not
+    /// fail.
+    ///
+    /// A stable discriminant such as `"award_pending"` or `"expired"`. This is
+    /// the field to branch on when the exception classes are not granular
+    /// enough - notably for a kind contributed by a domain this module has no
+    /// class for. Reconstructed from the message when the failure came from a
+    /// peer that predates structured errors.
+    #[getter]
+    fn error_kind(&self) -> PyResult<String> {
+        Ok(self
+            .0
+            .error_or_infer()
+            .map(|e| e.kind().to_owned())
+            .unwrap_or_default())
     }
 
     /// Raise this job's error, if it has one. A no-op otherwise.
     fn raise_for_error(&self) -> PyResult<()> {
         if self.0.is_error() {
-            return Err(errors::to_pyerr(&self.error_message()?));
+            return Err(self.typed_error());
         }
 
         Ok(())
@@ -1609,7 +1639,7 @@ impl Job {
         if self.0.is_error() {
             // Typed rather than a bare OSError, and compatible with it:
             // every class in the hierarchy derives from OSError.
-            return Err(errors::to_pyerr(&self.error_message()?));
+            return Err(self.typed_error());
         }
 
         let result_type = match self.0.result_type() {
@@ -3375,6 +3405,10 @@ impl ProjectStorageReport {
 
     fn filter(&self, range: &DateRange) -> PyResult<Self> {
         Ok(self.0.filter(&range.0).into())
+    }
+
+    fn to_storage_report(&self) -> StorageReport {
+        self.0.to_storage_report().into()
     }
 }
 

@@ -2803,21 +2803,16 @@ impl AwardDetails {
             merged.membership_control = other.membership_control.clone();
         }
 
+        // Replaced wholesale, not unioned. The allow-list is a definitive set
+        // decided by the awarding portal, so an update that names fewer domains
+        // means fewer - a union could only ever widen it, which left an
+        // allow-list that could never be reduced and made `Some([])`
+        // undeliverable to a project that already had entries. This matches
+        // `members` and `membership_control` above; the accumulating fields are
+        // `notes` (an audit trail) and `breakdown`, and they accumulate on
+        // purpose.
         if other.allowed_domains.is_some() {
-            if self.allowed_domains.is_none() {
-                merged.allowed_domains = other.allowed_domains.clone();
-            } else {
-                let mut domains = self.allowed_domains.clone().unwrap_or_default();
-                let other_domains = other.allowed_domains.clone().unwrap_or_default();
-
-                for domain in other_domains {
-                    if !domains.contains(&domain) {
-                        domains.push(domain);
-                    }
-                }
-
-                merged.allowed_domains = Some(domains);
-            }
+            merged.allowed_domains = other.allowed_domains.clone();
         }
 
         Ok(merged)
@@ -5814,38 +5809,71 @@ mod tests {
         }
     }
 
-    /// Pins what `merge` currently does with allow-lists: it takes the union,
-    /// so an update can only ever *widen* one. An update carrying an empty list
-    /// therefore does not narrow an existing list to "nobody" - it is a no-op.
-    ///
-    /// This is deliberate as far as the union goes (an award accumulates the
-    /// domains it has been granted), but it does mean `Some([])` cannot be
-    /// delivered through `update_award` to a project that already has entries.
-    /// Recorded here so the behaviour is a decision rather than a surprise.
+    /// The allow-list is a definitive set decided by the awarding portal, so
+    /// `merge` replaces it rather than unioning the two. A union could only
+    /// widen the list: a domain once granted could never be withdrawn, and
+    /// `Some([])` was undeliverable to a project that already had entries.
     #[test]
-    fn test_merge_unions_allow_lists_and_so_cannot_narrow_one() {
+    fn test_merge_replaces_the_allow_list_rather_than_unioning_it() {
         #[allow(clippy::unwrap_used)]
         {
-            // Onto an unset list, an update applies wholesale - including empty.
-            let base = AwardDetails::default();
+            let ac_uk = DomainPattern::parse("*.ac.uk").unwrap();
+            let example = DomainPattern::parse("example.com").unwrap();
+
+            let mut base = AwardDetails::default();
+            base.set_allowed_domains(vec![ac_uk.clone()]);
+
+            // A narrower update narrows: the old entry is gone, not merged in.
+            let mut narrower = AwardDetails::default();
+            narrower.set_allowed_domains(vec![example.clone()]);
+
+            let merged = base.merge(&narrower).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![example.clone()]));
+            assert!(!merged.is_domain_allowed("bristol.ac.uk"));
+            assert!(merged.is_domain_allowed("example.com"));
+
+            // An empty update now reaches a project that already has entries,
+            // which is the whole point - "nobody" is deliverable.
             let mut deny_all = AwardDetails::default();
             deny_all.set_allowed_domains(vec![]);
 
             let merged = base.merge(&deny_all).unwrap();
             assert_eq!(merged.allowed_domains(), Some(vec![]));
-            assert!(!merged.is_email_allowed("bob@evil.com"));
+            assert!(!merged.is_domain_allowed("bristol.ac.uk"));
+            assert!(!merged.is_email_allowed("bob@bristol.ac.uk"));
 
-            // Onto a populated list, the union means an empty update changes
-            // nothing - the existing entries survive.
-            let mut base = AwardDetails::default();
-            base.set_allowed_domains(vec![DomainPattern::parse("*.ac.uk").unwrap()]);
+            // An update that says nothing about the field still changes nothing,
+            // which is what "absent fields keep their current values" means.
+            let silent = AwardDetails::default();
+            let merged = base.merge(&silent).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![ac_uk.clone()]));
 
-            let merged = base.merge(&deny_all).unwrap();
-            assert_eq!(
-                merged.allowed_domains(),
-                Some(vec![DomainPattern::parse("*.ac.uk").unwrap()])
-            );
-            assert!(merged.is_domain_allowed("bristol.ac.uk"));
+            // ...and onto an unset list, an update still applies wholesale.
+            let merged = AwardDetails::default().merge(&base).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![ac_uk]));
+        }
+    }
+
+    /// `merge` replaces the allow-list, but `add_allowed_domain` is still the
+    /// incremental path for a portal building one up locally.
+    #[test]
+    fn test_add_allowed_domain_still_accumulates() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.add_allowed_domain(DomainPattern::parse("*.ac.uk").unwrap());
+            details.add_allowed_domain(DomainPattern::parse("example.com").unwrap());
+
+            assert_eq!(details.allowed_domains().unwrap_or_default().len(), 2);
+
+            // Adding to an empty (deny-all) list starts it populated rather
+            // than being ignored.
+            let mut details = AwardDetails::default();
+            details.set_allowed_domains(vec![]);
+            details.add_allowed_domain(DomainPattern::parse("*.ac.uk").unwrap());
+
+            assert_eq!(details.allowed_domains().unwrap_or_default().len(), 1);
+            assert!(details.is_domain_allowed("bristol.ac.uk"));
         }
     }
 

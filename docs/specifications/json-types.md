@@ -323,10 +323,10 @@ The `*.` prefix matches any number of subdomain levels — `*.ac.uk` matches
 domain itself (`ac.uk`) is not matched. Wildcards are not permitted elsewhere
 in the pattern.
 
-`update_award` **unions** allow-lists rather than replacing them, so an update
-can widen one but never narrow it: an empty list sent to a project that already
-has entries leaves those entries in place. This is unlike `members`, which is
-replaced wholesale.
+`update_award` **replaces** the allow-list wholesale, as it does `members`: the
+awarding portal owns the set, so an update naming fewer domains removes the
+rest, and one sending `[]` permits nobody. Omitting the field entirely leaves it
+unchanged.
 
 When `allowed_domains` is absent (`null`), all email addresses are permitted.
 When it is present but empty (`[]`), no email addresses are permitted. The

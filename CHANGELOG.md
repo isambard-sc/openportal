@@ -151,10 +151,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   restriction". `from_json`, `to_json` and `merge` already preserved the empty
   list, so the setter was the only path that lost it.
 
-  Note a related limit that is unchanged: `update_award` **unions** allow-lists,
-  so an update can widen one but never narrow it. Sending an empty list to a
-  project that already has entries is a no-op - now documented in both specs and
-  pinned by a test.
+- **`update_award` could widen an allow-list but never narrow it.** `merge`
+  took the union of the two lists, so a domain once granted could not be
+  withdrawn and an empty list sent to a project that already had entries was a
+  no-op - which made the state the fix above restores undeliverable over the
+  wire.
+
+  It now replaces the list wholesale, as `members` and `membership_control`
+  already did: `allowed_domains` is a definitive set decided by the awarding
+  portal, so an update naming fewer domains means fewer. Omitting the field
+  still changes nothing. The fields that accumulate on merge are `notes` (an
+  audit trail) and `breakdown`, and they still do; `add_allowed_domain` remains
+  the incremental path for a portal building a list up locally.
 - Documentation: `python-api.md` listed a `Status.expired()` that does not
   exist - expiry is not one of the six job states, and is read from
   `job.is_expired` - and omitted `Status.created()`, which does.

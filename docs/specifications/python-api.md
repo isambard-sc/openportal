@@ -479,11 +479,11 @@ All three states are reachable and distinct, and they survive a JSON round trip:
 `details.allowed_domains = []` permits nobody, `= None` (or
 `clear_allowed_domains()`) removes the restriction.
 
-One caveat on merging: `update_award` **unions** allow-lists rather than
-replacing them, so an update can widen one but never narrow it. Sending an empty
-list to a project that already has entries leaves those entries in place. To
-reduce an allow-list, send the state you want to a project whose list is unset,
-or clear it first.
+`update_award` **replaces** the allow-list rather than merging into it: the
+awarding portal owns the set, so whatever it sends is the whole set afterwards.
+An update naming fewer domains removes the rest, and an update sending `[]`
+permits nobody. An update that omits the field entirely changes nothing, as with
+every other field.
 
 **Related types used in `AwardDetails`:**
 

@@ -430,8 +430,11 @@ Notes:
   slot. The same form appears in `get_projects` for an award that has no local
   project yet.
 * **`update_*` is a merge.** Only the fields present in the supplied
-  `AwardDetails` change; absent fields keep their current values. `members`,
-  when present, replaces the member set wholesale.
+  `AwardDetails` change; absent fields keep their current values. `members` and
+  `allowed_domains`, when present, replace what you hold wholesale rather than
+  adding to it — both are sets the awarding portal owns, so an update naming
+  fewer entries means fewer. An `allowed_domains` of `[]` permits nobody, and is
+  distinct from omitting the field.
 * **`get_projects` returns mappings, `get_awards` returns details.** They are
   easy to confuse and the return types are different shapes.
 * `get_project` is retained for compatibility; new callers use `get_award`.

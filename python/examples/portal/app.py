@@ -52,6 +52,21 @@ SWEEP_SECONDS = int(os.environ.get("PORTAL_SWEEP_SECONDS", "15"))
 #: state, in the same database, keyed on the job id.
 _seen: set[str] = set()
 
+#: Our own portal's agent name, read from the bridge once at startup.
+#:
+#: Held rather than fetched per request: it cannot change while we are running,
+#: and asking the bridge for it on every approval would make approving depend on
+#: the bridge being reachable at that moment.
+_my_portal: str | None = None
+
+
+def my_portal() -> str:
+    """Our portal's name, or a 503 if startup has not completed."""
+    if _my_portal is None:
+        raise HTTPException(status_code=503, detail="not connected to the bridge yet")
+
+    return _my_portal
+
 
 # --------------------------------------------------------------------------
 # Startup: advertise what we offer
@@ -69,9 +84,12 @@ async def lifespan(app: FastAPI):
 
     `sync_offerings` is a *replace*, not a merge: anything absent is withdrawn.
     """
+    global _my_portal
+
     openportal.load_config(os.environ["OPENPORTAL_CONFIG"])
 
     me = openportal.get_portal()
+    _my_portal = str(me)
 
     # `<offering>.<us>.<them>` - the middle element must be our own agent name.
     # A real portal reads the list of awarding portals from its configuration.
@@ -206,8 +224,26 @@ async def _sweep_forever() -> None:
 # --------------------------------------------------------------------------
 
 
-class Decision(BaseModel):
-    """An approval or a refusal, with the reason the caller will be told."""
+class Approval(BaseModel):
+    """
+    An approval, and **the identifier we are giving the award here**.
+
+    `local_project_id` is not optional and cannot be defaulted, because it is
+    our half of the mapping: it is what goes back to the awarding portal, and
+    what our own accounting will record usage against. Approving without
+    deciding it would leave both sides unable to name the same thing.
+
+    A real portal generates this when it creates the project - a slug, a
+    sequence number, whatever it already uses - rather than asking an operator
+    to type it. It is a parameter here so the example can show it being chosen.
+    """
+
+    local_project_id: str
+    reason: str = ""
+
+
+class Rejection(BaseModel):
+    """A refusal, with the reason the awarding portal will be told."""
 
     reason: str = ""
 
@@ -236,7 +272,7 @@ async def list_awards():
             "project_id": a.project_id,
             "state": a.state,
             "reason": a.reason,
-            "local_group": a.local_group,
+            "local_project_id": a.local_project_id,
             "name": a.details.get("name"),
             "template": a.details.get("template"),
             "members": list((a.details.get("members") or {}).keys()),
@@ -256,32 +292,68 @@ async def get_one_award(project_id: str):
 
 
 @app.post("/awards/{project_id}/approve")
-async def approve(project_id: str, decision: Decision):
+async def approve(project_id: str, approval: Approval):
     """
-    Approve an award.
+    Approve an award, and **give it its identifier here**.
 
-    Nothing is pushed to the awarding portal here, and nothing needs to be: it
-    is already re-sending `create_award` on every cycle, so the next one gets a
-    mapping instead of `ManagedProjectPendingError` and the award goes live by
-    itself. That is what makes the retry contract so useful - approval does not
-    need a notification path of its own.
+    This is the moment the mapping is made. Until now the awarding portal knows
+    the award as `myproject.ukri` and we have nothing to pair it with; approving
+    creates a project on our side and names it, and that name is what closes the
+    loop.
+
+    Nothing is pushed back to the awarding portal, and nothing needs to be. It
+    is already re-sending `create_award` every cycle, so the next one gets a
+    `ProjectMapping` instead of `ManagedProjectPendingError` - and that mapping
+    is how it learns our identifier. Approval needs no notification path of its
+    own, which is the most useful consequence of the retry contract.
     """
     award = store.load(project_id)
 
     if award is None:
         raise HTTPException(status_code=404, detail="no such award")
 
+    # Must be a well-formed identifier, and must be one of *ours*: a mapping
+    # naming some other portal's project would be a claim we cannot make.
+    try:
+        local = openportal.ProjectIdentifier(approval.local_project_id)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"not a ProjectIdentifier: {e}")
+
+    me = my_portal()
+
+    if str(local.portal) != me:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"local_project_id must be in this portal's namespace "
+                f"(<project>.{me}), got '{local}'"
+            ),
+        )
+
+    # One local project per award, both ways round.
+    clash = store.load_by_local_id(str(local))
+
+    if clash is not None and clash.project_id != project_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{local}' is already the local project for {clash.project_id}",
+        )
+
     award.raw["state"] = store.Award.APPROVED
-    award.raw["reason"] = decision.reason
-    award.raw["local_group"] = award.local_group or project_id
+    award.raw["reason"] = approval.reason
+    award.raw["local_project_id"] = str(local)
     store.save(award)
 
-    logger.info("approved %s", project_id)
-    return {"project_id": project_id, "state": award.state}
+    logger.info("approved %s as %s", project_id, local)
+    return {
+        "project_id": project_id,
+        "local_project_id": str(local),
+        "state": award.state,
+    }
 
 
 @app.post("/awards/{project_id}/reject")
-async def reject(project_id: str, decision: Decision):
+async def reject(project_id: str, decision: Rejection):
     """
     Refuse an award, terminally.
 
@@ -301,20 +373,34 @@ async def reject(project_id: str, decision: Decision):
     return {"project_id": project_id, "state": award.state}
 
 
-@app.put("/awards/{project_id}/usage")
-async def push_usage(project_id: str, push: UsagePush):
+@app.put("/projects/{local_project_id}/usage")
+async def push_usage(local_project_id: str, push: UsagePush):
     """
     Push usage figures in, so `get_usage_report` can answer them from cache.
+
+    **Note this endpoint is keyed on our own project identifier**, not the
+    awarding portal's, and that is deliberate. Everything under `/awards` speaks
+    the awarding portal's language because that is the language OpenPortal asks
+    questions in. This one speaks ours, because your accounting produces figures
+    for `proj001.aip1` and has never heard of `myproject.ukri`. The mapping made
+    at approval is what joins them, and `portal.build_usage_report` is where the
+    translation happens.
 
     This is the half of the integration that is genuinely yours: your accounting
     is the source of truth, your parsers produce the numbers, and this endpoint
     is how they reach the portal. `get_usage_report` then serves them inside the
     thirty seconds it has (§3.4).
     """
-    award = store.load(project_id)
+    award = store.load_by_local_id(local_project_id)
 
     if award is None:
-        raise HTTPException(status_code=404, detail="no such award")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no approved award maps to '{local_project_id}' - an award only "
+                "gets a local project identifier when it is approved"
+            ),
+        )
 
     if push.report is not None:
         # A complete `ProjectUsageReport`. Parsing it validates the shape before
@@ -330,6 +416,10 @@ async def push_usage(project_id: str, push: UsagePush):
         # day, and `user_mapping` gives the portal user → local name pairs whose
         # usage that day holds. At the portal layer the local name is the
         # member's email.
+        #
+        # A report pushed here is expected to be in *our* namespace, since it
+        # came from our accounting. Only the email is kept, so a report built
+        # against either namespace flattens the same way.
         hours: dict[str, dict[str, float]] = {}
 
         for date in report.dates:
@@ -354,7 +444,11 @@ async def push_usage(project_id: str, push: UsagePush):
     award.raw["usage"] = hours
     store.save(award)
 
-    return {"project_id": project_id, "days": len(hours)}
+    return {
+        "local_project_id": local_project_id,
+        "award": award.project_id,
+        "days": len(hours),
+    }
 
 
 @app.get("/health")

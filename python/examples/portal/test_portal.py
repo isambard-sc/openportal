@@ -27,7 +27,12 @@ import openportal
 import portal
 import store
 
+#: What the awarding portal calls the award.
 PROJECT = "myproject.ukri"
+
+#: What *we* call the project we create for it. The two halves of the mapping.
+LOCAL_PROJECT = "proj001.aip1"
+
 OFFERING = "example-resource"
 
 
@@ -115,21 +120,38 @@ def _run_all() -> None:
     )
     check("...carrying the award_rejected kind", bad.error_kind == "award_rejected")
 
-    print("\n-- approval, and the mapping -----------------------------------")
+    print("\n-- approval names the project on our side ----------------------")
 
+    # Approving is what creates a project here and gives it an identifier in
+    # *our* namespace. That identifier is our half of the mapping.
     award = store.load(PROJECT)
     award.raw["state"] = store.Award.APPROVED
-    award.raw["local_group"] = "grp001"
+    award.raw["local_project_id"] = LOCAL_PROJECT
     store.save(award)
 
     job = portal.answer(make_job(f"create_project {PROJECT} {details()}"))
     check("an approved award answers with a mapping", not job.is_error)
     check(
-        "...of the specified shape",
-        str(job.result) == f"{PROJECT}:grp001",
+        "...pairing their award id with our project id",
+        str(job.result) == f"{PROJECT}:{LOCAL_PROJECT}",
         f"-> {job.result}",
     )
     check("...typed as a ProjectMapping", type(job.result) is openportal.ProjectMapping)
+    check(
+        "...their half is the award they asked about",
+        str(job.result.project) == PROJECT,
+    )
+    check(
+        "...our half is a project in our own namespace",
+        str(job.result.local_group) == LOCAL_PROJECT,
+        f"-> {job.result.local_group}",
+    )
+
+    # The reverse lookup: our accounting knows only our identifier.
+    check(
+        "an award can be found by our identifier for it",
+        store.load_by_local_id(LOCAL_PROJECT).project_id == PROJECT,
+    )
 
     print("\n-- get_award ---------------------------------------------------")
 
@@ -151,9 +173,10 @@ def _run_all() -> None:
     check("...and the award now exists", store.load("fresh.ukri") is not None)
     store.delete("fresh.ukri")
 
-    print("\n-- usage reports -----------------------------------------------")
+    print("\n-- usage: recorded in our namespace, answered in theirs --------")
 
-    # Push figures in the way an operator's parser would.
+    # Push figures in the way an operator's parser would - against our own
+    # project identifier, which is the only one that accounting knows.
     award = store.load(PROJECT)
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
     award.raw["usage"] = {yesterday: {"alice@bristol.ac.uk": 12.5}}
@@ -168,8 +191,21 @@ def _run_all() -> None:
         abs(report.total_usage.seconds / 3600 - 12.5) < 0.01,
         f"-> {report.total_usage}",
     )
+
+    # The translation: the caller asked about their award, so the report must be
+    # about their award - even though the figures were recorded against ours.
     check(
-        "...and a user mapping so the caller knows who used it",
+        "...reported against THEIR project identifier",
+        str(report.project) == PROJECT,
+        f"-> {report.project}",
+    )
+    check(
+        "...with user identifiers rebuilt into their namespace",
+        all(str(u).endswith(f".{PROJECT}") for u in report.users),
+        f"-> {[str(u) for u in report.users]}",
+    )
+    check(
+        "...and the email unchanged, being the same person either way",
         "alice@bristol.ac.uk" in report.user_mapping.values(),
         f"-> {list(report.user_mapping.values())}",
     )
@@ -181,6 +217,27 @@ def _run_all() -> None:
     job = portal.answer(make_job(f"get_usage_reports ukri this_month"))
     check("get_usage_reports rolls up to the portal", not job.is_error)
     check("...as a UsageReport", type(job.result) is openportal.UsageReport)
+
+    print("\n-- an award with no local project yet --------------------------")
+
+    # Usage cannot be reported for an award that has not been approved, because
+    # there is no project on our side to have recorded any against.
+    pending = "notyet.ukri"
+    portal.answer(make_job(f"create_project {pending} {details()}"))
+    job = portal.answer(make_job(f"get_usage_report {pending} this_month"))
+    check("usage for an unapproved award is an error", job.is_error, f"-> {job.error}")
+    check(
+        "...and the mapping for it is refused too",
+        portal.answer(make_job(f"get_project_mapping {pending}")).is_error,
+    )
+    check(
+        "...but get_projects still lists it, as :None",
+        any(
+            str(m) == f"{pending}:None"
+            for m in portal.answer(make_job("get_projects ukri")).result
+        ),
+    )
+    store.delete(pending)
 
     print("\n-- storage: empty beats absent ---------------------------------")
 

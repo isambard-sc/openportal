@@ -98,9 +98,27 @@ class Award:
         return self.raw.get("details", {})
 
     @property
-    def local_group(self) -> str | None:
-        """What we call this project locally. Assigned on approval."""
-        return self.raw.get("local_group")
+    def local_project_id(self) -> str | None:
+        """
+        **Our own `ProjectIdentifier` for this award**, e.g. `proj001.aip1`.
+
+        This is our half of the mapping, and it is the single most important
+        thing this record holds. It is `None` until the award is approved,
+        because until then no local project exists to name.
+
+        Two things hang off it:
+
+        * It goes back to the awarding portal in the `ProjectMapping`, so both
+          sides end up agreeing that *their* award and *our* project are the
+          same thing. After that exchange, award ID and project ID are two names
+          for one object.
+        * It is the identifier our own accounting knows this project by, so it
+          is what usage is posted against - see `usage` below.
+
+        Note it is a full identifier in *our* portal's namespace
+        (`<project>.<our-portal>`), not a bare group name.
+        """
+        return self.raw.get("local_project_id")
 
     @property
     def reason(self) -> str:
@@ -119,8 +137,10 @@ class Award:
 
             {"2026-08-01": {"alice@example.ac.uk": 12.5}}
 
-        Hours, as a float. Pushed in by the operator's own parsers - see
-        `app.py`'s `PUT /awards/{id}/usage`.
+        Hours, as a float. Pushed in by the operator's own parsers, which
+        identify the project by `local_project_id` - they have never heard of
+        the awarding portal's identifier. Translating between the two is what
+        the mapping is for; see `portal.build_usage_report`.
         """
         return self.raw.get("usage", {})
 
@@ -148,7 +168,9 @@ def create(project_id: str, details: dict[str, Any], forwarded_for: str | None) 
             "details": details,
             "state": Award.PENDING,
             "reason": "awaiting approval by a site administrator",
-            "local_group": None,
+            # No local project exists yet - approving is what creates one and
+            # gives it an identifier.
+            "local_project_id": None,
             "forwarded_for": forwarded_for,
             "usage": {},
         },
@@ -172,6 +194,23 @@ def all_awards() -> list[Award]:
 def awards_for_portal(portal: str) -> list[Award]:
     """Every award made by one awarding portal - `get_awards` needs this."""
     return [a for a in all_awards() if a.project_id.endswith(f".{portal}")]
+
+
+def load_by_local_id(local_project_id: str) -> Award | None:
+    """
+    Find an award by **our** identifier for it, rather than the awarding
+    portal's.
+
+    This is the reverse lookup, and it is the reason the mapping matters
+    operationally: your accounting produces figures for `proj001.aip1` and has
+    no idea that some other portal calls it `myproject.ukri`. A real store makes
+    this an indexed column rather than a scan.
+    """
+    for award in all_awards():
+        if award.local_project_id == local_project_id:
+            return award
+
+    return None
 
 
 def delete(project_id: str) -> bool:

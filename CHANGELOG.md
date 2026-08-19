@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`project-portal-api.md` §4.1.1, on what a `ProjectMapping` is for.** The
+  document described its second half as "whatever you call that project
+  locally", which undersold it. It is the receiving portal's own
+  `ProjectIdentifier`, decided when the award is provisioned, and it is the only
+  thing that lets two portals name the same object: the awarding portal cannot
+  guess it, and without it usage recorded on one side cannot be reported to the
+  other. The new section says so, and says how the translation works -
+  `remap_project` into the caller's namespace.
 - **An example project portal** ([python/examples/portal/](python/examples/portal/)):
   a complete, small, heavily commented implementation of
   [project-portal-api.md](docs/specifications/project-portal-api.md) - every

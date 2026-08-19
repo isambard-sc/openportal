@@ -415,9 +415,46 @@ you need to answer.
 
 Notes:
 
-* **`ProjectMapping`** is `<project_id>:<local_group>` — the identifier the
-  awarding portal used, paired with whatever you call that project locally. It
-  is a string, not an object.
+* **`ProjectMapping`** is `<their project id>:<your project id>` — a string,
+  not an object, and the most important thing you return. See §4.1.1.
+#### 4.1.1 The mapping is where the two sides agree what to call a thing
+
+The awarding portal knows the award as `myproject.ukri`. You create something
+for it and know that as, say, `proj001.aip1`. Neither side can guess the other's
+name, and until they have been exchanged there is no way to say "that award" and
+"that project" and mean the same object.
+
+The `ProjectMapping` you return is that exchange. **Its second half is your own
+`ProjectIdentifier` for the award** — a full `<project>.<your-portal>`
+identifier in your namespace, not a bare group name:
+
+```
+myproject.ukri:proj001.aip1
+```
+
+Once you have returned it, the award ID and the project ID are two names for one
+thing at this interface, and both sides hold the pair.
+
+**Deciding it is part of provisioning.** You cannot answer with a mapping before
+you have created the project and named it, which is exactly why an award still
+awaiting approval answers with `ManagedProjectPendingError` instead (§3.3) —
+there is no honest identifier to put in the second half yet.
+
+**This is also the join for everything else.** Your accounting records usage
+against `proj001.aip1` and has never heard of `myproject.ukri`; the awarding
+portal asks `get_usage_report myproject.ukri` and has never heard of
+`proj001.aip1`. The mapping is what lets you answer. In practice: build the
+report against your own identifier, because that is the namespace the figures
+were recorded in, and then translate it — in Python,
+`report.remap_project(their_id)` rewrites the project and rebuilds every
+`UserIdentifier` with it, so `alice.proj001.aip1` becomes `alice.myproject.ukri`
+while the member's email stays as it is.
+
+The second half is validated as a mapping target, so it is restricted to
+`A-Za-z0-9._-` (no leading `-`, no leading or trailing `.`, no `..`). A portal
+with no identifier scheme of its own may reuse the incoming project name, but
+qualify it with your own portal so the mapping still says something.
+
 * **A mapping is returned only on success.** `create_award` and `update_award`
   answer with a mapping when the award is in place; when it is not, they answer
   with an *error*, and that error is how the outcome is reported. This is not an
@@ -427,9 +464,9 @@ Notes:
   to raise; `ManagedProjectPendingError` is the one that means "not yet, ask me
   again".
 * **`remove_award` answers with `<project_id>:None`.** The award is gone, so
-  there is no local group left to name; the literal string `None` fills the
-  slot. The same form appears in `get_projects` for an award that has no local
-  project yet.
+  there is no project of yours left to name; the literal string `None` fills the
+  slot. The same form appears in `get_projects` for an award that has no project
+  yet because nobody has approved it.
 * **`update_*` is a merge.** Only the fields present in the supplied
   `AwardDetails` change; absent fields keep their current values. `members` and
   `allowed_domains`, when present, replace what you hold wholesale rather than
@@ -508,6 +545,10 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
 * **Usage reports are per-day.** A `ProjectUsageReport` holds `reports` keyed by
   date, plus a `users` map from `UserIdentifier` to local username. The
   portal-level `UsageReport` wraps per-project reports keyed by project.
+* **Report against the identifier you were asked about**, not your own. The
+  request names the awarding portal's project, so the answer must too — even
+  though your figures are recorded against your own. §4.1.1 covers the
+  translation.
 * **Storage reports are point-in-time.** The top-level fields of a
   `ProjectStorageReport` are the *latest* snapshot; `daily_reports` holds older
   ones, at most one per date. The date range therefore selects history, not the
@@ -572,19 +613,24 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
    as their `*_project` equivalents (§2).
 5. Authorise against `forwarded_for`, and store records under the full
    awarding-portal identifier (§1.2).
-6. Pick the instructions you will answer; decline the rest with
+6. Decide your own `ProjectIdentifier` for an award when you provision it, and
+   return it as the second half of the `ProjectMapping`. It is what the awarding
+   portal joins on, and what your usage figures translate through (§4.1.1).
+7. Pick the instructions you will answer; decline the rest with
    `OpenPortalUnsupportedCommandError` (§4.0). Return the exact type in §4 for
    the ones you keep, and never let a job go unanswered (§3.3).
-7. Fail with the right class — `ManagedProjectPendingError` for "not yet",
+8. Fail with the right class — `ManagedProjectPendingError` for "not yet",
    `ManagedProjectRejectedError` for "no" — because the caller treats them
    completely differently (§3.3).
-8. Make every handler idempotent: `create_award` for an award you already hold
+9. Make every handler idempotent: `create_award` for an award you already hold
    is normal traffic, and duplicate job ids must not do the work twice (§3.5).
-9. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
-   cache (§3.4).
-10. Handle `membership_control` and reject unknown `template` values (§4.1), and
+10. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
+    cache (§3.4).
+11. Report usage against the identifier you were asked about, not your own
+    (§4.1.1, §4.3).
+12. Handle `membership_control` and reject unknown `template` values (§4.1), and
     populate `AwardDetails.members` (§4.2).
-11. Fetch and acknowledge notifications (§5).
+13. Fetch and acknowledge notifications (§5).
 
 ---
 

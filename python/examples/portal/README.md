@@ -91,25 +91,38 @@ records it, and — because nobody has approved it — answers
 `ManagedProjectPendingError`. This is *not* a failure. The awarding portal logs
 it quietly and will ask again.
 
-**2. An operator looks at it.**
+**2. An operator approves it, and says what we call it here.**
 
 ```bash
 curl localhost:8080/awards
 curl -X POST localhost:8080/awards/myproject.ukri/approve \
-     -H 'content-type: application/json' -d '{"reason": "approved by the panel"}'
+     -H 'content-type: application/json' \
+     -d '{"local_project_id": "proj001.aip1", "reason": "approved by the panel"}'
 ```
 
-**3. It goes live by itself.** Nothing is pushed back to `ukri`. It is already
-re-sending `create_award` every cycle, so the next one gets a `ProjectMapping`
-instead of an error and the award is live. This is the single most useful
-consequence of the retry contract: approval needs no notification path of its
-own.
+`local_project_id` is required, and it is the point of the whole exchange.
+`ukri` knows this award as `myproject.ukri`; we now know the project we made for
+it as `proj001.aip1`. Neither side could guess the other's name, so approval is
+where ours gets decided.
 
-**4. Usage figures are pushed in.** Your accounting is the source of truth, so
-your parsers push:
+**3. It goes live by itself, and `ukri` learns our name for it.** Nothing is
+pushed back. `ukri` is already re-sending `create_award` every cycle, so the
+next one gets a `ProjectMapping` instead of an error:
+
+```
+myproject.ukri:proj001.aip1
+```
+
+Both sides now hold the pair, and from here the award ID and the project ID are
+two names for one thing. This is the most useful consequence of the retry
+contract — approval needs no notification path of its own.
+
+**4. Usage figures are pushed in — against *our* identifier.** Your accounting
+produces figures for `proj001.aip1` and has never heard of `myproject.ukri`, so
+that is what it posts against:
 
 ```bash
-curl -X PUT localhost:8080/awards/myproject.ukri/usage \
+curl -X PUT localhost:8080/projects/proj001.aip1/usage \
      -H 'content-type: application/json' \
      -d '{"hours": {"2026-08-01": {"alice@bristol.ac.uk": 12.5}}}'
 ```
@@ -118,40 +131,55 @@ or, if your parser already produces OpenPortal types, push a complete
 `ProjectUsageReport`:
 
 ```bash
-curl -X PUT localhost:8080/awards/myproject.ukri/usage \
+curl -X PUT localhost:8080/projects/proj001.aip1/usage \
      -H 'content-type: application/json' \
      -d '{"report": { ... ProjectUsageReport JSON ... }}'
 ```
 
 Both end up in the same store, and `get_usage_report` serves either.
 
-**5. `ukri` collects them**, and `get_usage_report` answers from what was
-pushed — no computing on the request path, because there are only about thirty
-seconds to answer in.
+Note the endpoints under `/awards` are keyed on `ukri`'s identifier and this one
+on ours. That is not an inconsistency — it is the two namespaces, and the
+mapping is what joins them.
 
-## The five things worth taking away
+**5. `ukri` collects them, and gets an answer in its own namespace.** It asks
+`get_usage_report myproject.ukri`. The figures were recorded against
+`proj001.aip1`, so `build_usage_report` assembles the report in our namespace
+and then `remap_project`s it into theirs — `alice.proj001.aip1` becomes
+`alice.myproject.ukri`, and the member's email is untouched because it is the
+same person either way. It answers from what was pushed, with no computing on
+the request path, because there are only about thirty seconds to answer in.
+
+## The six things worth taking away
 
 Each of these is commented at the point it matters in the code, but they are the
 reason the example exists.
 
-1. **Failing is a normal answer, and *which* failure matters.**
+1. **The mapping is where two portals agree what to call a thing.** You decide
+   your own `ProjectIdentifier` for an award when you provision it, and return
+   it as the second half of the `ProjectMapping`. It is what the awarding portal
+   joins on, and what your usage figures translate through. Until it exists you
+   have nothing honest to return — which is why an unapproved award answers with
+   an error instead.
+
+2. **Failing is a normal answer, and *which* failure matters.**
    `ManagedProjectPendingError` means "not yet, ask again" and is benign;
    `ManagedProjectRejectedError` means "no" and is terminal. Confusing them
    either strands an award that only needed approving, or leaves the caller
    retrying forever against a decision that will never change.
 
-2. **Everything is retried, so everything must be idempotent.** `create_award`
+3. **Everything is retried, so everything must be idempotent.** `create_award`
    arrives repeatedly for awards you already hold. `update_award` arrives for
    awards you have never seen. A duplicate job id must not do the work twice.
 
-3. **Never leave a job unanswered.** `portal.answer()` is built so that a
+4. **Never leave a job unanswered.** `portal.answer()` is built so that a
    handler returning, a handler raising, and a handler crashing all produce a
    posted result. Silence becomes a two-minute timeout for whoever is waiting.
 
-4. **You have thirty seconds, not two minutes.** The job expiry is two minutes
+5. **You have thirty seconds, not two minutes.** The job expiry is two minutes
    but the caller gives up long before that. Serve reports from cache.
 
-5. **Implement as much or as little as you want.** There is no minimum set.
+6. **Implement as much or as little as you want.** There is no minimum set.
    Decline what you do not implement with
    `OpenPortalUnsupportedCommandError` — clearly, so a caller can tell "I don't
    do that" from "I'm broken". This example does not implement `get_users`, and

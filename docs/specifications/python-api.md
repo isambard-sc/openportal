@@ -452,27 +452,32 @@ plain string. Usable as a `dict` key or in a `set`.
 
 ### `ProjectMapping`
 
-The pairing of a project identifier with whatever the local portal calls that
-project: `<project_id>:<local_group>`, e.g. `"myproject.myportal:grp001"`.
+The pairing of two portals' names for the same thing:
+`<their project id>:<our project id>`, e.g. `"myproject.ukri:proj001.aip1"`.
 
 **This is a string, not an object**, and it is what `create_award`,
 `update_award`, `remove_award` and `get_project_mapping` must return — see
-[project-portal-api.md §4.1](project-portal-api.md).
+[project-portal-api.md §4.1.1](project-portal-api.md), which explains why it
+matters.
 
 | Property | Type | Description |
 |---|---|---|
 | `project` | `ProjectIdentifier` | The identifier the awarding portal used |
-| `local_group` | `str` | What this portal calls that project locally |
+| `local_group` | `str` | The receiving portal's own identifier for it |
 
-`ProjectMapping("myproject.myportal:grp001")` constructs from a string, and
+`ProjectMapping("myproject.ukri:proj001.aip1")` constructs from a string, and
 raises `OSError` if either half is invalid. `str(m)` returns the pair. Supports
 `==` / `!=` against another `ProjectMapping`.
 
-`local_group` names a Unix group elsewhere in the network, so it is restricted
-to `A-Za-z0-9._-` (no leading `-`, no leading or trailing `.`, no `..`).
-Reusing the project identifier is the convention for a portal with no Unix
-groups of its own. `remove_award` answers with the literal `None` in this slot,
-since there is no local group left to name.
+The second half is named `local_group` for historical reasons — elsewhere in the
+network it does name a Unix group — but at the portal layer it is the receiving
+portal's own `ProjectIdentifier`, a full `<project>.<their-portal>`. It is the
+join key: usage recorded against it is reported against the *first* half, and
+`ProjectUsageReport.remap_project` is the translation. It is restricted to
+`A-Za-z0-9._-` (no leading `-`, no leading or trailing `.`, no `..`).
+
+`remove_award` answers with the literal `None` in this slot, since there is no
+project of the receiving portal's left to name.
 
 ---
 
@@ -777,7 +782,7 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 | `daily_reports` | `(with_usage_only: bool = True) → list[DailyProjectUsageReport]` | Return the daily reports sorted by date. If `with_usage_only=True` (default), only days with non-zero usage are returned; pass `False` to include all days. |
 | `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user breakdowns, job counts, and average wait times. |
 | `filter` | `(range: DateRange) → ProjectUsageReport` | Return a copy of this report containing only days that fall within `range` (inclusive on both ends). |
-| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
+| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. This is how a portal answers a request about *their* project with figures recorded against *its own* — see [project-portal-api.md §4.1.1](project-portal-api.md). Local usernames are unchanged. |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping each project name unchanged, e.g. `project.portal` → `project.new_portal`. |
 | `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
 

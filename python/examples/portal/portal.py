@@ -48,27 +48,40 @@ OFFERED_TEMPLATES = {"standard", "large"}
 # --------------------------------------------------------------------------
 
 
-def _local_group(award: store.Award) -> str:
+def _local_project(award: store.Award) -> openportal.ProjectIdentifier:
     """
-    What we call a project locally.
+    Our own `ProjectIdentifier` for an award, which only an approved award has.
+    """
+    if award.local_project_id is None:
+        raise openportal.OpenPortalError(
+            f"{award.project_id} has no local project - it is not approved"
+        )
 
-    A real portal generates something meaningful. Reusing the identifier is the
-    convention for a portal with no Unix groups of its own: it is always unique
-    and always a valid group name.
-    """
-    return award.local_group or award.project_id
+    return openportal.ProjectIdentifier(award.local_project_id)
 
 
 def _mapping(award: store.Award) -> openportal.ProjectMapping:
     """
     The `ProjectMapping` most award instructions return:
-    `<project_id>:<local_group>`.
+    `<their project id>:<our project id>`.
+
+    **This is the whole point of the exchange.** The awarding portal knows the
+    award as `myproject.ukri`; we know the project we created for it as
+    `proj001.aip1`. Neither side can guess the other's name, so the mapping is
+    where they are joined - and once it has been returned, both sides know that
+    their award and our project are the same object. Award ID and project ID
+    become two names for one thing at this interface.
+
+    It matters beyond bookkeeping. Our accounting produces usage figures for
+    `proj001.aip1` and has never heard of `myproject.ukri`; the mapping is what
+    lets `get_usage_report` answer a question asked in their namespace with
+    figures recorded in ours.
 
     Only ever built for an *approved* award. One still awaiting approval has no
-    local project, so there is no honest group name to put here - which is
+    local project, so there is no honest identifier to put here - which is
     precisely why the answer in that case is an error, not a mapping (§4.1).
     """
-    return openportal.ProjectMapping(f"{award.project_id}:{_local_group(award)}")
+    return openportal.ProjectMapping(f"{award.project_id}:{_local_project(award)}")
 
 
 def _require_award(project_id: str) -> store.Award:
@@ -285,18 +298,29 @@ def build_usage_report(
     """
     Assemble a `ProjectUsageReport` from the figures we hold.
 
-    Note that nothing here hand-assembles JSON. Construct the report, add a
-    daily report per date, and the type handles the wire format - including the
-    `UserIdentifier` → local-name mappings, which is what `add_mapping` is for.
-    At the portal layer the "local name" is the member's email address.
+    Two things are going on, and the second is the interesting one.
+
+    Nothing here hand-assembles JSON: construct the report, add a daily report
+    per date, and the type handles the wire format.
+
+    More importantly, **the figures are recorded in our namespace and asked for
+    in theirs**. Our accounting produces usage for `proj001.aip1`; the awarding
+    portal asked about `myproject.ukri`. So the report is built against our own
+    project identifier and then `remap_project`ped into theirs at the end. That
+    translation is only possible because approving the award fixed the mapping
+    between the two.
 
     `app.py` also accepts a complete `ProjectUsageReport` JSON pushed in by an
     operator's own parser. Both routes end up in the same store, and this
     function serves either.
     """
     award = _require_award(project_id)
+    local_project = _local_project(award)
 
-    report = openportal.ProjectUsageReport(openportal.ProjectIdentifier(project_id))
+    # Build the report in *our* namespace first, because that is the namespace
+    # the figures were recorded in - our accounting knows `proj001.aip1` and has
+    # never heard of `myproject.ukri`.
+    report = openportal.ProjectUsageReport(local_project)
     today = datetime.date.today()
 
     for iso_date, per_user in sorted(award.usage.items()):
@@ -304,9 +328,11 @@ def build_usage_report(
         daily = openportal.DailyProjectUsageReport()
 
         for email, hours in per_user.items():
-            user = openportal.UserIdentifier(f"{_username(email)}.{project_id}")
+            # `add_mapping` records which portal user each local name belongs
+            # to. At the portal layer the local name is the member's email.
+            user = openportal.UserIdentifier(f"{_username(email)}.{local_project}")
             report.add_mapping(
-                openportal.UserMapping(f"{user}:{email}:{_local_group(award)}")
+                openportal.UserMapping(f"{user}:{email}:{local_project}")
             )
             daily.add_usage(email, openportal.Usage.from_hours(float(hours)))
 
@@ -316,6 +342,14 @@ def build_usage_report(
             daily.set_complete()
 
         report.set_report(date, daily)
+
+    # Now translate the whole report into the awarding portal's namespace. This
+    # is the mapping being used: they asked about `myproject.ukri`, so that is
+    # what the answer must be about. `remap_project` rewrites the project and
+    # rebuilds every `UserIdentifier` with it, turning `alice.proj001.aip1` into
+    # `alice.myproject.ukri` - the member's email is unchanged, because that is
+    # the same person either way.
+    report.remap_project(openportal.ProjectIdentifier(project_id))
 
     return report.filter(date_range)
 

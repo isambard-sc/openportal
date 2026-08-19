@@ -33,12 +33,26 @@ PROJECT = "myproject.ukri"
 #: What *we* call the project we create for it. The two halves of the mapping.
 LOCAL_PROJECT = "proj001.aip1"
 
-OFFERING = "example-resource"
+#: The resource the award is for, and one it is not. Both are virtual agents on
+#: this portal, and the difference between them is the point of several checks
+#: below: an award lives on one resource, and the other knows nothing about it.
+OFFERING = "isambard-ai"
+OTHER_OFFERING = "isambard3"
 
 
-def make_job(instruction: str, *, forwarded_for: str | None = None) -> openportal.Job:
+def make_job(
+    instruction: str,
+    *,
+    offering: str = OFFERING,
+    forwarded_for: str | None = None,
+) -> openportal.Job:
     """
     A pending bridge-board job, as `fetch_job` would return it.
+
+    The destination ends with the offering - `aip1.bridge.isambard-ai` - which
+    is how the portal knows which resource the request is about. `forwarded_for`
+    carries the awarding portal's original `ukri.aip1.isambard-ai` when there is
+    one, and takes precedence.
 
     Note `state` is capitalised on the wire (`"Pending"`, not `"pending"`) -
     Python lower-cases it only for display.
@@ -51,7 +65,7 @@ def make_job(instruction: str, *, forwarded_for: str | None = None) -> openporta
                 "changed": 1700000000,
                 "expires": 4000000000,
                 "version": 1,
-                "command": f"aip1.bridge.{OFFERING} {instruction}",
+                "command": f"aip1.bridge.{offering} {instruction}",
                 "state": "Pending",
                 "result": None,
                 "result_type": None,
@@ -97,7 +111,7 @@ def _run_all() -> None:
         f"-> {job.error}",
     )
     check("...carrying the award_pending kind", job.error_kind == "award_pending")
-    check("the award was recorded", store.load(PROJECT) is not None)
+    check("the award was recorded on that offering", store.load(OFFERING, PROJECT) is not None)
 
     print("\n-- idempotency: the same create arrives again -------------------")
 
@@ -124,7 +138,7 @@ def _run_all() -> None:
 
     # Approving is what creates a project here and gives it an identifier in
     # *our* namespace. That identifier is our half of the mapping.
-    award = store.load(PROJECT)
+    award = store.load(OFFERING, PROJECT)
     award.raw["state"] = store.Award.APPROVED
     award.raw["local_project_id"] = LOCAL_PROJECT
     store.save(award)
@@ -170,14 +184,14 @@ def _run_all() -> None:
         "an update for an unknown award becomes a create",
         type(job.error) is openportal.ManagedProjectPendingError,
     )
-    check("...and the award now exists", store.load("fresh.ukri") is not None)
-    store.delete("fresh.ukri")
+    check("...and the award now exists", store.load(OFFERING, "fresh.ukri") is not None)
+    store.delete(OFFERING, "fresh.ukri")
 
     print("\n-- usage: recorded in our namespace, answered in theirs --------")
 
     # Push figures in the way an operator's parser would - against our own
     # project identifier, which is the only one that accounting knows.
-    award = store.load(PROJECT)
+    award = store.load(OFFERING, PROJECT)
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
     award.raw["usage"] = {yesterday: {"alice@bristol.ac.uk": 12.5}}
     store.save(award)
@@ -218,16 +232,116 @@ def _run_all() -> None:
     check("get_usage_reports rolls up to the portal", not job.is_error)
     check("...as a UsageReport", type(job.result) is openportal.UsageReport)
 
+    print("\n-- the same question asked of the wrong resource ----------------")
+
+    # The award lives on isambard-ai. An awarding portal can perfectly well ask
+    # isambard3 about it - same identifier, nothing stops the question - and the
+    # honest answer is that nothing was used there, because the project is not
+    # there. Empty, not an error: a caller sweeping every offering it knows
+    # about should not be failed by the ones that hold nothing.
+    job = portal.answer(
+        make_job(f"get_usage_report {PROJECT} this_month", offering=OTHER_OFFERING)
+    )
+    check("usage from the wrong offering succeeds", not job.is_error, f"{job.error_message}")
+    check(
+        "...and is empty, because the project is not on that resource",
+        job.result.total_usage.seconds == 0,
+        f"-> {job.result.total_usage}",
+    )
+    check(
+        "...while the right offering still has the usage",
+        portal.answer(
+            make_job(f"get_usage_report {PROJECT} this_month")
+        ).result.total_usage.seconds > 0,
+    )
+
+    # An award is only visible through the resource it was created on.
+    job = portal.answer(make_job(f"get_award {PROJECT}", offering=OTHER_OFFERING))
+    check("get_award from the wrong offering finds nothing", job.is_error, f"-> {job.error}")
+    check(
+        "...listings are scoped too",
+        portal.answer(make_job("get_projects ukri", offering=OTHER_OFFERING)).result == [],
+    )
+    check(
+        "...while the right offering lists it",
+        len(portal.answer(make_job("get_projects ukri")).result) > 0,
+    )
+
+    print("\n-- the same name on two resources is two awards -----------------")
+
+    # `myproject.ukri` on isambard3 is a different award from `myproject.ukri`
+    # on isambard-ai, and creating it must not disturb the first.
+    job = portal.answer(
+        make_job(f"create_project {PROJECT} {details()}", offering=OTHER_OFFERING)
+    )
+    check(
+        "creating the same name on another resource is a new, pending award",
+        type(job.error) is openportal.ManagedProjectPendingError,
+    )
+    check(
+        "...the original is untouched and still approved",
+        str(portal.answer(make_job(f"get_project_mapping {PROJECT}")).result)
+        == f"{PROJECT}:{LOCAL_PROJECT}",
+    )
+    check(
+        "...and they are stored as two separate awards",
+        len([a for a in store.all_awards() if a.project_id == PROJECT]) == 2,
+    )
+
+    # The two awards must not end up sharing one local project either. This is
+    # the same mistake as everywhere else in this section - comparing only the
+    # identifier and forgetting the offering - and it is worth a test because it
+    # is so easy to write.
+    other = store.load(OTHER_OFFERING, PROJECT)
+    check(
+        "the two awards are distinct despite the shared name",
+        (other.offering, other.project_id) != (OFFERING, PROJECT)
+        and other.project_id == PROJECT,
+    )
+    check(
+        "...and our identifier for the first is not free to reuse",
+        store.load_by_local_id(LOCAL_PROJECT).offering == OFFERING,
+    )
+
+    # Removing from one resource leaves the other alone.
+    portal.answer(make_job(f"remove_project {PROJECT}", offering=OTHER_OFFERING))
+    check(
+        "removing from one resource leaves the other",
+        store.load(OFFERING, PROJECT) is not None
+        and store.load(OTHER_OFFERING, PROJECT) is None,
+    )
+
+    print("\n-- a template this resource does not offer ----------------------")
+
+    # Templates are per-resource: `large` is offered on isambard-ai and not on
+    # isambard3, because a template selects things that belong to the resource.
+    job = portal.answer(
+        make_job(f"create_project big.ukri {details('large')}", offering=OTHER_OFFERING)
+    )
+    check(
+        "a template offered elsewhere is rejected here",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+    job = portal.answer(make_job(f"create_project big.ukri {details('large')}"))
+    check(
+        "...and accepted on the resource that offers it",
+        type(job.error) is openportal.ManagedProjectPendingError,
+    )
+    store.delete(OFFERING, "big.ukri")
+
     print("\n-- an award with no local project yet --------------------------")
 
-    # Usage cannot be reported for an award that has not been approved, because
-    # there is no project on our side to have recorded any against.
+    # An unapproved award has no project on our side, so there is nothing for
+    # usage to have been recorded against. Empty, for the same reason as the
+    # wrong-offering case above: nothing was used, and that is not a failure.
     pending = "notyet.ukri"
     portal.answer(make_job(f"create_project {pending} {details()}"))
     job = portal.answer(make_job(f"get_usage_report {pending} this_month"))
-    check("usage for an unapproved award is an error", job.is_error, f"-> {job.error}")
+    check("usage for an unapproved award is empty, not an error", not job.is_error)
+    check("...and reports zero", job.result.total_usage.seconds == 0)
     check(
-        "...and the mapping for it is refused too",
+        "...while the mapping for it is still refused, being pending",
         portal.answer(make_job(f"get_project_mapping {pending}")).is_error,
     )
     check(
@@ -237,7 +351,7 @@ def _run_all() -> None:
             for m in portal.answer(make_job("get_projects ukri")).result
         ),
     )
-    store.delete(pending)
+    store.delete(OFFERING, pending)
 
     print("\n-- storage: empty beats absent ---------------------------------")
 
@@ -289,7 +403,7 @@ def _run_all() -> None:
 
     job = portal.answer(make_job(f"remove_project {PROJECT}"))
     check("remove_award answers with :None", str(job.result) == f"{PROJECT}:None")
-    check("...and the award is gone", store.load(PROJECT) is None)
+    check("...and the award is gone", store.load(OFFERING, PROJECT) is None)
 
     job = portal.answer(make_job(f"remove_project {PROJECT}"))
     check("removing it twice is not an error", not job.is_error)

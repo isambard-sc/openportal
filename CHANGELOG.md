@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`project-portal-api.md` §1.3, on what an offering actually is.** The
+  document introduced offerings as "named things `ukri` is allowed to address",
+  which invites reading them as an access-control list. They are virtual agents
+  standing for one resource each, and the offering a request arrives through is
+  *part of what is being asked*: `create_award` to `ukri.aip1.isambard-ai` is a
+  request to create a project on Isambard-AI, the template is interpreted in
+  that resource's context, and the project stays tied to it.
+
+  So awards are keyed on `(offering, project_id)` - the same name on two
+  resources is two awards - every answer is scoped by the offering it was asked
+  through, and a question about a project that is not on this resource returns
+  an **empty report rather than an error**, because an awarding portal sweeping
+  its offerings to find which one holds an award should not be failed by the
+  ones that hold nothing.
 - **`project-portal-api.md` §4.1.1, on what a `ProjectMapping` is for.** The
   document described its second half as "whatever you call that project
   locally", which undersold it. It is the receiving portal's own

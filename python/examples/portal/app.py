@@ -95,9 +95,11 @@ async def lifespan(app: FastAPI):
     # A real portal reads the list of awarding portals from its configuration.
     awarding_portals = os.environ.get("PORTAL_AWARDING_PORTALS", "ukri").split(",")
 
+    # One registration per (resource, awarding portal) pair. Each is a virtual
+    # agent on this portal that the named portal may address directly.
     offerings = [
         openportal.Destination(f"{offering}.{me}.{them.strip()}")
-        for offering in portal.OFFERINGS
+        for offering in sorted(portal.OFFERINGS)
         for them in awarding_portals
         if them.strip()
     ]
@@ -269,6 +271,7 @@ async def list_awards():
     """Every award we hold, with its approval state."""
     return [
         {
+            "offering": a.offering,
             "project_id": a.project_id,
             "state": a.state,
             "reason": a.reason,
@@ -281,25 +284,35 @@ async def list_awards():
     ]
 
 
-@app.get("/awards/{project_id}")
-async def get_one_award(project_id: str):
-    award = store.load(project_id)
+@app.get("/awards/{offering}/{project_id}")
+async def get_one_award(offering: str, project_id: str):
+    """
+    One award. Keyed on the resource as well as the identifier, because that
+    pair is what identifies an award - the same name on another resource is a
+    different award.
+    """
+    award = store.load(offering, project_id)
 
     if award is None:
-        raise HTTPException(status_code=404, detail="no such award")
+        raise HTTPException(status_code=404, detail="no such award on that offering")
 
     return award.raw
 
 
-@app.post("/awards/{project_id}/approve")
-async def approve(project_id: str, approval: Approval):
+@app.post("/awards/{offering}/{project_id}/approve")
+async def approve(offering: str, project_id: str, approval: Approval):
     """
     Approve an award, and **give it its identifier here**.
 
     This is the moment the mapping is made. Until now the awarding portal knows
-    the award as `myproject.ukri` and we have nothing to pair it with; approving
-    creates a project on our side and names it, and that name is what closes the
-    loop.
+    the award as `myproject.ukri` on `isambard-ai` and we have nothing to pair
+    it with; approving creates a project on our side and names it, and that name
+    is what closes the loop.
+
+    The project is created **on the resource the award came in through**, and
+    stays tied to it. That is why the offering is in the path here: approving
+    `myproject.ukri` on `isambard-ai` says nothing about an award of the same
+    name on `isambard3`, which would be a different project.
 
     Nothing is pushed back to the awarding portal, and nothing needs to be. It
     is already re-sending `create_award` every cycle, so the next one gets a
@@ -307,10 +320,10 @@ async def approve(project_id: str, approval: Approval):
     is how it learns our identifier. Approval needs no notification path of its
     own, which is the most useful consequence of the retry contract.
     """
-    award = store.load(project_id)
+    award = store.load(offering, project_id)
 
     if award is None:
-        raise HTTPException(status_code=404, detail="no such award")
+        raise HTTPException(status_code=404, detail="no such award on that offering")
 
     # Must be a well-formed identifier, and must be one of *ours*: a mapping
     # naming some other portal's project would be a claim we cannot make.
@@ -330,13 +343,19 @@ async def approve(project_id: str, approval: Approval):
             ),
         )
 
-    # One local project per award, both ways round.
+    # One local project per award. The comparison is on the *whole* key -
+    # offering and identifier - because `myproject.ukri` on isambard-ai and
+    # `myproject.ukri` on isambard3 are two different awards and must not end
+    # up sharing one project.
     clash = store.load_by_local_id(str(local))
 
-    if clash is not None and clash.project_id != project_id:
+    if clash is not None and (clash.offering, clash.project_id) != (offering, project_id):
         raise HTTPException(
             status_code=409,
-            detail=f"'{local}' is already the local project for {clash.project_id}",
+            detail=(
+                f"'{local}' is already the local project for "
+                f"{clash.project_id} on {clash.offering}"
+            ),
         )
 
     award.raw["state"] = store.Award.APPROVED
@@ -344,33 +363,34 @@ async def approve(project_id: str, approval: Approval):
     award.raw["local_project_id"] = str(local)
     store.save(award)
 
-    logger.info("approved %s as %s", project_id, local)
+    logger.info("approved %s on %s as %s", project_id, offering, local)
     return {
+        "offering": offering,
         "project_id": project_id,
         "local_project_id": str(local),
         "state": award.state,
     }
 
 
-@app.post("/awards/{project_id}/reject")
-async def reject(project_id: str, decision: Rejection):
+@app.post("/awards/{offering}/{project_id}/reject")
+async def reject(offering: str, project_id: str, decision: Rejection):
     """
     Refuse an award, terminally.
 
     The reason given here is what the awarding portal receives inside
     `ManagedProjectRejectedError`, so write it for whoever reads it there.
     """
-    award = store.load(project_id)
+    award = store.load(offering, project_id)
 
     if award is None:
-        raise HTTPException(status_code=404, detail="no such award")
+        raise HTTPException(status_code=404, detail="no such award on that offering")
 
     award.raw["state"] = store.Award.REJECTED
     award.raw["reason"] = decision.reason or "refused by a site administrator"
     store.save(award)
 
-    logger.info("rejected %s: %s", project_id, award.reason)
-    return {"project_id": project_id, "state": award.state}
+    logger.info("rejected %s on %s: %s", project_id, offering, award.reason)
+    return {"offering": offering, "project_id": project_id, "state": award.state}
 
 
 @app.put("/projects/{local_project_id}/usage")
@@ -447,6 +467,7 @@ async def push_usage(local_project_id: str, push: UsagePush):
     return {
         "local_project_id": local_project_id,
         "award": award.project_id,
+        "offering": award.offering,
         "days": len(hours),
     }
 

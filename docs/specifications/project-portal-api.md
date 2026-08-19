@@ -119,6 +119,43 @@ projects.
 A locally-originated request has `forwarded_for` absent or naming only your own
 portal.
 
+### 1.3 The offering says *which resource*, and scopes everything
+
+An offering is a **virtual agent** on your portal: a name the awarding portal
+addresses directly, standing for one resource you run. `aip1` might offer
+`isambard-ai` and `isambard-p1`, and `ukri` addresses them as
+`ukri.aip1.isambard-ai` and `ukri.aip1.isambard-p1`.
+
+It is easy to read the offering as an access-control list — a set of names to
+check a request against — and that reading will produce a portal that answers
+the wrong questions. **The offering is part of what is being asked, not a
+permission to ask it.**
+
+`create_award` sent to `ukri.aip1.isambard-ai` is a request to create a project
+*on Isambard-AI*. The `template` in the `AwardDetails` is interpreted in the
+context of that resource — in Waldur it selects the organisation, the default
+offerings and the billing the project is created with, all of which belong to
+the resource — so the same template name may be offered on one and not another.
+When you provision, the project you create is tied to that resource, and the
+identifier you return in the mapping (§4.1.1) names a project on it.
+
+Three consequences:
+
+* **Key your records on `(offering, project_id)`.** `myproject.ukri` on
+  `isambard-ai` and `myproject.ukri` on `isambard-p1` are two different awards
+  for two different resources. The reference implementation keys its own records
+  exactly this way.
+* **Scope every answer by the offering the request came through.** `get_awards`
+  through `isambard-ai` means "what does `ukri` have *on Isambard-AI*".
+* **A question about a project that is not on this resource is not an error.**
+  An awarding portal sweeping every offering it knows about will ask each one
+  about each award. The offering that holds nothing answers with an **empty
+  report**, not a failure — see §4.3.
+
+Read the offering from `forwarded_for`'s last element, falling back to the
+job's own destination (`aip1.<bridge>.isambard-ai`) which ends the same way for
+a locally-originated request.
+
 ---
 
 ## 2. The `award` vocabulary
@@ -426,7 +463,8 @@ name, and until they have been exchanged there is no way to say "that award" and
 
 The `ProjectMapping` you return is that exchange. **Its second half is your own
 `ProjectIdentifier` for the award** — a full `<project>.<your-portal>`
-identifier in your namespace, not a bare group name:
+identifier in your namespace, naming the project you created *on the resource
+the award came in through* (§1.3), not a bare group name:
 
 ```
 myproject.ukri:proj001.aip1
@@ -565,6 +603,12 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
   "something is broken". The first is the truth and it is what a caller can act
   on — but since the two requests are independent, choosing the error costs you
   only the storage figures.
+* **A project that is not on this resource reports empty.** A request for a
+  project whose award was created through a *different* offering is a fair
+  question with the answer "nothing was used here" (§1.3). Answer it with an
+  empty report. An awarding portal may ask every offering it knows about which
+  ones hold a given award, and failing the ones that do not would break that
+  sweep for no reason.
 
 ### 4.4 What you will not receive
 
@@ -613,27 +657,29 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
    as their `*_project` equivalents (§2).
 5. Authorise against `forwarded_for`, and store records under the full
    awarding-portal identifier (§1.2).
-6. Decide your own `ProjectIdentifier` for an award when you provision it, and
+6. Read the offering from the request, key your records on
+   `(offering, project_id)`, and scope every answer by it. A project that is
+   not on the requested resource reports empty, not an error (§1.3).
+7. Decide your own `ProjectIdentifier` for an award when you provision it, and
    return it as the second half of the `ProjectMapping`. It is what the awarding
    portal joins on, and what your usage figures translate through (§4.1.1).
-7. Pick the instructions you will answer; decline the rest with
+8. Pick the instructions you will answer; decline the rest with
    `OpenPortalUnsupportedCommandError` (§4.0). Return the exact type in §4 for
    the ones you keep, and never let a job go unanswered (§3.3).
-8. Fail with the right class — `ManagedProjectPendingError` for "not yet",
+9. Fail with the right class — `ManagedProjectPendingError` for "not yet",
    `ManagedProjectRejectedError` for "no" — because the caller treats them
    completely differently (§3.3).
-9. Make every handler idempotent: `create_award` for an award you already hold
+10. Make every handler idempotent: `create_award` for an award you already hold
    is normal traffic, and duplicate job ids must not do the work twice (§3.5).
-10. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
+11. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
     cache (§3.4).
-11. Report usage against the identifier you were asked about, not your own
+12. Report usage against the identifier you were asked about, not your own
     (§4.1.1, §4.3).
-12. Handle `membership_control` and reject unknown `template` values (§4.1), and
+13. Handle `membership_control` and reject unknown `template` values (§4.1), and
     populate `AwardDetails.members` (§4.2).
-13. Fetch and acknowledge notifications (§5).
+14. Fetch and acknowledge notifications (§5).
 
 ---
-
 ## 7. Source file reference
 
 | Concept | Source file |

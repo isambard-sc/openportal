@@ -86,19 +86,25 @@ python test_portal.py
 With the application running and an awarding portal called `ukri` configured,
 here is the whole life of an award.
 
-**1. `ukri` creates it.** The job reaches `/signal/job`, `portal.create_award`
-records it, and — because nobody has approved it — answers
-`ManagedProjectPendingError`. This is *not* a failure. The awarding portal logs
-it quietly and will ask again.
+**1. `ukri` creates it, on a particular resource.** It addresses
+`ukri.aip1.isambard-ai`, and that last element is a *virtual agent* on this
+portal standing for one resource we run. The request is not "create an award",
+it is "create a project on Isambard-AI". The job reaches `/signal/job`,
+`portal.create_award` records it against that offering, and — because nobody has
+approved it — answers `ManagedProjectPendingError`. This is *not* a failure. The
+awarding portal logs it quietly and will ask again.
 
 **2. An operator approves it, and says what we call it here.**
 
 ```bash
 curl localhost:8080/awards
-curl -X POST localhost:8080/awards/myproject.ukri/approve \
+curl -X POST localhost:8080/awards/isambard-ai/myproject.ukri/approve \
      -H 'content-type: application/json' \
      -d '{"local_project_id": "proj001.aip1", "reason": "approved by the panel"}'
 ```
+
+The offering is in the path because an award is identified by *both* — the same
+name on `isambard3` would be a different award, for a different resource.
 
 `local_project_id` is required, and it is the point of the whole exchange.
 `ukri` knows this award as `myproject.ukri`; we now know the project we made for
@@ -143,43 +149,57 @@ on ours. That is not an inconsistency — it is the two namespaces, and the
 mapping is what joins them.
 
 **5. `ukri` collects them, and gets an answer in its own namespace.** It asks
-`get_usage_report myproject.ukri`. The figures were recorded against
+`ukri.aip1.isambard-ai get_usage_report myproject.ukri`. The figures were recorded against
 `proj001.aip1`, so `build_usage_report` assembles the report in our namespace
 and then `remap_project`s it into theirs — `alice.proj001.aip1` becomes
 `alice.myproject.ukri`, and the member's email is untouched because it is the
 same person either way. It answers from what was pushed, with no computing on
 the request path, because there are only about thirty seconds to answer in.
 
-## The six things worth taking away
+**6. The same question asked of the wrong resource returns nothing.** Ask
+`ukri.aip1.isambard3 get_usage_report myproject.ukri` and the answer is an
+*empty* report, not an error — the project is not on Isambard 3, so nothing was
+used there. An awarding portal sweeping every offering it knows about to find
+which one holds an award relies on that.
+
+## The seven things worth taking away
 
 Each of these is commented at the point it matters in the code, but they are the
 reason the example exists.
 
-1. **The mapping is where two portals agree what to call a thing.** You decide
+1. **The offering says which resource, and scopes everything.** It is a virtual
+   agent standing for one resource you run, and it is part of what is being
+   asked rather than a permission to ask it. Awards are keyed on
+   `(offering, project id)`; answers are scoped by it; and a question about a
+   project that is not on this resource returns empty, not an error. Reading it
+   as an access-control list is the mistake this example is arranged to prevent
+   — which is why it offers two resources rather than one.
+
+2. **The mapping is where two portals agree what to call a thing.** You decide
    your own `ProjectIdentifier` for an award when you provision it, and return
    it as the second half of the `ProjectMapping`. It is what the awarding portal
    joins on, and what your usage figures translate through. Until it exists you
    have nothing honest to return — which is why an unapproved award answers with
    an error instead.
 
-2. **Failing is a normal answer, and *which* failure matters.**
+3. **Failing is a normal answer, and *which* failure matters.**
    `ManagedProjectPendingError` means "not yet, ask again" and is benign;
    `ManagedProjectRejectedError` means "no" and is terminal. Confusing them
    either strands an award that only needed approving, or leaves the caller
    retrying forever against a decision that will never change.
 
-3. **Everything is retried, so everything must be idempotent.** `create_award`
+4. **Everything is retried, so everything must be idempotent.** `create_award`
    arrives repeatedly for awards you already hold. `update_award` arrives for
    awards you have never seen. A duplicate job id must not do the work twice.
 
-4. **Never leave a job unanswered.** `portal.answer()` is built so that a
+5. **Never leave a job unanswered.** `portal.answer()` is built so that a
    handler returning, a handler raising, and a handler crashing all produce a
    posted result. Silence becomes a two-minute timeout for whoever is waiting.
 
-5. **You have thirty seconds, not two minutes.** The job expiry is two minutes
+6. **You have thirty seconds, not two minutes.** The job expiry is two minutes
    but the caller gives up long before that. Serve reports from cache.
 
-6. **Implement as much or as little as you want.** There is no minimum set.
+7. **Implement as much or as little as you want.** There is no minimum set.
    Decline what you do not implement with
    `OpenPortalUnsupportedCommandError` — clearly, so a caller can tell "I don't
    do that" from "I'm broken". This example does not implement `get_users`, and

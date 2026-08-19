@@ -14,9 +14,13 @@ what lets you throw this file away without touching the handlers.
 
 Two design choices worth copying even so:
 
-* **Awards are keyed on the full project identifier** (`myproj.ukri`), not on
-  the project name. The same name can exist under two different awarding
-  portals and they are different projects - see project-portal-api.md §1.2.
+* **Awards are keyed on `(offering, project identifier)`, not on either
+  alone.** The offering names *which resource* the award is for, so the same
+  awarding portal can hold two separate awards under the same name on two
+  different resources - see project-portal-api.md §1.3. And the identifier must
+  be the full `myproj.ukri`, because the same project name can exist under two
+  different awarding portals and mean different projects (§1.2). The reference
+  implementation keys its own records the same way.
 
 * **State is read fresh from disk on every access.** An operator approving an
   award through the REST API and the job handler answering a request are
@@ -36,20 +40,34 @@ from typing import Any
 STATE_DIR = Path(os.environ.get("PORTAL_STATE_DIR", "./portal-state"))
 
 
-def _path_for(project_id: str) -> Path:
+def _safe(component: str, what: str) -> str:
     """
-    The file backing one award.
+    Refuse anything that could escape the state directory.
 
-    `project_id` arrives from the network, so it is not used as a filename
-    without checking. An identifier is `<project>.<portal>` and both halves are
-    restricted to `[A-Za-z0-9_-]` by the grammar, so anything containing a path
-    separator or `..` is not an identifier at all and is refused here rather
-    than being allowed to escape the state directory.
+    Both an identifier and an offering name arrive from the network and are used
+    here as path components. Agent names and identifier halves are restricted to
+    `[A-Za-z0-9_-]` by the grammar, so anything carrying a path separator or
+    `..` is not one at all, and is refused rather than allowed through.
     """
-    if not project_id or "/" in project_id or "\\" in project_id or ".." in project_id:
-        raise ValueError(f"unsafe project identifier: {project_id!r}")
+    if not component or "/" in component or "\\" in component or ".." in component:
+        raise ValueError(f"unsafe {what}: {component!r}")
 
-    return STATE_DIR / f"{project_id}.json"
+    return component
+
+
+def _path_for(offering: str, project_id: str) -> Path:
+    """
+    The file backing one award: one directory per offering, one file per award.
+
+    The directory *is* the key. An award for `myproj.ukri` on `isambard-ai` and
+    one for `myproj.ukri` on `isambard3` are two different awards for two
+    different resources, and they must not collide.
+    """
+    return (
+        STATE_DIR
+        / _safe(offering, "offering")
+        / f"{_safe(project_id, 'project identifier')}.json"
+    )
 
 
 def _write_atomically(path: Path, data: dict[str, Any]) -> None:
@@ -85,7 +103,11 @@ class Award:
     #: Refused for good. `create_award` answers ManagedProjectRejectedError.
     REJECTED = "rejected"
 
-    def __init__(self, project_id: str, raw: dict[str, Any]):
+    def __init__(self, offering: str, project_id: str, raw: dict[str, Any]):
+        #: The resource this award is for - the virtual agent it arrived
+        #: through. Half of this award's identity, not an attribute of it.
+        self.offering = offering
+        #: What the awarding portal calls this award.
         self.project_id = project_id
         self.raw = raw
 
@@ -145,24 +167,35 @@ class Award:
         return self.raw.get("usage", {})
 
 
-def load(project_id: str) -> Award | None:
-    """Read one award, or `None` if we hold no such award."""
-    path = _path_for(project_id)
+def load(offering: str, project_id: str) -> Award | None:
+    """
+    Read one award, or `None` if we hold no such award **on that offering**.
+
+    Both halves of the key are required. Asking for an award on a resource it
+    was never created on is a legitimate question with the answer "no".
+    """
+    path = _path_for(offering, project_id)
 
     if not path.exists():
         return None
 
     with path.open() as handle:
-        return Award(project_id, json.load(handle))
+        return Award(offering, project_id, json.load(handle))
 
 
 def save(award: Award) -> None:
-    _write_atomically(_path_for(award.project_id), award.raw)
+    _write_atomically(_path_for(award.offering, award.project_id), award.raw)
 
 
-def create(project_id: str, details: dict[str, Any], forwarded_for: str | None) -> Award:
-    """Record a brand-new award, awaiting approval."""
+def create(
+    offering: str,
+    project_id: str,
+    details: dict[str, Any],
+    forwarded_for: str | None,
+) -> Award:
+    """Record a brand-new award on one offering, awaiting approval."""
     award = Award(
+        offering,
         project_id,
         {
             "details": details,
@@ -180,20 +213,30 @@ def create(project_id: str, details: dict[str, Any], forwarded_for: str | None) 
 
 
 def all_awards() -> list[Award]:
-    """Every award we hold. A real store would paginate."""
+    """Every award we hold, across every offering. A real store would paginate."""
     if not STATE_DIR.exists():
         return []
 
     awards = []
-    for path in sorted(STATE_DIR.glob("*.json")):
+    for path in sorted(STATE_DIR.glob("*/*.json")):
         with path.open() as handle:
-            awards.append(Award(path.stem, json.load(handle)))
+            awards.append(Award(path.parent.name, path.stem, json.load(handle)))
     return awards
 
 
-def awards_for_portal(portal: str) -> list[Award]:
-    """Every award made by one awarding portal - `get_awards` needs this."""
-    return [a for a in all_awards() if a.project_id.endswith(f".{portal}")]
+def awards_on(offering: str, portal: str) -> list[Award]:
+    """
+    Every award made by one awarding portal **on one offering**.
+
+    Both filters matter. `get_awards ukri` arriving through `isambard-ai` is
+    asking what `ukri` has on *that* resource, and an award on a different
+    resource is no more relevant than one from a different portal.
+    """
+    return [
+        a
+        for a in all_awards()
+        if a.offering == offering and a.project_id.endswith(f".{portal}")
+    ]
 
 
 def load_by_local_id(local_project_id: str) -> Award | None:
@@ -203,8 +246,12 @@ def load_by_local_id(local_project_id: str) -> Award | None:
 
     This is the reverse lookup, and it is the reason the mapping matters
     operationally: your accounting produces figures for `proj001.aip1` and has
-    no idea that some other portal calls it `myproject.ukri`. A real store makes
-    this an indexed column rather than a scan.
+    no idea that some other portal calls it `myproject.ukri` on `isambard-ai`.
+
+    No offering is needed here - a local project identifier is unique across the
+    whole portal, because it names a real project of ours, and that project is
+    on exactly one resource. A real store makes this an indexed column rather
+    than a scan.
     """
     for award in all_awards():
         if award.local_project_id == local_project_id:
@@ -213,9 +260,9 @@ def load_by_local_id(local_project_id: str) -> Award | None:
     return None
 
 
-def delete(project_id: str) -> bool:
-    """Forget an award. Returns whether we held one."""
-    path = _path_for(project_id)
+def delete(offering: str, project_id: str) -> bool:
+    """Forget one award on one offering. Returns whether we held it."""
+    path = _path_for(offering, project_id)
 
     if not path.exists():
         return False

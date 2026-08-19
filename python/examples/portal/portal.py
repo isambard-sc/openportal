@@ -32,15 +32,32 @@ logger = logging.getLogger(__name__)
 # What this portal offers
 # --------------------------------------------------------------------------
 
-#: The offerings we advertise, registered with the bridge at startup by
-#: `app.py`. On the wire an offering is written `<offering>.<us>.<them>` - the
-#: resource, offered by us, to them - and the middle element must be our own
-#: portal agent's name. Here we hold just the resource part.
-OFFERINGS = {"example-resource"}
+#: The resources we offer, and to whom.
+#:
+#: An offering is a **virtual agent** on this portal: a name the awarding portal
+#: addresses directly, standing for one resource we run. On the wire it is
+#: written `<offering>.<us>.<them>` - the resource, offered by us, to them - and
+#: `app.py` registers the full paths with the bridge at startup.
+#:
+#: Two of them here, because one would hide the most important thing about them:
+#: **the offering is part of an award's identity, not a permission check.** An
+#: award created through `isambard-ai` is an award *on Isambard-AI*. The same
+#: awarding portal can hold a different award of the same name on `isambard3`,
+#: and asking one resource about a project that lives on the other gets nothing
+#: back - see `_offering_of` and `build_usage_report` below.
+OFFERINGS = {"isambard-ai", "isambard3"}
 
-#: The `AwardDetails.template` values we accept. An award naming anything else
-#: is rejected rather than quietly given a default (§4.1).
-OFFERED_TEMPLATES = {"standard", "large"}
+#: The `AwardDetails.template` values each offering accepts.
+#:
+#: Per-offering, because a template means something different on each resource -
+#: in Waldur it selects the organisation, the default offerings and the billing
+#: that a project is created with, all of which are properties of the resource.
+#: An award naming a template this resource does not offer is rejected rather
+#: than quietly given a default (§4.1).
+OFFERED_TEMPLATES = {
+    "isambard-ai": {"standard", "large"},
+    "isambard3": {"standard"},
+}
 
 
 # --------------------------------------------------------------------------
@@ -84,18 +101,41 @@ def _mapping(award: store.Award) -> openportal.ProjectMapping:
     return openportal.ProjectMapping(f"{award.project_id}:{_local_project(award)}")
 
 
-def _require_award(project_id: str) -> store.Award:
+def _offering_of(job: openportal.Job) -> str:
     """
-    Fetch an award we are expected to hold already, or fail clearly.
+    Which resource this request is about.
+
+    Every request arrives addressed to one of our virtual agents, and that name
+    is the last element of the path. `forwarded_for` carries the original
+    `ukri.aip1.isambard-ai` when the request came from another portal; the job's
+    own destination is `aip1.<bridge>.isambard-ai` and ends the same way, so it
+    is the fallback for a locally-originated request.
+
+    This is not decoration. It scopes everything below: an award belongs to the
+    offering it was created on, and a question asked of a different offering is
+    a question about a different thing.
+    """
+    path = job.forwarded_for if job.forwarded_for is not None else job.destination
+
+    return path.agents[-1]
+
+
+def _require_award(job: openportal.Job, project_id: str) -> store.Award:
+    """
+    Fetch an award we hold **on the offering this request came through**, or
+    fail clearly.
 
     `OpenPortalError`, not `ManagedProjectRejectedError`: we are not refusing
-    this award, we simply do not have it. The distinction matters because a
+    this award, we simply do not have it here. The distinction matters because a
     rejection is terminal to the caller (§3.3).
     """
-    award = store.load(project_id)
+    offering = _offering_of(job)
+    award = store.load(offering, project_id)
 
     if award is None:
-        raise openportal.OpenPortalError(f"no such award: {project_id}")
+        raise openportal.OpenPortalError(
+            f"no award {project_id} on {offering}"
+        )
 
     return award
 
@@ -163,21 +203,30 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     project_id = job.instruction.arguments[0]
     details = openportal.AwardDetails(job.instruction.arguments[1])
 
+    # Which resource this award is for. It came in addressed to one of our
+    # virtual agents, and that is the resource being asked for.
+    offering = _offering_of(job)
+
     if details.project_template is None:
         raise openportal.ManagedProjectRejectedError("no template named in the award")
 
-    if str(details.project_template) not in OFFERED_TEMPLATES:
+    if str(details.project_template) not in OFFERED_TEMPLATES.get(offering, set()):
         raise openportal.ManagedProjectRejectedError(
-            f"template '{details.project_template}' is not offered here"
+            f"template '{details.project_template}' is not offered on {offering}"
         )
 
-    award = store.load(project_id)
+    award = store.load(offering, project_id)
 
     if award is None:
-        # New award. Record it and leave it pending - a human decides next.
+        # New award *on this resource*. An award of the same name on another
+        # offering is a different award and is left alone.
         forwarded_for = str(job.forwarded_for) if job.forwarded_for else None
-        award = store.create(project_id, json.loads(details.to_json()), forwarded_for)
-        logger.info("recorded new award %s, awaiting approval", project_id)
+        award = store.create(
+            offering, project_id, json.loads(details.to_json()), forwarded_for
+        )
+        logger.info(
+            "recorded new award %s on %s, awaiting approval", project_id, offering
+        )
     else:
         # Known already: merge the incoming details over what we hold, so a
         # changed member list or end date takes effect. `merge` replaces
@@ -186,7 +235,7 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
         held = openportal.AwardDetails(json.dumps(award.details))
         award.raw["details"] = json.loads(held.merge(details).to_json())
         store.save(award)
-        logger.debug("re-asserted award %s", project_id)
+        logger.debug("re-asserted award %s on %s", project_id, offering)
 
     return _answer_for_state(award)
 
@@ -200,10 +249,11 @@ def update_award(job: openportal.Job) -> openportal.ProjectMapping:
     which routes it through the approval path rather than silently provisioning
     something nobody approved (§3.5).
     """
-    if store.load(job.instruction.arguments[0]) is None:
+    if store.load(_offering_of(job), job.instruction.arguments[0]) is None:
         logger.info(
-            "update for unknown award %s - treating it as a create",
+            "update for unknown award %s on %s - treating it as a create",
             job.instruction.arguments[0],
+            _offering_of(job),
         )
 
     return create_award(job)
@@ -221,9 +271,12 @@ def remove_award(job: openportal.Job) -> openportal.ProjectMapping:
     not produce a spurious failure.
     """
     project_id = job.instruction.arguments[0]
+    offering = _offering_of(job)
 
-    if store.delete(project_id):
-        logger.info("removed award %s", project_id)
+    # Only from this resource. An award of the same name on another offering is
+    # a different award, and was not what the caller asked to remove.
+    if store.delete(offering, project_id):
+        logger.info("removed award %s from %s", project_id, offering)
 
     return openportal.ProjectMapping(f"{project_id}:None")
 
@@ -240,7 +293,7 @@ def get_award(job: openportal.Job) -> openportal.AwardDetails:
     and this is the field callers read (§4.2). They are already in the stored
     details because that is how they arrived.
     """
-    award = _require_award(job.instruction.arguments[0])
+    award = _require_award(job, job.instruction.arguments[0])
     details = openportal.AwardDetails(json.dumps(award.details))
 
     # A real portal overlays live project state here - the current member list,
@@ -259,7 +312,7 @@ def get_awards(job: openportal.Job) -> list[openportal.AwardDetails]:
     """`get_awards <portal_id>` → every award that portal has made here."""
     return [
         openportal.AwardDetails(json.dumps(a.details))
-        for a in store.awards_for_portal(job.instruction.arguments[0])
+        for a in store.awards_on(_offering_of(job), job.instruction.arguments[0])
     ]
 
 
@@ -273,7 +326,7 @@ def get_projects(job: openportal.Job) -> list[openportal.ProjectMapping]:
     """
     mappings = []
 
-    for award in store.awards_for_portal(job.instruction.arguments[0]):
+    for award in store.awards_on(_offering_of(job), job.instruction.arguments[0]):
         if award.state == store.Award.APPROVED:
             mappings.append(_mapping(award))
         else:
@@ -284,7 +337,7 @@ def get_projects(job: openportal.Job) -> list[openportal.ProjectMapping]:
 
 def get_project_mapping(job: openportal.Job) -> openportal.ProjectMapping:
     """`get_project_mapping <project_id>` → that one award's mapping."""
-    return _answer_for_state(_require_award(job.instruction.arguments[0]))
+    return _answer_for_state(_require_award(job, job.instruction.arguments[0]))
 
 
 # --------------------------------------------------------------------------
@@ -293,7 +346,7 @@ def get_project_mapping(job: openportal.Job) -> openportal.ProjectMapping:
 
 
 def build_usage_report(
-    project_id: str, date_range: openportal.DateRange
+    offering: str, project_id: str, date_range: openportal.DateRange
 ) -> openportal.ProjectUsageReport:
     """
     Assemble a `ProjectUsageReport` from the figures we hold.
@@ -310,11 +363,28 @@ def build_usage_report(
     translation is only possible because approving the award fixed the mapping
     between the two.
 
+    The report is also scoped to one resource. A project lives on the offering
+    its award was created through, so asking a different offering about it
+    returns an empty report rather than an error - see below.
+
     `app.py` also accepts a complete `ProjectUsageReport` JSON pushed in by an
     operator's own parser. Both routes end up in the same store, and this
     function serves either.
     """
-    award = _require_award(project_id)
+    report = openportal.ProjectUsageReport(openportal.ProjectIdentifier(project_id))
+
+    # **The project may simply not be on this resource.** An awarding portal
+    # holding an award on `isambard-ai` can perfectly well ask `isambard3` about
+    # it - the identifier is the same, and nothing stops the question. The
+    # honest answer is an empty report: nothing was used here, because the
+    # project is not here. An error would say "something is broken", which is
+    # not true, and would fail a caller that is simply sweeping every offering
+    # it knows about.
+    award = store.load(offering, project_id)
+
+    if award is None or award.local_project_id is None:
+        return report
+
     local_project = _local_project(award)
 
     # Build the report in *our* namespace first, because that is the namespace
@@ -375,7 +445,9 @@ def get_usage_report(job: openportal.Job) -> openportal.ProjectUsageReport:
     takes minutes, serve what you have and let the next request collect the
     fresher numbers; there will be a next request, because callers retry.
     """
-    return build_usage_report(job.instruction.arguments[0], _date_range(job))
+    return build_usage_report(
+        _offering_of(job), job.instruction.arguments[0], _date_range(job)
+    )
 
 
 def get_usage_reports(job: openportal.Job) -> openportal.UsageReport:
@@ -386,11 +458,14 @@ def get_usage_reports(job: openportal.Job) -> openportal.UsageReport:
     single-project report into the portal-level shape so they can be combined.
     """
     portal = job.instruction.arguments[0]
+    offering = _offering_of(job)
     date_range = _date_range(job)
 
+    # Only the awards on this resource, so a portal-level roll-up asked of
+    # `isambard3` covers Isambard 3 and nothing else.
     reports = [
-        build_usage_report(award.project_id, date_range).to_usage_report()
-        for award in store.awards_for_portal(portal)
+        build_usage_report(offering, award.project_id, date_range).to_usage_report()
+        for award in store.awards_on(_offering_of(job), portal)
     ]
 
     # `combine` needs at least one report, so an empty portal answers with an
@@ -407,14 +482,13 @@ def get_storage_report(job: openportal.Job) -> openportal.ProjectStorageReport:
 
     This portal has no storage to report, and answers with an **empty report**
     rather than an error. Empty says "nothing here"; an error says "something is
-    broken", and only the first is true (§4.3).
+    broken", and only the first is true (§4.3). That is the same answer a
+    project which is not on this resource gets, for the same reason.
 
     Usage and storage are requested independently, on separate schedules, so
     failing this would not have cost us the usage figures - but there is no
     reason to fail it.
     """
-    _require_award(job.instruction.arguments[0])
-
     return openportal.ProjectStorageReport(
         openportal.ProjectIdentifier(job.instruction.arguments[0])
     )
@@ -457,16 +531,20 @@ HANDLERS = {
 
 def _authorise(job: openportal.Job) -> None:
     """
-    Check the request came in through an offering we advertise.
+    Check the request came in through an offering we actually advertise.
 
-    `forwarded_for` is set by our own portal agent, not by the caller, so it is
-    the field to authorise against (§1.2). Its first element is the portal that
-    asked; its last is the offering they came in through.
+    Note what this is *not* doing. It is not deciding whether the caller may see
+    a particular award - the offering is not a permission, it is which resource
+    is being talked about, and every handler scopes itself by it via
+    `_offering_of`. This only refuses a name we do not offer at all, which
+    should never happen: the portal agent only forwards requests for offerings
+    we registered. It is here as a backstop, not as the access control.
+
+    `forwarded_for` is set by our own portal agent and not by the caller, which
+    is why it is the field worth trusting (§1.2). Its first element is the
+    portal that asked; its last is the offering they came in through.
     """
-    if job.forwarded_for is None:
-        return  # locally-originated, not a portal-to-portal request
-
-    offering = job.forwarded_for.agents[-1]
+    offering = _offering_of(job)
 
     if offering not in OFFERINGS:
         raise openportal.ManagedProjectRejectedError(

@@ -83,14 +83,14 @@ def _mapping(award: store.Award) -> openportal.ProjectMapping:
     `<their project id>:<our project id>`.
 
     **This is the whole point of the exchange.** The awarding portal knows the
-    award as `myaward1.award`; we know the project we created for it as
-    `myproject1.portal`. Neither side can guess the other's name, so the mapping is
+    award as `myaward1.allocator`; we know the project we created for it as
+    `myproject1.site`. Neither side can guess the other's name, so the mapping is
     where they are joined - and once it has been returned, both sides know that
     their award and our project are the same object. Award ID and project ID
     become two names for one thing at this interface.
 
     It matters beyond bookkeeping. Our accounting produces usage figures for
-    `myproject1.portal` and has never heard of `myaward1.award`; the mapping is what
+    `myproject1.site` and has never heard of `myaward1.allocator`; the mapping is what
     lets `get_usage_report` answer a question asked in their namespace with
     figures recorded in ours.
 
@@ -107,8 +107,8 @@ def _offering_of(job: openportal.Job) -> str:
 
     Every request arrives addressed to one of our virtual agents, and that name
     is the last element of the path. `forwarded_for` carries the original
-    `award.portal.cluster1` when the request came from another portal; the job's
-    own destination is `portal.<bridge>.cluster1` and ends the same way, so it
+    `allocator.site.cluster1` when the request came from another portal; the job's
+    own destination is `site.<bridge>.cluster1` and ends the same way, so it
     is the fallback for a locally-originated request.
 
     This is not decoration. It scopes everything below: an award belongs to the
@@ -357,8 +357,8 @@ def build_usage_report(
     per date, and the type handles the wire format.
 
     More importantly, **the figures are recorded in our namespace and asked for
-    in theirs**. Our accounting produces usage for `myproject1.portal`; the awarding
-    portal asked about `myaward1.award`. So the report is built against our own
+    in theirs**. Our accounting produces usage for `myproject1.site`; the awarding
+    portal asked about `myaward1.allocator`. So the report is built against our own
     project identifier and then `remap_project`ped into theirs at the end. That
     translation is only possible because approving the award fixed the mapping
     between the two.
@@ -388,8 +388,8 @@ def build_usage_report(
     local_project = _local_project(award)
 
     # Build the report in *our* namespace first, because that is the namespace
-    # the figures were recorded in - our accounting knows `myproject1.portal` and has
-    # never heard of `myaward1.award`.
+    # the figures were recorded in - our accounting knows `myproject1.site` and has
+    # never heard of `myaward1.allocator`.
     report = openportal.ProjectUsageReport(local_project)
     today = datetime.date.today()
 
@@ -414,10 +414,10 @@ def build_usage_report(
         report.set_report(date, daily)
 
     # Now translate the whole report into the awarding portal's namespace. This
-    # is the mapping being used: they asked about `myaward1.award`, so that is
+    # is the mapping being used: they asked about `myaward1.allocator`, so that is
     # what the answer must be about. `remap_project` rewrites the project and
-    # rebuilds every `UserIdentifier` with it, turning `alice.myproject1.portal` into
-    # `alice.myaward1.award` - the member's email is unchanged, because that is
+    # rebuilds every `UserIdentifier` with it, turning `alice.myproject1.site` into
+    # `alice.myaward1.allocator` - the member's email is unchanged, because that is
     # the same person either way.
     report.remap_project(openportal.ProjectIdentifier(project_id))
 

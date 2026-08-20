@@ -413,8 +413,8 @@ plain string. Usable as a `dict` key or in a `set`.
 | `agents` | `list[str]` | The path split into agent names |
 
 `agents` is how a portal reads the two ends that matter on a bridge-board job:
-for a `forwarded_for` of `award.portal.cluster1`, `agents[0]` is the awarding
-portal that asked (`award`) and `agents[-1]` is the offering it came in
+for a `forwarded_for` of `allocator.site.cluster1`, `agents[0]` is the awarding
+portal that asked (`allocator`) and `agents[-1]` is the offering it came in
 through (`cluster1`). See
 [project-portal-api.md §1.2](project-portal-api.md).
 
@@ -454,7 +454,7 @@ plain string. Usable as a `dict` key or in a `set`.
 ### `ProjectMapping`
 
 The pairing of two portals' names for the same thing:
-`<their project id>:<our project id>`, e.g. `"myaward1.award:myproject1.portal"`.
+`<their project id>:<our project id>`, e.g. `"myaward1.allocator:myproject1.site"`.
 
 **This is a string, not an object**, and it is what `create_award`,
 `update_award`, `remove_award` and `get_project_mapping` must return — see
@@ -466,7 +466,7 @@ matters.
 | `project` | `ProjectIdentifier` | The identifier the awarding portal used |
 | `local_group` | `str` | The receiving portal's own identifier for it |
 
-`ProjectMapping("myaward1.award:myproject1.portal")` constructs from a string, and
+`ProjectMapping("myaward1.allocator:myproject1.site")` constructs from a string, and
 raises `OSError` if either half is invalid. `str(m)` returns the pair. Supports
 `==` / `!=` against another `ProjectMapping`.
 
@@ -800,7 +800,7 @@ active projects. Arithmetic operators (`+`, `+=`) are supported.
 
 | Property | Type | Description |
 |---|---|---|
-| `portal` | `PortalIdentifier` | The portal this report covers |
+| `site` | `PortalIdentifier` | The portal this report covers |
 | `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
 | `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
 
@@ -910,7 +910,7 @@ aggregate of `ProjectStorageReport` objects for all active projects.
 
 | Property | Type | Description |
 |---|---|---|
-| `portal` | `PortalIdentifier` | The portal this report covers |
+| `site` | `PortalIdentifier` | The portal this report covers |
 | `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
 | `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
 
@@ -982,7 +982,7 @@ job = job.errored(openportal.ManagedProjectPendingError("awaiting approval"))
 openportal.send_result(job)
 
 # Reading a job you submitted — the same class comes back
-job = openportal.run("award.portal.cluster1 create_award myaward1.award {…}", max_ms=30_000)
+job = openportal.run("allocator.site.cluster1 create_award myaward1.allocator {…}", max_ms=30_000)
 
 if job.is_error:
     match job.error:

@@ -47,58 +47,65 @@ mechanics; use this one when writing the handler.
 
 ## 1. The shape of a portal-to-portal exchange
 
-Two portals, each with their own OpenPortal agents:
+Two portals, each with their own OpenPortal agents. Throughout this document
+they are named after what they do:
 
-* **`award`** — the *awarding portal*. Makes awards; wants them provisioned
-  elsewhere.
-* **`portal`** — the *project portal* (yours). Owns projects, members, and the
-  infrastructure behind them.
+* **`allocator`** — the *awarding portal*. Allocates awards, and wants them
+  provisioned somewhere else; hence the name.
+* **`site`** — the *site portal* (yours). Runs the resources, owns the projects
+  and their members, and provisions what `allocator` asks for.
 
-`portal` advertises one or more **offerings** — named things `award` is allowed to
-address. An offering is written `<offering>.<local-portal>.<remote-portal>`,
-e.g. `cluster1.portal.award`: "the resource `cluster1`, offered by `portal`,
-to `award`".
+`site` advertises one or more **offerings**: named resources that `allocator` may
+address. An offering is registered as `<resource>.<site>.<allocator>` —
+`cluster1.site.allocator` reads "the resource `cluster1`, offered by `site`, to
+`allocator`".
+
+**Note the two forms are reversed.** You *register* `cluster1.site.allocator`,
+and `allocator` *addresses* `allocator.site.cluster1` — a destination always
+starts with the sender and ends with what is being addressed, while a
+registration starts with the thing being offered. The middle element is your own
+portal either way.
 
 A request then flows:
 
 ```
- 1.  award's portal software submits, through its own bridge:
-         award.portal.cluster1 create_award myaward1.award {…AwardDetails…}
+ 1.  allocator's portal software submits, through its own bridge:
+         allocator.site.cluster1 create_award myaward1.allocator {…AwardDetails…}
 
- 2.  award's own agent  ─────────►  portal's agent
+ 2.  allocator's own agent  ─────────►  site's agent
          (the destination's first hop is the sending portal itself;
           the last hop names the offering)
 
- 3.  the project portal's agent recognises the offering and re-issues it
+ 3.  the site's agent recognises the offering and re-issues it
      to its own bridge, tagged with where it came from:
-         portal.<bridge>.cluster1 create_project myaward1.award {…}
-         forwarded_for = award.portal.cluster1
+         site.<bridge>.cluster1 create_project myaward1.allocator {…}
+         forwarded_for = allocator.site.cluster1
 
  4.  its bridge puts the Job on its board and signals your portal:
          GET <signal_url>?job_id=<uuid>
 
  5.  YOUR PORTAL: fetch the job, do the work, post the result.        ← §3
 
- 6.  The result travels back the way it came, to award.
+ 6.  The result travels back the way it came, to allocator.
 ```
 
 Everything above step 5 is handled by the agents. Steps 0 and 5 are yours.
 
 ### 1.1 Step 0: you must advertise offerings first
 
-Until an offering exists, requests from `award` have nowhere to land — they are
+Until an offering exists, requests from `allocator` have nowhere to land — they are
 held and only delivered once the offering is registered. On startup (and
 whenever the set changes) call `POST /sync_offerings` with the complete list:
 
 ```json
-["cluster1.portal.award", "cluster2.portal.award"]
+["cluster1.site.allocator", "cluster2.site.allocator"]
 ```
 
 `sync_offerings` is a *replace*, not a merge — anything absent is withdrawn.
 Use `add_offerings` / `remove_offerings` for incremental changes, and
 `get_offerings` to read the current set.
 
-The middle element must be your own portal's agent name, or the offering is
+The middle element must be your own site's agent name, or the offering is
 rejected.
 
 ### 1.2 Telling portal-to-portal requests apart
@@ -106,13 +113,13 @@ rejected.
 Two things distinguish an awarding portal's request from a local one:
 
 **`forwarded_for`** carries the original destination, e.g.
-`award.portal.cluster1`. Its **first** element is the portal that asked; its
+`allocator.site.cluster1`. Its **first** element is the portal that asked; its
 **last** element is the offering they came in through. This is the field to
 authorise against — it is set by your own portal agent, not by the caller.
 
 **Identifiers in a request name the awarding portal, not you.** An award made
-by `award` arrives as `myaward1.award` — never rewritten into your namespace —
-and its members as `alice.myaward1.award`. You will have your own identifier for
+by `allocator` arrives as `myaward1.allocator` — never rewritten into your namespace —
+and its members as `alice.myaward1.allocator`. You will have your own identifier for
 the project you create for it (§4.1.1), but that is yours to return, not
 something to expect in an incoming request. Key your records on the full
 identifier as sent: the same project name may exist under two different awarding
@@ -124,16 +131,16 @@ portal.
 ### 1.3 The offering says *which resource*, and scopes everything
 
 An offering is a **virtual agent** on your portal: a name the awarding portal
-addresses directly, standing for one resource you run. `portal` might offer
-`cluster1` and `cluster2`, and `award` addresses them as
-`award.portal.cluster1` and `award.portal.cluster2`.
+addresses directly, standing for one resource you run. `site` might offer
+`cluster1` and `cluster2`, and `allocator` addresses them as
+`allocator.site.cluster1` and `allocator.site.cluster2`.
 
 It is easy to read the offering as an access-control list — a set of names to
 check a request against — and that reading will produce a portal that answers
 the wrong questions. **The offering is part of what is being asked, not a
 permission to ask it.**
 
-`create_award` sent to `award.portal.cluster1` is a request to create a project
+`create_award` sent to `allocator.site.cluster1` is a request to create a project
 *on `cluster1`*. The `template` in the `AwardDetails` is interpreted in the
 context of that resource — in Waldur it selects the organisation, the default
 offerings and the billing the project is created with, all of which belong to
@@ -143,31 +150,31 @@ identifier you return in the mapping (§4.1.1) names a project on it.
 
 Three consequences:
 
-* **Key your records on `(offering, project_id)`.** `myaward1.award` on
-  `cluster1` and `myaward1.award` on `cluster2` are two different awards
+* **Key your records on `(offering, project_id)`.** `myaward1.allocator` on
+  `cluster1` and `myaward1.allocator` on `cluster2` are two different awards
   for two different resources. The reference implementation keys its own records
   exactly this way.
 * **Scope every answer by the offering the request came through.** `get_awards`
-  through `cluster1` means "what does `award` have *on `cluster1`*".
+  through `cluster1` means "what does `allocator` have *on `cluster1`*".
 * **A question about a project that is not on this resource is not an error.**
   An awarding portal sweeping every offering it knows about will ask each one
   about each award. The offering that holds nothing answers with an **empty
   report**, not a failure — see §4.3.
 
 Read the offering from `forwarded_for`'s last element, falling back to the
-job's own destination (`portal.<bridge>.cluster1`) which ends the same way for
+job's own destination (`site.<bridge>.cluster1`) which ends the same way for
 a locally-originated request.
 
-Worked through, with `award` holding two awards on `portal`:
+Worked through, with `allocator` holding two awards on `site`:
 
-| `award` sends | on | `portal` creates | and returns |
+| `allocator` sends | on | `site` creates | and returns |
 |---|---|---|---|
-| `create_award myaward1.award` to `award.portal.cluster1` | `cluster1` | `myproject1.portal` | `myaward1.award:myproject1.portal` |
-| `create_award myaward2.award` to `award.portal.cluster2` | `cluster2` | `myproject2.portal` | `myaward2.award:myproject2.portal` |
+| `create_award myaward1.allocator` to `allocator.site.cluster1` | `cluster1` | `myproject1.site` | `myaward1.allocator:myproject1.site` |
+| `create_award myaward2.allocator` to `allocator.site.cluster2` | `cluster2` | `myproject2.site` | `myaward2.allocator:myproject2.site` |
 
-`get_usage_report myaward1.award` through `cluster1` answers with the usage of
-`myproject1.portal`, translated into `award`'s namespace. The same request
-through `cluster2` answers with an **empty** report: `myaward1.award` is not on
+`get_usage_report myaward1.allocator` through `cluster1` answers with the usage of
+`myproject1.site`, translated into `allocator`'s namespace. The same request
+through `cluster2` answers with an **empty** report: `myaward1.allocator` is not on
 `cluster2`. Nothing is wrong — it is simply not there.
 
 ---
@@ -226,11 +233,11 @@ A fetched job looks like:
   "changed":       1700000005,
   "expires":       1700000120,
   "version":       2,
-  "command":       "portal.bridge.cluster1 get_award myaward1.award",
+  "command":       "site.bridge.cluster1 get_award myaward1.allocator",
   "state":         "Pending",
   "result":        null,
   "result_type":   null,
-  "forwarded_for": "award.portal.cluster1"
+  "forwarded_for": "allocator.site.cluster1"
 }
 ```
 
@@ -242,7 +249,7 @@ A fetched job looks like:
 `command` is the destination path followed by the instruction. Parse the
 instruction rather than the whole string: in Python, `job.instruction.command`
 gives the verb (`get_award`) and `job.instruction.arguments` the argument list
-(`["myaward1.award"]`).
+(`["myaward1.allocator"]`).
 
 ### 3.2 Responding
 
@@ -262,7 +269,7 @@ Note the double encoding: `result` is a JSON **string containing JSON**. A
 
 ```json
 "state": "Complete",
-"result": "\"myaward1.award:myproject1.portal\"",
+"result": "\"myaward1.allocator:myproject1.site\"",
 "result_type": "ProjectMapping"
 ```
 
@@ -455,14 +462,14 @@ you need to answer.
 
 | Instruction | Arguments | Must return | Wire form |
 |-------------|-----------|-------------|-----------|
-| `create_project` / `create_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
-| `update_project` / `update_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
-| `remove_project` / `remove_award` | `<project_id>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
+| `create_project` / `create_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
+| `update_project` / `update_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
+| `remove_project` / `remove_award` | `<project_id>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
 | `get_project` | `<project_id>` | `AwardDetails` | object |
 | `get_award` | `<project_id>` | `AwardDetails` | object |
 | `get_awards` / `list_awards` | `<portal_id>` | `Vec<AwardDetails>` | array of objects |
 | `get_projects` | `<portal_id>` | `Vec<ProjectMapping>` | array of **strings** |
-| `get_project_mapping` | `<project_id>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
+| `get_project_mapping` | `<project_id>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
 
 Notes:
 
@@ -470,8 +477,8 @@ Notes:
   not an object, and the most important thing you return. See §4.1.1.
 #### 4.1.1 The mapping is where the two sides agree what to call a thing
 
-The awarding portal knows the award as `myaward1.award`. You create something
-for it and know that as, say, `myproject1.portal`. Neither side can guess the other's
+The awarding portal knows the award as `myaward1.allocator`. You create something
+for it and know that as, say, `myproject1.site`. Neither side can guess the other's
 name, and until they have been exchanged there is no way to say "that award" and
 "that project" and mean the same object.
 
@@ -481,7 +488,7 @@ identifier in your namespace, naming the project you created *on the resource
 the award came in through* (§1.3), not a bare group name:
 
 ```
-myaward1.award:myproject1.portal
+myaward1.allocator:myproject1.site
 ```
 
 Once you have returned it, the award ID and the project ID are two names for one
@@ -493,13 +500,13 @@ awaiting approval answers with `ManagedProjectPendingError` instead (§3.3) —
 there is no honest identifier to put in the second half yet.
 
 **This is also the join for everything else.** Your accounting records usage
-against `myproject1.portal` and has never heard of `myaward1.award`; the awarding
-portal asks `get_usage_report myaward1.award` and has never heard of
-`myproject1.portal`. The mapping is what lets you answer. In practice: build the
+against `myproject1.site` and has never heard of `myaward1.allocator`; the awarding
+portal asks `get_usage_report myaward1.allocator` and has never heard of
+`myproject1.site`. The mapping is what lets you answer. In practice: build the
 report against your own identifier, because that is the namespace the figures
 were recorded in, and then translate it — in Python,
 `report.remap_project(their_id)` rewrites the project and rebuilds every
-`UserIdentifier` with it, so `alice.myproject1.portal` becomes `alice.myaward1.award`
+`UserIdentifier` with it, so `alice.myproject1.site` becomes `alice.myaward1.allocator`
 while the member's email stays as it is.
 
 The second half is validated as a mapping target, so it is restricted to
@@ -548,7 +555,7 @@ portal-to-portal work:
 | `get_users` | `<project_id>` | `Vec<UserMapping>` |
 
 A `UserMapping` is `<user_id>:<local_user>:<local_group>`, e.g.
-`alice.myaward1.award:alice@example.ac.uk:myaward1.award`.
+`alice.myaward1.allocator:alice@example.ac.uk:myaward1.allocator`.
 
 At the portal layer the member's **email address is the `local_user`** — a
 portal has no Unix accounts to name, and the email is the portal-level

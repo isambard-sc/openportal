@@ -27,28 +27,28 @@ import openportal
 import portal
 import store
 
-# The cast. `award` is the awarding portal, `portal` is us, and `cluster1` and
+# The cast. `allocator` is the awarding portal, `site` is us, and `cluster1` and
 # `cluster2` are two resources we offer - virtual agents on this portal that
-# `award` addresses directly.
+# `allocator` addresses directly.
 #
 # Two awards, on two resources, each mapped to a project of ours:
 #
-#     award.portal.cluster1   myaward1.award  ->  myproject1.portal
-#     award.portal.cluster2   myaward2.award  ->  myproject2.portal
+#     allocator.site.cluster1   myaward1.allocator  ->  myproject1.site
+#     allocator.site.cluster2   myaward2.allocator  ->  myproject2.site
 #
 # Most checks below use the first pair. `cluster2` is here because with one
 # resource the most important property of an offering is invisible: an award
 # lives on one resource, and the other knows nothing about it.
 
 #: What the awarding portal calls the award we mostly work with.
-AWARD = "myaward1.award"
+AWARD = "myaward1.allocator"
 
 #: What *we* call the project we create for it. The two halves of the mapping.
-LOCAL_PROJECT = "myproject1.portal"
+LOCAL_PROJECT = "myproject1.site"
 
 #: A second award, on the other resource.
-AWARD2 = "myaward2.award"
-LOCAL_PROJECT2 = "myproject2.portal"
+AWARD2 = "myaward2.allocator"
+LOCAL_PROJECT2 = "myproject2.site"
 
 OFFERING = "cluster1"
 OTHER_OFFERING = "cluster2"
@@ -63,9 +63,9 @@ def make_job(
     """
     A pending bridge-board job, as `fetch_job` would return it.
 
-    The destination ends with the offering - `portal.bridge.cluster1` - which
+    The destination ends with the offering - `site.bridge.cluster1` - which
     is how the portal knows which resource the request is about. `forwarded_for`
-    carries the awarding portal's original `award.portal.cluster1` when there is
+    carries the awarding portal's original `allocator.site.cluster1` when there is
     one, and takes precedence.
 
     Note `state` is capitalised on the wire (`"Pending"`, not `"pending"`) -
@@ -143,7 +143,7 @@ def _run_all() -> None:
 
     print("\n-- a rejected template -----------------------------------------")
 
-    bad = portal.answer(make_job(f"create_project myaward5.award {details('gpu-mega')}"))
+    bad = portal.answer(make_job(f"create_project myaward5.allocator {details('gpu-mega')}"))
     check(
         "an unoffered template is rejected terminally",
         type(bad.error) is openportal.ManagedProjectRejectedError,
@@ -196,16 +196,16 @@ def _run_all() -> None:
 
     print("\n-- update_award for an award we do not hold ---------------------")
 
-    job = portal.answer(make_job(f"update_project myaward4.award {details()}"))
+    job = portal.answer(make_job(f"update_project myaward4.allocator {details()}"))
     check(
         "an update for an unknown award becomes a create",
         type(job.error) is openportal.ManagedProjectPendingError,
     )
     check(
         "...and the award now exists",
-        store.load(OFFERING, "myaward4.award") is not None,
+        store.load(OFFERING, "myaward4.allocator") is not None,
     )
-    store.delete(OFFERING, "myaward4.award")
+    store.delete(OFFERING, "myaward4.allocator")
 
     print("\n-- usage: recorded in our namespace, answered in theirs --------")
 
@@ -280,12 +280,12 @@ def _run_all() -> None:
     )
     check(
         "each resource lists only its own award",
-        [str(m) for m in portal.answer(make_job("get_projects award")).result]
+        [str(m) for m in portal.answer(make_job("get_projects allocator")).result]
         == [f"{AWARD}:{LOCAL_PROJECT}"]
         and [
             str(m)
             for m in portal.answer(
-                make_job("get_projects award", offering=OTHER_OFFERING)
+                make_job("get_projects allocator", offering=OTHER_OFFERING)
             ).result
         ]
         == [f"{AWARD2}:{LOCAL_PROJECT2}"],
@@ -322,7 +322,7 @@ def _run_all() -> None:
         not any(
             str(m).startswith(f"{AWARD}:")
             for m in portal.answer(
-                make_job("get_projects award", offering=OTHER_OFFERING)
+                make_job("get_projects allocator", offering=OTHER_OFFERING)
             ).result
         ),
     )
@@ -330,15 +330,15 @@ def _run_all() -> None:
         "...while the right offering lists it",
         any(
             str(m).startswith(f"{AWARD}:")
-            for m in portal.answer(make_job("get_projects award")).result
+            for m in portal.answer(make_job("get_projects allocator")).result
         ),
     )
 
     print("\n-- the same name on two resources is two awards -----------------")
 
     # A stronger case than the two awards above: the *same* name on both
-    # resources. `myaward1.award` on cluster2 is a different award from
-    # `myaward1.award` on cluster1, and creating it must not disturb the first.
+    # resources. `myaward1.allocator` on cluster2 is a different award from
+    # `myaward1.allocator` on cluster1, and creating it must not disturb the first.
     job = portal.answer(
         make_job(f"create_project {AWARD} {details()}", offering=OTHER_OFFERING)
     )
@@ -384,26 +384,26 @@ def _run_all() -> None:
     # Templates are per-resource: `large` is offered on cluster1 and not on
     # cluster2, because a template selects things that belong to the resource.
     job = portal.answer(
-        make_job(f"create_project myaward6.award {details('large')}", offering=OTHER_OFFERING)
+        make_job(f"create_project myaward6.allocator {details('large')}", offering=OTHER_OFFERING)
     )
     check(
         "a template offered elsewhere is rejected here",
         type(job.error) is openportal.ManagedProjectRejectedError,
         f"-> {job.error}",
     )
-    job = portal.answer(make_job(f"create_project myaward6.award {details('large')}"))
+    job = portal.answer(make_job(f"create_project myaward6.allocator {details('large')}"))
     check(
         "...and accepted on the resource that offers it",
         type(job.error) is openportal.ManagedProjectPendingError,
     )
-    store.delete(OFFERING, "myaward6.award")
+    store.delete(OFFERING, "myaward6.allocator")
 
     print("\n-- an award with no local project yet --------------------------")
 
     # An unapproved award has no project on our side, so there is nothing for
     # usage to have been recorded against. Empty, for the same reason as the
     # wrong-offering case above: nothing was used, and that is not a failure.
-    pending = "myaward3.award"
+    pending = "myaward3.allocator"
     portal.answer(make_job(f"create_project {pending} {details()}"))
     job = portal.answer(make_job(f"get_usage_report {pending} this_month"))
     check("usage for an unapproved award is empty, not an error", not job.is_error)
@@ -416,7 +416,7 @@ def _run_all() -> None:
         "...but get_projects still lists it, as :None",
         any(
             str(m) == f"{pending}:None"
-            for m in portal.answer(make_job("get_projects award")).result
+            for m in portal.answer(make_job("get_projects allocator")).result
         ),
     )
     store.delete(OFFERING, pending)
@@ -455,7 +455,7 @@ def _run_all() -> None:
 
     print("\n-- an award we have never heard of ------------------------------")
 
-    job = portal.answer(make_job("get_award nosuch.award"))
+    job = portal.answer(make_job("get_award nosuch.allocator"))
     check("an unknown award is an error, not a rejection", job.is_error)
     check(
         "...recovered as the class it was raised as",

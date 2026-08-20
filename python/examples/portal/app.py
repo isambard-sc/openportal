@@ -52,7 +52,7 @@ SWEEP_SECONDS = int(os.environ.get("PORTAL_SWEEP_SECONDS", "15"))
 #: state, in the same database, keyed on the job id.
 _seen: set[str] = set()
 
-#: Our own portal's agent name, read from the bridge once at startup.
+#: Our own site's agent name, read from the bridge once at startup.
 #:
 #: Held rather than fetched per request: it cannot change while we are running,
 #: and asking the bridge for it on every approval would make approving depend on
@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
 
     # `<offering>.<us>.<them>` - the middle element must be our own agent name.
     # A real portal reads the list of awarding portals from its configuration.
-    awarding_portals = os.environ.get("PORTAL_AWARDING_PORTALS", "award").split(",")
+    awarding_portals = os.environ.get("PORTAL_AWARDING_PORTALS", "allocator").split(",")
 
     # One registration per (resource, awarding portal) pair. Each is a virtual
     # agent on this portal that the named portal may address directly.
@@ -305,13 +305,13 @@ async def approve(offering: str, project_id: str, approval: Approval):
     Approve an award, and **give it its identifier here**.
 
     This is the moment the mapping is made. Until now the awarding portal knows
-    the award as `myaward1.award` on `cluster1` and we have nothing to pair
+    the award as `myaward1.allocator` on `cluster1` and we have nothing to pair
     it with; approving creates a project on our side and names it, and that name
     is what closes the loop.
 
     The project is created **on the resource the award came in through**, and
     stays tied to it. That is why the offering is in the path here: approving
-    `myaward1.award` on `cluster1` says nothing about an award of the same
+    `myaward1.allocator` on `cluster1` says nothing about an award of the same
     name on `cluster2`, which would be a different project.
 
     Nothing is pushed back to the awarding portal, and nothing needs to be. It
@@ -344,8 +344,8 @@ async def approve(offering: str, project_id: str, approval: Approval):
         )
 
     # One local project per award. The comparison is on the *whole* key -
-    # offering and identifier - because `myaward1.award` on cluster1 and
-    # `myaward1.award` on cluster2 are two different awards and must not end
+    # offering and identifier - because `myaward1.allocator` on cluster1 and
+    # `myaward1.allocator` on cluster2 are two different awards and must not end
     # up sharing one project.
     clash = store.load_by_local_id(str(local))
 
@@ -402,7 +402,7 @@ async def push_usage(local_project_id: str, push: UsagePush):
     awarding portal's, and that is deliberate. Everything under `/awards` speaks
     the awarding portal's language because that is the language OpenPortal asks
     questions in. This one speaks ours, because your accounting produces figures
-    for `myproject1.portal` and has never heard of `myaward1.award`. The mapping made
+    for `myproject1.site` and has never heard of `myaward1.allocator`. The mapping made
     at approval is what joins them, and `portal.build_usage_report` is where the
     translation happens.
 

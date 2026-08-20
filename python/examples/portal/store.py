@@ -18,7 +18,7 @@ Two design choices worth copying even so:
   alone.** The offering names *which resource* the award is for, so the same
   awarding portal can hold two separate awards under the same name on two
   different resources - see project-portal-api.md §1.3. And the identifier must
-  be the full `myaward1.award`, because the same project name can exist under two
+  be the full `myaward1.allocator`, because the same project name can exist under two
   different awarding portals and mean different projects (§1.2). The reference
   implementation keys its own records the same way.
 
@@ -59,8 +59,8 @@ def _path_for(offering: str, project_id: str) -> Path:
     """
     The file backing one award: one directory per offering, one file per award.
 
-    The directory *is* the key. An award for `myaward1.award` on `cluster1` and
-    one for `myaward1.award` on `cluster2` are two different awards for two
+    The directory *is* the key. An award for `myaward1.allocator` on `cluster1` and
+    one for `myaward1.allocator` on `cluster2` are two different awards for two
     different resources, and they must not collide.
     """
     return (
@@ -122,7 +122,7 @@ class Award:
     @property
     def local_project_id(self) -> str | None:
         """
-        **Our own `ProjectIdentifier` for this award**, e.g. `myproject1.portal`.
+        **Our own `ProjectIdentifier` for this award**, e.g. `myproject1.site`.
 
         This is our half of the mapping, and it is the single most important
         thing this record holds. It is `None` until the award is approved,
@@ -228,8 +228,8 @@ def awards_on(offering: str, portal: str) -> list[Award]:
     """
     Every award made by one awarding portal **on one offering**.
 
-    Both filters matter. `get_awards award` arriving through `cluster1` is
-    asking what `award` has on *that* resource, and an award on a different
+    Both filters matter. `get_awards allocator` arriving through `cluster1` is
+    asking what `allocator` has on *that* resource, and an award on a different
     resource is no more relevant than one from a different portal.
     """
     return [
@@ -245,8 +245,8 @@ def load_by_local_id(local_project_id: str) -> Award | None:
     portal's.
 
     This is the reverse lookup, and it is the reason the mapping matters
-    operationally: your accounting produces figures for `myproject1.portal` and has
-    no idea that some other portal calls it `myaward1.award` on `cluster1`.
+    operationally: your accounting produces figures for `myproject1.site` and has
+    no idea that some other portal calls it `myaward1.allocator` on `cluster1`.
 
     No offering is needed here - a local project identifier is unique across the
     whole portal, because it names a real project of ours, and that project is

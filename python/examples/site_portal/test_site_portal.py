@@ -276,8 +276,13 @@ def _run_all() -> None:
     # Push figures in the way an operator's parser would - against our own
     # project identifier, which is the only one that accounting knows.
     award = store.load(OFFERING, AWARD)
-    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    award.raw["usage"] = {yesterday: {"alice@bristol.ac.uk": 12.5}}
+    # The first of the current month, so the figure is inside `this_month` on
+    # every day the suite might be run - `yesterday` is in *last* month on the
+    # 1st, and the report would come back empty.
+    today = datetime.date.today()
+    a_day_this_month = today.replace(day=1).isoformat()
+    this_month_key = f"{today.year:04d}-{today.month:02d}"
+    award.raw["usage"] = {a_day_this_month: {"alice@bristol.ac.uk": 12.5}}
     store.save(award)
 
     job = site_portal.answer(make_job(f"get_usage_report {AWARD} this_month"))
@@ -308,13 +313,112 @@ def _run_all() -> None:
         f"-> {list(report.user_mapping.values())}",
     )
     check(
-        "...marked complete, since the day is past",
-        all(d.is_complete for d in report.daily_reports()),
+        "...and NOT marked complete, because nobody has said the month is final",
+        not report.is_complete,
+        f"-> is_complete={report.is_complete}",
     )
 
     job = site_portal.answer(make_job(f"get_usage_reports award this_month"))
     check("get_usage_reports rolls up to the portal", not job.is_error)
     check("...as a UsageReport", type(job.result) is openportal.UsageReport)
+
+    print("\n-- is_complete is an operations decision, not a calendar one ----")
+
+    # `is_complete` is the allocator's signal that a month is settled and need
+    # not be requested again. It is therefore a claim about the future, and the
+    # only people who can make it are the ones who run the accounting - so the
+    # example drives it from `final_months`, which an operator sets.
+    check(
+        "an un-finalised month reports incomplete",
+        not site_portal.answer(
+            make_job(f"get_usage_report {AWARD} this_month")
+        ).result.is_complete,
+    )
+
+    award = store.load(OFFERING, AWARD)
+    award.raw["final_months"] = [this_month_key]
+    store.save(award)
+
+    report = site_portal.answer(
+        make_job(f"get_usage_report {AWARD} this_month")
+    ).result
+    check("...and a finalised one reports complete", report.is_complete)
+    check(
+        "...with the figures unchanged by the decision",
+        abs(report.total_usage.seconds / 3600 - 12.5) < 0.01,
+        f"-> {report.total_usage}",
+    )
+
+    # Taking the decision back must work, or a late correction could never be
+    # collected: the allocator only re-reads a month it has not been told is
+    # final.
+    award.raw["final_months"] = []
+    store.save(award)
+    check(
+        "...and un-finalising makes it incomplete again",
+        not site_portal.answer(
+            make_job(f"get_usage_report {AWARD} this_month")
+        ).result.is_complete,
+    )
+
+    # The trap this guards. `ProjectUsageReport.is_complete` is "every day I
+    # contain is complete", which is vacuously **true** for a report holding no
+    # days at all. So a month whose figures have simply not been ingested yet
+    # would answer "nothing was used, and that is final" - and the allocator
+    # would believe it and never ask again. An explicit incomplete placeholder
+    # says the honest thing: nothing so far, ask again.
+    empty = openportal.ProjectUsageReport(openportal.ProjectIdentifier(AWARD))
+    check(
+        "an empty report is vacuously complete - the trap being guarded",
+        empty.is_complete,
+    )
+
+    award.raw["usage"] = {}
+    store.save(award)
+    report = site_portal.answer(
+        make_job(f"get_usage_report {AWARD} this_month")
+    ).result
+    check("a month with no data at all reports zero", report.total_usage.seconds == 0)
+    check(
+        "...and is NOT complete, so the allocator asks again",
+        not report.is_complete,
+        f"-> is_complete={report.is_complete}",
+    )
+
+    # ...but a month with no data that the site *has* declared final is
+    # complete. "Nothing was used and that is settled" is a legitimate answer,
+    # and it is the operator's to give.
+    award.raw["final_months"] = [this_month_key]
+    store.save(award)
+    check(
+        "...unless the site declared it final, which is a legitimate answer",
+        site_portal.answer(
+            make_job(f"get_usage_report {AWARD} this_month")
+        ).result.is_complete,
+    )
+
+    # A range that does not start on the 1st. `DateRange.months` yields whole
+    # calendar months, so the placeholder has to be anchored inside the range
+    # that was actually asked about - anchoring it on the month's first day
+    # would put it outside, the final `filter` would drop it, and the vacuous
+    # "empty means complete" answer would be back.
+    award.raw["final_months"] = []
+    award.raw["usage"] = {}
+    store.save(award)
+    mid_month = f"{this_month_key}-10:{this_month_key}-20"
+    report = site_portal.answer(
+        make_job(f"get_usage_report {AWARD} {mid_month}")
+    ).result
+    check(
+        "a partial range with no data is still incomplete",
+        not report.is_complete,
+        f"-> is_complete={report.is_complete} over {mid_month}",
+    )
+
+    # Put the award back the way the rest of the suite expects it.
+    award.raw["final_months"] = []
+    award.raw["usage"] = {a_day_this_month: {"alice@bristol.ac.uk": 12.5}}
+    store.save(award)
 
     print("\n-- a second award, on the other resource ------------------------")
 

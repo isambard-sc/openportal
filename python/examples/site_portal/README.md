@@ -43,7 +43,7 @@ away.
 |---|---|
 | `site_portal.py` | **The contract.** One function per instruction, plus the dispatch that guarantees every job is answered. Read this first. |
 | `store.py` | The portal's own state. The file you replace. |
-| `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for approving awards and pushing usage figures. |
+| `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for approving awards, pushing usage figures and declaring a month's accounting final. |
 | `test_site_portal.py` | Drives every handler with synthetic jobs — no bridge, no agents, no network. Proves the example works, and shows that the contract is testable in isolation. |
 
 ## Running it
@@ -85,7 +85,7 @@ python test_site_portal.py
 
 With the application running and an awarding portal called `allocator`
 configured, here is the whole life of an award. This is the part to read
-carefully — most of the contract is visible in these six steps.
+carefully — most of the contract is visible in these seven steps.
 
 ### 1. The allocator asks for an award to be attached to a project
 
@@ -220,14 +220,83 @@ email is untouched, because that is the same person either way.
 It answers from what was pushed, with no computing on the request path — there
 are only about thirty seconds to answer in.
 
-### 6. The same question asked of the wrong resource returns nothing
+### 6. How often you are asked, and how to make it stop
+
+Usage is not asked for once. `get_usage_report` arrives on every sync cycle, and
+almost always for **`this_month`** — the allocator is watching a month fill up,
+not fetching a finished ledger. Your answer carries a flag that decides whether
+it comes back for that month again.
+
+Each day in a `ProjectUsageReport` is either complete or not, and the report as
+a whole is complete when every day in it is. Complete means one specific thing:
+*these figures will not change.* An allocator that receives a complete month
+records it and stops asking; one that receives an incomplete month asks again
+next cycle.
+
+So which months you get asked about is, in part, up to you:
+
+* **The current month is always re-requested,** whatever you say about it. The
+  reference implementation will not even store it as complete — the month is
+  still running, so the claim cannot be true yet.
+* **A past month is re-requested until you report it complete.** Once you do,
+  the allocator has what it needs and moves on.
+
+The window is finite, though, and this is worth knowing before you rely on it.
+Waldur — the reference allocator — sweeps a rolling **two months**,
+`[last_month, this_month]`, on each cycle, and nothing walks further back than
+that. So a month that is never declared complete is re-requested for about
+thirty days and then falls out of the window, still incomplete, and is not asked
+for again. There is no backfill. Declaring a month complete is therefore not
+merely how you stop the asking; it is how you confirm, inside the window where
+anyone is still listening, that the figures the allocator holds are the final
+ones.
+
+That is why this example makes completeness an explicit operations decision
+rather than inferring it:
+
+```bash
+# "August's accounting is settled — stop asking."
+curl -X POST localhost:8080/projects/myproject1.site/usage/finalise \
+     -H 'content-type: application/json' \
+     -d '{"month": "2026-08"}'
+```
+
+and, because a late correction can always land, it can be taken back:
+
+```bash
+curl -X POST localhost:8080/projects/myproject1.site/usage/finalise \
+     -H 'content-type: application/json' \
+     -d '{"month": "2026-08", "final": false}'
+```
+
+The alternative — guessing from the calendar, "the day has passed, so it must be
+settled" — is what the example deliberately does *not* do. A scheduler outage, a
+job record that lands late, a billing correction: any of them moves a number
+after the month has ended. Only the team running the accounting knows when their
+own pipeline has settled, so only they get to say so.
+
+There is one trap here, and it is easy to walk into. A report containing **no
+days at all** is complete, vacuously — "every day I contain is complete" is true
+of nothing. So a month whose figures have simply not been ingested yet would
+answer *"nothing was used, and that is final"*, and be believed.
+`build_usage_report` guards it by writing an explicit zero-usage,
+**not**-complete day for any month in the requested range that it has no data
+for and has not been told is final. That says the honest thing instead: nothing
+so far, ask again.
+
+Note also which way the two errors run. Never finalising costs you one request
+per sync while the month is in the window, and nothing else. Finalising early is
+the expensive direction: the allocator records what it has and stops asking, and
+a correction that arrives afterwards is never collected.
+
+### 7. The same question asked of the wrong resource returns nothing
 
 Ask `allocator.site.cluster2 get_usage_report myaward1.allocator` and the answer
 is an **empty** report, not an error. The award is attached to a project on
 `cluster1`, so nothing was used on `cluster2`. An allocator sweeping every
 offering it knows about, to find which one holds a given award, depends on that.
 
-## The eight things worth taking away
+## The nine things worth taking away
 
 Each of these is commented at the point it matters in the code, but they are the
 reason the example exists.
@@ -275,6 +344,14 @@ reason the example exists.
    `OpenPortalUnsupportedCommandError` — clearly, so a caller can tell "I don't
    do that" from "I'm broken". This example does not implement `get_users`, and
    neither does Waldur.
+
+9. **`is_complete` is a promise, and it is yours to make.** It tells the
+   allocator a month's figures will not change, so it need not ask again — and
+   the allocator's window is only a couple of months wide, so a month never
+   declared complete eventually stops being asked about rather than being
+   retried forever. Nothing in the code can know when accounting has settled;
+   your operations team can. Note that an empty report is complete *vacuously*,
+   which is the one way to promise this by accident.
 
 ## Other languages
 

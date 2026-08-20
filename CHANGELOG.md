@@ -8,6 +8,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`site-portal-api.md` §4.3 and the example on what `is_complete` commits you
+  to.** The flag means "these figures will not change", and it is what decides
+  whether a month is requested again. The section now records what the reference
+  allocator actually does with it: Waldur's `sync_usage` sweeps a rolling
+  two-month window, `[last_month, this_month]`; the current month is always
+  re-requested and never stored complete; last month is re-requested until a
+  complete report arrives; and there is **no backfill**, so a month that leaves
+  the window still incomplete is not asked for again.
+
+  Two traps are now spelled out. Completeness is a claim about the future, so it
+  is an operations decision rather than something to infer from the calendar - a
+  late job record or a billing correction moves numbers after a month has ended.
+  And `ProjectUsageReport::is_complete` is `all()` over the days a report
+  contains, so an **empty report is complete vacuously**: a month that has
+  simply not been ingested yet otherwise answers "nothing was used, and that is
+  final" and is believed.
+
+  The example follows both. `store.Award.final_months` records the months the
+  site has declared final, `POST /projects/{id}/usage/finalise` is how an
+  operator sets or clears one, and `build_usage_report` writes an explicit
+  zero-usage, *not*-complete day for any requested month it has no data for and
+  has not been told is final. It previously inferred completeness from the
+  calendar ("the day has passed, so it must be settled"), which claimed
+  something it could not know.
+
 - **§4.1.1 spells out what a returned project identifier may contain** - 1 to 64
   characters of `A-Za-z0-9_-`, not starting with `-`, for the project component,
   and your own portal's name for the other. Wider than it looks: uppercase,

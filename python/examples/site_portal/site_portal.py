@@ -370,6 +370,14 @@ def build_usage_report(
     `app.py` also accepts a complete `ProjectUsageReport` JSON pushed in by an
     operator's own parser. Both routes end up in the same store, and this
     function serves either.
+
+    **On `is_complete`.** The allocator asks per month, and a report that comes
+    back complete is one it will not ask for again. That makes completeness a
+    claim about the future - "these figures will not change" - which only the
+    site's operations team can make, so here it is driven by
+    `store.Award.final_months` rather than inferred from the calendar. Until a
+    month is declared final it is reported incomplete and keeps being asked
+    for. See the README for what the allocator does with that.
     """
     report = openportal.ProjectUsageReport(openportal.ProjectIdentifier(project_id))
 
@@ -391,7 +399,8 @@ def build_usage_report(
     # the figures were recorded in - our accounting knows `myproject1.site` and has
     # never heard of `myaward1.allocator`.
     report = openportal.ProjectUsageReport(local_project)
-    today = datetime.date.today()
+    final = set(award.final_months)
+    months_with_days: set[str] = set()
 
     for iso_date, per_user in sorted(award.usage.items()):
         date = datetime.date.fromisoformat(iso_date)
@@ -406,12 +415,41 @@ def build_usage_report(
             )
             daily.add_usage(email, openportal.Usage.from_hours(float(hours)))
 
-        # A day in the past will not change, so say so - it lets the caller
-        # cache the figure and stop asking for it.
-        if date < today:
+        # Completeness is a *decision*, not a date comparison. A day is
+        # reported complete only when the site has declared its month final -
+        # see `store.Award.final_months`. Guessing from the calendar ("the day
+        # has passed, so it must be settled") claims the figures will not
+        # change, which nobody but the operations team can know.
+        month = _month_key(date)
+        months_with_days.add(month)
+
+        if month in final:
             daily.set_complete()
 
         report.set_report(date, daily)
+
+    # A month with no data needs an explicit, incomplete placeholder.
+    #
+    # `ProjectUsageReport.is_complete` is "every day I contain is complete",
+    # which is vacuously **true** for a report containing no days at all. So a
+    # month we have simply not ingested yet would otherwise answer "nothing was
+    # used, and that is final" - and the allocator would believe it and stop
+    # asking. A zero-usage day that is *not* marked complete says the honest
+    # thing instead: nothing so far, ask again.
+    for month_range in date_range.months:
+        month = _month_key(month_range.start_date)
+
+        if month in final or month in months_with_days:
+            continue
+
+        # `date_range.months` yields whole calendar months, so a month's first
+        # day can fall before the range that was actually asked about - and the
+        # `filter` at the end of this function would drop the placeholder
+        # again, putting the vacuous-complete answer straight back. Anchor it
+        # inside the requested range instead.
+        anchor = max(month_range.start_date, date_range.start_date)
+
+        report.set_report(anchor, openportal.DailyProjectUsageReport())
 
     # Now translate the whole report into the awarding portal's namespace. This
     # is the mapping being used: they asked about `myaward1.allocator`, so that is
@@ -422,6 +460,11 @@ def build_usage_report(
     report.remap_project(openportal.ProjectIdentifier(project_id))
 
     return report.filter(date_range)
+
+
+def _month_key(date: datetime.date) -> str:
+    """`"YYYY-MM"` - how a month is named in `store.Award.final_months`."""
+    return f"{date.year:04d}-{date.month:02d}"
 
 
 def _date_range(job: openportal.Job, index: int = 1) -> openportal.DateRange:

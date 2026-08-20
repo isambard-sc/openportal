@@ -23,6 +23,7 @@ it. Yours will look nothing like this.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -276,6 +277,19 @@ class UsagePush(BaseModel):
     report: dict | None = None
 
 
+class Finalisation(BaseModel):
+    """
+    An operations decision that one month's accounting will not change again.
+
+    `month` is `"YYYY-MM"`. `final` is separate from it so the decision can be
+    taken back - if a late correction lands, clear it and the allocator starts
+    asking about that month again.
+    """
+
+    month: str
+    final: bool = True
+
+
 @app.get("/awards")
 async def list_awards():
     """Every award we hold, with its approval state."""
@@ -289,6 +303,10 @@ async def list_awards():
             "name": a.details.get("name"),
             "template": a.details.get("template"),
             "members": list((a.details.get("members") or {}).keys()),
+            # Which months this site has declared final. Anything not listed
+            # here is still being re-requested by the allocator - see
+            # `/usage/finalise` below.
+            "final_months": a.final_months,
         }
         for a in store.all_awards()
     ]
@@ -494,6 +512,74 @@ async def push_usage(local_project_id: str, push: UsagePush):
         "award": award.project_id,
         "offering": award.offering,
         "days": len(hours),
+    }
+
+
+@app.post("/projects/{local_project_id}/usage/finalise")
+async def finalise_usage(local_project_id: str, decision: Finalisation):
+    """
+    Declare one month's accounting final - or take that declaration back.
+
+    This is the endpoint that stops the allocator asking. It sets `is_complete`
+    on the days of that month in every `get_usage_report` answer, and
+    `is_complete` is the allocator's signal that a month is settled and need not
+    be requested again (see the README, "How often you are asked").
+
+    It is a deliberately *manual* decision, and it is here rather than inside
+    `site_portal.py` for that reason. Completeness is a claim about the future -
+    "these figures will not change" - and nothing in the code can know it: a
+    scheduler outage, a late job record or a billing correction can all move a
+    number after the month has ended. Only the operations team knows when their
+    own pipeline has settled, so only they get to say so.
+
+    Nothing forces you to call it. An award whose months are never finalised
+    still reports correct figures; it is just re-read for as long as it stays
+    inside the allocator's window, which costs a request per sync and nothing
+    else. Getting it *wrong* is the expensive direction: finalise a month early
+    and the allocator records the figures it has and stops asking, so a
+    correction that lands afterwards is never collected.
+    """
+    award = store.load_by_local_id(local_project_id)
+
+    if award is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no approved award maps to '{local_project_id}' - an award only "
+                "gets a local project identifier when it is approved"
+            ),
+        )
+
+    month = decision.month.strip()
+
+    # Validated rather than trusted: this string is compared against a key built
+    # from a real date in `site_portal.build_usage_report`, so a month written
+    # any other way would silently never match and the finalisation would look
+    # like it had been applied when it had not.
+    try:
+        parsed = datetime.datetime.strptime(month, "%Y-%m")
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail=f"month must be 'YYYY-MM', not {month!r}"
+        )
+
+    month = f"{parsed.year:04d}-{parsed.month:02d}"
+
+    months = set(award.final_months)
+
+    if decision.final:
+        months.add(month)
+    else:
+        months.discard(month)
+
+    award.raw["final_months"] = sorted(months)
+    store.save(award)
+
+    return {
+        "local_project_id": local_project_id,
+        "award": award.project_id,
+        "offering": award.offering,
+        "final_months": award.final_months,
     }
 
 

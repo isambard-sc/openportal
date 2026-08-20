@@ -8,9 +8,9 @@ OpenPortal contract and is broadly the same whatever your portal is; this file
 is about *your* portal, and a real one keeps this in a database with migrations,
 transactions and backups rather than in a directory of JSON files.
 
-It is deliberately dull, and deliberately separate from `portal.py`, to make one
-point: the contract and your state are different concerns. Keeping them apart is
-what lets you throw this file away without touching the handlers.
+It is deliberately dull, and deliberately separate from `site_portal.py`, to
+make one point: the contract and your state are different concerns. Keeping them
+apart is what lets you throw this file away without touching the handlers.
 
 Two design choices worth copying even so:
 
@@ -162,9 +162,22 @@ class Award:
         Hours, as a float. Pushed in by the operator's own parsers, which
         identify the project by `local_project_id` - they have never heard of
         the awarding portal's identifier. Translating between the two is what
-        the mapping is for; see `portal.build_usage_report`.
+        the mapping is for; see `site_portal.build_usage_report`.
         """
         return self.raw.get("usage", {})
+
+    @property
+    def final_months(self) -> list[str]:
+        """
+        The months whose accounting the site has declared final, as `"YYYY-MM"`.
+
+        This is the operations team's lever over how long the allocator keeps
+        asking. A month listed here is reported with `is_complete` set, and the
+        allocator stops re-requesting it; a month absent from here is reported
+        incomplete, and keeps being asked for while it is still inside the
+        allocator's window. See `site_portal.build_usage_report`.
+        """
+        return self.raw.get("final_months", [])
 
 
 def load(offering: str, project_id: str) -> Award | None:
@@ -206,6 +219,7 @@ def create(
             "local_project_id": None,
             "forwarded_for": forwarded_for,
             "usage": {},
+            "final_months": [],
         },
     )
     save(award)

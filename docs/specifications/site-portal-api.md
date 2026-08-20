@@ -659,6 +659,38 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
   ones hold a given award, and failing the ones that do not would break that
   sweep for no reason.
 
+#### `is_complete` decides whether you are asked again
+
+`DailyProjectUsageReport` carries an `is_complete` flag, and
+`ProjectUsageReport.is_complete` is true when every day it contains is. It means
+one thing: *these figures will not change.*
+
+The awarding portal acts on it. Waldur's `sync_usage` (`remotebackend.py`)
+sweeps a rolling **two-month window**, `[last_month, this_month]`, on every
+cycle:
+
+* The **current month** is always re-requested, and is never stored as
+  complete regardless of what you report — "the current month's report cannot
+  be complete", because the month has not finished.
+* **Last month** is re-requested until a report for it comes back complete.
+  After that it is skipped.
+* There is **no backfill.** Nothing walks further back than that window, so a
+  month that leaves it without having been reported complete is simply not asked
+  for again.
+
+Two consequences for a site portal:
+
+* **Reporting a month complete is how you confirm the figures are final**, and
+  it is worth doing inside the window rather than never. It is also a claim
+  about the future, so it is an operations decision — a scheduler outage, a late
+  job record or a billing correction all move numbers after a month has ended.
+  Do not infer it from the calendar.
+* **An empty report is complete vacuously.** `is_complete` over no days at all
+  is true, so a month you have not ingested yet answers "nothing was used, and
+  that is final" and will be believed. If you have no figures for a month and
+  are not asserting that it is settled, include an explicit zero-usage day that
+  is *not* marked complete.
+
 ### 4.4 What you will not receive
 
 The bridge board carries only the instructions above. Everything else in the
@@ -724,9 +756,12 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
     cache (§3.4).
 12. Report usage against the identifier you were asked about, not your own
     (§4.1.1, §4.3).
-13. Handle `membership_control` and reject unknown `template` values (§4.1), and
+13. Set `is_complete` deliberately, and never on a month you have no figures
+    for — an empty report is complete vacuously, and the caller will believe it
+    and stop asking (§4.3).
+14. Handle `membership_control` and reject unknown `template` values (§4.1), and
     populate `AwardDetails.members` (§4.2).
-14. Fetch and acknowledge notifications (§5).
+15. Fetch and acknowledge notifications (§5).
 
 ---
 ## 7. Source file reference

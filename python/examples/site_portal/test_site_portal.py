@@ -193,6 +193,34 @@ def _run_all() -> None:
         store.load_by_local_id(LOCAL_PROJECT).project_id == AWARD,
     )
 
+    print("\n-- what a project name may contain -----------------------------")
+
+    # The operator supplies only the project's own name; `.site` is added for
+    # them. These are the rules that name has to satisfy - one component of a
+    # ProjectIdentifier - and they are wider than they look: uppercase,
+    # underscore and hyphen are all allowed.
+    for name in ("myproject1", "MyProject_1", "my-project", "P1", "a" * 64):
+        try:
+            openportal.ProjectIdentifier(f"{name}.site")
+        except OSError as e:  # pragma: no cover - a failure here is the point
+            raise AssertionError(f"{name!r} should be a usable project name: {e}")
+    check("valid project names are accepted", True, "A-Za-z0-9_- , 1-64 chars")
+
+    for name, why in (
+        ("-lead", "leading dash"),
+        ("my project", "space"),
+        ("my,project", "comma"),
+        ("", "empty"),
+        ("a" * 65, "too long"),
+        ("caf\u00e9", "non-ascii"),
+    ):
+        try:
+            openportal.ProjectIdentifier(f"{name}.site")
+            raise AssertionError(f"{name!r} ({why}) should have been rejected")
+        except OSError:
+            pass
+    check("invalid ones are rejected", True, "dash-first, space, comma, empty, >64, non-ascii")
+
     print("\n-- an award can be moved to a different project -----------------")
 
     # An award is *attached* to a project, not identical to one, so the operator

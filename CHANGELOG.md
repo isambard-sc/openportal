@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **§4.1.1 spells out what a returned project identifier may contain** - 1 to 64
+  characters of `A-Za-z0-9_-`, not starting with `-`, for the project component,
+  and your own portal's name for the other. Wider than it looks: uppercase,
+  underscore and hyphen are all allowed. `python-api.md` states the same rules on
+  `ProjectIdentifier` itself, and the section recommends asking an operator for
+  the project component alone and adding the portal yourself.
 - **`site-portal-api.md` on what `create_award` actually asks for.** The
   document said it was a request to create a project on a resource. It is a
   request to *attach* an award to a project on that resource - usually by

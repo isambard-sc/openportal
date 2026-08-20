@@ -116,25 +116,42 @@ Their job is exactly two decisions: approve or reject.
 curl localhost:8080/awards
 ```
 
-**To approve, they must supply the `ProjectIdentifier` of the project the award
-is attached to** — either one they have just created for it, or one that already
-exists:
+**To approve, they must name the project the award is attached to** — either one
+they have just created for it, or one that already exists:
 
 ```bash
 curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/approve \
      -H 'content-type: application/json' \
-     -d '{"local_project_id": "myproject1.site", "reason": "approved by the panel"}'
+     -d '{"project": "myproject1", "reason": "approved by the panel"}'
 ```
+
+Note they supply `myproject1`, **not** `myproject1.site`. The `.site` half is
+added from the portal's own name, because it is the one part of the identifier an
+operator can get wrong and cannot usefully vary — a project in somebody else's
+namespace is not something this portal can claim. Sending the full identifier is
+refused with a message saying so, rather than being quietly accepted.
+
+The name must uniquely identify the project on this site, and must fit what a
+`ProjectIdentifier` component allows:
+
+| | |
+|---|---|
+| Characters | `A-Z`, `a-z`, `0-9`, `_`, `-` |
+| Must not start with | `-` |
+| Length | 1 to 64 characters |
+
+So `myproject1`, `MyProject_1` and `my-project` are all fine; `my.project`,
+`my project`, `café` and `-lead` are not.
 
 The offering is in the path because an award is identified by *both* the resource
 and the identifier — the same name arriving on `cluster2` would be a different
 award, for a different resource.
 
 **One project, one award — at a time.** A project can be attached to only one
-award at any moment, so approving a second award onto `myproject1.site` is
-refused with a `409`. The operator is free to *change* which project an award is
-attached to, though: approving again with a different `local_project_id` moves
-it, and the project it leaves behind becomes available to another award.
+award at any moment, so approving a second award onto `myproject1` is refused
+with a `409`. The operator is free to *change* which project an award is attached
+to, though: approving again with a different `project` moves it, and the project
+it leaves behind becomes available to another award.
 
 **To reject**, they say so, and the reason travels back:
 
@@ -157,7 +174,8 @@ so the next one simply succeeds, and what it returns is the mapping:
 myaward1.allocator:myproject1.site
 ```
 
-`allocator` supplied the identifier on the left; we chose the one on the right.
+`allocator` supplied the identifier on the left; we chose the one on the right -
+`myproject1`, qualified with our own portal name into `myproject1.site`.
 Neither side could have guessed the other's, and now both hold the pair — so the
 allocator and the site portal agree on the linkage and know what they are talking
 about. From here the award and the project are two names for one thing.
@@ -228,9 +246,9 @@ reason the example exists.
    project that already exists. A project holds at most one award at a time, and
    you may move an award to a different project whenever your records say so.
 
-3. **The mapping is where two portals agree what to call a thing.** You supply
-   the `ProjectIdentifier` of the project you attached, and return it as the
-   second half of the `ProjectMapping`. It is what the allocator joins on, and
+3. **The mapping is where two portals agree what to call a thing.** You name
+   the project you attached — just its own name, qualified with your portal —
+   and it is returned as the second half of the `ProjectMapping`. It is what the allocator joins on, and
    what your usage figures translate through. Until an award is attached you
    have nothing honest to put there — which is why an unattached award answers
    with an error instead.

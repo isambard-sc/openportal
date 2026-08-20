@@ -518,10 +518,29 @@ were recorded in, and then translate it — in Python,
 `UserIdentifier` with it, so `alice.myproject1.site` becomes `alice.myaward1.allocator`
 while the member's email stays as it is.
 
-The second half is validated as a mapping target, so it is restricted to
-`A-Za-z0-9._-` (no leading `-`, no leading or trailing `.`, no `..`). A portal
-with no identifier scheme of its own may reuse the incoming project name, but
-qualify it with your own portal so the mapping still says something.
+**The rules on the identifier you return.** Its project component — the part
+before the `.` — is one component of a `ProjectIdentifier`, so it must be:
+
+| | |
+|---|---|
+| Characters | `A-Z`, `a-z`, `0-9`, `_`, `-` |
+| Must not start with | `-` |
+| Length | 1 to 64 characters |
+
+and its portal component must be your own portal's name. Within that the project
+component must uniquely identify the project on your site.
+
+The mapping as a whole is validated as a *mapping target*, which is why the `.`
+separating the two halves is permitted at all; a leading or trailing `.`, or
+`..`, is not. A portal with no identifier scheme of its own may reuse the
+incoming project name, but qualify it with your own portal so the mapping still
+says something.
+
+A practical note for anyone building the operator-facing side of this: ask for
+the project component alone and add the portal yourself. It is the one part of
+the identifier a human cannot usefully vary and can easily mistype, and an
+identifier naming another portal's namespace is not a claim you can make. The
+example does this — see its `approve` endpoint.
 
 * **A mapping is returned only on success.** `create_award` and `update_award`
   answer with a mapping when the award is in place; when it is not, they answer

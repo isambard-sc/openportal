@@ -435,6 +435,11 @@ the OpenPortal network.
 
 A pair `project.portal` that uniquely identifies a project.
 
+Each component must be 1 to 64 characters of `A-Za-z0-9_-` and must not start
+with `-`; anything else raises `OSError`. So `myproject1`, `MyProject_1` and
+`my-project` are valid components, while `my.project`, `my project` and `-lead`
+are not.
+
 `ProjectIdentifier("myproject.myportal")` constructs from a string.
 `str(pid)` returns the dot-pair. Supports `==` / `!=` against another
 `ProjectIdentifier` or a plain string. Usable as a `dict` key or in a `set`.

@@ -228,19 +228,29 @@ async def _sweep_forever() -> None:
 
 class Approval(BaseModel):
     """
-    An approval, and **the identifier we are giving the award here**.
+    An approval, and **the project the award is being attached to**.
 
-    `local_project_id` is not optional and cannot be defaulted, because it is
-    our half of the mapping: it is what goes back to the awarding portal, and
-    what our own accounting will record usage against. Approving without
-    deciding it would leave both sides unable to name the same thing.
+    `project` is the project's name on *this* site - `myproject1`, not
+    `myproject1.site`. The `.site` half is added for you from the portal's own
+    name, because it is the one part of the identifier an operator can get wrong
+    and cannot usefully vary: an award attached to a project in somebody else's
+    namespace is not a claim this portal can make.
 
-    A real portal generates this when it creates the project - a slug, a
-    sequence number, whatever it already uses - rather than asking an operator
-    to type it. It is a parameter here so the example can show it being chosen.
+    It is required and cannot be defaulted, because it is our half of the
+    mapping: it is what goes back to the allocator, and what our own accounting
+    records usage against. Approving without deciding it would leave both sides
+    unable to name the same thing.
+
+    The name must be 1-64 characters of `A-Za-z0-9_-` and must not start with
+    `-`, which is what `ProjectIdentifier` allows for a single component. Within
+    that it must uniquely identify the project on this site.
+
+    A real portal generates this when it creates a project - a slug, a sequence
+    number, whatever it already uses - rather than asking an operator to type it.
+    It is a parameter here so the example can show it being chosen.
     """
 
-    local_project_id: str
+    project: str
     reason: str = ""
 
 
@@ -330,21 +340,31 @@ async def approve(offering: str, project_id: str, approval: Approval):
     if award is None:
         raise HTTPException(status_code=404, detail="no such award on that offering")
 
-    # Must be a well-formed identifier, and must be one of *ours*: a mapping
-    # naming some other portal's project would be a claim we cannot make.
-    try:
-        local = openportal.ProjectIdentifier(approval.local_project_id)
-    except OSError as e:
-        raise HTTPException(status_code=400, detail=f"not a ProjectIdentifier: {e}")
-
     me = my_portal()
 
-    if str(local.portal) != me:
+    # The operator supplies only the project's own name; we qualify it with our
+    # portal. Catching a dotted value explicitly rather than letting the parse
+    # fail gives the operator the actual answer - "just the project part" - which
+    # is the mistake worth anticipating when the full identifier is what appears
+    # everywhere else in the API.
+    if "." in approval.project:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"local_project_id must be in this portal's namespace "
-                f"(<project>.{me}), got '{local}'"
+                f"send only the project name, not the full identifier: "
+                f"'{approval.project.split('.')[0]}' rather than "
+                f"'{approval.project}' - the '.{me}' is added for you"
+            ),
+        )
+
+    try:
+        local = openportal.ProjectIdentifier(f"{approval.project}.{me}")
+    except OSError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{approval.project}' is not a usable project name: {e}. "
+                "Use 1-64 characters of A-Za-z0-9_- not starting with '-'."
             ),
         )
 

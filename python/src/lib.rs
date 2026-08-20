@@ -1573,7 +1573,7 @@ impl Job {
     /// one of the classes in `openportal` (`ManagedProjectPendingError`,
     /// `ManagedProjectRejectedError`, ...). An exception is encoded as
     /// `"<ClassName>: <message>"` so the awarding portal can recover which
-    /// class it was; see `docs/specifications/project-portal-api.md` §3.3.
+    /// class it was; see `docs/specifications/site-portal-api.md` §3.3.
     fn errored(&self, error: &Bound<'_, PyAny>) -> PyResult<Job> {
         let message = if error.is_instance_of::<pyo3::exceptions::PyBaseException>() {
             errors::from_exception(error)?

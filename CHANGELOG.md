@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- **`project-portal-api.md` §1.3, on what an offering actually is.** The
+- **`site-portal-api.md` §1.3, on what an offering actually is.** The
   document introduced offerings as "named things `ukri` is allowed to address",
   which invites reading them as an access-control list. They are virtual agents
   standing for one resource each, and the offering a request arrives through is
@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   an **empty report rather than an error**, because an awarding portal sweeping
   its offerings to find which one holds an award should not be failed by the
   ones that hold nothing.
-- **`project-portal-api.md` §4.1.1, on what a `ProjectMapping` is for.** The
+- **`site-portal-api.md` §4.1.1, on what a `ProjectMapping` is for.** The
   document described its second half as "whatever you call that project
   locally", which undersold it. It is the receiving portal's own
   `ProjectIdentifier`, decided when the award is provisioned, and it is the only
@@ -30,9 +30,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   guess it, and without it usage recorded on one side cannot be reported to the
   other. The new section says so, and says how the translation works -
   `remap_project` into the caller's namespace.
-- **An example project portal** ([python/examples/portal/](python/examples/portal/)):
+- **An example site portal** ([python/examples/site_portal/](python/examples/site_portal/)):
   a complete, small, heavily commented implementation of
-  [project-portal-api.md](docs/specifications/project-portal-api.md) - every
+  [site-portal-api.md](docs/specifications/site-portal-api.md) - every
   instruction as one function, the approval path, the retry contract, and the
   answer-everything guarantee - behind a FastAPI application, with a test suite
   that drives every handler without a bridge, an agent or a network.
@@ -130,7 +130,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   an agent, which is not where OpenPortal state belongs. The same need is met
   without either agent: the operators run a stock `op-portal` and `op-bridge` and
   put their own software behind the bridge, holding that state on their side of it.
-  [project-portal-api.md](docs/specifications/project-portal-api.md) specifies what
+  [site-portal-api.md](docs/specifications/site-portal-api.md) specifies what
   that software has to implement. The archived design documents are kept, marked
   withdrawn, as a record of the reasoning.
 
@@ -140,8 +140,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- **The project portal contract corrected against a real implementation.**
-  [project-portal-api.md](docs/specifications/project-portal-api.md) was written
+- **The site portal contract corrected against a real implementation.**
+  [site-portal-api.md](docs/specifications/site-portal-api.md) was written
   without sight of `waldur-mastermind`'s side of it. Reading that implementation
   changed several things it claimed:
 
@@ -170,8 +170,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
   §7 now points at `waldur-mastermind`'s `src/waldur_openportal/`, file by file,
   as the worked implementation of each part.
-- **A specification of what a connected project portal must implement**
-  ([docs/specifications/project-portal-api.md](docs/specifications/project-portal-api.md)):
+- **A specification of what a connected site portal must implement**
+  ([docs/specifications/site-portal-api.md](docs/specifications/site-portal-api.md)):
   the requests that arrive on the bridge board, the exact result type each one must
   return, the two-minute answering deadline, and how portal-to-portal working hangs
   together - offerings, the `forwarded_for` tag that identifies the awarding portal,

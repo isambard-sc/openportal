@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
-//! The typed errors a project portal can return, and their wire encoding.
+//! The typed errors a site portal can return, and their wire encoding.
 //!
 //! A portal answers a bridge-board job either with a result or with an error,
 //! and for several instructions the error *is* the answer - an award awaiting
@@ -18,7 +18,7 @@
 //! `waldur-mastermind`'s `src/waldur_openportal/op.py`; it belongs here, so both
 //! sides of a portal-to-portal exchange agree by construction rather than by
 //! two implementations happening to match. See
-//! `docs/specifications/project-portal-api.md` §3.3.
+//! `docs/specifications/site-portal-api.md` §3.3.
 
 use greatwestern::errorkind::kind as gw_kind;
 use pyo3::create_exception;

@@ -168,7 +168,7 @@ mapping:
 | Form | Produced by | Grammar |
 |------|-------------|---------|
 | Unix account name | account agents (`op-freeipa`, `op-localaccount`) and anything below them | `A-Za-z0-9`, `_`, `-`, `.`; no leading `-`, no leading/trailing `.`, no `..`; max 64 characters |
-| Email address | portals, whose members have no Unix account (see [project-portal-api.md](project-portal-api.md)) | local part from `A-Za-z0-9._+-` (max 64, same `.`/`-` rules as above), `@`, then a hostname of at least two labels drawn from `A-Za-z0-9-`; max 254 characters overall |
+| Email address | portals, whose members have no Unix account (see [site-portal-api.md](site-portal-api.md)) | local part from `A-Za-z0-9._+-` (max 64, same `.`/`-` rules as above), `@`, then a hostname of at least two labels drawn from `A-Za-z0-9-`; max 254 characters overall |
 
 The form is decided by whether an `@` is present, and each is validated against
 its own grammar — an address that a portal holds in `AwardDetails.members` may

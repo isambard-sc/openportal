@@ -3,9 +3,9 @@
 """
 The contract: what this portal answers, and how.
 
-This is the file to read. Everything OpenPortal asks of a project portal is
+This is the file to read. Everything OpenPortal asks of a site portal is
 here, one function per instruction, in the order
-`docs/specifications/project-portal-api.md` §4 lists them.
+`docs/specifications/site-portal-api.md` §4 lists them.
 
 The shape to take away is `handle()` at the bottom: **every job gets an
 answer.** A handler either returns a value or raises; either way a result is

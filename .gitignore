@@ -13,7 +13,7 @@ slurm_example_data*
 slurm_demo_data*
 agents/*.toml
 
-# Left behind by running the Python example (python/examples/portal)
+# Left behind by running the Python example (python/examples/site_portal)
 __pycache__
 *.pyc
 portal-state

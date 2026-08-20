@@ -284,7 +284,7 @@ State that a deployment genuinely needs to keep - which projects exist,
 who is a member of them, what has been approved - belongs to the portal
 software on the far side of `op-bridge`, not to an agent. A portal that
 does not yet have somewhere to put that state should hold it itself; see
-[project-portal-api.md](project-portal-api.md) for what such a portal has
+[site-portal-api.md](site-portal-api.md) for what such a portal has
 to implement.
 
 ### 4.4 What this doesn't claim

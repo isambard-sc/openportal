@@ -3,11 +3,12 @@ SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.
 SPDX-License-Identifier: CC0-1.0
 -->
 
-# Project Portal API Specification
+# Site Portal API Specification
 
 **Status:** Normative for the `greatwestern` domain
-**Audience:** Anyone connecting a *project portal* — the portal software that
-owns projects and their members (e.g. Waldur) — to an OpenPortal network.
+**Audience:** Anyone connecting their site's portal to OpenPortal — the software
+that runs a site's resources and owns its projects and their members
+(e.g. Waldur).
 
 ---
 
@@ -40,7 +41,7 @@ mechanics; use this one when writing the handler.
 | The instruction string grammar | [instruction-protocol.md](instruction-protocol.md) |
 | Which error to raise, and what the caller does with it | this document, §3.3 |
 | Doing it in Python | [python-api.md](python-api.md) |
-| A worked implementation to read | [`python/examples/portal/`](../../python/examples/portal/) |
+| A worked implementation to read | [`python/examples/site_portal/`](../../python/examples/site_portal/) |
 | A portal that already does all this in production | `waldur-mastermind`, `src/waldur_openportal/` (§7) |
 
 ---
@@ -718,7 +719,7 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 
 ### 7.1 The example portal
 
-[`python/examples/portal/`](../../python/examples/portal/) implements this
+[`python/examples/site_portal/`](../../python/examples/site_portal/) implements this
 document — every instruction, the approval path, the retry contract, the
 answer-everything guarantee — in about 400 lines of commented Python, with a
 test suite that drives each handler without needing a bridge. It is written to be

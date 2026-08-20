@@ -10,7 +10,7 @@ then removed: on reflection the cloud integration does not need a bespoke
 Rust agent at all. The cloud operators can run a stock `op-portal` and
 `op-bridge` and put their own (Python) portal software behind it, holding
 whatever state they need on their side of the bridge - see
-[project-portal-api.md](../../specifications/project-portal-api.md) for the
+[site-portal-api.md](../../specifications/site-portal-api.md) for the
 contract such software implements. This document is kept only as a record
 of the design decisions and rationale; the code it describes is no longer
 in the tree (see git history for `cloudaccount/`).

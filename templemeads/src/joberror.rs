@@ -5,7 +5,7 @@
 //!
 //! A failure used to be a `String`, which meant every agent that wanted to act
 //! on one - rather than merely log it - had to parse prose. The clearest case
-//! is a project portal answering `create_award`: "awaiting approval" means keep
+//! is a site portal answering `create_award`: "awaiting approval" means keep
 //! asking and "rejected" means stop, and the difference between them travelled
 //! as a class-name prefix that both ends agreed on by convention.
 //!

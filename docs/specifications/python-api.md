@@ -24,8 +24,8 @@ This installs the `openportal` module into the current Python environment.
 
 ## A worked example
 
-[`python/examples/portal/`](../../python/examples/portal/) is a complete, small,
-heavily commented project portal built on this module - the two `signal_url`
+[`python/examples/site_portal/`](../../python/examples/site_portal/) is a complete, small,
+heavily commented site portal built on this module - the two `signal_url`
 endpoints, every instruction handler, and a test suite that runs without a
 bridge. It is the fastest way to see how the pieces below fit together.
 
@@ -416,7 +416,7 @@ plain string. Usable as a `dict` key or in a `set`.
 for a `forwarded_for` of `allocator.site.cluster1`, `agents[0]` is the awarding
 portal that asked (`allocator`) and `agents[-1]` is the offering it came in
 through (`cluster1`). See
-[project-portal-api.md §1.2](project-portal-api.md).
+[site-portal-api.md §1.2](site-portal-api.md).
 
 ---
 
@@ -458,7 +458,7 @@ The pairing of two portals' names for the same thing:
 
 **This is a string, not an object**, and it is what `create_award`,
 `update_award`, `remove_award` and `get_project_mapping` must return — see
-[project-portal-api.md §4.1.1](project-portal-api.md), which explains why it
+[site-portal-api.md §4.1.1](site-portal-api.md), which explains why it
 matters.
 
 | Property | Type | Description |
@@ -783,7 +783,7 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 | `daily_reports` | `(with_usage_only: bool = True) → list[DailyProjectUsageReport]` | Return the daily reports sorted by date. If `with_usage_only=True` (default), only days with non-zero usage are returned; pass `False` to include all days. |
 | `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user breakdowns, job counts, and average wait times. |
 | `filter` | `(range: DateRange) → ProjectUsageReport` | Return a copy of this report containing only days that fall within `range` (inclusive on both ends). |
-| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. This is how a portal answers a request about *their* project with figures recorded against *its own* — see [project-portal-api.md §4.1.1](project-portal-api.md). Local usernames are unchanged. |
+| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. This is how a portal answers a request about *their* project with figures recorded against *its own* — see [site-portal-api.md §4.1.1](site-portal-api.md). Local usernames are unchanged. |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping each project name unchanged, e.g. `project.portal` → `project.new_portal`. |
 | `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
 
@@ -1007,9 +1007,9 @@ predates it — so the class you catch is the class that was raised, not a guess
 this module has no class for (it arrives as `OpenPortalOtherError` with its text
 intact). The kinds are listed in [json-types.md](json-types.md).
 
-Which error a project portal should return, and what an awarding portal does
+Which error a site portal should return, and what an awarding portal does
 with each, is specified in
-[project-portal-api.md §3.3](project-portal-api.md).
+[site-portal-api.md §3.3](site-portal-api.md).
 
 ---
 

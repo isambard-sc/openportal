@@ -17,7 +17,7 @@ Two design choices worth copying even so:
 * **Awards are keyed on `(offering, project identifier)`, not on either
   alone.** The offering names *which resource* the award is for, so the same
   awarding portal can hold two separate awards under the same name on two
-  different resources - see project-portal-api.md §1.3. And the identifier must
+  different resources - see site-portal-api.md §1.3. And the identifier must
   be the full `myaward1.allocator`, because the same project name can exist under two
   different awarding portals and mean different projects (§1.2). The reference
   implementation keys its own records the same way.

@@ -12,7 +12,7 @@ which is which:
 
 **What OpenPortal calls** - `/signal/job` and `/signal/notification`. These are
 the `signal_url` and `notification_url` you gave `op-bridge init`. Their shape
-is dictated by the contract (project-portal-api.md §3.1, §5).
+is dictated by the contract (site-portal-api.md §3.1, §5).
 
 **What an operator calls** - everything under `/awards`. This is *not* part of
 any OpenPortal contract; it exists because someone has to approve awards and
@@ -32,7 +32,7 @@ import openportal
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
-import portal
+import site_portal
 import store
 
 logging.basicConfig(level=logging.INFO)
@@ -99,7 +99,7 @@ async def lifespan(app: FastAPI):
     # agent on this portal that the named portal may address directly.
     offerings = [
         openportal.Destination(f"{offering}.{me}.{them.strip()}")
-        for offering in sorted(portal.OFFERINGS)
+        for offering in sorted(site_portal.OFFERINGS)
         for them in awarding_portals
         if them.strip()
     ]
@@ -115,7 +115,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="OpenPortal example project portal",
+    title="OpenPortal example site portal",
     description=__doc__,
     lifespan=lifespan,
 )
@@ -158,7 +158,7 @@ async def signal_job(tasks: BackgroundTasks, job_id: str = Query(...)):
         raise HTTPException(status_code=403)
 
     _seen.add(job_id)
-    tasks.add_task(portal.handle, job)
+    tasks.add_task(site_portal.handle, job)
 
     return {}
 
@@ -211,7 +211,7 @@ async def _sweep_forever() -> None:
 
                 logger.info("sweep picked up job %s that no signal delivered", job.id)
                 _seen.add(str(job.id))
-                await asyncio.to_thread(portal.handle, job)
+                await asyncio.to_thread(site_portal.handle, job)
 
         except asyncio.CancelledError:
             raise
@@ -403,7 +403,7 @@ async def push_usage(local_project_id: str, push: UsagePush):
     the awarding portal's language because that is the language OpenPortal asks
     questions in. This one speaks ours, because your accounting produces figures
     for `myproject1.site` and has never heard of `myaward1.allocator`. The mapping made
-    at approval is what joins them, and `portal.build_usage_report` is where the
+    at approval is what joins them, and `site_portal.build_usage_report` is where the
     translation happens.
 
     This is the half of the integration that is genuinely yours: your accounting

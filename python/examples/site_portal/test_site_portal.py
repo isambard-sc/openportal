@@ -7,7 +7,7 @@ Run it with `python test_portal.py`, or under pytest.
 
 This is here for two reasons. It proves the example actually works rather than
 merely looking as though it should - and it shows that **the contract is testable
-in isolation**. A `Job` deserialises from JSON, and `portal.answer()` returns the
+in isolation**. A `Job` deserialises from JSON, and `site_portal.answer()` returns the
 answered job, so every instruction can be driven from a fixture. Anyone writing
 a real portal should do this: it is much faster than round-tripping through two
 agent networks, and it catches the cases that are awkward to provoke live, like
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import openportal
 
-import portal
+import site_portal
 import store
 
 # The cast. `allocator` is the awarding portal, `site` is us, and `cluster1` and
@@ -79,7 +79,7 @@ def make_job(
                 "changed": 1700000000,
                 "expires": 4000000000,
                 "version": 1,
-                "command": f"portal.bridge.{offering} {instruction}",
+                "command": f"site_portal.bridge.{offering} {instruction}",
                 "state": "Pending",
                 "result": None,
                 "result_type": None,
@@ -117,7 +117,7 @@ def _run_all() -> None:
 
     # A new award is recorded and answers "not yet", because a human has not
     # looked at it. This is the normal first response, not a fault.
-    job = portal.answer(make_job(f"create_project {AWARD} {details()}"))
+    job = site_portal.answer(make_job(f"create_project {AWARD} {details()}"))
     check("new award is answered with an error", job.is_error)
     check(
         "...and the error is ManagedProjectPendingError",
@@ -134,7 +134,7 @@ def _run_all() -> None:
 
     # The awarding portal re-sends this every cycle. It must not create a
     # second award, and must answer the same way.
-    again = portal.answer(make_job(f"create_project {AWARD} {details()}"))
+    again = site_portal.answer(make_job(f"create_project {AWARD} {details()}"))
     check(
         "a repeated create answers the same",
         type(again.error) is openportal.ManagedProjectPendingError,
@@ -143,7 +143,7 @@ def _run_all() -> None:
 
     print("\n-- a rejected template -----------------------------------------")
 
-    bad = portal.answer(make_job(f"create_project myaward5.allocator {details('gpu-mega')}"))
+    bad = site_portal.answer(make_job(f"create_project myaward5.allocator {details('gpu-mega')}"))
     check(
         "an unoffered template is rejected terminally",
         type(bad.error) is openportal.ManagedProjectRejectedError,
@@ -160,7 +160,7 @@ def _run_all() -> None:
     award.raw["local_project_id"] = LOCAL_PROJECT
     store.save(award)
 
-    job = portal.answer(make_job(f"create_project {AWARD} {details()}"))
+    job = site_portal.answer(make_job(f"create_project {AWARD} {details()}"))
     check("an approved award answers with a mapping", not job.is_error)
     check(
         "...pairing their award id with our project id",
@@ -186,7 +186,7 @@ def _run_all() -> None:
 
     print("\n-- get_award ---------------------------------------------------")
 
-    job = portal.answer(make_job(f"get_award {AWARD}"))
+    job = site_portal.answer(make_job(f"get_award {AWARD}"))
     check("get_award returns AwardDetails", type(job.result) is openportal.AwardDetails)
     check(
         "...with members populated (there is no get_users)",
@@ -196,7 +196,7 @@ def _run_all() -> None:
 
     print("\n-- update_award for an award we do not hold ---------------------")
 
-    job = portal.answer(make_job(f"update_project myaward4.allocator {details()}"))
+    job = site_portal.answer(make_job(f"update_project myaward4.allocator {details()}"))
     check(
         "an update for an unknown award becomes a create",
         type(job.error) is openportal.ManagedProjectPendingError,
@@ -216,7 +216,7 @@ def _run_all() -> None:
     award.raw["usage"] = {yesterday: {"alice@bristol.ac.uk": 12.5}}
     store.save(award)
 
-    job = portal.answer(make_job(f"get_usage_report {AWARD} this_month"))
+    job = site_portal.answer(make_job(f"get_usage_report {AWARD} this_month"))
     check("get_usage_report succeeds", not job.is_error, f"{job.error_message}")
     report = job.result
     check("...returns a ProjectUsageReport", type(report) is openportal.ProjectUsageReport)
@@ -248,7 +248,7 @@ def _run_all() -> None:
         all(d.is_complete for d in report.daily_reports()),
     )
 
-    job = portal.answer(make_job(f"get_usage_reports award this_month"))
+    job = site_portal.answer(make_job(f"get_usage_reports award this_month"))
     check("get_usage_reports rolls up to the portal", not job.is_error)
     check("...as a UsageReport", type(job.result) is openportal.UsageReport)
 
@@ -257,7 +257,7 @@ def _run_all() -> None:
     # The ordinary two-resource case: a different award, on a different
     # resource, mapped to a different project of ours. Nothing about it touches
     # the first, and both are live at once.
-    portal.answer(
+    site_portal.answer(
         make_job(f"create_project {AWARD2} {details()}", offering=OTHER_OFFERING)
     )
     second = store.load(OTHER_OFFERING, AWARD2)
@@ -265,7 +265,7 @@ def _run_all() -> None:
     second.raw["local_project_id"] = LOCAL_PROJECT2
     store.save(second)
 
-    job = portal.answer(
+    job = site_portal.answer(
         make_job(f"get_project_mapping {AWARD2}", offering=OTHER_OFFERING)
     )
     check(
@@ -275,16 +275,16 @@ def _run_all() -> None:
     )
     check(
         "...and the first is unaffected",
-        str(portal.answer(make_job(f"get_project_mapping {AWARD}")).result)
+        str(site_portal.answer(make_job(f"get_project_mapping {AWARD}")).result)
         == f"{AWARD}:{LOCAL_PROJECT}",
     )
     check(
         "each resource lists only its own award",
-        [str(m) for m in portal.answer(make_job("get_projects allocator")).result]
+        [str(m) for m in site_portal.answer(make_job("get_projects allocator")).result]
         == [f"{AWARD}:{LOCAL_PROJECT}"]
         and [
             str(m)
-            for m in portal.answer(
+            for m in site_portal.answer(
                 make_job("get_projects allocator", offering=OTHER_OFFERING)
             ).result
         ]
@@ -298,7 +298,7 @@ def _run_all() -> None:
     # honest answer is that nothing was used there, because the project is not
     # there. Empty, not an error: a caller sweeping every offering it knows
     # about should not be failed by the ones that hold nothing.
-    job = portal.answer(
+    job = site_portal.answer(
         make_job(f"get_usage_report {AWARD} this_month", offering=OTHER_OFFERING)
     )
     check("usage from the wrong offering succeeds", not job.is_error, f"{job.error_message}")
@@ -309,19 +309,19 @@ def _run_all() -> None:
     )
     check(
         "...while the right offering still has the usage",
-        portal.answer(
+        site_portal.answer(
             make_job(f"get_usage_report {AWARD} this_month")
         ).result.total_usage.seconds > 0,
     )
 
     # An award is only visible through the resource it was created on.
-    job = portal.answer(make_job(f"get_award {AWARD}", offering=OTHER_OFFERING))
+    job = site_portal.answer(make_job(f"get_award {AWARD}", offering=OTHER_OFFERING))
     check("get_award from the wrong offering finds nothing", job.is_error, f"-> {job.error}")
     check(
         "...listings are scoped too, so it is absent from the other resource",
         not any(
             str(m).startswith(f"{AWARD}:")
-            for m in portal.answer(
+            for m in site_portal.answer(
                 make_job("get_projects allocator", offering=OTHER_OFFERING)
             ).result
         ),
@@ -330,7 +330,7 @@ def _run_all() -> None:
         "...while the right offering lists it",
         any(
             str(m).startswith(f"{AWARD}:")
-            for m in portal.answer(make_job("get_projects allocator")).result
+            for m in site_portal.answer(make_job("get_projects allocator")).result
         ),
     )
 
@@ -339,7 +339,7 @@ def _run_all() -> None:
     # A stronger case than the two awards above: the *same* name on both
     # resources. `myaward1.allocator` on cluster2 is a different award from
     # `myaward1.allocator` on cluster1, and creating it must not disturb the first.
-    job = portal.answer(
+    job = site_portal.answer(
         make_job(f"create_project {AWARD} {details()}", offering=OTHER_OFFERING)
     )
     check(
@@ -348,7 +348,7 @@ def _run_all() -> None:
     )
     check(
         "...the original is untouched and still approved",
-        str(portal.answer(make_job(f"get_project_mapping {AWARD}")).result)
+        str(site_portal.answer(make_job(f"get_project_mapping {AWARD}")).result)
         == f"{AWARD}:{LOCAL_PROJECT}",
     )
     check(
@@ -372,7 +372,7 @@ def _run_all() -> None:
     )
 
     # Removing from one resource leaves the other alone.
-    portal.answer(make_job(f"remove_project {AWARD}", offering=OTHER_OFFERING))
+    site_portal.answer(make_job(f"remove_project {AWARD}", offering=OTHER_OFFERING))
     check(
         "removing from one resource leaves the other",
         store.load(OFFERING, AWARD) is not None
@@ -383,7 +383,7 @@ def _run_all() -> None:
 
     # Templates are per-resource: `large` is offered on cluster1 and not on
     # cluster2, because a template selects things that belong to the resource.
-    job = portal.answer(
+    job = site_portal.answer(
         make_job(f"create_project myaward6.allocator {details('large')}", offering=OTHER_OFFERING)
     )
     check(
@@ -391,7 +391,7 @@ def _run_all() -> None:
         type(job.error) is openportal.ManagedProjectRejectedError,
         f"-> {job.error}",
     )
-    job = portal.answer(make_job(f"create_project myaward6.allocator {details('large')}"))
+    job = site_portal.answer(make_job(f"create_project myaward6.allocator {details('large')}"))
     check(
         "...and accepted on the resource that offers it",
         type(job.error) is openportal.ManagedProjectPendingError,
@@ -404,32 +404,32 @@ def _run_all() -> None:
     # usage to have been recorded against. Empty, for the same reason as the
     # wrong-offering case above: nothing was used, and that is not a failure.
     pending = "myaward3.allocator"
-    portal.answer(make_job(f"create_project {pending} {details()}"))
-    job = portal.answer(make_job(f"get_usage_report {pending} this_month"))
+    site_portal.answer(make_job(f"create_project {pending} {details()}"))
+    job = site_portal.answer(make_job(f"get_usage_report {pending} this_month"))
     check("usage for an unapproved award is empty, not an error", not job.is_error)
     check("...and reports zero", job.result.total_usage.seconds == 0)
     check(
         "...while the mapping for it is still refused, being pending",
-        portal.answer(make_job(f"get_project_mapping {pending}")).is_error,
+        site_portal.answer(make_job(f"get_project_mapping {pending}")).is_error,
     )
     check(
         "...but get_projects still lists it, as :None",
         any(
             str(m) == f"{pending}:None"
-            for m in portal.answer(make_job("get_projects allocator")).result
+            for m in site_portal.answer(make_job("get_projects allocator")).result
         ),
     )
     store.delete(OFFERING, pending)
 
     print("\n-- storage: empty beats absent ---------------------------------")
 
-    job = portal.answer(make_job(f"get_storage_report {AWARD} this_month"))
+    job = site_portal.answer(make_job(f"get_storage_report {AWARD} this_month"))
     check("get_storage_report succeeds rather than failing", not job.is_error)
     check("...with an empty report", job.result.is_empty())
 
     print("\n-- an instruction we do not implement ---------------------------")
 
-    job = portal.answer(make_job(f"get_users {AWARD}"))
+    job = site_portal.answer(make_job(f"get_users {AWARD}"))
     check(
         "get_users is declined, not ignored",
         type(job.error) is openportal.OpenPortalUnsupportedCommandError,
@@ -439,13 +439,13 @@ def _run_all() -> None:
 
     print("\n-- authorisation against forwarded_for -------------------------")
 
-    job = portal.answer(
-        make_job(f"get_award {AWARD}", forwarded_for=f"award.portal.{OFFERING}")
+    job = site_portal.answer(
+        make_job(f"get_award {AWARD}", forwarded_for=f"allocator.site.{OFFERING}")
     )
     check("a request through an advertised offering is allowed", not job.is_error)
 
-    job = portal.answer(
-        make_job(f"get_award {AWARD}", forwarded_for="award.portal.not-ours")
+    job = site_portal.answer(
+        make_job(f"get_award {AWARD}", forwarded_for="allocator.site.not-ours")
     )
     check(
         "a request through an unknown offering is refused",
@@ -455,7 +455,7 @@ def _run_all() -> None:
 
     print("\n-- an award we have never heard of ------------------------------")
 
-    job = portal.answer(make_job("get_award nosuch.allocator"))
+    job = site_portal.answer(make_job("get_award nosuch.allocator"))
     check("an unknown award is an error, not a rejection", job.is_error)
     check(
         "...recovered as the class it was raised as",
@@ -469,28 +469,28 @@ def _run_all() -> None:
 
     print("\n-- remove_award ------------------------------------------------")
 
-    job = portal.answer(make_job(f"remove_project {AWARD}"))
+    job = site_portal.answer(make_job(f"remove_project {AWARD}"))
     check("remove_award answers with :None", str(job.result) == f"{AWARD}:None")
     check("...and the award is gone", store.load(OFFERING, AWARD) is None)
 
-    job = portal.answer(make_job(f"remove_project {AWARD}"))
+    job = site_portal.answer(make_job(f"remove_project {AWARD}"))
     check("removing it twice is not an error", not job.is_error)
 
     print("\n-- every job gets an answer ------------------------------------")
 
     # The structural guarantee: even a handler that blows up unexpectedly
     # produces an errored job rather than silence.
-    broken = dict(portal.HANDLERS)
-    portal.HANDLERS["get_award"] = lambda job: 1 / 0
+    broken = dict(site_portal.HANDLERS)
+    site_portal.HANDLERS["get_award"] = lambda job: 1 / 0
     logging.disable(logging.CRITICAL)  # the traceback below is deliberate
     try:
-        job = portal.answer(make_job("get_award anything.award"))
+        job = site_portal.answer(make_job("get_award anything.award"))
         check("an unexpected exception still answers", job.is_error)
         check("...as an OpenPortalError", isinstance(job.error, openportal.OpenPortalError))
     finally:
         logging.disable(logging.NOTSET)
-        portal.HANDLERS.clear()
-        portal.HANDLERS.update(broken)
+        site_portal.HANDLERS.clear()
+        site_portal.HANDLERS.update(broken)
 
     print("\nall checks passed\n")
 

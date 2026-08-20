@@ -3,20 +3,20 @@ SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.
 SPDX-License-Identifier: CC0-1.0
 -->
 
-# An example project portal
+# An example site portal
 
 A small, complete, working implementation of
-[project-portal-api.md](../../../docs/specifications/project-portal-api.md) — the
-contract a *project portal* fulfils when another portal creates awards on its
+[site-portal-api.md](../../../docs/specifications/site-portal-api.md) — the
+contract a *site portal* fulfils when another portal creates awards on its
 infrastructure.
 
-It exists to be **read**. If you are connecting portal software to OpenPortal,
-this is the shortest path to understanding what your side has to do: every
-instruction is one function, and the awkward parts of the contract — the ones
-that are easy to get wrong and hard to discover — are commented where they bite
-rather than left in the specification.
+It exists to be **read**. If you are connecting your site's portal to
+OpenPortal, this is the shortest path to understanding what your side has to do:
+every instruction is one function, and the awkward parts of the contract — the
+ones that are easy to get wrong and hard to discover — are commented where they
+bite rather than left in the specification.
 
-## This is not a production portal
+## This is not a production site portal
 
 Not "not yet" — not ever. It is missing, deliberately, everything a real
 deployment needs and nothing that would teach you about OpenPortal:
@@ -41,10 +41,10 @@ away.
 
 | File | What it is |
 |---|---|
-| `portal.py` | **The contract.** One function per instruction, plus the dispatch that guarantees every job is answered. Read this first. |
+| `site_portal.py` | **The contract.** One function per instruction, plus the dispatch that guarantees every job is answered. Read this first. |
 | `store.py` | The portal's own state. The file you replace. |
 | `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for approving awards and pushing usage figures. |
-| `test_portal.py` | Drives every handler with synthetic jobs — no bridge, no agents, no network. Proves the example works, and shows that the contract is testable in isolation. |
+| `test_site_portal.py` | Drives every handler with synthetic jobs — no bridge, no agents, no network. Proves the example works, and shows that the contract is testable in isolation. |
 
 ## Running it
 
@@ -78,7 +78,7 @@ op-bridge init \
 The tests need neither the bridge nor the config:
 
 ```bash
-python test_portal.py
+python test_site_portal.py
 ```
 
 ## Walking through one award
@@ -90,7 +90,7 @@ here is the whole life of an award.
 `allocator.site.cluster1`, and that last element is a *virtual agent* on this
 portal standing for one resource we run. The request is not "create an award",
 it is "create a project on `cluster1`". The job reaches `/signal/job`,
-`portal.create_award` records it against that offering, and — because nobody has
+`site_portal.create_award` records it against that offering, and — because nobody has
 approved it — answers `ManagedProjectPendingError`. This is *not* a failure. The
 awarding portal logs it quietly and will ask again.
 
@@ -192,7 +192,7 @@ reason the example exists.
    arrives repeatedly for awards you already hold. `update_award` arrives for
    awards you have never seen. A duplicate job id must not do the work twice.
 
-5. **Never leave a job unanswered.** `portal.answer()` is built so that a
+5. **Never leave a job unanswered.** `site_portal.answer()` is built so that a
    handler returning, a handler raising, and a handler crashing all produce a
    posted result. Silence becomes a two-minute timeout for whoever is waiting.
 
@@ -209,7 +209,7 @@ reason the example exists.
 
 Nothing here is Python-specific except the convenience of the `openportal`
 module. The contract is HTTP and JSON, and
-[project-portal-api.md](../../../docs/specifications/project-portal-api.md)
+[site-portal-api.md](../../../docs/specifications/site-portal-api.md)
 specifies it in language-neutral terms — including the wire form of the error
 classes, so a portal in another language can produce and read them. If you build
 an equivalent example in another language, it belongs alongside this one.

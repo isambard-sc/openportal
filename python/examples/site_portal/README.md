@@ -83,49 +83,92 @@ python test_site_portal.py
 
 ## Walking through one award
 
-With the application running and an awarding portal called `allocator` configured,
-here is the whole life of an award.
+With the application running and an awarding portal called `allocator`
+configured, here is the whole life of an award. This is the part to read
+carefully — most of the contract is visible in these six steps.
 
-**1. `allocator` creates it, on a particular resource.** It addresses
-`allocator.site.cluster1`, and that last element is a *virtual agent* on this
-portal standing for one resource we run. The request is not "create an award",
-it is "create a project on `cluster1`". The job reaches `/signal/job`,
-`site_portal.create_award` records it against that offering, and — because nobody has
-approved it — answers `ManagedProjectPendingError`. This is *not* a failure. The
-awarding portal logs it quietly and will ask again.
+### 1. The allocator asks for an award to be attached to a project
 
-**2. An operator approves it, and says what we call it here.**
+`allocator` addresses `allocator.site.cluster1`. That last element is a *virtual
+agent* on this portal standing for one resource we run, so the request carries
+which resource it is about.
+
+What it is asking for is more subtle than it first looks. It is **not** "create
+an award" — the award already exists; `allocator` decided it. It is *"connect
+this award to a project on `cluster1`"*. Most often that will mean creating a new
+project for it, but nothing requires that: you are free to attach the award to a
+project that already exists, if that is what your site's records say should
+happen.
+
+Since this site wants a human to look at every award first, nothing is attached
+yet, and `site_portal.create_award` answers with `ManagedProjectPendingError`.
+
+**This is not a failure.** It is the honest answer to "is this award connected to
+a project yet?" — not yet. `allocator` logs it quietly and **will repeat the
+request periodically until it is approved or rejected**. That retry is what makes
+the rest of this work, and it is why nothing below needs to push anything back.
+
+### 2. The site operators see the pending awards, and decide
+
+Their job is exactly two decisions: approve or reject.
 
 ```bash
 curl localhost:8080/awards
+```
+
+**To approve, they must supply the `ProjectIdentifier` of the project the award
+is attached to** — either one they have just created for it, or one that already
+exists:
+
+```bash
 curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/approve \
      -H 'content-type: application/json' \
      -d '{"local_project_id": "myproject1.site", "reason": "approved by the panel"}'
 ```
 
-The offering is in the path because an award is identified by *both* — the same
-name on `cluster2` would be a different award, for a different resource.
+The offering is in the path because an award is identified by *both* the resource
+and the identifier — the same name arriving on `cluster2` would be a different
+award, for a different resource.
 
-`local_project_id` is required, and it is the point of the whole exchange.
-`allocator` knows this award as `myaward1.allocator`; we now know the project we made for
-it as `myproject1.site`. Neither side could guess the other's name, so approval is
-where ours gets decided.
+**One project, one award — at a time.** A project can be attached to only one
+award at any moment, so approving a second award onto `myproject1.site` is
+refused with a `409`. The operator is free to *change* which project an award is
+attached to, though: approving again with a different `local_project_id` moves
+it, and the project it leaves behind becomes available to another award.
 
-**3. It goes live by itself, and `allocator` learns our name for it.** Nothing is
-pushed back. `allocator` is already re-sending `create_award` every cycle, so the
-next one gets a `ProjectMapping` instead of an error:
+**To reject**, they say so, and the reason travels back:
+
+```bash
+curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/reject \
+     -H 'content-type: application/json' \
+     -d '{"reason": "no capacity on cluster1 this quarter"}'
+```
+
+`allocator`'s next request then gets `ManagedProjectRejectedError`, which tells it
+the award is refused. Unlike pending, that is terminal: `allocator` records the
+award as errored and stops asking.
+
+### 3. On approval, the two portals learn each other's names for the thing
+
+Nothing is pushed back to `allocator`. It is already re-sending `create_award`,
+so the next one simply succeeds, and what it returns is the mapping:
 
 ```
 myaward1.allocator:myproject1.site
 ```
 
-Both sides now hold the pair, and from here the award ID and the project ID are
-two names for one thing. This is the most useful consequence of the retry
-contract — approval needs no notification path of its own.
+`allocator` supplied the identifier on the left; we chose the one on the right.
+Neither side could have guessed the other's, and now both hold the pair — so the
+allocator and the site portal agree on the linkage and know what they are talking
+about. From here the award and the project are two names for one thing.
 
-**4. Usage figures are pushed in — against *our* identifier.** Your accounting
-produces figures for `myproject1.site` and has never heard of `myaward1.allocator`, so
-that is what it posts against:
+That is also what makes approval need no notification path of its own: the
+retrying request *is* the delivery mechanism.
+
+### 4. Usage figures are pushed in — against *our* identifier
+
+Your accounting is the source of truth, and it produces figures for
+`myproject1.site`. It has never heard of `myaward1.allocator`:
 
 ```bash
 curl -X PUT localhost:8080/projects/myproject1.site/usage \
@@ -144,25 +187,29 @@ curl -X PUT localhost:8080/projects/myproject1.site/usage \
 
 Both end up in the same store, and `get_usage_report` serves either.
 
-Note the endpoints under `/awards` are keyed on `allocator`'s identifier and this one
-on ours. That is not an inconsistency — it is the two namespaces, and the
-mapping is what joins them.
+Note that everything under `/awards` is keyed on `allocator`'s identifier and this
+endpoint on ours. That is not an inconsistency — those are the two namespaces,
+and the mapping from step 3 is what joins them.
 
-**5. `allocator` collects them, and gets an answer in its own namespace.** It asks
-`allocator.site.cluster1 get_usage_report myaward1.allocator`. The figures were recorded against
-`myproject1.site`, so `build_usage_report` assembles the report in our namespace
-and then `remap_project`s it into theirs — `alice.myproject1.site` becomes
-`alice.myaward1.allocator`, and the member's email is untouched because it is the
-same person either way. It answers from what was pushed, with no computing on
-the request path, because there are only about thirty seconds to answer in.
+### 5. The allocator asks for usage, and gets it in its own namespace
 
-**6. The same question asked of the wrong resource returns nothing.** Ask
-`allocator.site.cluster2 get_usage_report myaward1.allocator` and the answer is an
-*empty* report, not an error — the project is not on `cluster2`, so nothing was
-used there. An awarding portal sweeping every offering it knows about to find
-which one holds an award relies on that.
+It asks `allocator.site.cluster1 get_usage_report myaward1.allocator`. The
+figures were recorded against `myproject1.site`, so `build_usage_report`
+assembles the report in our namespace and then `remap_project`s it into theirs:
+`alice.myproject1.site` becomes `alice.myaward1.allocator`, while the member's
+email is untouched, because that is the same person either way.
 
-## The seven things worth taking away
+It answers from what was pushed, with no computing on the request path — there
+are only about thirty seconds to answer in.
+
+### 6. The same question asked of the wrong resource returns nothing
+
+Ask `allocator.site.cluster2 get_usage_report myaward1.allocator` and the answer
+is an **empty** report, not an error. The award is attached to a project on
+`cluster1`, so nothing was used on `cluster2`. An allocator sweeping every
+offering it knows about, to find which one holds a given award, depends on that.
+
+## The eight things worth taking away
 
 Each of these is commented at the point it matters in the code, but they are the
 reason the example exists.
@@ -175,31 +222,37 @@ reason the example exists.
    as an access-control list is the mistake this example is arranged to prevent
    — which is why it offers two resources rather than one.
 
-2. **The mapping is where two portals agree what to call a thing.** You decide
-   your own `ProjectIdentifier` for an award when you provision it, and return
-   it as the second half of the `ProjectMapping`. It is what the awarding portal
-   joins on, and what your usage figures translate through. Until it exists you
-   have nothing honest to return — which is why an unapproved award answers with
-   an error instead.
+2. **An award is *attached* to a project, not the same thing as one.**
+   `create_award` asks you to connect an award to a project on a resource.
+   Usually you will create one for it; you are equally free to attach it to a
+   project that already exists. A project holds at most one award at a time, and
+   you may move an award to a different project whenever your records say so.
 
-3. **Failing is a normal answer, and *which* failure matters.**
+3. **The mapping is where two portals agree what to call a thing.** You supply
+   the `ProjectIdentifier` of the project you attached, and return it as the
+   second half of the `ProjectMapping`. It is what the allocator joins on, and
+   what your usage figures translate through. Until an award is attached you
+   have nothing honest to put there — which is why an unattached award answers
+   with an error instead.
+
+4. **Failing is a normal answer, and *which* failure matters.**
    `ManagedProjectPendingError` means "not yet, ask again" and is benign;
    `ManagedProjectRejectedError` means "no" and is terminal. Confusing them
    either strands an award that only needed approving, or leaves the caller
    retrying forever against a decision that will never change.
 
-4. **Everything is retried, so everything must be idempotent.** `create_award`
+5. **Everything is retried, so everything must be idempotent.** `create_award`
    arrives repeatedly for awards you already hold. `update_award` arrives for
    awards you have never seen. A duplicate job id must not do the work twice.
 
-5. **Never leave a job unanswered.** `site_portal.answer()` is built so that a
+6. **Never leave a job unanswered.** `site_portal.answer()` is built so that a
    handler returning, a handler raising, and a handler crashing all produce a
    posted result. Silence becomes a two-minute timeout for whoever is waiting.
 
-6. **You have thirty seconds, not two minutes.** The job expiry is two minutes
+7. **You have thirty seconds, not two minutes.** The job expiry is two minutes
    but the caller gives up long before that. Serve reports from cache.
 
-7. **Implement as much or as little as you want.** There is no minimum set.
+8. **Implement as much or as little as you want.** There is no minimum set.
    Decline what you do not implement with
    `OpenPortalUnsupportedCommandError` — clearly, so a caller can tell "I don't
    do that" from "I'm broken". This example does not implement `get_users`, and

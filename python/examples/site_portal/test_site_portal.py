@@ -43,7 +43,7 @@ import store
 #: What the awarding portal calls the award we mostly work with.
 AWARD = "myaward1.allocator"
 
-#: What *we* call the project we create for it. The two halves of the mapping.
+#: The project we attach it to. The two halves of the mapping.
 LOCAL_PROJECT = "myproject1.site"
 
 #: A second award, on the other resource.
@@ -100,6 +100,15 @@ def details(template: str = "standard", **extra) -> str:
     return d.to_json()
 
 
+def portal_answer_mapping(award: str, offering: str = None):
+    """The `ProjectMapping` this site currently answers for one award."""
+    job = make_job(
+        f"get_project_mapping {award}",
+        offering=offering or OFFERING,
+    )
+    return site_portal.answer(job).result
+
+
 def check(name: str, condition: bool, detail: str = "") -> None:
     if not condition:
         raise AssertionError(f"{name} FAILED {detail}")
@@ -153,8 +162,8 @@ def _run_all() -> None:
 
     print("\n-- approval names the project on our side ----------------------")
 
-    # Approving is what creates a project here and gives it an identifier in
-    # *our* namespace. That identifier is our half of the mapping.
+    # Approving is what attaches the award to a project of ours - newly created
+    # or pre-existing. That project's identifier is our half of the mapping.
     award = store.load(OFFERING, AWARD)
     award.raw["state"] = store.Award.APPROVED
     award.raw["local_project_id"] = LOCAL_PROJECT
@@ -183,6 +192,33 @@ def _run_all() -> None:
         "an award can be found by our identifier for it",
         store.load_by_local_id(LOCAL_PROJECT).project_id == AWARD,
     )
+
+    print("\n-- an award can be moved to a different project -----------------")
+
+    # An award is *attached* to a project, not identical to one, so the operator
+    # can change which project holds it. The mapping follows, and the project it
+    # leaves behind becomes available again.
+    moved = store.load(OFFERING, AWARD)
+    moved.raw["local_project_id"] = "elsewhere.site"
+    store.save(moved)
+
+    check(
+        "moving the award moves the mapping",
+        str(portal_answer_mapping(AWARD)) == f"{AWARD}:elsewhere.site",
+        f"-> {portal_answer_mapping(AWARD)}",
+    )
+    check(
+        "...and the award is now found by the new identifier",
+        store.load_by_local_id("elsewhere.site").project_id == AWARD,
+    )
+    check(
+        "...while the old one holds nothing",
+        store.load_by_local_id(LOCAL_PROJECT) is None,
+    )
+
+    # Put it back for the rest of the checks.
+    moved.raw["local_project_id"] = LOCAL_PROJECT
+    store.save(moved)
 
     print("\n-- get_award ---------------------------------------------------")
 

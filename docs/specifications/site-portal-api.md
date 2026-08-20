@@ -141,13 +141,14 @@ check a request against — and that reading will produce a portal that answers
 the wrong questions. **The offering is part of what is being asked, not a
 permission to ask it.**
 
-`create_award` sent to `allocator.site.cluster1` is a request to create a project
-*on `cluster1`*. The `template` in the `AwardDetails` is interpreted in the
-context of that resource — in Waldur it selects the organisation, the default
-offerings and the billing the project is created with, all of which belong to
-the resource — so the same template name may be offered on one and not another.
-When you provision, the project you create is tied to that resource, and the
-identifier you return in the mapping (§4.1.1) names a project on it.
+`create_award` sent to `allocator.site.cluster1` is a request to *attach this
+award to a project on `cluster1`*. Usually that means creating a project for it,
+but you are free to attach it to one that already exists. The `template` in the
+`AwardDetails` is interpreted in the context of that resource — in Waldur it
+selects the organisation, the default offerings and the billing a project is
+created with, all of which belong to the resource — so the same template name may
+be offered on one and not another. Either way the project you attach is on that
+resource, and the identifier you return in the mapping (§4.1.1) names it.
 
 Three consequences:
 
@@ -495,10 +496,17 @@ myaward1.allocator:myproject1.site
 Once you have returned it, the award ID and the project ID are two names for one
 thing at this interface, and both sides hold the pair.
 
-**Deciding it is part of provisioning.** You cannot answer with a mapping before
-you have created the project and named it, which is exactly why an award still
-awaiting approval answers with `ManagedProjectPendingError` instead (§3.3) —
-there is no honest identifier to put in the second half yet.
+**Deciding it is part of attaching.** You cannot answer with a mapping before
+the award is attached to a project, which is exactly why an award still awaiting
+approval answers with `ManagedProjectPendingError` instead (§3.3) — there is no
+honest identifier to put in the second half yet.
+
+**One project holds at most one award at a time.** The relationship is
+one-to-one while it lasts, so do not return the same project identifier for two
+different awards. You may *move* an award to a different project whenever your
+own records say so: return the new identifier in the mapping and the allocator
+picks it up on its next request, which frees the previous project to be attached
+to something else.
 
 **This is also the join for everything else.** Your accounting records usage
 against `myproject1.site` and has never heard of `myaward1.allocator`; the awarding

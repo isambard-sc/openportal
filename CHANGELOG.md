@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`site-portal-api.md` on what `create_award` actually asks for.** The
+  document said it was a request to create a project on a resource. It is a
+  request to *attach* an award to a project on that resource - usually by
+  creating one, but a site is free to attach it to a project that already
+  exists. §4.1.1 also now states the constraint that follows: a project holds at
+  most one award at a time, and moving an award to a different project is a
+  legitimate thing for a site to do, which the allocator picks up from the next
+  mapping it is given.
 - **`site-portal-api.md` §1.3, on what an offering actually is.** The
   document introduced offerings as "named things `ukri` is allowed to address",
   which invites reading them as an access-control list. They are virtual agents

@@ -306,8 +306,13 @@ async def approve(offering: str, project_id: str, approval: Approval):
 
     This is the moment the mapping is made. Until now the awarding portal knows
     the award as `myaward1.allocator` on `cluster1` and we have nothing to pair
-    it with; approving creates a project on our side and names it, and that name
-    is what closes the loop.
+    it with; approving attaches it to a project of ours - newly created, or one
+    that already exists - and that project's identifier is what closes the loop.
+
+    A project holds at most one award at a time, so an identifier already
+    attached to a different award is refused. Re-approving with a different
+    identifier *moves* the award, which is allowed: the operator may change which
+    project an award is attached to whenever their records say so.
 
     The project is created **on the resource the award came in through**, and
     stays tied to it. That is why the offering is in the path here: approving

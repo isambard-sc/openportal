@@ -83,7 +83,7 @@ def _mapping(award: store.Award) -> openportal.ProjectMapping:
     `<their project id>:<our project id>`.
 
     **This is the whole point of the exchange.** The awarding portal knows the
-    award as `myaward1.allocator`; we know the project we created for it as
+    award as `myaward1.allocator`; we know the project we attached it to as
     `myproject1.site`. Neither side can guess the other's name, so the mapping is
     where they are joined - and once it has been returned, both sides know that
     their award and our project are the same object. Award ID and project ID

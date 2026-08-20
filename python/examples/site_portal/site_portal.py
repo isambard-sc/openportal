@@ -67,11 +67,12 @@ OFFERED_TEMPLATES = {
 
 def _local_project(award: store.Award) -> openportal.ProjectIdentifier:
     """
-    Our own `ProjectIdentifier` for an award, which only an approved award has.
+    Our own `ProjectIdentifier` for an award, which only an award that is
+    *currently attached* to a project of ours has.
     """
     if award.local_project_id is None:
         raise openportal.OpenPortalError(
-            f"{award.project_id} has no local project - it is not approved"
+            f"{award.project_id} is not attached to a project here"
         )
 
     return openportal.ProjectIdentifier(award.local_project_id)
@@ -170,6 +171,15 @@ def _answer_for_state(award: store.Award) -> openportal.ProjectMapping:
             award.reason or "this award was refused"
         )
 
+    # Approved once, but not attached to anything now - `remove_award` severed
+    # it. "Pending", not "rejected": there is nothing wrong with the award and
+    # an operator may attach it again, so the allocator should keep asking
+    # rather than writing it off (§3.3, §4.1.2).
+    if not award.is_attached:
+        raise openportal.ManagedProjectPendingError(
+            award.reason or "this award is not attached to a project"
+        )
+
     return _mapping(award)
 
 
@@ -234,6 +244,22 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
         # owned by the awarding portal - while `notes` accumulate.
         held = openportal.AwardDetails(json.dumps(award.details))
         award.raw["details"] = json.loads(held.merge(details).to_json())
+
+        # An award we previously detached, being asserted again. The allocator
+        # still holds it, so it is asking us to attach it to a project - which
+        # is a fresh decision for an operator, not something to resurrect on the
+        # old project's behalf. Back to the pending queue it goes, and the
+        # attachment history is left exactly as it is: the days it owned before
+        # are still its days (§4.1.2).
+        if award.state == store.Award.APPROVED and not award.is_attached:
+            award.raw["state"] = store.Award.PENDING
+            award.raw["reason"] = "awaiting re-attachment to a project"
+            logger.info(
+                "award %s on %s was re-asserted after removal - pending again",
+                project_id,
+                offering,
+            )
+
         store.save(award)
         logger.debug("re-asserted award %s on %s", project_id, offering)
 
@@ -263,20 +289,44 @@ def remove_award(job: openportal.Job) -> openportal.ProjectMapping:
     """
     `remove_project <project_id>`
 
-    Severs the link. The answer is `<project_id>:None` - the award is gone, so
-    there is no local group left to name (§4.1).
+    **Disconnects an award from a project. It does not delete the project.**
+    The answer is `<project_id>:None` - there is no longer a project attached to
+    name (§4.1.2).
+
+    What removal actually ends is the award's claim on *future* days. Billing is
+    per-day, and a day belongs to whichever award the project was last attached
+    to during it, so:
+
+    * the day of removal still belongs to this award, unless another award is
+      attached later the same day, in which case the whole day belongs to that
+      one instead;
+    * from the following day the project bills to nothing, until another award
+      is attached.
+
+    So this **keeps the record and the usage figures** and only stamps the
+    detachment date. The days the award already owns still have to be
+    reportable - the allocator has not necessarily collected the final ones yet,
+    and it cannot ask a question we have destroyed the answer to. Deleting would
+    also make the month report as empty, and an empty report is vacuously
+    *complete*: we would be telling the allocator that nothing was ever used and
+    that the figure is final.
 
     Removing an award we do not hold is *not* an error: the caller wants it
-    gone, and it is gone. Being idempotent here means a retried removal does
-    not produce a spurious failure.
+    gone, and it is gone. Being idempotent here means a retried removal does not
+    produce a spurious failure. A second removal of an award already detached
+    likewise does nothing - the first detachment date is the true one, and
+    moving it later would hand the award days it did not own.
     """
     project_id = job.instruction.arguments[0]
     offering = _offering_of(job)
 
     # Only from this resource. An award of the same name on another offering is
     # a different award, and was not what the caller asked to remove.
-    if store.delete(offering, project_id):
-        logger.info("removed award %s from %s", project_id, offering)
+    award = store.load(offering, project_id)
+
+    if award is not None and award.is_attached:
+        store.detach(offering, project_id, datetime.date.today())
+        logger.info("detached award %s on %s", project_id, offering)
 
     return openportal.ProjectMapping(f"{project_id}:None")
 
@@ -321,13 +371,19 @@ def get_projects(job: openportal.Job) -> list[openportal.ProjectMapping]:
     `get_projects <portal_id>` → a list of **mappings**, not details.
 
     Easy to confuse with `get_awards` above; the return types are different
-    shapes. An award with no local project yet maps to `:None`, the same
-    spelling `remove_award` uses.
+    shapes. An award with no project attached maps to `:None`, the same spelling
+    `remove_award` uses.
+
+    The test is `is_attached`, not the approval state. A detached award is still
+    *approved* - it was approved once and that did happen - but it has no project
+    attached now, so there is no identifier to put in a mapping. Keying this on
+    the state instead would build a mapping for an award with nothing to map, and
+    fail the whole listing rather than one entry (§4.1.2).
     """
     mappings = []
 
     for award in store.awards_on(_offering_of(job), job.instruction.arguments[0]):
-        if award.state == store.Award.APPROVED:
+        if award.is_attached:
             mappings.append(_mapping(award))
         else:
             mappings.append(openportal.ProjectMapping(f"{award.project_id}:None"))
@@ -343,6 +399,78 @@ def get_project_mapping(job: openportal.Job) -> openportal.ProjectMapping:
 # --------------------------------------------------------------------------
 # §4.3 Reports
 # --------------------------------------------------------------------------
+
+
+def owner_of_day(
+    awards: list[store.Award], local_project_id: str, date: datetime.date
+) -> store.Award | None:
+    """
+    Which award a project's usage on `date` is billed to, or `None` for nobody.
+
+    The rule (§4.1.2) is *the award the project was last attached to on that
+    day*, and every part of that sentence is doing work:
+
+    * **"last attached"** - if two awards were attached during the day, the
+      later attachment takes the whole day, not just the part after the
+      handover. Usage is accounted per day, so a day is indivisible; splitting
+      it would need per-hour attribution that neither side keeps.
+    * **"on that day"** - an award detached *during* the day was attached during
+      it, so it stays a candidate. It stops being one from the next day on. This
+      is why removal takes effect at most the day after.
+    * **`None`** - a day on which the project was attached to nothing is billed
+      to nothing. The usage is real and stays in our own accounting; there is
+      simply no award for it to appear under, so it appears in no report.
+
+    A consequence worth being explicit about: **a day's attribution is not
+    settled until the day is over.** Attaching an award this afternoon changes
+    who owns this morning. That is the deeper reason completeness is a decision
+    rather than a calendar comparison, and the reason a day whose award changed
+    has to be re-reported to both awards - the one that lost it needs to see it
+    go.
+    """
+    owner = None
+    owner_since = None
+
+    for award in awards:
+        for attachment in award.attachments:
+            if attachment.project != local_project_id:
+                # The same award may have been attached to several projects of
+                # ours over its life. Only this project's episodes bill here.
+                continue
+
+            if not attachment.covers(date):
+                continue
+
+            if owner_since is None or attachment.since > owner_since:
+                owner, owner_since = award, attachment.since
+
+    return owner
+
+
+def _could_own_any_of(
+    award: store.Award, local_project_id: str, month: openportal.DateRange
+) -> bool:
+    """
+    Whether `award` was attached to `local_project_id` at any point during
+    `month`.
+
+    Used to decide whether a month with no figures deserves an "incomplete, ask
+    again" placeholder. A month wholly outside every attachment this award had
+    on this project is a different case: the award owned nothing then and never
+    will, so an empty and therefore complete answer is the truth rather than an
+    accident.
+    """
+    for attachment in award.attachments:
+        if attachment.project != local_project_id:
+            continue
+
+        if attachment.since > month.end_date:
+            continue
+
+        if attachment.to is None or attachment.to >= month.start_date:
+            return True
+
+    return False
 
 
 def build_usage_report(
@@ -375,7 +503,7 @@ def build_usage_report(
     back complete is one it will not ask for again. That makes completeness a
     claim about the future - "these figures will not change" - which only the
     site's operations team can make, so here it is driven by
-    `store.Award.final_months` rather than inferred from the calendar. Until a
+    `store.Project.final_months` rather than inferred from the calendar. Until a
     month is declared final it is reported incomplete and keeps being asked
     for. See the README for what the allocator does with that.
     """
@@ -390,45 +518,75 @@ def build_usage_report(
     # it knows about.
     award = store.load(offering, project_id)
 
-    if award is None or award.local_project_id is None:
+    # Never attached to anything of ours, so there are no figures to find.
+    # Note the test is the award's *history*, not whether it is attached now:
+    # a removed award still owns the days it was attached for, and refusing to
+    # report them - or reporting them as an empty, and therefore vacuously
+    # complete, month - is how the final days of an award get silently lost
+    # (§4.1.2).
+    if award is None or not award.projects_ever_attached:
         return report
 
-    local_project = _local_project(award)
+    # The identifier the answer is expressed in. Almost always the award's one
+    # and only project; the most recent one if an operator has moved the award
+    # between projects. Everything is remapped into the *awarding* portal's
+    # namespace at the end, which is where usernames and emails end up, so this
+    # choice affects only the intermediate form.
+    local_project = openportal.ProjectIdentifier(award.projects_ever_attached[-1])
 
-    # Build the report in *our* namespace first, because that is the namespace
-    # the figures were recorded in - our accounting knows `myproject1.site` and has
-    # never heard of `myaward1.allocator`.
     report = openportal.ProjectUsageReport(local_project)
-    final = set(award.final_months)
     months_with_days: set[str] = set()
+    final: set[str] = set()
 
-    for iso_date, per_user in sorted(award.usage.items()):
-        date = datetime.date.fromisoformat(iso_date)
-        daily = openportal.DailyProjectUsageReport()
+    # The figures are the *project's*, and this award only claims days of them.
+    # Every award ever attached to the same project is needed to work out which
+    # days, because "the award last attached that day" is a question about the
+    # whole attachment history and not about this award alone (§4.1.2).
+    for local_id in award.projects_ever_attached:
+        project = store.load_project(local_id)
+        siblings = store.awards_for_local_project(local_id)
+        final |= set(project.final_months)
 
-        for email, hours in per_user.items():
-            # `add_mapping` records which portal user each local name belongs
-            # to. At the portal layer the local name is the member's email.
-            user = openportal.UserIdentifier(f"{_username(email)}.{local_project}")
-            report.add_mapping(
-                openportal.UserMapping(f"{user}:{email}:{local_project}")
-            )
-            daily.add_usage(email, openportal.Usage.from_hours(float(hours)))
+        for iso_date, per_user in sorted(project.usage.items()):
+            date = datetime.date.fromisoformat(iso_date)
 
-        # Completeness is a *decision*, not a date comparison. A day is
-        # reported complete only when the site has declared its month final -
-        # see `store.Award.final_months`. Guessing from the calendar ("the day
-        # has passed, so it must be settled") claims the figures will not
-        # change, which nobody but the operations team can know.
-        month = _month_key(date)
-        months_with_days.add(month)
+            # **Whose day is this?** A day of this project's usage is billed to
+            # the award it was last attached to during that day - which may be
+            # a different award than the one being asked about, or none at all
+            # if the project was unattached then. Either way it is not ours to
+            # report, and reporting it anyway would bill it twice.
+            owner = owner_of_day(siblings, local_id, date)
 
-        if month in final:
-            daily.set_complete()
+            if owner is None or _key(owner) != _key(award):
+                continue
 
-        report.set_report(date, daily)
+            daily = openportal.DailyProjectUsageReport()
 
-    # A month with no data needs an explicit, incomplete placeholder.
+            for email, hours in per_user.items():
+                # `add_mapping` records which portal user each local name
+                # belongs to. At the portal layer the local name is the
+                # member's email.
+                user = openportal.UserIdentifier(f"{_username(email)}.{local_project}")
+                report.add_mapping(
+                    openportal.UserMapping(f"{user}:{email}:{local_project}")
+                )
+                daily.add_usage(email, openportal.Usage.from_hours(float(hours)))
+
+            # Completeness is a *decision*, not a date comparison. A day is
+            # reported complete only when the site has declared its month final
+            # - see `store.Project.final_months`. Guessing from the calendar
+            # ("the day has passed, so it must be settled") claims the figures
+            # will not change, which nobody but the operations team can know.
+            month = _month_key(date)
+            months_with_days.add(month)
+
+            if month in final:
+                daily.set_complete()
+
+            report.set_report(date, daily)
+
+    # A month this award could still own days in, but that we have no data for,
+    # needs an explicit, incomplete placeholder.
     #
     # `ProjectUsageReport.is_complete` is "every day I contain is complete",
     # which is vacuously **true** for a report containing no days at all. So a
@@ -440,6 +598,17 @@ def build_usage_report(
         month = _month_key(month_range.start_date)
 
         if month in final or month in months_with_days:
+            continue
+
+        # A month wholly outside this award's attachment window is a different
+        # case, and an empty report for it is *correct*: this award owned
+        # nothing then and never will, so "nothing, and that is final" is the
+        # truth rather than an accident. Only months the award could still be
+        # billed days in get a placeholder.
+        if not any(
+            _could_own_any_of(award, local_id, month_range)
+            for local_id in award.projects_ever_attached
+        ):
             continue
 
         # `date_range.months` yields whole calendar months, so a month's first
@@ -463,8 +632,19 @@ def build_usage_report(
 
 
 def _month_key(date: datetime.date) -> str:
-    """`"YYYY-MM"` - how a month is named in `store.Award.final_months`."""
+    """`"YYYY-MM"` - how a month is named in `store.Project.final_months`."""
     return f"{date.year:04d}-{date.month:02d}"
+
+
+def _key(award: store.Award) -> tuple[str, str]:
+    """
+    An award's identity: the offering *and* the identifier (§1.3).
+
+    Records are read fresh from disk on every access, so two objects describing
+    the same award are different objects - identity has to be compared on the
+    key rather than with `is`.
+    """
+    return (award.offering, award.project_id)
 
 
 def _date_range(job: openportal.Job, index: int = 1) -> openportal.DateRange:

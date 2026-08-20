@@ -8,6 +8,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`site-portal-api.md` §4.1.2, on what `remove_award` actually does.** It
+  detaches an award from a project; it does not delete the project. The
+  reference implementation has always been explicit about this - `board.py`'s
+  handler removes the link record and comments "will not delete the project
+  itself" - but the specification only said the award was "gone", which invites
+  the wrong reading.
+
+  The section states the billing rule that gives removal its meaning: a
+  project's usage on a given day is billed to the award it was **last attached
+  to on that day**. So a handover part-way through a day gives the *whole* day
+  to the incoming award; an award detached during a day keeps that day and stops
+  from the next one, which is why removal bites at most the day after; and from
+  the first whole day with no award attached, a project's usage is billed to
+  nobody.
+
+  Three consequences are spelled out, because each is a way to lose data.
+  Removal must leave the award's accrued usage reportable - it owns every day up
+  to its last attached day, and those are the days least likely to have been
+  collected yet. Deleting the record is worse than erroring: the report comes
+  back empty, an empty report is vacuously `is_complete`, and the allocator
+  records "nothing was ever used, and that is final". And usage must be stored
+  against the site's own project rather than against the award, because which
+  award owns a day is derived from the attachment history when a report is
+  built - filing it under "the award attached right now" overwrites the record
+  with a provisional answer.
+
+  §4.3 also notes the second reason completeness is not a calendar question: a
+  day's *attribution* is not settled until the day ends either, since attaching
+  an award this afternoon changes who owns this morning.
+
+- **The example site portal implements the attachment history.** `remove_award`
+  now detaches instead of deleting, an award's attachments are a list of
+  `(project, since, to)` periods rather than a single date - so an award
+  re-attached after a gap, or moved between projects, keeps the days it already
+  owned - and usage and finalised months moved from the award record to a
+  per-project record. `site_portal.owner_of_day` resolves the billing rule,
+  `POST /awards/.../approve` records the attachment date, and the operator API
+  keeps working after removal so the last days can still be pushed and the month
+  still declared final. Re-asserting a removed award returns it to the pending
+  queue rather than silently re-attaching it.
+
 - **`site-portal-api.md` §4.3 and the example on what `is_complete` commits you
   to.** The flag means "these figures will not change", and it is what decides
   whether a month is requested again: report a month incomplete and the

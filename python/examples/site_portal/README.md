@@ -42,7 +42,7 @@ away.
 | File | What it is |
 |---|---|
 | `site_portal.py` | **The contract.** One function per instruction, plus the dispatch that guarantees every job is answered. Read this first. |
-| `store.py` | The portal's own state. The file you replace. |
+| `store.py` | The portal's own state: awards, their attachment history, and per-project usage. The file you replace. |
 | `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for approving awards, pushing usage figures and declaring a month's accounting final. |
 | `test_site_portal.py` | Drives every handler with synthetic jobs — no bridge, no agents, no network. Proves the example works, and shows that the contract is testable in isolation. |
 
@@ -85,7 +85,7 @@ python test_site_portal.py
 
 With the application running and an awarding portal called `allocator`
 configured, here is the whole life of an award. This is the part to read
-carefully — most of the contract is visible in these seven steps.
+carefully — most of the contract is visible in these eight steps.
 
 ### 1. The allocator asks for an award to be attached to a project
 
@@ -296,7 +296,72 @@ is an **empty** report, not an error. The award is attached to a project on
 `cluster1`, so nothing was used on `cluster2`. An allocator sweeping every
 offering it knows about, to find which one holds a given award, depends on that.
 
-## The nine things worth taking away
+### 8. The award is removed — and the project carries on
+
+Eventually `allocator` sends `allocator.site.cluster1 remove_award
+myaward1.allocator`. It is the mirror image of step 1: step 1 asked us to
+*attach* an award to a project, and this asks us to *detach* it. It says nothing
+about the project.
+
+So `myproject1.site` carries on exactly as before — its accounts, its files, its
+members, its identity. Whether a project outlives its funding is a question for
+the site, answered through the site's own processes. Nothing about it belongs in
+a handler for a message from another portal.
+
+What removal ends is `myproject1.site`'s ability to bill usage against
+`myaward1.allocator`, and it ends it *per day*:
+
+```
+      Aug 10                Aug 20                     Aug 21
+      myaward1 attached     myaward1 removed,          nothing attached
+                            myaward2 attached
+      ├─────────────────────┤                          │
+      Aug 10-19  → myaward1 │ Aug 20 → myaward2, all of it
+                            └──────────────────────────┤
+                                                       Aug 21 → nobody
+```
+
+The rule is *the award the project was last attached to on that day*. Because
+the handover happened during 20 August, **the whole of that day** goes to
+`myaward2` — not just the hours after the swap. A day is indivisible; usage is
+accounted daily and splitting one would need per-hour attribution nobody keeps.
+And had nothing replaced `myaward1`, 20 August would still have been its own,
+with 21 August the first day billed to nobody. Removal therefore bites *at most*
+the day after it happens.
+
+Two things follow, and the example is arranged around them.
+
+**Removal keeps the record.** `remove_award` marks the award detached; it does
+not delete it, and it does not touch the usage. The award still owns every day up
+to and including 20 August, and the allocator has very likely not collected those
+yet — the last days of an award are the least likely to have been collected. The
+tempting shortcut is to delete the row, and it has a failure mode worse than an
+error: `get_usage_report` would then return an *empty* report, an empty report is
+vacuously complete (step 6), and we would be telling `allocator` that nothing was
+ever used and that this is final. The final days of every award would vanish
+quietly. So the operator API keeps working after removal too — the last figures
+can still be pushed, and the month can still be declared final.
+
+**Usage is stored against our project, not against the award.** This is why
+`store.py` keeps usage in `projects/` rather than on the award record. Which
+award owns a day is *derived* when a report is built, by asking the attachment
+history. File a day's usage under "the award attached right now" as it arrives
+and re-attribution becomes impossible — the record of what happened has been
+overwritten by an answer that was only provisional.
+
+There is a nice consequence for step 6. A day whose attachment changed has to be
+re-reported to *both* awards: `myaward1` needs to see 20 August leave, and
+`myaward2` needs to see it arrive. Neither is settled the moment the day begins,
+which is a second and quite separate reason completeness cannot be inferred from
+a calendar.
+
+Finally, if `allocator` still holds the award it will keep sending
+`create_award` for it every cycle. The example puts it back in the pending queue
+rather than silently re-attaching it: attaching is an operator's decision, and it
+may well be a *different* project this time. Its earlier attachment periods are
+kept, because those days are still its days.
+
+## The ten things worth taking away
 
 Each of these is commented at the point it matters in the code, but they are the
 reason the example exists.
@@ -352,6 +417,13 @@ reason the example exists.
    Leaving a month open costs one request per cycle; closing it early loses
    every correction that arrives later. And note that an empty report is
    complete *vacuously* — the one way to make that promise by accident.
+
+10. **`remove_award` detaches an award; it never deletes a project.** And it
+    does not end the award's history: it still owns every day up to and
+    including its last attached day, so keep the record and keep those days
+    reportable. Billing is per-day and the day belongs to whichever award was
+    attached last during it, so store usage against your own project and work
+    out the owner when you build the report — not the other way round.
 
 ## Other languages
 

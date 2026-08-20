@@ -109,6 +109,25 @@ def portal_answer_mapping(award: str, offering: str = None):
     return site_portal.answer(job).result
 
 
+def approve(award: store.Award, local: str, on: datetime.date = None) -> store.Award:
+    """Attach an award to one of our projects, as the operator API does."""
+    return store.attach(award, local, on or datetime.date.today())
+
+
+def set_usage(local: str, usage: dict) -> None:
+    """Record usage against one of *our* projects, as the operator API does."""
+    project = store.load_project(local)
+    project.raw["usage"] = usage
+    store.save_project(project)
+
+
+def set_final(local: str, months: list) -> None:
+    """Declare months final on one of our projects."""
+    project = store.load_project(local)
+    project.raw["final_months"] = months
+    store.save_project(project)
+
+
 def check(name: str, condition: bool, detail: str = "") -> None:
     if not condition:
         raise AssertionError(f"{name} FAILED {detail}")
@@ -126,6 +145,16 @@ def _run_all() -> None:
 
     # A new award is recorded and answers "not yet", because a human has not
     # looked at it. This is the normal first response, not a fault.
+    # Dates the whole suite works in. The first of the current month is used
+    # both as the day the award is attached and as the day usage lands on, so
+    # every figure is inside `this_month` whenever the suite is run - and inside
+    # the award's attachment window, which is what decides whether the award is
+    # billed for it at all (§4.1.2).
+    today = datetime.date.today()
+    month_start = today.replace(day=1)
+    a_day_this_month = month_start.isoformat()
+    this_month_key = f"{today.year:04d}-{today.month:02d}"
+
     job = site_portal.answer(make_job(f"create_project {AWARD} {details()}"))
     check("new award is answered with an error", job.is_error)
     check(
@@ -165,8 +194,7 @@ def _run_all() -> None:
     # Approving is what attaches the award to a project of ours - newly created
     # or pre-existing. That project's identifier is our half of the mapping.
     award = store.load(OFFERING, AWARD)
-    award.raw["state"] = store.Award.APPROVED
-    award.raw["local_project_id"] = LOCAL_PROJECT
+    approve(award, LOCAL_PROJECT, month_start)
     store.save(award)
 
     job = site_portal.answer(make_job(f"create_project {AWARD} {details()}"))
@@ -227,7 +255,7 @@ def _run_all() -> None:
     # can change which project holds it. The mapping follows, and the project it
     # leaves behind becomes available again.
     moved = store.load(OFFERING, AWARD)
-    moved.raw["local_project_id"] = "elsewhere.site"
+    approve(moved, "elsewhere.site")
     store.save(moved)
 
     check(
@@ -245,7 +273,7 @@ def _run_all() -> None:
     )
 
     # Put it back for the rest of the checks.
-    moved.raw["local_project_id"] = LOCAL_PROJECT
+    approve(moved, LOCAL_PROJECT, month_start)
     store.save(moved)
 
     print("\n-- get_award ---------------------------------------------------")
@@ -276,14 +304,7 @@ def _run_all() -> None:
     # Push figures in the way an operator's parser would - against our own
     # project identifier, which is the only one that accounting knows.
     award = store.load(OFFERING, AWARD)
-    # The first of the current month, so the figure is inside `this_month` on
-    # every day the suite might be run - `yesterday` is in *last* month on the
-    # 1st, and the report would come back empty.
-    today = datetime.date.today()
-    a_day_this_month = today.replace(day=1).isoformat()
-    this_month_key = f"{today.year:04d}-{today.month:02d}"
-    award.raw["usage"] = {a_day_this_month: {"alice@bristol.ac.uk": 12.5}}
-    store.save(award)
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
 
     job = site_portal.answer(make_job(f"get_usage_report {AWARD} this_month"))
     check("get_usage_report succeeds", not job.is_error, f"{job.error_message}")
@@ -336,8 +357,7 @@ def _run_all() -> None:
     )
 
     award = store.load(OFFERING, AWARD)
-    award.raw["final_months"] = [this_month_key]
-    store.save(award)
+    set_final(LOCAL_PROJECT, [this_month_key])
 
     report = site_portal.answer(
         make_job(f"get_usage_report {AWARD} this_month")
@@ -352,8 +372,7 @@ def _run_all() -> None:
     # Taking the decision back must work, or a late correction could never be
     # collected: the allocator only re-reads a month it has not been told is
     # final.
-    award.raw["final_months"] = []
-    store.save(award)
+    set_final(LOCAL_PROJECT, [])
     check(
         "...and un-finalising makes it incomplete again",
         not site_portal.answer(
@@ -373,8 +392,7 @@ def _run_all() -> None:
         empty.is_complete,
     )
 
-    award.raw["usage"] = {}
-    store.save(award)
+    set_usage(LOCAL_PROJECT, {})
     report = site_portal.answer(
         make_job(f"get_usage_report {AWARD} this_month")
     ).result
@@ -388,8 +406,7 @@ def _run_all() -> None:
     # ...but a month with no data that the site *has* declared final is
     # complete. "Nothing was used and that is settled" is a legitimate answer,
     # and it is the operator's to give.
-    award.raw["final_months"] = [this_month_key]
-    store.save(award)
+    set_final(LOCAL_PROJECT, [this_month_key])
     check(
         "...unless the site declared it final, which is a legitimate answer",
         site_portal.answer(
@@ -402,9 +419,8 @@ def _run_all() -> None:
     # that was actually asked about - anchoring it on the month's first day
     # would put it outside, the final `filter` would drop it, and the vacuous
     # "empty means complete" answer would be back.
-    award.raw["final_months"] = []
-    award.raw["usage"] = {}
-    store.save(award)
+    set_final(LOCAL_PROJECT, [])
+    set_usage(LOCAL_PROJECT, {})
     mid_month = f"{this_month_key}-10:{this_month_key}-20"
     report = site_portal.answer(
         make_job(f"get_usage_report {AWARD} {mid_month}")
@@ -416,9 +432,8 @@ def _run_all() -> None:
     )
 
     # Put the award back the way the rest of the suite expects it.
-    award.raw["final_months"] = []
-    award.raw["usage"] = {a_day_this_month: {"alice@bristol.ac.uk": 12.5}}
-    store.save(award)
+    set_final(LOCAL_PROJECT, [])
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
 
     print("\n-- a second award, on the other resource ------------------------")
 
@@ -429,8 +444,7 @@ def _run_all() -> None:
         make_job(f"create_project {AWARD2} {details()}", offering=OTHER_OFFERING)
     )
     second = store.load(OTHER_OFFERING, AWARD2)
-    second.raw["state"] = store.Award.APPROVED
-    second.raw["local_project_id"] = LOCAL_PROJECT2
+    approve(second, LOCAL_PROJECT2, month_start)
     store.save(second)
 
     job = site_portal.answer(
@@ -542,10 +556,18 @@ def _run_all() -> None:
     # Removing from one resource leaves the other alone.
     site_portal.answer(make_job(f"remove_project {AWARD}", offering=OTHER_OFFERING))
     check(
-        "removing from one resource leaves the other",
-        store.load(OFFERING, AWARD) is not None
-        and store.load(OTHER_OFFERING, AWARD) is None,
+        "removing from one resource leaves the other attached",
+        store.load(OFFERING, AWARD).is_attached
+        and not store.load(OTHER_OFFERING, AWARD).is_attached,
     )
+    # And the record survives the removal, because the days it owned still have
+    # to be reportable. Deleting it is the tempting mistake - see the
+    # remove_award section below.
+    check(
+        "...and the removed award's record is kept, not deleted",
+        store.load(OTHER_OFFERING, AWARD) is not None,
+    )
+    store.delete(OTHER_OFFERING, AWARD)
 
     print("\n-- a template this resource does not offer ----------------------")
 
@@ -637,12 +659,171 @@ def _run_all() -> None:
 
     print("\n-- remove_award ------------------------------------------------")
 
+    # `remove_award` disconnects an award from a project. It does not delete the
+    # project, and - the part that is easy to get wrong - it must not delete the
+    # usage the award already accrued.
+    set_final(LOCAL_PROJECT, [])
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
+
     job = site_portal.answer(make_job(f"remove_project {AWARD}"))
     check("remove_award answers with :None", str(job.result) == f"{AWARD}:None")
-    check("...and the award is gone", store.load(OFFERING, AWARD) is None)
+    check(
+        "...and the award is no longer attached",
+        not store.load(OFFERING, AWARD).is_attached,
+    )
+    check(
+        "...but the record survives, because it still owns days",
+        store.load(OFFERING, AWARD) is not None,
+    )
+    check(
+        "...and the project is untouched - removal disconnects, it does not delete",
+        store.load_project(LOCAL_PROJECT).usage != {},
+    )
+
+    # The failure this guards against. If removal had deleted the record, the
+    # allocator's next request would get an empty report - and an empty report
+    # is vacuously complete, so it would record "nothing was ever used, final"
+    # and stop asking. The last days of every award would vanish.
+    report = site_portal.answer(
+        make_job(f"get_usage_report {AWARD} this_month")
+    ).result
+    check(
+        "a removed award still reports the usage it accrued",
+        abs(report.total_usage.seconds / 3600 - 12.5) < 0.01,
+        f"-> {report.total_usage}",
+    )
+    check(
+        "...and still says so incompletely, so the figures can still be corrected",
+        not report.is_complete,
+    )
+
+    # A detached award is still *approved* - that did happen - but has nothing
+    # attached, so listings must not try to build a mapping for it. Keying this
+    # on the state rather than the attachment fails the whole call, not one row.
+    job = site_portal.answer(make_job("get_projects allocator"))
+    check("get_projects survives a detached award", not job.is_error, f"{job.error}")
+    check(
+        "...and reports it as :None",
+        any(str(m) == f"{AWARD}:None" for m in job.result),
+        f"-> {[str(m) for m in job.result]}",
+    )
+
+    # The project is free again, which is what lets an operator attach a
+    # different award to it.
+    check(
+        "the project it left is available again",
+        store.load_by_local_id(LOCAL_PROJECT) is None,
+    )
 
     job = site_portal.answer(make_job(f"remove_project {AWARD}"))
     check("removing it twice is not an error", not job.is_error)
+
+    # Re-asserting a removed award puts it back in the pending queue rather than
+    # silently re-attaching it. Attaching is an operator's decision.
+    job = site_portal.answer(make_job(f"create_project {AWARD} {details()}"))
+    check(
+        "re-asserting a removed award is pending again, not rejected",
+        type(job.error) is openportal.ManagedProjectPendingError,
+        f"-> {job.error}",
+    )
+
+    print("\n-- which award a day is billed to ------------------------------")
+
+    # The rule (§4.1.2): a project's usage on a given day is billed to the award
+    # it was last attached to *on that day*. Set up a handover part-way through
+    # the month and check each side of it.
+    store.delete(OFFERING, AWARD)
+    for stale in store.all_awards():
+        store.delete(stale.offering, stale.project_id)
+
+    early = month_start
+    handover = month_start + datetime.timedelta(days=10)
+
+    site_portal.answer(make_job(f"create_project {AWARD} {details()}"))
+    first = store.load(OFFERING, AWARD)
+    approve(first, LOCAL_PROJECT, early)
+
+    set_final(LOCAL_PROJECT, [])
+    set_usage(
+        LOCAL_PROJECT,
+        {
+            early.isoformat(): {"alice@bristol.ac.uk": 1.0},
+            handover.isoformat(): {"alice@bristol.ac.uk": 2.0},
+            (handover + datetime.timedelta(days=1)).isoformat(): {
+                "alice@bristol.ac.uk": 4.0
+            },
+        },
+    )
+
+    # Before the handover, everything is the first award's.
+    everything = f"{early.isoformat()}:{(handover + datetime.timedelta(days=1)).isoformat()}"
+    check(
+        "one award is billed every day it is attached for",
+        abs(
+            site_portal.answer(
+                make_job(f"get_usage_report {AWARD} {everything}")
+            ).result.total_usage.seconds
+            / 3600
+            - 7.0
+        )
+        < 0.01,
+    )
+
+    # Now the handover: the first award is removed and a second attached, both
+    # on the same day.
+    store.detach(OFFERING, AWARD, handover)
+    site_portal.answer(make_job(f"create_project {AWARD2} {details()}"))
+    second_award = store.load(OFFERING, AWARD2)
+    approve(second_award, LOCAL_PROJECT, handover)
+
+    outgoing = site_portal.answer(
+        make_job(f"get_usage_report {AWARD} {everything}")
+    ).result
+    incoming = site_portal.answer(
+        make_job(f"get_usage_report {AWARD2} {everything}")
+    ).result
+
+    check(
+        "the whole handover day goes to the award attached last that day",
+        abs(incoming.total_usage.seconds / 3600 - 6.0) < 0.01,
+        f"-> {incoming.total_usage} (expected 2.0 + 4.0)",
+    )
+    check(
+        "...and the outgoing award keeps only the days before it",
+        abs(outgoing.total_usage.seconds / 3600 - 1.0) < 0.01,
+        f"-> {outgoing.total_usage} (expected 1.0)",
+    )
+    check(
+        "...so the project's usage is billed exactly once",
+        abs(
+            (outgoing.total_usage.seconds + incoming.total_usage.seconds) / 3600 - 7.0
+        )
+        < 0.01,
+    )
+
+    # And with nothing attached, from the first whole day onwards nothing is
+    # billed to anybody.
+    store.detach(OFFERING, AWARD2, handover)
+    unbilled = site_portal.answer(
+        make_job(f"get_usage_report {AWARD2} {everything}")
+    ).result
+    check(
+        "a detached award keeps the day it was detached on",
+        abs(unbilled.total_usage.seconds / 3600 - 2.0) < 0.01,
+        f"-> {unbilled.total_usage} (expected the handover day only)",
+    )
+    check(
+        "...and the day after it belongs to nobody",
+        site_portal.owner_of_day(
+            store.awards_for_local_project(LOCAL_PROJECT),
+            LOCAL_PROJECT,
+            handover + datetime.timedelta(days=1),
+        )
+        is None,
+    )
+
+    for stale in store.all_awards():
+        store.delete(stale.offering, stale.project_id)
 
     print("\n-- every job gets an answer ------------------------------------")
 

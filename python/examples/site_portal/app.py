@@ -303,10 +303,21 @@ async def list_awards():
             "name": a.details.get("name"),
             "template": a.details.get("template"),
             "members": list((a.details.get("members") or {}).keys()),
-            # Which months this site has declared final. Anything not listed
-            # here is still being re-requested by the allocator - see
-            # `/usage/finalise` below.
-            "final_months": a.final_months,
+            # Whether it is attached now, and the full attachment history. A
+            # detached award is kept rather than deleted: it still owns the days
+            # it was attached for, and those still have to be reportable
+            # (§4.1.2), so the operator needs to see them.
+            "attached": a.is_attached,
+            "attachments": [att.raw for att in a.attachments],
+            # Which months the site has declared final. A property of the
+            # project rather than of the award - see `/usage/finalise` below -
+            # so it is looked up against the project this award was *last*
+            # attached to, which a detached award still has.
+            "final_months": (
+                store.load_project(a.projects_ever_attached[-1]).final_months
+                if a.projects_ever_attached
+                else []
+            ),
         }
         for a in store.all_awards()
     ]
@@ -401,9 +412,11 @@ async def approve(offering: str, project_id: str, approval: Approval):
             ),
         )
 
-    award.raw["state"] = store.Award.APPROVED
+    # Attaching records the date as well as the identifier, because billing is
+    # per-day: this award is billed the project's usage from today onwards, and
+    # takes the whole of today from whichever award held it before (§4.1.2).
+    store.attach(award, str(local), datetime.date.today())
     award.raw["reason"] = approval.reason
-    award.raw["local_project_id"] = str(local)
     store.save(award)
 
     logger.info("approved %s on %s as %s", project_id, offering, local)
@@ -412,6 +425,7 @@ async def approve(offering: str, project_id: str, approval: Approval):
         "project_id": project_id,
         "local_project_id": str(local),
         "state": award.state,
+        "attachments": [att.raw for att in award.attachments],
     }
 
 
@@ -454,16 +468,23 @@ async def push_usage(local_project_id: str, push: UsagePush):
     is how they reach the portal. `get_usage_report` then serves them inside the
     thirty seconds it has (§3.4).
     """
-    award = store.load_by_local_id(local_project_id)
-
-    if award is None:
+    # Deliberately *not* `load_by_local_id` alone. A project whose award has
+    # just been removed still needs its last days pushed in - the removed award
+    # owns them and the allocator has not necessarily collected them yet
+    # (§4.1.2). So the check is "is this a project we know", not "is an award
+    # attached right now".
+    if not store.awards_for_local_project(local_project_id):
         raise HTTPException(
             status_code=404,
             detail=(
-                f"no approved award maps to '{local_project_id}' - an award only "
-                "gets a local project identifier when it is approved"
+                f"no award has ever been attached to '{local_project_id}' - an "
+                "award only gets a local project identifier when it is approved"
             ),
         )
+
+    # Only to report back where today's figures will land; may be None if the
+    # project is currently unattached, which is not an error.
+    award = store.load_by_local_id(local_project_id)
 
     if push.report is not None:
         # A complete `ProjectUsageReport`. Parsing it validates the shape before
@@ -504,14 +525,18 @@ async def push_usage(local_project_id: str, push: UsagePush):
     else:
         raise HTTPException(status_code=400, detail="send either `hours` or `report`")
 
-    award.raw["usage"] = hours
-    store.save(award)
+    project = store.load_project(local_project_id)
+    project.raw["usage"] = hours
+    store.save_project(project)
 
+    # Which award each day is billed to is deliberately *not* decided here. It
+    # depends on the attachment history and can still change - attaching an
+    # award this afternoon takes the whole of today - so it is worked out when a
+    # report is built, not when figures are recorded (§4.1.2).
     return {
         "local_project_id": local_project_id,
-        "award": award.project_id,
-        "offering": award.offering,
         "days": len(hours),
+        "billing_to": award.project_id if award is not None else None,
     }
 
 
@@ -539,14 +564,15 @@ async def finalise_usage(local_project_id: str, decision: Finalisation):
     records the figures it has and stops asking, so a correction that lands
     afterwards is never collected. When in doubt, leave it open.
     """
-    award = store.load_by_local_id(local_project_id)
-
-    if award is None:
+    # As with pushing usage: a month of a detached award can still be declared
+    # final, and often needs to be - it is the last thing the allocator is
+    # waiting for before it stops asking (§4.1.2).
+    if not store.awards_for_local_project(local_project_id):
         raise HTTPException(
             status_code=404,
             detail=(
-                f"no approved award maps to '{local_project_id}' - an award only "
-                "gets a local project identifier when it is approved"
+                f"no award has ever been attached to '{local_project_id}' - an "
+                "award only gets a local project identifier when it is approved"
             ),
         )
 
@@ -565,21 +591,20 @@ async def finalise_usage(local_project_id: str, decision: Finalisation):
 
     month = f"{parsed.year:04d}-{parsed.month:02d}"
 
-    months = set(award.final_months)
+    project = store.load_project(local_project_id)
+    months = set(project.final_months)
 
     if decision.final:
         months.add(month)
     else:
         months.discard(month)
 
-    award.raw["final_months"] = sorted(months)
-    store.save(award)
+    project.raw["final_months"] = sorted(months)
+    store.save_project(project)
 
     return {
         "local_project_id": local_project_id,
-        "award": award.project_id,
-        "offering": award.offering,
-        "final_months": award.final_months,
+        "final_months": project.final_months,
     }
 
 

@@ -200,6 +200,12 @@ produces the same `create_project` instruction internally, and that canonical
 form is what appears in the `command` field of the Job you fetch. Dispatch on
 the canonical name and you will handle both.
 
+Do not read the `*_project` spellings too literally. `create_project` asks you
+to *attach* an award to a project — usually by creating one, but attaching it to
+a project that already exists is equally valid — and `remove_project` asks you
+to *detach* one, leaving the project entirely intact. §4.1.1 and §4.1.2 cover
+each.
+
 ---
 
 ## 3. The request/response cycle
@@ -550,10 +556,11 @@ example does this — see its `approve` endpoint.
   There is nothing truthful it could put in a mapping. See §3.3 for which error
   to raise; `ManagedProjectPendingError` is the one that means "not yet, ask me
   again".
-* **`remove_award` answers with `<project_id>:None`.** The award is gone, so
-  there is no project of yours left to name; the literal string `None` fills the
-  slot. The same form appears in `get_projects` for an award that has no project
-  yet because nobody has approved it.
+* **`remove_award` answers with `<project_id>:None`.** The award is no longer
+  attached to anything, so there is no project of yours left to name; the literal
+  string `None` fills the slot. The same form appears in `get_projects` for an
+  award that has no project yet because nobody has approved it. What removal
+  does and does not end is §4.1.2.
 * **`update_*` is a merge.** Only the fields present in the supplied
   `AwardDetails` change; absent fields keep their current values. `members` and
   `allowed_domains`, when present, replace what you hold wholesale rather than
@@ -575,6 +582,94 @@ portal-to-portal work:
   independently of the awarding portal: `open` (default when absent),
   `members_only`, `roles_only`, `locked`. Honour it — the awarding portal is
   entitled to assume you do.
+
+
+#### 4.1.2 `remove_award` disconnects an award; it does not delete a project
+
+`remove_award` is the counterpart of `create_award`, and it mirrors it exactly:
+`create_award` asks you to *attach* an award to a project, and `remove_award`
+asks you to *detach* it. Neither is about the existence of the project.
+
+**The project survives, and so does everything in it.** Accounts, files,
+membership, the project's own identity: none of it is affected. If your
+implementation of `remove_award` deletes a project, it is wrong — the reference
+implementation is explicit about this, and its handler deletes only the link
+record (`board.py`, `remove_award`: "This will delete the ManagedProject, but
+will not delete the project itself - this just severs the link"). A site that
+wants to wind a project down does so through its own processes, on its own
+schedule, for its own reasons.
+
+What removal ends is the project's ability to **bill usage against that award**.
+
+##### Which award a day is billed to
+
+Billing is per day, and the rule is:
+
+> A project's usage on a given day is billed to the award it was **last attached
+> to on that day**.
+
+Each clause carries weight:
+
+* **"last attached"** — if the attachment changed during a day, the later
+  attachment takes the *whole* day, not the part of it after the handover. So if
+  `myaward1` is attached to `myproject1`, is removed later the same day, and
+  `myaward2` is then attached, the whole of that day's usage for `myproject1` is
+  billed to `myaward2`. A day is indivisible: usage is accounted daily, and
+  splitting one would need per-hour attribution that neither side keeps.
+* **"on that day"** — an award detached *during* a day was attached during it,
+  so it keeps that day. It stops being billed from the following day. This is
+  why removal takes effect **at most the day after** it happens: exactly the day
+  after if nothing replaces the award, and the same day if something does.
+* **A project attached to nothing is billed to nothing.** From the first *whole*
+  day on which a project has no award attached, its usage appears in no report
+  at the awarding portal. The usage is still real and still yours; there is
+  simply no award for it to be attributed to.
+
+##### What this requires of a site portal
+
+Three consequences, and the first is the one that costs data if you get it
+wrong.
+
+* **Removal must not make the award's accrued usage unreportable.** The award
+  still owns every day up to and including its last attached day, and the
+  allocator has not necessarily collected those days yet — the final ones are
+  usually the *least* likely to have been collected. So keep the record and keep
+  the figures.
+
+  Deleting them has a failure mode worse than an error. A `get_usage_report` for
+  an award you have erased returns an **empty** report, and an empty report is
+  vacuously `is_complete` (§4.3) — so you would be telling the allocator that
+  nothing was ever used and that the figure is final. The last days of every
+  removed award would silently disappear. If you cannot report a removed award's
+  usage, fail the request rather than answering empty.
+
+* **A day's attribution is not settled until the day is over.** Attaching an
+  award this afternoon changes who owns this morning. This is a second, separate
+  reason not to infer `is_complete` from the calendar (§4.3), and a reason a day
+  whose attachment changed has to be re-reported to *both* awards — the one
+  that lost it needs to see it go.
+
+* **Store usage against your own project, not against the award.** Which award
+  owns a day is derived from the attachment history when a report is built. Filing
+  usage under "the currently attached award" as it arrives makes re-attribution
+  impossible, because the record of what the day belonged to has been overwritten
+  by the answer.
+
+##### Re-attaching
+
+An award you have detached may be attached again — to the same project or to a
+different one — and an allocator that still holds the award will keep sending
+`create_award` for it every cycle (§3.5). Treat that as a fresh attach request:
+it is a decision for whoever approves awards, not something to resurrect
+automatically. Answering `ManagedProjectPendingError` in the meantime is correct,
+because nothing is wrong and the award may well be attached again;
+`ManagedProjectRejectedError` would tell the allocator to give up on an award
+that is merely waiting.
+
+Keep the earlier attachment periods when you do. An award's history is a *list*
+of periods, not a single "attached since" date, and each period owns its own
+days. Collapsing them loses the days before the latest attachment — which are
+exactly the days already reported and billed.
 
 ### 4.2 Members
 
@@ -694,6 +789,11 @@ consequences:
   believed. This is the one way to make the expensive mistake *by accident*. If
   you have no figures for a month and are not asserting that it is settled,
   include an explicit zero-usage day that is **not** marked complete.
+* **A day's attribution can change after the day starts.** Which award a day is
+  billed to is decided by the attachment in force during it, and attaching an
+  award part-way through a day takes the whole of it (§4.1.2). So a day whose
+  attachment changed is not settled either, independently of whether its figures
+  are.
 
 > **Current Waldur limitation.** `sync_usage` (`remotebackend.py`) sweeps only a
 > rolling two-month window, `[last_month, this_month]`, and never walks further
@@ -768,12 +868,14 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
     cache (§3.4).
 12. Report usage against the identifier you were asked about, not your own
     (§4.1.1, §4.3).
-13. Set `is_complete` deliberately, and never on a month you have no figures
+13. Treat `remove_award` as *detach*, not delete: keep the project, and keep the
+    award's accrued usage reportable for the days it was attached (§4.1.2).
+14. Set `is_complete` deliberately, and never on a month you have no figures
     for — an empty report is complete vacuously, and the caller will believe it
     and stop asking (§4.3).
-14. Handle `membership_control` and reject unknown `template` values (§4.1), and
+15. Handle `membership_control` and reject unknown `template` values (§4.1), and
     populate `AwardDetails.members` (§4.2).
-15. Fetch and acknowledge notifications (§5).
+16. Fetch and acknowledge notifications (§5).
 
 ---
 ## 7. Source file reference

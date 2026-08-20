@@ -174,8 +174,8 @@ class Award:
         This is the operations team's lever over how long the allocator keeps
         asking. A month listed here is reported with `is_complete` set, and the
         allocator stops re-requesting it; a month absent from here is reported
-        incomplete, and keeps being asked for while it is still inside the
-        allocator's window. See `site_portal.build_usage_report`.
+        incomplete, and keeps being asked for. See
+        `site_portal.build_usage_report`.
         """
         return self.raw.get("final_months", [])
 

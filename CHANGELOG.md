@@ -10,12 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - **`site-portal-api.md` §4.3 and the example on what `is_complete` commits you
   to.** The flag means "these figures will not change", and it is what decides
-  whether a month is requested again. The section now records what the reference
-  allocator actually does with it: Waldur's `sync_usage` sweeps a rolling
-  two-month window, `[last_month, this_month]`; the current month is always
-  re-requested and never stored complete; last month is re-requested until a
-  complete report arrives; and there is **no backfill**, so a month that leaves
-  the window still incomplete is not asked for again.
+  whether a month is requested again: report a month incomplete and the
+  allocator asks for it on every sync cycle; report it complete and it stops.
+  The current month is exempt - it is always re-requested, and an allocator may
+  disregard a `complete` claim about a month that has not finished.
 
   Two traps are now spelled out. Completeness is a claim about the future, so it
   is an operations decision rather than something to infer from the calendar - a
@@ -23,7 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   And `ProjectUsageReport::is_complete` is `all()` over the days a report
   contains, so an **empty report is complete vacuously**: a month that has
   simply not been ingested yet otherwise answers "nothing was used, and that is
-  final" and is believed.
+  final" and is believed. Both documents note which way the mistakes run -
+  leaving a month open costs one request per cycle, closing it early loses every
+  correction that arrives later.
 
   The example follows both. `store.Award.final_months` records the months the
   site has declared final, `POST /projects/{id}/usage/finalise` is how an
@@ -32,6 +32,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   has not been told is final. It previously inferred completeness from the
   calendar ("the day has passed, so it must be settled"), which claimed
   something it could not know.
+
+  Both documents also flag a current limitation on the allocator side, as a
+  limitation rather than as the contract: Waldur's `sync_usage` sweeps only a
+  rolling two-month window, `[last_month, this_month]`, and never walks further
+  back, so today a month that leaves that window still incomplete stops being
+  requested. That is being fixed in Waldur to retry every month from the award's
+  start date until it is reported complete. A site portal implemented against
+  the rule above needs no change when it lands.
 
 - **§4.1.1 spells out what a returned project identifier may contain** - 1 to 64
   characters of `A-Za-z0-9_-`, not starting with `-`, for the project component,

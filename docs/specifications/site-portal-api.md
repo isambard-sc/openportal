@@ -665,31 +665,43 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
 `ProjectUsageReport.is_complete` is true when every day it contains is. It means
 one thing: *these figures will not change.*
 
-The awarding portal acts on it. Waldur's `sync_usage` (`remotebackend.py`)
-sweeps a rolling **two-month window**, `[last_month, this_month]`, on every
-cycle:
+The awarding portal acts on it, and the rule is simple:
 
-* The **current month** is always re-requested, and is never stored as
-  complete regardless of what you report — "the current month's report cannot
-  be complete", because the month has not finished.
-* **Last month** is re-requested until a report for it comes back complete.
-  After that it is skipped.
-* There is **no backfill.** Nothing walks further back than that window, so a
-  month that leaves it without having been reported complete is simply not asked
-  for again.
+* **A month you report incomplete is requested again.** Every sync cycle, for as
+  long as the award exists.
+* **A month you report complete is not.** The allocator records the figures and
+  moves on.
+* **The current month is exempt.** It is always re-requested, and an allocator
+  is entitled to disregard a `complete` claim about a month that has not
+  finished — Waldur will not even store one.
 
-Two consequences for a site portal:
+So how long you keep being asked about a month is, in part, up to you. Two
+consequences:
 
-* **Reporting a month complete is how you confirm the figures are final**, and
-  it is worth doing inside the window rather than never. It is also a claim
-  about the future, so it is an operations decision — a scheduler outage, a late
-  job record or a billing correction all move numbers after a month has ended.
-  Do not infer it from the calendar.
-* **An empty report is complete vacuously.** `is_complete` over no days at all
-  is true, so a month you have not ingested yet answers "nothing was used, and
-  that is final" and will be believed. If you have no figures for a month and
-  are not asserting that it is settled, include an explicit zero-usage day that
-  is *not* marked complete.
+* **Reporting a month complete is a claim about the future**, so it is an
+  operations decision rather than something to infer from the calendar. "The day
+  has passed, so it must be settled" is not sound: a scheduler outage, a late job
+  record or a billing correction all move numbers after a month has ended. Only
+  the team running the accounting knows when their pipeline has settled.
+
+  Note which way the two mistakes run. Never reporting a month complete costs
+  one request per sync cycle and nothing else. Reporting one complete too early
+  is the expensive direction — the allocator records what it has and stops
+  asking, so a correction arriving afterwards is never collected.
+* **An empty report is complete vacuously.** `is_complete` is `all()` over the
+  days a report contains, which is true of no days at all — so a month you have
+  not ingested yet answers "nothing was used, and that is final" and will be
+  believed. This is the one way to make the expensive mistake *by accident*. If
+  you have no figures for a month and are not asserting that it is settled,
+  include an explicit zero-usage day that is **not** marked complete.
+
+> **Current Waldur limitation.** `sync_usage` (`remotebackend.py`) sweeps only a
+> rolling two-month window, `[last_month, this_month]`, and never walks further
+> back — so today a month that leaves that window still incomplete stops being
+> requested rather than being retried. That is a bug on the allocator side, not
+> the contract, and it is being fixed to retry every month from the award's start
+> date until it is reported complete. Implement against the rule above; a site
+> portal that does needs no change when the fix lands.
 
 ### 4.4 What you will not receive
 

@@ -533,11 +533,11 @@ async def finalise_usage(local_project_id: str, decision: Finalisation):
     own pipeline has settled, so only they get to say so.
 
     Nothing forces you to call it. An award whose months are never finalised
-    still reports correct figures; it is just re-read for as long as it stays
-    inside the allocator's window, which costs a request per sync and nothing
-    else. Getting it *wrong* is the expensive direction: finalise a month early
-    and the allocator records the figures it has and stops asking, so a
-    correction that lands afterwards is never collected.
+    still reports correct figures; those months are simply re-requested every
+    sync cycle, which costs one request each and nothing else. Getting it
+    *wrong* is the expensive direction: finalise a month early and the allocator
+    records the figures it has and stops asking, so a correction that lands
+    afterwards is never collected. When in doubt, leave it open.
     """
     award = store.load_by_local_id(local_project_id)
 

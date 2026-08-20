@@ -241,18 +241,9 @@ So which months you get asked about is, in part, up to you:
 * **A past month is re-requested until you report it complete.** Once you do,
   the allocator has what it needs and moves on.
 
-The window is finite, though, and this is worth knowing before you rely on it.
-Waldur — the reference allocator — sweeps a rolling **two months**,
-`[last_month, this_month]`, on each cycle, and nothing walks further back than
-that. So a month that is never declared complete is re-requested for about
-thirty days and then falls out of the window, still incomplete, and is not asked
-for again. There is no backfill. Declaring a month complete is therefore not
-merely how you stop the asking; it is how you confirm, inside the window where
-anyone is still listening, that the figures the allocator holds are the final
-ones.
-
-That is why this example makes completeness an explicit operations decision
-rather than inferring it:
+The asking therefore stops when, and only when, you say the month is settled —
+which is why this example makes that an explicit operations decision rather than
+inferring it:
 
 ```bash
 # "August's accounting is settled — stop asking."
@@ -284,10 +275,19 @@ answer *"nothing was used, and that is final"*, and be believed.
 for and has not been told is final. That says the honest thing instead: nothing
 so far, ask again.
 
-Note also which way the two errors run. Never finalising costs you one request
-per sync while the month is in the window, and nothing else. Finalising early is
-the expensive direction: the allocator records what it has and stops asking, and
-a correction that arrives afterwards is never collected.
+Note also which way the two mistakes run. Never finalising a month costs you one
+request per sync cycle and nothing else — a small, permanent bill. Finalising
+early is the expensive direction: the allocator records what it has and stops
+asking, and a correction that arrives afterwards is never collected. When in
+doubt, leave it open.
+
+> **One caveat about today's Waldur.** It currently sweeps only the last two
+> months and never looks further back, so at the moment a month that is never
+> declared complete stops being asked about after about thirty days rather than
+> being retried. That is a bug on the allocator side and is being fixed to retry
+> every month from the award's start date until it is reported complete. Nothing
+> in this example changes either way — which is the point of implementing
+> against the rule rather than against the current behaviour.
 
 ### 7. The same question asked of the wrong resource returns nothing
 
@@ -346,12 +346,12 @@ reason the example exists.
    neither does Waldur.
 
 9. **`is_complete` is a promise, and it is yours to make.** It tells the
-   allocator a month's figures will not change, so it need not ask again — and
-   the allocator's window is only a couple of months wide, so a month never
-   declared complete eventually stops being asked about rather than being
-   retried forever. Nothing in the code can know when accounting has settled;
-   your operations team can. Note that an empty report is complete *vacuously*,
-   which is the one way to promise this by accident.
+   allocator a month's figures will not change, so it need not ask again.
+   Nothing in the code can know when accounting has settled; your operations
+   team can, so this example asks them rather than guessing from the calendar.
+   Leaving a month open costs one request per cycle; closing it early loses
+   every correction that arrives later. And note that an empty report is
+   complete *vacuously* — the one way to make that promise by accident.
 
 ## Other languages
 

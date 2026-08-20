@@ -41,11 +41,11 @@ logger = logging.getLogger(__name__)
 #:
 #: Two of them here, because one would hide the most important thing about them:
 #: **the offering is part of an award's identity, not a permission check.** An
-#: award created through `isambard-ai` is an award *on Isambard-AI*. The same
-#: awarding portal can hold a different award of the same name on `isambard3`,
+#: award created through `cluster1` is an award *on `cluster1`*. The same
+#: awarding portal can hold a different award of the same name on `cluster2`,
 #: and asking one resource about a project that lives on the other gets nothing
 #: back - see `_offering_of` and `build_usage_report` below.
-OFFERINGS = {"isambard-ai", "isambard3"}
+OFFERINGS = {"cluster1", "cluster2"}
 
 #: The `AwardDetails.template` values each offering accepts.
 #:
@@ -55,8 +55,8 @@ OFFERINGS = {"isambard-ai", "isambard3"}
 #: An award naming a template this resource does not offer is rejected rather
 #: than quietly given a default (§4.1).
 OFFERED_TEMPLATES = {
-    "isambard-ai": {"standard", "large"},
-    "isambard3": {"standard"},
+    "cluster1": {"standard", "large"},
+    "cluster2": {"standard"},
 }
 
 
@@ -83,14 +83,14 @@ def _mapping(award: store.Award) -> openportal.ProjectMapping:
     `<their project id>:<our project id>`.
 
     **This is the whole point of the exchange.** The awarding portal knows the
-    award as `myproject.ukri`; we know the project we created for it as
-    `proj001.aip1`. Neither side can guess the other's name, so the mapping is
+    award as `myaward1.award`; we know the project we created for it as
+    `myproject1.portal`. Neither side can guess the other's name, so the mapping is
     where they are joined - and once it has been returned, both sides know that
     their award and our project are the same object. Award ID and project ID
     become two names for one thing at this interface.
 
     It matters beyond bookkeeping. Our accounting produces usage figures for
-    `proj001.aip1` and has never heard of `myproject.ukri`; the mapping is what
+    `myproject1.portal` and has never heard of `myaward1.award`; the mapping is what
     lets `get_usage_report` answer a question asked in their namespace with
     figures recorded in ours.
 
@@ -107,8 +107,8 @@ def _offering_of(job: openportal.Job) -> str:
 
     Every request arrives addressed to one of our virtual agents, and that name
     is the last element of the path. `forwarded_for` carries the original
-    `ukri.aip1.isambard-ai` when the request came from another portal; the job's
-    own destination is `aip1.<bridge>.isambard-ai` and ends the same way, so it
+    `award.portal.cluster1` when the request came from another portal; the job's
+    own destination is `portal.<bridge>.cluster1` and ends the same way, so it
     is the fallback for a locally-originated request.
 
     This is not decoration. It scopes everything below: an award belongs to the
@@ -357,8 +357,8 @@ def build_usage_report(
     per date, and the type handles the wire format.
 
     More importantly, **the figures are recorded in our namespace and asked for
-    in theirs**. Our accounting produces usage for `proj001.aip1`; the awarding
-    portal asked about `myproject.ukri`. So the report is built against our own
+    in theirs**. Our accounting produces usage for `myproject1.portal`; the awarding
+    portal asked about `myaward1.award`. So the report is built against our own
     project identifier and then `remap_project`ped into theirs at the end. That
     translation is only possible because approving the award fixed the mapping
     between the two.
@@ -374,7 +374,7 @@ def build_usage_report(
     report = openportal.ProjectUsageReport(openportal.ProjectIdentifier(project_id))
 
     # **The project may simply not be on this resource.** An awarding portal
-    # holding an award on `isambard-ai` can perfectly well ask `isambard3` about
+    # holding an award on `cluster1` can perfectly well ask `cluster2` about
     # it - the identifier is the same, and nothing stops the question. The
     # honest answer is an empty report: nothing was used here, because the
     # project is not here. An error would say "something is broken", which is
@@ -388,8 +388,8 @@ def build_usage_report(
     local_project = _local_project(award)
 
     # Build the report in *our* namespace first, because that is the namespace
-    # the figures were recorded in - our accounting knows `proj001.aip1` and has
-    # never heard of `myproject.ukri`.
+    # the figures were recorded in - our accounting knows `myproject1.portal` and has
+    # never heard of `myaward1.award`.
     report = openportal.ProjectUsageReport(local_project)
     today = datetime.date.today()
 
@@ -414,10 +414,10 @@ def build_usage_report(
         report.set_report(date, daily)
 
     # Now translate the whole report into the awarding portal's namespace. This
-    # is the mapping being used: they asked about `myproject.ukri`, so that is
+    # is the mapping being used: they asked about `myaward1.award`, so that is
     # what the answer must be about. `remap_project` rewrites the project and
-    # rebuilds every `UserIdentifier` with it, turning `alice.proj001.aip1` into
-    # `alice.myproject.ukri` - the member's email is unchanged, because that is
+    # rebuilds every `UserIdentifier` with it, turning `alice.myproject1.portal` into
+    # `alice.myaward1.award` - the member's email is unchanged, because that is
     # the same person either way.
     report.remap_project(openportal.ProjectIdentifier(project_id))
 
@@ -462,7 +462,7 @@ def get_usage_reports(job: openportal.Job) -> openportal.UsageReport:
     date_range = _date_range(job)
 
     # Only the awards on this resource, so a portal-level roll-up asked of
-    # `isambard3` covers Isambard 3 and nothing else.
+    # `cluster2` covers `cluster2` and nothing else.
     reports = [
         build_usage_report(offering, award.project_id, date_range).to_usage_report()
         for award in store.awards_on(_offering_of(job), portal)

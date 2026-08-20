@@ -413,8 +413,9 @@ plain string. Usable as a `dict` key or in a `set`.
 | `agents` | `list[str]` | The path split into agent names |
 
 `agents` is how a portal reads the two ends that matter on a bridge-board job:
-for a `forwarded_for` of `ukri.aip1.isambard-ai`, `agents[0]` is the awarding
-portal that asked and `agents[-1]` is the offering it came in through. See
+for a `forwarded_for` of `award.portal.cluster1`, `agents[0]` is the awarding
+portal that asked (`award`) and `agents[-1]` is the offering it came in
+through (`cluster1`). See
 [project-portal-api.md §1.2](project-portal-api.md).
 
 ---
@@ -453,7 +454,7 @@ plain string. Usable as a `dict` key or in a `set`.
 ### `ProjectMapping`
 
 The pairing of two portals' names for the same thing:
-`<their project id>:<our project id>`, e.g. `"myproject.ukri:proj001.aip1"`.
+`<their project id>:<our project id>`, e.g. `"myaward1.award:myproject1.portal"`.
 
 **This is a string, not an object**, and it is what `create_award`,
 `update_award`, `remove_award` and `get_project_mapping` must return — see
@@ -465,7 +466,7 @@ matters.
 | `project` | `ProjectIdentifier` | The identifier the awarding portal used |
 | `local_group` | `str` | The receiving portal's own identifier for it |
 
-`ProjectMapping("myproject.ukri:proj001.aip1")` constructs from a string, and
+`ProjectMapping("myaward1.award:myproject1.portal")` constructs from a string, and
 raises `OSError` if either half is invalid. `str(m)` returns the pair. Supports
 `==` / `!=` against another `ProjectMapping`.
 
@@ -981,7 +982,7 @@ job = job.errored(openportal.ManagedProjectPendingError("awaiting approval"))
 openportal.send_result(job)
 
 # Reading a job you submitted — the same class comes back
-job = openportal.run("ukri.aip1.isambard-ai create_award myproj.ukri {…}", max_ms=30_000)
+job = openportal.run("award.portal.cluster1 create_award myaward1.award {…}", max_ms=30_000)
 
 if job.is_error:
     match job.error:

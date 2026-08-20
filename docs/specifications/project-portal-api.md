@@ -49,49 +49,49 @@ mechanics; use this one when writing the handler.
 
 Two portals, each with their own OpenPortal agents:
 
-* **`ukri`** — the *awarding portal*. Makes awards; wants them provisioned
+* **`award`** — the *awarding portal*. Makes awards; wants them provisioned
   elsewhere.
-* **`aip1`** — the *project portal* (yours). Owns projects, members, and the
+* **`portal`** — the *project portal* (yours). Owns projects, members, and the
   infrastructure behind them.
 
-`aip1` advertises one or more **offerings** — named things `ukri` is allowed to
+`portal` advertises one or more **offerings** — named things `award` is allowed to
 address. An offering is written `<offering>.<local-portal>.<remote-portal>`,
-e.g. `isambard-ai.aip1.ukri`: "the resource `isambard-ai`, offered by `aip1`,
-to `ukri`".
+e.g. `cluster1.portal.award`: "the resource `cluster1`, offered by `portal`,
+to `award`".
 
 A request then flows:
 
 ```
- 1.  ukri's portal software submits, through its own bridge:
-         ukri.aip1.isambard-ai create_award myproj.ukri {…AwardDetails…}
+ 1.  award's portal software submits, through its own bridge:
+         award.portal.cluster1 create_award myaward1.award {…AwardDetails…}
 
- 2.  ukri's portal agent  ──────────►  aip1's portal agent
+ 2.  award's own agent  ─────────►  portal's agent
          (the destination's first hop is the sending portal itself;
           the last hop names the offering)
 
- 3.  aip1's portal agent recognises the offering and re-issues the request
+ 3.  the project portal's agent recognises the offering and re-issues it
      to its own bridge, tagged with where it came from:
-         aip1.<bridge>.isambard-ai create_project myproj.ukri {…}
-         forwarded_for = ukri.aip1.isambard-ai
+         portal.<bridge>.cluster1 create_project myaward1.award {…}
+         forwarded_for = award.portal.cluster1
 
- 4.  aip1's bridge puts the Job on its board and signals your portal:
+ 4.  its bridge puts the Job on its board and signals your portal:
          GET <signal_url>?job_id=<uuid>
 
  5.  YOUR PORTAL: fetch the job, do the work, post the result.        ← §3
 
- 6.  The result travels back the way it came, to ukri.
+ 6.  The result travels back the way it came, to award.
 ```
 
 Everything above step 5 is handled by the agents. Steps 0 and 5 are yours.
 
 ### 1.1 Step 0: you must advertise offerings first
 
-Until an offering exists, requests from `ukri` have nowhere to land — they are
+Until an offering exists, requests from `award` have nowhere to land — they are
 held and only delivered once the offering is registered. On startup (and
 whenever the set changes) call `POST /sync_offerings` with the complete list:
 
 ```json
-["isambard-ai.aip1.ukri", "isambard-p1.aip1.ukri"]
+["cluster1.portal.award", "cluster2.portal.award"]
 ```
 
 `sync_offerings` is a *replace*, not a merge — anything absent is withdrawn.
@@ -106,15 +106,17 @@ rejected.
 Two things distinguish an awarding portal's request from a local one:
 
 **`forwarded_for`** carries the original destination, e.g.
-`ukri.aip1.isambard-ai`. Its **first** element is the portal that asked; its
+`award.portal.cluster1`. Its **first** element is the portal that asked; its
 **last** element is the offering they came in through. This is the field to
 authorise against — it is set by your own portal agent, not by the caller.
 
-**Identifiers name the awarding portal.** A project created by `ukri` is
-`myproj.ukri`, not `myproj.aip1`, and its members are
-`alice.myproj.ukri`. Key your records on the full identifier: the same project
-name may exist under two different awarding portals, and they are different
-projects.
+**Identifiers in a request name the awarding portal, not you.** An award made
+by `award` arrives as `myaward1.award` — never rewritten into your namespace —
+and its members as `alice.myaward1.award`. You will have your own identifier for
+the project you create for it (§4.1.1), but that is yours to return, not
+something to expect in an incoming request. Key your records on the full
+identifier as sent: the same project name may exist under two different awarding
+portals, and those are different projects.
 
 A locally-originated request has `forwarded_for` absent or naming only your own
 portal.
@@ -122,17 +124,17 @@ portal.
 ### 1.3 The offering says *which resource*, and scopes everything
 
 An offering is a **virtual agent** on your portal: a name the awarding portal
-addresses directly, standing for one resource you run. `aip1` might offer
-`isambard-ai` and `isambard-p1`, and `ukri` addresses them as
-`ukri.aip1.isambard-ai` and `ukri.aip1.isambard-p1`.
+addresses directly, standing for one resource you run. `portal` might offer
+`cluster1` and `cluster2`, and `award` addresses them as
+`award.portal.cluster1` and `award.portal.cluster2`.
 
 It is easy to read the offering as an access-control list — a set of names to
 check a request against — and that reading will produce a portal that answers
 the wrong questions. **The offering is part of what is being asked, not a
 permission to ask it.**
 
-`create_award` sent to `ukri.aip1.isambard-ai` is a request to create a project
-*on Isambard-AI*. The `template` in the `AwardDetails` is interpreted in the
+`create_award` sent to `award.portal.cluster1` is a request to create a project
+*on `cluster1`*. The `template` in the `AwardDetails` is interpreted in the
 context of that resource — in Waldur it selects the organisation, the default
 offerings and the billing the project is created with, all of which belong to
 the resource — so the same template name may be offered on one and not another.
@@ -141,24 +143,36 @@ identifier you return in the mapping (§4.1.1) names a project on it.
 
 Three consequences:
 
-* **Key your records on `(offering, project_id)`.** `myproject.ukri` on
-  `isambard-ai` and `myproject.ukri` on `isambard-p1` are two different awards
+* **Key your records on `(offering, project_id)`.** `myaward1.award` on
+  `cluster1` and `myaward1.award` on `cluster2` are two different awards
   for two different resources. The reference implementation keys its own records
   exactly this way.
 * **Scope every answer by the offering the request came through.** `get_awards`
-  through `isambard-ai` means "what does `ukri` have *on Isambard-AI*".
+  through `cluster1` means "what does `award` have *on `cluster1`*".
 * **A question about a project that is not on this resource is not an error.**
   An awarding portal sweeping every offering it knows about will ask each one
   about each award. The offering that holds nothing answers with an **empty
   report**, not a failure — see §4.3.
 
 Read the offering from `forwarded_for`'s last element, falling back to the
-job's own destination (`aip1.<bridge>.isambard-ai`) which ends the same way for
+job's own destination (`portal.<bridge>.cluster1`) which ends the same way for
 a locally-originated request.
+
+Worked through, with `award` holding two awards on `portal`:
+
+| `award` sends | on | `portal` creates | and returns |
+|---|---|---|---|
+| `create_award myaward1.award` to `award.portal.cluster1` | `cluster1` | `myproject1.portal` | `myaward1.award:myproject1.portal` |
+| `create_award myaward2.award` to `award.portal.cluster2` | `cluster2` | `myproject2.portal` | `myaward2.award:myproject2.portal` |
+
+`get_usage_report myaward1.award` through `cluster1` answers with the usage of
+`myproject1.portal`, translated into `award`'s namespace. The same request
+through `cluster2` answers with an **empty** report: `myaward1.award` is not on
+`cluster2`. Nothing is wrong — it is simply not there.
 
 ---
 
-## 2. The `award` vocabulary
+## 2. The `*_award` vocabulary
 
 Awarding portals speak of awards; the wire vocabulary grew up around projects.
 Both spellings are accepted, and each `*_award` form is an exact synonym of the
@@ -212,11 +226,11 @@ A fetched job looks like:
   "changed":       1700000005,
   "expires":       1700000120,
   "version":       2,
-  "command":       "aip1.bridge.isambard-ai get_award myproj.ukri",
+  "command":       "portal.bridge.cluster1 get_award myaward1.award",
   "state":         "Pending",
   "result":        null,
   "result_type":   null,
-  "forwarded_for": "ukri.aip1.isambard-ai"
+  "forwarded_for": "award.portal.cluster1"
 }
 ```
 
@@ -228,7 +242,7 @@ A fetched job looks like:
 `command` is the destination path followed by the instruction. Parse the
 instruction rather than the whole string: in Python, `job.instruction.command`
 gives the verb (`get_award`) and `job.instruction.arguments` the argument list
-(`["myproj.ukri"]`).
+(`["myaward1.award"]`).
 
 ### 3.2 Responding
 
@@ -248,7 +262,7 @@ Note the double encoding: `result` is a JSON **string containing JSON**. A
 
 ```json
 "state": "Complete",
-"result": "\"myproj.ukri:grp001\"",
+"result": "\"myaward1.award:myproject1.portal\"",
 "result_type": "ProjectMapping"
 ```
 
@@ -441,14 +455,14 @@ you need to answer.
 
 | Instruction | Arguments | Must return | Wire form |
 |-------------|-----------|-------------|-----------|
-| `create_project` / `create_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
-| `update_project` / `update_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
-| `remove_project` / `remove_award` | `<project_id>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
+| `create_project` / `create_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
+| `update_project` / `update_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
+| `remove_project` / `remove_award` | `<project_id>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
 | `get_project` | `<project_id>` | `AwardDetails` | object |
 | `get_award` | `<project_id>` | `AwardDetails` | object |
 | `get_awards` / `list_awards` | `<portal_id>` | `Vec<AwardDetails>` | array of objects |
 | `get_projects` | `<portal_id>` | `Vec<ProjectMapping>` | array of **strings** |
-| `get_project_mapping` | `<project_id>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
+| `get_project_mapping` | `<project_id>` | `ProjectMapping` | `"myaward1.award:myproject1.portal"` |
 
 Notes:
 
@@ -456,8 +470,8 @@ Notes:
   not an object, and the most important thing you return. See §4.1.1.
 #### 4.1.1 The mapping is where the two sides agree what to call a thing
 
-The awarding portal knows the award as `myproject.ukri`. You create something
-for it and know that as, say, `proj001.aip1`. Neither side can guess the other's
+The awarding portal knows the award as `myaward1.award`. You create something
+for it and know that as, say, `myproject1.portal`. Neither side can guess the other's
 name, and until they have been exchanged there is no way to say "that award" and
 "that project" and mean the same object.
 
@@ -467,7 +481,7 @@ identifier in your namespace, naming the project you created *on the resource
 the award came in through* (§1.3), not a bare group name:
 
 ```
-myproject.ukri:proj001.aip1
+myaward1.award:myproject1.portal
 ```
 
 Once you have returned it, the award ID and the project ID are two names for one
@@ -479,13 +493,13 @@ awaiting approval answers with `ManagedProjectPendingError` instead (§3.3) —
 there is no honest identifier to put in the second half yet.
 
 **This is also the join for everything else.** Your accounting records usage
-against `proj001.aip1` and has never heard of `myproject.ukri`; the awarding
-portal asks `get_usage_report myproject.ukri` and has never heard of
-`proj001.aip1`. The mapping is what lets you answer. In practice: build the
+against `myproject1.portal` and has never heard of `myaward1.award`; the awarding
+portal asks `get_usage_report myaward1.award` and has never heard of
+`myproject1.portal`. The mapping is what lets you answer. In practice: build the
 report against your own identifier, because that is the namespace the figures
 were recorded in, and then translate it — in Python,
 `report.remap_project(their_id)` rewrites the project and rebuilds every
-`UserIdentifier` with it, so `alice.proj001.aip1` becomes `alice.myproject.ukri`
+`UserIdentifier` with it, so `alice.myproject1.portal` becomes `alice.myaward1.award`
 while the member's email stays as it is.
 
 The second half is validated as a mapping target, so it is restricted to
@@ -534,7 +548,7 @@ portal-to-portal work:
 | `get_users` | `<project_id>` | `Vec<UserMapping>` |
 
 A `UserMapping` is `<user_id>:<local_user>:<local_group>`, e.g.
-`alice.myproj.ukri:alice@example.ac.uk:myproj.ukri`.
+`alice.myaward1.award:alice@example.ac.uk:myaward1.award`.
 
 At the portal layer the member's **email address is the `local_user`** — a
 portal has no Unix accounts to name, and the email is the portal-level

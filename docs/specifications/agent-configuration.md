@@ -487,10 +487,15 @@ Two things follow for how this is configured:
   round-robin DNS alias is several masters behind one name, so pinning writes
   to it pins nothing.
 - Writes only ever go to one server at a time, but *which* server can change:
-  if the write server is confirmed down (a refused connection or a rejected
-  login - never merely a slow call) for longer than
+  if the write server is confirmed down for longer than
   `freeipa-replication-window`, one replacement is elected, in configuration
-  order. It reverts once the original has been up again for a full window -
+  order. "Confirmed down" means a refused connection, a rejected or timed-out
+  login, or a run of `3` consecutive calls that went unanswered - never a
+  single slow call, because one timeout is indistinguishable from a write that
+  landed and whose response was lost. A server that is listening but not
+  answering also has its session discarded after each timeout, so the next call
+  has to log in again and that login becomes an independent check on whether it
+  is alive. It reverts once the original has been up again for a full window -
   recovery waits for the same reason failover does, since a server that has
   just come back may not have caught up with what stood in for it. If nothing
   is fit to take writes, calls fail rather than being sent to a server that may

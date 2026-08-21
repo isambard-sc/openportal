@@ -91,7 +91,7 @@ async fn send_payload(
     server: &str,
     health: &Arc<ServerHealth>,
     payload: &serde_json::Value,
-) -> Result<reqwest::Response, Error> {
+) -> Result<reqwest::Response, SendFailure> {
     match client
         .post(url)
         .header("Referer", format!("{}/ipa", server))
@@ -106,16 +106,37 @@ async fn send_payload(
             Ok(response)
         }
         Err(e) => {
+            let message = format!(
+                "Could not call function {} on server {}: {}",
+                payload, server, e
+            );
+
+            if e.is_timeout() {
+                health.mark_timeout(server);
+
+                return Err(SendFailure::TimedOut(Error::Timeout(message)));
+            }
+
             if e.is_connect() {
+                // nothing is listening - that is not ambiguous
                 health.mark_down(server);
             }
 
-            Err(Error::Call(format!(
-                "Could not call function {} on server {}: {}",
-                payload, server, e
-            )))
+            Err(SendFailure::Failed(Error::Call(message)))
         }
     }
+}
+
+///
+/// Why a call did not get a response, to the extent that the caller has to care
+/// about the difference.
+///
+enum SendFailure {
+    /// The server did not answer in time. The call may well have been applied,
+    /// so this must never be treated as "the write did not happen".
+    TimedOut(Error),
+    /// The call did not get a response for some other reason.
+    Failed(Error),
 }
 
 ///
@@ -174,7 +195,7 @@ where
     let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
 
     if time_left < 5 {
-        return Err(Error::Call(
+        return Err(Error::Expired(
             "Not enough time left to call FreeIPA server".to_string(),
         ));
     }
@@ -214,7 +235,22 @@ where
     // loop.
     let mut url = format!("{}/ipa/session/json", lock.server());
 
-    let mut result = send_payload(&client, &url, lock.server(), lock.health(), &payload).await?;
+    let mut result = match send_payload(&client, &url, lock.server(), lock.health(), &payload).await
+    {
+        Ok(result) => result,
+        Err(SendFailure::TimedOut(e)) => {
+            // Throw away the session, so the next call to this server has to
+            // log in again. A server that is listening but not answering keeps
+            // its session cookie valid for ever, so without this nothing would
+            // ever probe it by any other means and it would go on absorbing
+            // every write. The login is a separate, short-lived request: if
+            // that cannot get through either, the server is confirmed down and
+            // failover can begin.
+            lock.set_login_failed();
+            return Err(e);
+        }
+        Err(SendFailure::Failed(e)) => return Err(e),
+    };
 
     // write a warning if this took a long time
     if (Utc::now() - start_time).num_seconds() > 5 {
@@ -276,7 +312,7 @@ where
         let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
 
         if time_left < 5 {
-            return Err(Error::Call(
+            return Err(Error::Expired(
                 "Not enough time left to call FreeIPA server".to_string(),
             ));
         }
@@ -289,7 +325,14 @@ where
             .context("Could not build client")?;
 
         // retry the call
-        result = send_payload(&client, &url, lock.server(), lock.health(), &payload).await?;
+        result = match send_payload(&client, &url, lock.server(), lock.health(), &payload).await {
+            Ok(result) => result,
+            Err(SendFailure::TimedOut(e)) => {
+                lock.set_login_failed();
+                return Err(e);
+            }
+            Err(SendFailure::Failed(e)) => return Err(e),
+        };
 
         if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
             tracing::error!(
@@ -527,13 +570,27 @@ struct ServerHealth {
     /// Unix seconds at which this server last came back after being down, or 0
     /// if it has been up for as long as we have known it.
     up_since: std::sync::atomic::AtomicI64,
+    /// How many calls in a row this server has failed to answer in time. Reset
+    /// by any answer at all.
+    consecutive_timeouts: std::sync::atomic::AtomicI64,
 }
+
+/// How many calls a server may fail to answer in a row before it is treated as
+/// down. A server that is listening but never replies would otherwise take
+/// every write forever: nothing marks it down, because a timeout on its own is
+/// not evidence that the write did not land.
+///
+/// Each of these is a separate call that waited out its own timeout, so this is
+/// minutes of a server not answering, not one slow request. Failover then still
+/// waits the replication window on top.
+const MAX_CONSECUTIVE_TIMEOUTS: i64 = 3;
 
 impl ServerHealth {
     fn new() -> Self {
         ServerHealth {
             down_since: std::sync::atomic::AtomicI64::new(0),
             up_since: std::sync::atomic::AtomicI64::new(0),
+            consecutive_timeouts: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -552,7 +609,45 @@ impl ServerHealth {
         }
     }
 
+    ///
+    /// Record that a call to this server did not answer in time, and treat the
+    /// server as down once enough of them have gone unanswered in a row.
+    ///
+    /// A single timeout deliberately does not count. It is indistinguishable
+    /// from a write that landed and whose response was lost, and failing over
+    /// on the strength of one is what leaves the same DN added on two masters.
+    /// A run of them is different: it says the server is not answering
+    /// *anything*, and the replication window still has to pass before a write
+    /// goes anywhere else - long enough for whatever it did accept to have
+    /// replicated to the server that takes over.
+    ///
+    fn mark_timeout(&self, url: &str) {
+        let timeouts = self
+            .consecutive_timeouts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+
+        tracing::warn!(
+            "FreeIPA server {} did not answer in time ({} call(s) in a row).",
+            url,
+            timeouts
+        );
+
+        if timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
+            tracing::error!(
+                "FreeIPA server {} has failed to answer {} calls in a row - \
+                 treating it as down.",
+                url,
+                timeouts
+            );
+            self.mark_down(url);
+        }
+    }
+
     fn mark_up(&self, url: &str) {
+        self.consecutive_timeouts
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+
         if self.down_since.swap(0, std::sync::atomic::Ordering::SeqCst) != 0 {
             self.up_since
                 .store(Utc::now().timestamp(), std::sync::atomic::Ordering::SeqCst);
@@ -931,7 +1026,13 @@ async fn get_connected_server(
                             // update the jar in the server
                             tracing::info!("Login successful to FreeIPA server: {}", server.server);
                             server.set_login_success(jar);
-                            entry.health.mark_up(&entry.url);
+
+                            // Deliberately *not* marked up here. Being able to
+                            // log in does not prove the server is serving -
+                            // one that accepts a login and then hangs on every
+                            // call would otherwise have its timeout streak
+                            // reset on each re-login and could never be
+                            // treated as down. Only an answered call counts.
                             return Ok(LockedIPAServer {
                                 server,
                                 health: entry.health.clone(),
@@ -945,9 +1046,15 @@ async fn get_connected_server(
                             );
                             server.set_login_failed();
 
-                            // a server we cannot log in to is confirmed down -
-                            // unlike one that is merely slow
-                            entry.health.mark_down(&entry.url);
+                            // A server we cannot log in to is confirmed down -
+                            // including one that accepted the connection and
+                            // then never answered, which is how a hung server
+                            // is caught. Running out of the job's own time
+                            // budget says nothing about the server, so it does
+                            // not count.
+                            if !matches!(e, Error::Expired(_)) {
+                                entry.health.mark_down(&entry.url);
+                            }
 
                             // release the lock and try the next server
                         }
@@ -1001,7 +1108,10 @@ async fn login(
     let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
 
     if time_left < 5 {
-        return Err(Error::Call(
+        // Expired, not Call: this is our own job budget running out, not
+        // anything wrong with the server, and it must not be read as evidence
+        // that the server is down.
+        return Err(Error::Expired(
             "Not enough time left to login to FreeIPA server".to_string(),
         ));
     }
@@ -4094,6 +4204,32 @@ mod tests {
             Some(entry) => entry.health.clone(),
             None => unreachable!("the write server is not in the pool"),
         };
+
+        // A server that is listening but never answering has to be caught too,
+        // or it would absorb every write for ever. One timeout is not enough -
+        // it is indistinguishable from a write that landed and whose response
+        // was lost - but a run of them is.
+        for _ in 1..MAX_CONSECUTIVE_TIMEOUTS {
+            health.mark_timeout(&ipa2);
+            assert!(matches!(
+                resolve_write_target(&pool).await,
+                Target::Named(ref url) if *url == ipa2
+            ));
+            assert!(health.down_for().is_none());
+        }
+
+        health.mark_timeout(&ipa2);
+        assert!(health.down_for().is_some());
+
+        // and any answered call clears it again
+        health.mark_up(&ipa2);
+        assert!(health.down_for().is_none());
+        assert_eq!(
+            health
+                .consecutive_timeouts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
 
         // Confirmed down, but only just: keep aiming writes at it. Failing the
         // call is recoverable, whereas adding the same DN on a second master

@@ -40,9 +40,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
   - Writes, and the reads that decide whether to write, now all go to one server
     (`freeipa-write-server`, defaulting to the first configured). Failover happens
-    only once that server is *confirmed* down - a refused connection or a rejected
-    login, never a timeout - and not until `freeipa-replication-window` (30s) has
-    passed, so anything it accepted has had time to reach whichever master takes over.
+    only once that server is *confirmed* down - a refused connection, a rejected or
+    timed-out login, or a run of unanswered calls, but never one timeout on its own,
+    since that is indistinguishable from a write that landed and whose response was
+    lost - and not until `freeipa-replication-window` (30s) has passed, so anything it
+    accepted has had time to reach whichever master takes over.
     Failover elects a single replacement in configuration order rather than spreading
     writes over what is left, and reverts only once the original has been up again for
     a full window: a server that has just come back may not have caught up with what

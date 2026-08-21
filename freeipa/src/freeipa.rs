@@ -692,22 +692,61 @@ impl ServerHealth {
     }
 }
 
+/// The connection slots that reads may use - one per entry in
+/// `freeipa-server`.
 static FREEIPA_SERVERS: Lazy<Mutex<Vec<PoolEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+/// The connection slots reserved for writes, keyed by server.
 ///
-/// The server that all writes are sent to, and the time that replication needs
-/// to converge before a write may be sent anywhere else.
+/// Writes get their own slots so that write concurrency can be raised without
+/// also multiplying the read pool - and because which server takes the writes
+/// changes on failover, so it cannot be expressed by listing one server more
+/// often in `freeipa-server`.
+///
+/// Slots are created the first time a server takes writes and then kept, so
+/// that handing the role back to a server that has held it before reuses its
+/// sessions instead of logging in again.
+static WRITE_SLOTS: Lazy<Mutex<HashMap<String, Vec<PoolEntry>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Whether each server is answering, keyed by server.
+///
+/// One record per server, shared by every slot for it, read and write alike:
+/// evidence that a server has stopped answering is evidence however it was
+/// gathered, and failover decisions are made by comparing servers, so they
+/// cannot be reading from two separate sets of books.
+static SERVER_HEALTH: Lazy<Mutex<HashMap<String, Arc<ServerHealth>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+///
+/// The credentials every slot logs in with. Held so that a write slot can be
+/// created later, when a server first takes the writes.
+///
+#[derive(Debug, Clone)]
+struct Credentials {
+    user: String,
+    password: SecretString,
+}
+
+static CREDENTIALS: Lazy<Mutex<Option<Credentials>>> = Lazy::new(|| Mutex::new(None));
+
+///
+/// The server that all writes are sent to, the time that replication needs to
+/// converge before a write may be sent anywhere else, and how many writes may
+/// run against that server at once.
 ///
 #[derive(Debug, Clone, Default)]
 struct WriteConfig {
     server: Option<String>,
     replication_window: chrono::Duration,
+    concurrent_writes: usize,
 }
 
 static WRITE_CONFIG: Lazy<Mutex<WriteConfig>> = Lazy::new(|| {
     Mutex::new(WriteConfig {
         server: None,
         replication_window: chrono::Duration::seconds(DEFAULT_REPLICATION_WINDOW),
+        concurrent_writes: DEFAULT_CONCURRENT_WRITES,
     })
 });
 
@@ -718,20 +757,98 @@ static WRITE_CONFIG: Lazy<Mutex<WriteConfig>> = Lazy::new(|| {
 /// what the old one accepted.
 const DEFAULT_REPLICATION_WINDOW: i64 = 30;
 
+/// How many writes may run against the write server at once, if
+/// `freeipa-concurrent-writes` is not set.
+///
+/// More than one is safe: a single 389-ds serialises DN uniqueness itself, so
+/// two simultaneous adds of one DN on one server give a success and a
+/// `DuplicateEntry`, which is handled. It is only two *masters* accepting the
+/// same add that cannot be reconciled.
+const DEFAULT_CONCURRENT_WRITES: usize = 2;
+
+/// Each concurrent write is a live session on the server, so refuse to open an
+/// implausible number of them because of a mistyped config value.
+const MAX_CONCURRENT_WRITES: usize = 64;
+
+///
+/// Return the health record for the passed server, creating it if this is the
+/// first slot to ask.
+///
+async fn health_for(url: &str) -> Arc<ServerHealth> {
+    SERVER_HEALTH
+        .lock()
+        .await
+        .entry(url.to_string())
+        .or_insert_with(|| Arc::new(ServerHealth::new()))
+        .clone()
+}
+
+///
+/// Return the connection slots reserved for writes on the passed server,
+/// creating them if it has not taken the writes before.
+///
+async fn write_slots_for(url: &str) -> Result<Vec<PoolEntry>, Error> {
+    let mut slots = WRITE_SLOTS.lock().await;
+
+    if let Some(existing) = slots.get(url) {
+        return Ok(existing.clone());
+    }
+
+    let credentials = match CREDENTIALS.lock().await.clone() {
+        Some(credentials) => credentials,
+        None => {
+            return Err(Error::Call(
+                "No FreeIPA credentials have been initialised".to_string(),
+            ))
+        }
+    };
+
+    let concurrent_writes = WRITE_CONFIG.lock().await.concurrent_writes.max(1);
+    let health = health_for(url).await;
+
+    let entries: Vec<PoolEntry> = (0..concurrent_writes)
+        .map(|_| PoolEntry {
+            url: url.to_string(),
+            health: health.clone(),
+            server: Arc::new(Mutex::new(IPAServer::new(
+                url,
+                &credentials.user,
+                &credentials.password,
+            ))),
+        })
+        .collect();
+
+    tracing::info!(
+        "Opened {} write connection(s) to FreeIPA server {}.",
+        entries.len(),
+        url
+    );
+
+    slots.insert(url.to_string(), entries.clone());
+
+    Ok(entries)
+}
+
 pub async fn initialise_servers(
     servers: &[String],
     write_server: &str,
     replication_window: Option<i64>,
+    concurrent_writes: Option<i64>,
     user: &str,
     password: &SecretString,
 ) -> Result<(), Error> {
     let mut freeipa_servers = FREEIPA_SERVERS.lock().await;
 
-    // clear any existing servers
+    // clear any existing servers, along with the write slots and health
+    // records that belonged to them
     freeipa_servers.clear();
+    WRITE_SLOTS.lock().await.clear();
+    SERVER_HEALTH.lock().await.clear();
 
-    // one shared health record per server, however many slots it has
-    let mut health: HashMap<String, Arc<ServerHealth>> = HashMap::new();
+    *CREDENTIALS.lock().await = Some(Credentials {
+        user: user.to_string(),
+        password: password.clone(),
+    });
 
     // now add each server
     for server in servers {
@@ -743,10 +860,7 @@ pub async fn initialise_servers(
 
         freeipa_servers.push(PoolEntry {
             url: server.to_string(),
-            health: health
-                .entry(server.to_string())
-                .or_insert_with(|| Arc::new(ServerHealth::new()))
-                .clone(),
+            health: health_for(server).await,
             server: Arc::new(Mutex::new(IPAServer::new(server, user, password))),
         });
     }
@@ -782,11 +896,30 @@ pub async fn initialise_servers(
             .unwrap_or(DEFAULT_REPLICATION_WINDOW),
     );
 
+    let concurrent_writes = match concurrent_writes {
+        Some(requested) => {
+            let clamped = requested.clamp(1, MAX_CONCURRENT_WRITES as i64);
+
+            if clamped != requested {
+                tracing::warn!(
+                    "freeipa-concurrent-writes of {} is out of range - using {}.",
+                    requested,
+                    clamped
+                );
+            }
+
+            clamped as usize
+        }
+        None => DEFAULT_CONCURRENT_WRITES,
+    };
+
     match &write_server {
         Some(server) => tracing::info!(
-            "FreeIPA writes will be sent to {} (failing over only once it is \
-             confirmed down, and no sooner than {} seconds afterwards).",
+            "FreeIPA writes will be sent to {}, up to {} at a time (failing over \
+             only once it is confirmed down, and no sooner than {} seconds \
+             afterwards).",
             server,
+            concurrent_writes,
             replication_window.num_seconds()
         ),
         None => tracing::warn!("No FreeIPA servers configured - writes have nowhere to go."),
@@ -795,6 +928,7 @@ pub async fn initialise_servers(
     *WRITE_CONFIG.lock().await = WriteConfig {
         server: write_server,
         replication_window,
+        concurrent_writes,
     };
 
     Ok(())
@@ -962,22 +1096,24 @@ async fn get_connected_server(
 
     let pool: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
 
-    // a write has to be aimed at one specific server - work out which
-    let target = match target {
-        Target::Pinned => resolve_write_target(&pool).await,
-        target => target.clone(),
+    let freeipa_servers: Vec<PoolEntry> = match target {
+        // A write has to be aimed at one specific server, and it takes that
+        // server's own write slots rather than competing with reads for the
+        // shared ones.
+        Target::Pinned => match resolve_write_target(&pool).await {
+            Target::Named(url) => write_slots_for(&url).await?,
+            // no write server is configured - fall back to how this behaved
+            // before there was one
+            _ => pool,
+        },
+        Target::Any => pool,
+        // Named is a read of one particular server - the per-master existence
+        // checks - so it uses the read pool.
+        Target::Named(url) => pool.into_iter().filter(|entry| entry.url == *url).collect(),
     };
 
-    let freeipa_servers: Vec<PoolEntry> = pool
-        .into_iter()
-        .filter(|entry| match &target {
-            Target::Any | Target::Pinned => true,
-            Target::Named(url) => entry.url == *url,
-        })
-        .collect();
-
     if freeipa_servers.is_empty() {
-        return Err(match &target {
+        return Err(match target {
             Target::Any | Target::Pinned => {
                 Error::Call("No FreeIPA servers have been initialised".to_string())
             }
@@ -1070,8 +1206,9 @@ async fn get_connected_server(
         if should_all_backoff {
             tracing::error!(
                 "All FreeIPA servers ({}) are backing off because of repeated login failures.",
-                match &target {
-                    Target::Any | Target::Pinned => "any".to_string(),
+                match target {
+                    Target::Any => "any".to_string(),
+                    Target::Pinned => "the write server".to_string(),
                     Target::Named(url) => url.clone(),
                 }
             );
@@ -4144,7 +4281,9 @@ mod tests {
 
         let init = |servers: Vec<String>, write_server: &'static str, window: Option<i64>| {
             let password = password.clone();
-            async move { initialise_servers(&servers, write_server, window, "admin", &password).await }
+            async move {
+                initialise_servers(&servers, write_server, window, None, "admin", &password).await
+            }
         };
 
         // The `freeipa-server` option may list the same server several times,
@@ -4191,6 +4330,82 @@ mod tests {
         }
 
         assert_eq!(servers_to_check().await, vec![ipa2.clone(), ipa1.clone()]);
+
+        // A mistyped concurrency is clamped rather than opening an
+        // implausible number of sessions - or none at all
+        for (requested, expected) in [(0_i64, 1_usize), (10_000, MAX_CONCURRENT_WRITES)] {
+            match initialise_servers(
+                &[ipa1.clone(), ipa2.clone()],
+                "https://ipa2.example.com",
+                Some(60),
+                Some(requested),
+                "admin",
+                &password,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => unreachable!("initialise_servers: {:?}", e),
+            }
+
+            assert_eq!(WRITE_CONFIG.lock().await.concurrent_writes, expected);
+
+            match write_slots_for(&ipa2).await {
+                Ok(slots) => assert_eq!(slots.len(), expected),
+                Err(e) => unreachable!("write_slots_for: {:?}", e),
+            }
+        }
+
+        // back to the defaults for the rest of this test
+        match init(
+            vec![ipa1.clone(), ipa2.clone()],
+            "https://ipa2.example.com",
+            Some(60),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => unreachable!("initialise_servers: {:?}", e),
+        }
+
+        // Writes get their own connections to whichever server is taking them,
+        // so raising write concurrency does not multiply the connections that
+        // reads share. They are created on first use and then kept, so a
+        // server that takes the writes back reuses its sessions.
+        let write_slots = match write_slots_for(&ipa2).await {
+            Ok(slots) => slots,
+            Err(e) => unreachable!("write_slots_for: {:?}", e),
+        };
+
+        assert_eq!(write_slots.len(), DEFAULT_CONCURRENT_WRITES);
+        assert!(write_slots.iter().all(|slot| slot.url == ipa2));
+
+        // ...and they are not the slots that reads use
+        let read_slots: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
+
+        for write_slot in &write_slots {
+            assert!(!read_slots
+                .iter()
+                .any(|read_slot| Arc::ptr_eq(&read_slot.server, &write_slot.server)));
+
+            // Health is one record per server whatever kind of slot reports
+            // it: a server that has stopped answering has stopped answering,
+            // and failover compares servers with each other.
+            match read_slots.iter().find(|read_slot| read_slot.url == ipa2) {
+                Some(read_slot) => {
+                    assert!(Arc::ptr_eq(&read_slot.health, &write_slot.health))
+                }
+                None => unreachable!("the write server has no read slot"),
+            }
+        }
+
+        match write_slots_for(&ipa2).await {
+            Ok(again) => assert!(again
+                .iter()
+                .zip(write_slots.iter())
+                .all(|(a, b)| Arc::ptr_eq(&a.server, &b.server))),
+            Err(e) => unreachable!("write_slots_for: {:?}", e),
+        }
 
         let pool: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
 

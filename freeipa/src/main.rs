@@ -84,6 +84,24 @@ async fn main() -> Result<()> {
     // through the IPA framework at all.
     let freeipa_write_server = config.option("freeipa-write-server", "");
 
+    // How many writes may run against the write server at once. Writes have
+    // their own connections, so this can be raised without also multiplying
+    // the connections that reads share.
+    let freeipa_concurrent_writes: Option<i64> = {
+        let writes = config.option("freeipa-concurrent-writes", "");
+        let writes = writes.trim();
+
+        match writes.is_empty() {
+            true => None,
+            false => Some(writes.parse::<i64>().map_err(|e| {
+                anyhow::anyhow!(
+                    "Could not parse freeipa-concurrent-writes as a number: {}",
+                    e
+                )
+            })?),
+        }
+    };
+
     // How long replication is given to converge before a write is allowed to
     // go to a different server.
     let freeipa_replication_window: Option<i64> = {
@@ -139,6 +157,7 @@ async fn main() -> Result<()> {
         &freeipa_servers,
         &freeipa_write_server,
         freeipa_replication_window,
+        freeipa_concurrent_writes,
         &freeipa_user,
         &freeipa_password,
     )

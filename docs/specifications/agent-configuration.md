@@ -468,6 +468,7 @@ The FreeIPA agent manages user and project accounts in FreeIPA.
 | `freeipa-user` | `extra` | `admin` | FreeIPA admin username. |
 | `freeipa-write-server` | `extra` | first entry of `freeipa-server` | Which server takes all writes. Must be one of the `freeipa-server` entries. |
 | `freeipa-replication-window` | `extra` | `30` | Seconds that replication is assumed to need to converge. Writes are not moved to another server until the write server has been confirmed down for at least this long, nor moved back until it has been up again for that long. |
+| `freeipa-concurrent-writes` | `extra` | `2` | How many writes may run against the write server at once. These are connections of their own, so this can be raised without also multiplying the connections that reads share. |
 | `system-groups` | `extra` | `""` | Comma-separated list of FreeIPA groups to add all users to automatically. |
 | `instance-groups` | `extra` | `""` | Per-instance group mappings. Format: `instance-name:group1,group2;...` |
 
@@ -500,11 +501,17 @@ Two things follow for how this is configured:
   just come back may not have caught up with what stood in for it. If nothing
   is fit to take writes, calls fail rather than being sent to a server that may
   be behind.
-- The number of times a server is listed is the number of concurrent
-  connections it gets. Since any server may end up taking the writes, list
-  them all the same number of times - the write server's slots are the limit on
-  write concurrency, and after a failover that will be a different server's
-  slots. A server listed once serialises writes.
+- Reads and writes have separate connections. The number of times a server is
+  listed in `freeipa-server` is how many connections *reads* get to it;
+  `freeipa-concurrent-writes` is how many the current write server gets for
+  writes, opened when it takes the role and kept in case it takes it back. So
+  each server normally only needs listing once, and write concurrency follows
+  the role across a failover rather than having to be pre-provisioned on every
+  server.
+- More than one concurrent write to *one* server is safe: a single 389-ds
+  serialises DN uniqueness itself, so two simultaneous adds of the same DN give
+  one success and one `DuplicateEntry`, which is handled. It is only two
+  *masters* accepting the same add that cannot be reconciled.
 
 `op-freeipa` also checks every configured server before concluding that a user
 or group does not exist, since a master that has not yet received a recent add
@@ -518,7 +525,7 @@ already exist.
 ```bash
 op-freeipa init --service freeipa --url wss://freeipa-host:8046
 op-freeipa encryption --environment OPENPORTAL_SECRET
-op-freeipa extra --key freeipa-server --value https://ipa1.example.com,https://ipa2.example.com
+op-freeipa extra --key freeipa-server --value https://ipa1.example.com,https://ipa2.example.com,https://ipa3.example.com
 op-freeipa extra --key freeipa-write-server --value https://ipa1.example.com
 op-freeipa extra --key freeipa-user --value admin
 op-freeipa secret --key freeipa-password --value 'secret'

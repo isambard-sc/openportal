@@ -18,7 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   specify the HTTP transport itself.
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
-- `freeipa-write-server` and `freeipa-replication-window` options for `op-freeipa`,
+- `freeipa-write-server`, `freeipa-replication-window` and
+  `freeipa-concurrent-writes` options for `op-freeipa`,
   and [scripts/check-replication-conflicts.sh](scripts/check-replication-conflicts.sh)
   to find LDAP replication conflicts that already exist in a directory. Both are part
   of the fix below.
@@ -55,6 +56,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - Group creation takes a per-group mutex, mirroring the existing per-user one. Two
     `add_user` jobs for different users in one project both need that project's group
     and are not duplicates of each other to the job Board, so they raced.
+
+  Writes have connections of their own - `freeipa-concurrent-writes`, default 2, on
+  whichever server currently holds the role - so write concurrency follows the write
+  server across a failover and can be raised without also multiplying the connections
+  reads share. Concurrency against a single master is safe; it is only two masters
+  accepting the same add that cannot be reconciled.
 
   Every `freeipa-server` entry must name an individual master for this to hold: a VIP
   or a round-robin DNS alias is several masters behind one name.

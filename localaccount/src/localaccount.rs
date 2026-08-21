@@ -9,12 +9,17 @@
 //! service like FreeIPA. Production account management should use `op-freeipa`.
 //!
 //! It is nonetheless written to be safe if it is mistakenly deployed against a
-//! real system: it only ever removes accounts and groups it manages — a user
-//! must be a member of the managed group before it will `userdel` them
+//! real system: it only ever touches accounts and groups it manages — a user
+//! must be a member of the managed group before it will disable them
 //! (`is_protected_user`), and a group must have a normal (non-system) GID and
 //! not be a configured system/managed group before it will `groupdel` it
 //! (`is_protected_project`). See docs/specifications/security-review.md
 //! (finding F13).
+//!
+//! Note that removing a user *disables* the account rather than deleting it, so
+//! that its uid - and therefore the ownership of every file it owns, including
+//! the home directory `op-filesystem` recycles - stays stable across a remove
+//! and a later re-add. See `remove_user`.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -36,7 +41,6 @@ static COMMANDS: OnceCell<Commands> = OnceCell::new();
 ///
 pub struct Commands {
     useradd: Vec<String>,
-    userdel: Vec<String>,
     groupadd: Vec<String>,
     groupdel: Vec<String>,
     usermod: Vec<String>,
@@ -64,7 +68,6 @@ impl Commands {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         useradd: &str,
-        userdel: &str,
         groupadd: &str,
         groupdel: &str,
         usermod: &str,
@@ -76,7 +79,6 @@ impl Commands {
     ) -> Self {
         Self {
             useradd: Self::parse_cmd(useradd),
-            userdel: Self::parse_cmd(userdel),
             groupadd: Self::parse_cmd(groupadd),
             groupdel: Self::parse_cmd(groupdel),
             usermod: Self::parse_cmd(usermod),
@@ -94,6 +96,11 @@ pub fn initialise_commands(cmds: Commands) -> Result<()> {
         .set(cmds)
         .map_err(|_| anyhow::anyhow!("Commands already initialised"))
 }
+
+/// The expiry date stamped on a disabled account. Any date in the past refuses the
+/// login; this one is unambiguous and obviously deliberate rather than a real date
+/// somebody might have meant.
+const EXPIRED_DATE: &str = "1970-01-02";
 
 fn get_commands() -> Result<&'static Commands, Error> {
     COMMANDS
@@ -493,10 +500,16 @@ pub async fn add_user(
     let default_home = format!("/home/{}", local_user);
     let homedir_str = homedir.as_deref().unwrap_or(&default_home);
 
-    // `useradd -m` creates this directory (and any missing parents) as root and
-    // chowns it to the new account, and on this path the value came back over
-    // the wire from the peer - so validate it before handing it over. See
+    // This value came back over the wire from the peer, so validate it before it is
+    // recorded as the account's home directory. See
     // `docs/specifications/security-review-2.md` (finding R13).
+    //
+    // The directory itself is *not* created here. `useradd -m` used to create it, which
+    // meant a freshly added account already had an empty home - and `op-filesystem`
+    // then saw a directory that existed and declined to restore the recycled one
+    // holding the user's real files. Home directories belong to the filesystem agent,
+    // which creates them and recycles rather than deletes them; this matches
+    // `op-freeipa`, whose `user_add` likewise only records the attribute.
     check_homedir(homedir_str)?;
 
     tracing::info!("Adding user: {}", local_user);
@@ -505,15 +518,7 @@ pub async fn add_user(
         &cmds.useradd,
         // `--` ends option parsing so a name can never be read as a flag
         // (defence-in-depth on top of identifier validation, finding F15).
-        &[
-            "-d",
-            homedir_str,
-            "-m",
-            "-s",
-            "/bin/bash",
-            "--",
-            &local_user,
-        ],
+        &["-d", homedir_str, "-s", "/bin/bash", "--", &local_user],
     )
     .await?;
 
@@ -523,6 +528,14 @@ pub async fn add_user(
         }
         9 => {
             tracing::warn!("User already exists, will sync groups: {}", local_user);
+
+            // `remove_user` disables rather than deletes, so an account that is still
+            // here may be one that was removed. Re-enable it: this is the counterpart
+            // of the disable there, and mirrors `op-freeipa`, whose add path calls
+            // `user_enable`.
+            if is_removed_user(user, expires).await? {
+                enable_user(&local_user, expires).await?;
+            }
         }
         _ => {
             return Err(Error::Call(format!(
@@ -532,18 +545,36 @@ pub async fn add_user(
         }
     }
 
-    // Now create all required groups and add the user to them.
+    // Now create all required groups and add the user to them. `remove_user` strips the
+    // supplementary groups when it disables an account, so a re-enabled user gets back
+    // exactly the groups they are entitled to now rather than the ones they had then.
     sync_groups(&local_user, user, instance, expires).await?;
 
     UserMapping::new(user, &local_user, &local_group).map_err(|e| Error::Call(e.to_string()))
 }
 
 ///
-/// Remove a user from the local system.
-/// Idempotent: succeeds silently if the user did not exist.
-/// Note: the home directory is intentionally NOT removed here — home directories
-/// are managed separately by the filesystem agent, which recycles them rather
-/// than deleting them.
+/// Remove a user from the local system by **disabling** their account, not by
+/// deleting it. Idempotent: succeeds silently if the user did not exist, or is
+/// already disabled.
+///
+/// This used to run `userdel`. Deleting the account frees its uid, so recreating the
+/// user later could allocate a different one and every file they owned - including the
+/// home directory `op-filesystem` had carefully recycled rather than deleted - was left
+/// belonging to a uid its owner no longer had, or to whoever the old uid was
+/// subsequently issued to. `op-freeipa` disables (`user_disable`) for exactly this
+/// reason, and this now mirrors it: the account, its uid and its files stay put, and
+/// `add_user` re-enables it.
+///
+/// The supplementary groups are stripped, all but the two markers this agent needs to
+/// keep - the managed group, which is what makes the account ours to touch at all, and
+/// the removed group, which records that it is disabled. `sync_groups` appends
+/// (`usermod -aG`) and never removes, so leaving them would hand a re-enabled user back
+/// whatever access they had before rather than what they are entitled to now.
+/// `op-freeipa` strips groups on removal for the same reason.
+///
+/// The home directory is untouched, as it always was - home directories belong to the
+/// filesystem agent, which recycles them rather than deleting them.
 ///
 pub async fn remove_user(
     user: &UserIdentifier,
@@ -572,26 +603,199 @@ pub async fn remove_user(
         return Ok(mapping);
     }
 
-    tracing::info!("Removing user: {}", local_user);
+    if !is_existing_user(user, expires).await? {
+        tracing::warn!("User did not exist: {}", local_user);
+        return Ok(mapping);
+    }
 
-    let (exit_code, _, stderr) = run_command(&cmds.userdel, &["--", &local_user]).await?;
+    // Already disabled, and not merely blocked - nothing to do. The same check
+    // `op-freeipa::remove_user` makes.
+    if is_removed_user(user, expires).await? && !is_blocked_user(user, expires).await? {
+        tracing::info!("User {} is already disabled - nothing to do.", local_user);
+        return Ok(mapping);
+    }
 
-    match exit_code {
-        0 => {
-            tracing::info!("User removed: {}", local_user);
+    tracing::info!("Disabling user: {}", local_user);
+
+    let removed_group = removed_group_name(cmds);
+    ensure_group_exists(&removed_group, expires).await?;
+
+    let (exit_code, _, stderr) =
+        run_command(&cmds.usermod, &["-aG", &removed_group, "--", &local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -aG {} failed for '{}': exit code {}, stderr: {}",
+            removed_group, local_user, exit_code, stderr
+        )));
+    }
+
+    // Strip the supplementary groups, keeping only the markers that must survive.
+    let keep = [
+        cmds.managed_group.clone(),
+        removed_group,
+        blocked_group_name(cmds),
+    ];
+
+    for group in groups_for_user(&local_user, expires).await? {
+        if keep.contains(&group) {
+            continue;
         }
-        6 => {
-            tracing::warn!("User did not exist: {}", local_user);
-        }
-        _ => {
-            return Err(Error::Call(format!(
-                "userdel failed for '{}': exit code {}, stderr: {}",
-                local_user, exit_code, stderr
-            )));
+
+        let (exit_code, _, stderr) =
+            run_command(&cmds.gpasswd, &["-d", &local_user, &group]).await?;
+
+        if exit_code == 0 {
+            tracing::info!("Removed user '{}' from group '{}'", local_user, group);
+        } else {
+            // Not fatal: the account still gets disabled below, which is the part that
+            // matters, and a group we failed to leave is re-derived from scratch by
+            // `sync_groups` if the user is ever re-enabled.
+            tracing::warn!(
+                "Could not remove user '{}' from group '{}': exit code {}, stderr: {}",
+                local_user,
+                group,
+                exit_code,
+                stderr
+            );
         }
     }
 
+    disable_user(&local_user, expires).await?;
+
+    tracing::info!("User disabled: {}", local_user);
+
     Ok(mapping)
+}
+
+///
+/// Every supplementary group the local user is a member of.
+///
+/// Read from `getent group` rather than from `id`, both because `getent` is already a
+/// configured command and because this is the same enumeration `get_groups` performs.
+/// A user's **primary** group does not appear in these member lists and so is never
+/// returned - which is what we want: it is the account's login group, cannot be left
+/// with `gpasswd -d`, and is re-established by `sync_groups`.
+///
+async fn groups_for_user(
+    local_user: &str,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Vec<String>, Error> {
+    assert_not_expired(expires)?;
+
+    let cmds = get_commands()?;
+
+    let (exit_code, stdout, stderr) = run_command(&cmds.getent, &["group"]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "getent group failed: exit code {}, stderr: {}",
+            exit_code, stderr
+        )));
+    }
+
+    let mut groups = Vec::new();
+
+    for line in stdout.lines() {
+        // getent group output: groupname:x:gid:member1,member2,...
+        let mut fields = line.splitn(4, ':');
+
+        let Some(group_name) = fields.next() else {
+            continue;
+        };
+
+        let members = fields.nth(2).unwrap_or("");
+
+        if members.split(',').any(|m| m.trim() == local_user) {
+            groups.push(group_name.to_string());
+        }
+    }
+
+    Ok(groups)
+}
+
+///
+/// Disable a local account: lock its password and expire it.
+///
+/// Both, because neither alone is enough. `usermod -L` only puts a `!` in front of the
+/// password hash, which stops password authentication but leaves SSH keys, and any
+/// other non-password mechanism, working. Expiring the account is what actually refuses
+/// the login. `block_user` locks without expiring, which is a gap worth closing
+/// separately - it is not made worse here.
+///
+async fn disable_user(local_user: &str, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    assert_not_expired(expires)?;
+
+    let cmds = get_commands()?;
+
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-L", "--", local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -L failed for '{}': exit code {}, stderr: {}",
+            local_user, exit_code, stderr
+        )));
+    }
+
+    // An explicit date rather than a day count: `usermod -e` takes YYYY-MM-DD on every
+    // shadow-utils version, where a bare number is only accepted by newer ones.
+    let (exit_code, _, stderr) =
+        run_command(&cmds.usermod, &["-e", EXPIRED_DATE, "--", local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -e {} failed for '{}': exit code {}, stderr: {}",
+            EXPIRED_DATE, local_user, exit_code, stderr
+        )));
+    }
+
+    Ok(())
+}
+
+///
+/// Re-enable an account that `remove_user` disabled: take it out of the removed group,
+/// unlock it and clear its expiry.
+///
+async fn enable_user(local_user: &str, expires: &chrono::DateTime<Utc>) -> Result<(), Error> {
+    assert_not_expired(expires)?;
+
+    let cmds = get_commands()?;
+    let removed_group = removed_group_name(cmds);
+
+    tracing::info!("Re-enabling previously removed user: {}", local_user);
+
+    let (exit_code, _, stderr) =
+        run_command(&cmds.gpasswd, &["-d", local_user, &removed_group]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "gpasswd -d failed for '{}' from group '{}': exit code {}, stderr: {}",
+            local_user, removed_group, exit_code, stderr
+        )));
+    }
+
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-U", "--", local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -U failed for '{}': exit code {}, stderr: {}",
+            local_user, exit_code, stderr
+        )));
+    }
+
+    // An empty argument is how `usermod -e` is told to clear an expiry date.
+    let (exit_code, _, stderr) = run_command(&cmds.usermod, &["-e", "", "--", local_user]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::Call(format!(
+            "usermod -e '' failed for '{}': exit code {}, stderr: {}",
+            local_user, exit_code, stderr
+        )));
+    }
+
+    tracing::info!("User re-enabled: {}", local_user);
+
+    Ok(())
 }
 
 ///
@@ -909,6 +1113,19 @@ fn blocked_group_name(cmds: &Commands) -> String {
 }
 
 ///
+/// Return the name of the removed group: "{managed_group}.removed".
+///
+/// Membership of this group is the source of truth for whether a user has been
+/// removed - i.e. disabled by `remove_user` - in the same way that the blocked group
+/// records a block. The two are deliberately separate: a blocked user must stay
+/// blocked across a remove and re-add, and an operator needs to be able to tell why an
+/// account is disabled.
+///
+fn removed_group_name(cmds: &Commands) -> String {
+    format!("{}.removed", cmds.managed_group)
+}
+
+///
 /// Return true if the local Unix user is a member of the given group.
 ///
 async fn is_user_in_group(
@@ -943,6 +1160,23 @@ pub async fn is_blocked_user(
     let blocked_group = blocked_group_name(cmds);
 
     is_user_in_group(&local_user, &blocked_group, expires).await
+}
+
+///
+/// Return true if this user has been removed - that is, disabled by `remove_user`
+/// rather than blocked by `block_user`.
+///
+pub async fn is_removed_user(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let local_user = identifier_to_userid(user);
+    let cmds = get_commands()?;
+    let removed_group = removed_group_name(cmds);
+
+    is_user_in_group(&local_user, &removed_group, expires).await
 }
 
 ///

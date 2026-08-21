@@ -529,6 +529,22 @@ impl ProjectStorageReport {
             .context("Failed to deserialise ProjectStorageReport from JSON")
             .map_err(Error::from)
     }
+
+    /// Wrap this single-project report in a portal-level [`StorageReport`].
+    ///
+    /// The mirror of [`crate::usagereport::ProjectUsageReport::to_usage_report`],
+    /// and needed for the same reason: `get_storage_reports` answers with a
+    /// portal-level report, so a portal assembling one project at a time has to
+    /// lift each into that shape before combining them.
+    pub fn to_storage_report(&self) -> StorageReport {
+        let mut report = StorageReport::new(&self.project.portal_identifier());
+
+        // Infallible: `set_report` only rejects a project belonging to another
+        // portal, and the portal here was taken from this very project.
+        let _ = report.set_report(self.clone());
+
+        report
+    }
 }
 
 /// Merge two reports for the same project. The newer snapshot (by
@@ -973,5 +989,42 @@ impl std::fmt::Display for StorageReport {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_storage_report_lifts_a_project_report_to_portal_level() {
+        // The mirror of ProjectUsageReport::to_usage_report. A portal answering
+        // get_storage_reports builds one project report at a time and combines
+        // them, so this is the step that makes them combinable at all.
+        let project = ProjectIdentifier::parse("myproject.myportal")
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+
+        let report = ProjectStorageReport::new(&project).to_storage_report();
+
+        assert_eq!(*report.portal(), project.portal_identifier());
+        assert_eq!(report.projects(), vec![project.clone()]);
+        assert_eq!(report.get_report(&project).project(), &project);
+    }
+
+    #[test]
+    fn to_storage_report_keeps_the_project_report_intact() {
+        let project = ProjectIdentifier::parse("myproject.myportal")
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+
+        let volume = Volume::parse("home").unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+        let quota = Quota::parse("10GB").unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+
+        let mut project_report = ProjectStorageReport::new(&project);
+        project_report.set_project_quotas(HashMap::from([(volume, quota)]));
+
+        let lifted = project_report.to_storage_report();
+
+        assert!(!lifted.is_empty());
+        assert!(!lifted.get_report(&project).is_empty());
     }
 }

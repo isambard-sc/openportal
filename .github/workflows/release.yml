@@ -139,74 +139,6 @@ jobs:
           name: sbom-bridge.spdx.json
           path: sbom-bridge.spdx.json
 
-  attest-cloudaccount:
-    name: Attest CloudAccount
-    needs: build-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-sbom
-      - name: Generate SBOM
-        run: cargo sbom --cargo-package op-cloudaccount --output-format=spdx_json_2_3 > sbom-cloudaccount.spdx.json
-      - name: Fetch release artefacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: op-cloudaccount
-          merge-multiple: true
-      - name: Attest SBOM
-        uses: actions/attest-sbom@v4
-        with:
-          subject-path: op-cloudaccount
-          sbom-path: sbom-cloudaccount.spdx.json
-      - name: Store SBOM
-        uses: actions/upload-artifact@v7
-        with:
-          name: sbom-cloudaccount.spdx.json
-          path: sbom-cloudaccount.spdx.json
-
-  attest-cloudportal:
-    name: Attest CloudPortal
-    needs: build-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-sbom
-      - name: Generate SBOM
-        run: cargo sbom --cargo-package op-cloudportal --output-format=spdx_json_2_3 > sbom-cloudportal.spdx.json
-      - name: Fetch release artefacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: op-cloudportal
-          merge-multiple: true
-      - name: Attest SBOM
-        uses: actions/attest-sbom@v4
-        with:
-          subject-path: op-cloudportal
-          sbom-path: sbom-cloudportal.spdx.json
-      - name: Store SBOM
-        uses: actions/upload-artifact@v7
-        with:
-          name: sbom-cloudportal.spdx.json
-          path: sbom-cloudportal.spdx.json
-
   attest-cluster:
     name: Attest Cluster
     needs: build-release
@@ -520,8 +452,6 @@ jobs:
         build-release,
         tag-release,
         attest-bridge,
-        attest-cloudaccount,
-        attest-cloudportal,
         attest-cluster,
         attest-clusters,
         attest-filesystem,

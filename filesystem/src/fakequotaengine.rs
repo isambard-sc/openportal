@@ -228,7 +228,7 @@ impl FakeEngine {
         limit: &QuotaLimit,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
-        let user = mapping.local_user();
+        let user = mapping.local_user().unix()?;
         tracing::info!(
             "FakeQuotaEngine::set_user_quota: user={}, volume={}, limit={}",
             user,
@@ -258,7 +258,7 @@ impl FakeEngine {
         volume_config: &UserVolumeConfig,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
-        let user = mapping.local_user();
+        let user = mapping.local_user().unix()?;
         tracing::info!(
             "FakeQuotaEngine::get_user_quota: user={}, volume={}",
             user,
@@ -277,7 +277,7 @@ impl FakeEngine {
         _volume_config: &UserVolumeConfig,
         _expires: &chrono::DateTime<Utc>,
     ) -> Result<(), Error> {
-        let user = mapping.local_user();
+        let user = mapping.local_user().unix()?;
         tracing::info!(
             "FakeQuotaEngine::clear_user_quota: user={}, volume={}",
             user,

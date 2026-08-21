@@ -453,13 +453,10 @@ mod tests {
         assert_eq!(d.position("freeipa", "cluster"), Position::Destination);
         assert_eq!(d.position("cluster", "freeipa"), Position::Upstream);
 
-        // cloudportal -> cloudaccount (cloudportal/src/main.rs:381ff)
-        let d = Destination::parse("cloudportal.cloudaccount")
+        // a delegating peer -> a delegated instance (`instance::run_delegated`)
+        let d = Destination::parse("delegator.instance")
             .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
-        assert_eq!(
-            d.position("cloudaccount", "cloudportal"),
-            Position::Destination
-        );
+        assert_eq!(d.position("instance", "delegator"), Position::Destination);
 
         // the offering shape: resource.local-portal.remote-portal
         let d = Destination::parse("resource.localportal.remoteportal")

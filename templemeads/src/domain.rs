@@ -74,6 +74,28 @@ pub trait Domain: Clone + std::fmt::Debug + 'static {
         None
     }
 
+    /// Classify one of this domain's own failure messages into a stable
+    /// `JobError` kind.
+    ///
+    /// templemeads owns the kinds that belong to the transport
+    /// (`joberror::kind`) and cannot own any others: a failure that means
+    /// "this award is awaiting approval" is vocabulary, exactly like an
+    /// instruction is. So a job's error kind is inferred by asking the domain
+    /// first, and falling back to the transport's own guess only when the
+    /// domain has no opinion.
+    ///
+    /// `message` is the failure text with any `RuntimeError{...}` wrapper
+    /// already removed, so an implementation matches on its own spellings
+    /// without knowing about that wrapper.
+    ///
+    /// Default: no opinion, everything falls back to the transport kinds. A
+    /// domain overrides this when it has failures a caller is expected to
+    /// branch on - see `greatwestern`, where the difference between "pending"
+    /// and "rejected" decides whether the caller retries forever or gives up.
+    fn error_kind_for(_message: &str) -> Option<&'static str> {
+        None
+    }
+
     /// The portal that "owns" this instruction, if it has one - i.e. whose
     /// name a job's destination's first hop must match. `PortalIdentifier`
     /// lives in templemeads itself (it names a fixed position in the agent

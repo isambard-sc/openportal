@@ -822,7 +822,7 @@ async fn get_user_create_if_not_exists(
     let cluster = cache::get_cluster().await?;
 
     // now get the user from slurm
-    let slurm_user = get_user(user.local_user(), expires).await?;
+    let slurm_user = get_user(user.local_user().unix()?, expires).await?;
 
     if let Some(slurm_user) = slurm_user {
         // the user exists - check that the account is associated with the user
@@ -845,7 +845,7 @@ async fn get_user_create_if_not_exists(
     }
 
     // first, create the user
-    let username = clean_user_name(user.local_user())?;
+    let username = clean_user_name(user.local_user().unix()?)?;
     let account = clean_account_name(slurm_account.name())?;
 
     let cluster = cache::get_cluster().await?;
@@ -870,7 +870,7 @@ async fn get_user_create_if_not_exists(
         .await?;
 
     // now load the user from slurm to make sure it exists
-    let slurm_user = match get_user(user.local_user(), expires).await? {
+    let slurm_user = match get_user(user.local_user().unix()?, expires).await? {
         Some(user) => user,
         None => {
             return Err(Error::Call(format!(

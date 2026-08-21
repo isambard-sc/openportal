@@ -38,6 +38,7 @@ pub use error::Error;
 pub mod erased;
 pub mod health;
 pub mod job;
+pub mod joberror;
 pub mod named;
 pub mod notification;
 pub mod portal_identifier;

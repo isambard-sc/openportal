@@ -285,9 +285,9 @@ Given a Job naming portal `P` arriving at agent `A` from peer `S`:
 1. If `A` is not the Job's destination, no check - forward it.
 2. If `verify_portal_ownership` is off for `A`, no check. This is what keeps
    Account/Filesystem/Scheduler agents and `instance::run_delegated` Instances
-   out even in a portal-rooted zone - `op-cloudaccount` would otherwise reject
-   `cloudportal.cloudaccount add_user bob.proj.waldur`, since it originates a
-   route for `cloudportal` and so marks that zone portal-rooted.
+   out even in a portal-rooted zone - a delegated Instance would otherwise
+   reject `delegator.instance add_user bob.proj.waldur`, since it originates a
+   route for `delegator` and so marks that zone portal-rooted.
 3. If `A` knows no portal route in `S`'s zone, no check - this is an internal
    zone.
 4. Otherwise the root check applies: `P` must equal `destination.first()`. This

@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
                         // disable the user instead. Note that they are already
                         // disabled in FreeIPA, so cannot submit jobs to this account.
                         // However, we do want to cancel all pending jobs for this user.
-                        sacctmgr::cancel_pending_user_jobs(mapping.local_user(), job.expires()).await?;
+                        sacctmgr::cancel_pending_user_jobs(mapping.local_user().unix()?, job.expires()).await?;
                         tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
                     },
@@ -270,7 +270,7 @@ async fn main() -> Result<()> {
                         // disable the user instead. Note that they are already
                         // disabled in FreeIPA, so cannot submit jobs to this account.
                         // However, we do want to cancel all pending jobs for this user.
-                        sacctmgr::cancel_pending_user_jobs(mapping.local_user(), job.expires()).await?;
+                        sacctmgr::cancel_pending_user_jobs(mapping.local_user().unix()?, job.expires()).await?;
                         tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
                     },

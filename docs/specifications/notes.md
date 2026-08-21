@@ -239,8 +239,8 @@ Every `templemeads`-based agent can now act as a relayed peer, not just
   simplification restricting this was removed once it became clear
   nothing in the protocol actually needed it).
 
-Validated with a genuine three-process test (`op-proxy` + `op-portal` +
-`op-cloudportal`, real compiled binaries, real TCP connections): the
+Validated with a genuine three-process test (`op-proxy` plus two real
+agents, real compiled binaries, real TCP connections): the
 bootstrap completes, each side fires its synthesised `Connected` event,
 and a real templemeads `Register` command sent immediately afterwards is
 correctly relayed and processed on the other side, including recovering

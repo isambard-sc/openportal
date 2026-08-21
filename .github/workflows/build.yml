@@ -241,18 +241,6 @@ jobs:
           name: op-bridge
           path: |
             target/x86_64-unknown-linux-musl/release/op-bridge
-      - name: Store cloudaccount artefact
-        uses: actions/upload-artifact@v7
-        with:
-          name: op-cloudaccount
-          path: |
-            target/x86_64-unknown-linux-musl/release/op-cloudaccount
-      - name: Store cloudportal artefact
-        uses: actions/upload-artifact@v7
-        with:
-          name: op-cloudportal
-          path: |
-            target/x86_64-unknown-linux-musl/release/op-cloudportal
       - name: Store cluster artefact
         uses: actions/upload-artifact@v7
         with:
@@ -331,7 +319,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
       - name: Rename binaries
         run: |
-          for bin in op-bridge op-cloudaccount op-cloudportal op-cluster op-clusters \
+          for bin in op-bridge op-cluster op-clusters \
                      op-filesystem op-freeipa op-localaccount op-portal op-provider \
                      op-proxy op-slurm; do
             cp "target/aarch64-unknown-linux-musl/release/${bin}" "${bin}-aarch64"
@@ -341,16 +329,6 @@ jobs:
         with:
           name: op-bridge-aarch64
           path: op-bridge-aarch64
-      - name: Store cloudaccount artefact
-        uses: actions/upload-artifact@v7
-        with:
-          name: op-cloudaccount-aarch64
-          path: op-cloudaccount-aarch64
-      - name: Store cloudportal artefact
-        uses: actions/upload-artifact@v7
-        with:
-          name: op-cloudportal-aarch64
-          path: op-cloudportal-aarch64
       - name: Store cluster artefact
         uses: actions/upload-artifact@v7
         with:

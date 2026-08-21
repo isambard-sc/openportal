@@ -155,33 +155,7 @@ The key types of Agent are:
    implements the `slurm` Agent, with source code in the
    [slurm](../slurm) directory.
 
-8. `cloudaccount` - this is an Agent that represents a single cloud account
-   (e.g. one AWS account) assigned to a project. It is a prototype agent
-   that merges the `instance` and `slurm`-style roles into one process:
-   there is no cloud-side API yet to record which projects/users have been
-   assigned to the account, so this Agent is the source of truth for that,
-   and it turns whatever cost-report files the cloud operators drop into a
-   directory into a usage report. The `op-cloudaccount` executable
-   implements this Agent, with source code in the
-   [cloudaccount](../cloudaccount) directory. See
-   [docs/plans/archive/op-cloudaccount-design.md](plans/archive/op-cloudaccount-design.md)
-   for the full design.
-
-9. `cloudportal` - this is an Agent that acts as a self-contained "cloud"
-   portal in a portal-to-portal relationship - for example, a central
-   portal creating Awards on it, the same way any OpenPortal portal can
-   create Awards on a downstream portal. Like `cloudaccount`, it is a
-   deliberately rough prototype agent: there is no real portal management
-   software (no Waldur) behind it, so it stores Award state itself,
-   requires a human operator to approve an Award (via CLI subcommands)
-   before anything is provisioned, and then provisions the approved Award
-   on whichever `cloudaccount` Agent its `template` field maps to. The
-   `op-cloudportal` executable implements this Agent, with source code in
-   the [cloudportal](../cloudportal) directory. See
-   [docs/plans/archive/op-cloudportal-design.md](plans/archive/op-cloudportal-design.md)
-   for the full design.
-
-10. `bridge` - OpenPortal is implemented in Rust, while portals are typically
+8. `bridge` - OpenPortal is implemented in Rust, while portals are typically
    implemented in other languages (e.g. Python). The `bridge` Agent is
    responsible for bridging between the Rust-based OpenPortal network and
    the actual code in the portal. For example, the `op-bridge` executable
@@ -253,6 +227,19 @@ that will look and feel like other agents in the OpenPortal system.
 The [bridge](bridge) example demonstrates how to connect the OpenPortal
 agent network to portal software written in Python using the `op-bridge`
 agent and the `openportal` Python library.
+
+### Example 5: a site portal
+
+The [site_portal](../python/examples/site_portal) example is a complete, small
+implementation of the *other* direction: the requests OpenPortal sends **to**
+portal software, which a portal must answer. It implements
+[site-portal-api.md](specifications/site-portal-api.md) - every
+instruction, the approval path, the retry contract - as commented Python behind
+a FastAPI application, with a test suite that runs without a bridge.
+
+It is written to be read, not deployed: its README is explicit about the
+authentication, state storage and durability a production portal would have to
+add. Read it if you are connecting your site's portal, in any language.
 
 ## Protocol Specifications
 

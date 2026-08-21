@@ -24,8 +24,6 @@ cd "$(dirname "$0")/.."
 # path:reason - each of these has been checked and writes no key material
 ALLOWED=(
     "paddington/src/config.rs"          # write_secret_file's own non-unix fallback
-    "cloudaccount/src/state.rs"         # project/user assignment state
-    "cloudportal/src/state.rs"          # award state
     "filesystem/src/fakequotaengine.rs" # test double for a quota backend
 )
 

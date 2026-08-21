@@ -214,7 +214,7 @@ impl LinuxEngine {
         limit: &QuotaLimit,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
-        let user = mapping.local_user();
+        let user = mapping.local_user().unix()?;
 
         // Validate against any configured maximum.
         if let Some(max_quota) = volume_config.max_quota() {
@@ -261,7 +261,7 @@ impl LinuxEngine {
         _volume_config: &UserVolumeConfig,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<Quota, Error> {
-        let user = mapping.local_user();
+        let user = mapping.local_user().unix()?;
         let fs = self.config.filesystem.as_str();
 
         tracing::info!(
@@ -284,7 +284,7 @@ impl LinuxEngine {
         _volume_config: &UserVolumeConfig,
         expires: &chrono::DateTime<Utc>,
     ) -> Result<(), Error> {
-        let user = mapping.local_user();
+        let user = mapping.local_user().unix()?;
         let fs = self.config.filesystem.as_str();
 
         tracing::info!(

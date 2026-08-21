@@ -1158,6 +1158,24 @@ struct RunRequest {
     command: String,
 }
 
+///
+/// Every `Job` this server hands to the connected portal goes out through here.
+///
+/// The portal is outside the agent network, so a failure's `origin` - which
+/// names the agent it happened at - is stripped before it leaves. It is a
+/// diagnostic aid for operators of the network, not something a connected
+/// portal has any business learning, and internal topology is exactly the kind
+/// of detail worth not volunteering. The `kind` and the message both survive,
+/// so nothing the portal actually acts on is lost.
+///
+/// One funnel rather than a redaction at each endpoint, so a new endpoint that
+/// returns a job cannot quietly skip it.
+///
+fn outbound<L: Domain>(mut job: Job<L>) -> Json<Job<L>> {
+    job.redact_error_origin();
+    Json(job)
+}
+
 //
 // The 'run' endpoint for the web API. This is the main entry point
 // to which commands are submitted to OpenPortal. This will return
@@ -1176,7 +1194,7 @@ async fn run<L: Domain>(
     tracing::debug!("Running command: {}", payload.command);
 
     match bridge_run::<L>(&payload.command).await {
-        Ok(job) => Ok(Json(job)),
+        Ok(job) => Ok(outbound(job)),
         Err(e) => {
             tracing::error!("Error running command: {:?}", e);
             Err(AppError(e.into(), None))
@@ -1235,7 +1253,7 @@ async fn status<L: Domain>(
     tracing::debug!("Status request for job: {:?}", payload);
 
     match bridge_status::<L>(&payload.job).await {
-        Ok(job) => Ok(Json(job)),
+        Ok(job) => Ok(outbound(job)),
         Err(e) => {
             tracing::error!("Error getting status: {:?}", e);
             Err(AppError(e.into(), None))
@@ -1262,7 +1280,7 @@ async fn fetch_jobs<L: Domain>(
     match board {
         Ok(board) => {
             let jobs = board.read().await.unfinished_jobs();
-            Ok(Json(jobs))
+            Ok(Json(jobs.into_iter().map(|j| outbound(j).0).collect()))
         }
         Err(e) => {
             tracing::error!("Error getting jobs: {:?}", e);
@@ -1299,7 +1317,7 @@ async fn fetch_job<L: Domain>(
                 .find(|j| j.id() == uid);
 
             match job {
-                Some(job) => Ok(Json(job.clone())),
+                Some(job) => Ok(outbound(job.clone())),
                 None => Err(AppError(
                     anyhow::anyhow!("Job not found"),
                     Some(StatusCode::NOT_FOUND),
@@ -1741,6 +1759,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `origin` names an agent inside the network. Every job served to the
+    /// connected portal goes through `outbound`, which must strip it - while
+    /// leaving the kind and message, which are what the portal acts on.
+    #[test]
+    fn test_outbound_strips_the_error_origin() {
+        use crate::joberror::JobError;
+        use crate::test_domain::TestDomain;
+
+        let job = Job::<TestDomain>::parse("portal.cluster do_thing", true)
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e))
+            .pending()
+            .unwrap_or_else(|e| unreachable!("pending: {:?}", e))
+            .errored_with(
+                JobError::new("award_rejected", "no").with_origin("portal.clusters.shared"),
+            )
+            .unwrap_or_else(|e| unreachable!("errored: {:?}", e));
+
+        // The origin is present while the job is still inside the network...
+        assert_eq!(
+            job.error().and_then(|e| e.origin()),
+            Some("portal.clusters.shared")
+        );
+
+        // ...and gone from what the portal is handed.
+        let served = outbound(job).0;
+
+        assert_eq!(served.error().and_then(|e| e.origin()), None);
+        assert_eq!(served.error().map(|e| e.kind()), Some("award_rejected"));
+        assert_eq!(served.error_message().as_deref(), Some("no"));
+
+        // Nothing in the serialised form mentions the internal agent either.
+        let json = serde_json::to_string(&served).unwrap_or_else(|e| unreachable!("{:?}", e));
+        assert!(
+            !json.contains("clusters.shared"),
+            "internal topology must not reach the portal: {}",
+            json
+        );
+    }
 
     #[test]
     fn test_extract_client_ip_ignores_forwarded_headers() {

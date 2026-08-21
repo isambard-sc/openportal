@@ -117,7 +117,7 @@ rejecting the peer.
 
 `proxy` is set only when this peer can only be reached through a blind
 relay proxy (an `op-proxy` agent) rather than directly — see
-[§3.11](#311-blind-relay-proxy-op-proxy) and
+[§3.9](#39-blind-relay-proxy-op-proxy) and
 [blind-relay-proxy-design.md](../plans/archive/blind-relay-proxy-design.md). A
 relayed `[[clients]]` entry has no `ip` (authentication comes from
 completing the relayed handshake, not an IP allowlist); a relayed
@@ -216,7 +216,7 @@ through a blind relay proxy (`relay-name` must already be a known
 `server --add`) rather than a direct IP allowlist; `--ip` is not required
 and is ignored if given alongside `--proxy`. The generated invite carries
 the relay's name, so the importing side's `server --add` (below) picks it
-up automatically. See [§3.11.1](#3111-connecting-two-real-agents-through-a-proxy)
+up automatically. See [§3.9.1](#391-connecting-two-real-agents-through-a-proxy)
 for a full worked example.
 
 `--rotate` generates new keys and writes a rotation invite file
@@ -458,7 +458,7 @@ The FreeIPA agent manages user and project accounts in FreeIPA.
 
 | Key | Set via | Description |
 |-----|---------|-------------|
-| `freeipa-server` | `extra` | Hostname(s) of FreeIPA server(s). Comma-separated for multiple. The same server may be listed multiple times to allow concurrent connections. |
+| `freeipa-server` | `extra` | Hostname(s) of FreeIPA server(s). Comma-separated for multiple. The same server may be listed multiple times to allow concurrent connections. Each entry must name an individual server - see the note on replication below. |
 | `freeipa-password` | `secret` | FreeIPA admin password (encrypted at rest). |
 
 **Optional extras:**
@@ -466,15 +466,67 @@ The FreeIPA agent manages user and project accounts in FreeIPA.
 | Key | Set via | Default | Description |
 |-----|---------|---------|-------------|
 | `freeipa-user` | `extra` | `admin` | FreeIPA admin username. |
+| `freeipa-write-server` | `extra` | first entry of `freeipa-server` | Which server takes all writes. Must be one of the `freeipa-server` entries. |
+| `freeipa-replication-window` | `extra` | `30` | Seconds that replication is assumed to need to converge. Writes are not moved to another server until the write server has been confirmed down for at least this long, nor moved back until it has been up again for that long. |
+| `freeipa-concurrent-writes` | `extra` | `2` | How many writes may run against the write server at once. These are connections of their own, so this can be raised without also multiplying the connections that reads share. |
 | `system-groups` | `extra` | `""` | Comma-separated list of FreeIPA groups to add all users to automatically. |
 | `instance-groups` | `extra` | `""` | Per-instance group mappings. Format: `instance-name:group1,group2;...` |
+
+**Multi-master topologies:**
+
+Reads are spread over every server in `freeipa-server`; writes all go to one,
+because FreeIPA's multi-master replication cannot reconcile two independent
+`ADD`s of the same DN. When that happens 389-ds keeps one copy, renames the
+other to `nsuniqueid=<uuid>+uid=<user>,...` and flags it `nsds5ReplConflict`.
+Such entries are invisible to ordinary LDAP searches and cannot be removed
+with `ipa user-del`, so they accumulate silently and cleaning them up is
+manual work as Directory Manager.
+
+Two things follow for how this is configured:
+
+- Every `freeipa-server` entry must name an **individual** server. A VIP or a
+  round-robin DNS alias is several masters behind one name, so pinning writes
+  to it pins nothing.
+- Writes only ever go to one server at a time, but *which* server can change:
+  if the write server is confirmed down for longer than
+  `freeipa-replication-window`, one replacement is elected, in configuration
+  order. "Confirmed down" means a refused connection, a rejected or timed-out
+  login, or a run of `3` consecutive calls that went unanswered - never a
+  single slow call, because one timeout is indistinguishable from a write that
+  landed and whose response was lost. A server that is listening but not
+  answering also has its session discarded after each timeout, so the next call
+  has to log in again and that login becomes an independent check on whether it
+  is alive. It reverts once the original has been up again for a full window -
+  recovery waits for the same reason failover does, since a server that has
+  just come back may not have caught up with what stood in for it. If nothing
+  is fit to take writes, calls fail rather than being sent to a server that may
+  be behind.
+- Reads and writes have separate connections. The number of times a server is
+  listed in `freeipa-server` is how many connections *reads* get to it;
+  `freeipa-concurrent-writes` is how many the current write server gets for
+  writes, opened when it takes the role and kept in case it takes it back. So
+  each server normally only needs listing once, and write concurrency follows
+  the role across a failover rather than having to be pre-provisioned on every
+  server.
+- More than one concurrent write to *one* server is safe: a single 389-ds
+  serialises DN uniqueness itself, so two simultaneous adds of the same DN give
+  one success and one `DuplicateEntry`, which is handled. It is only two
+  *masters* accepting the same add that cannot be reconciled.
+
+`op-freeipa` also checks every configured server before concluding that a user
+or group does not exist, since a master that has not yet received a recent add
+would say it does not. Any check it could not complete is logged with the
+`REPLICATION-RISK` marker, as is a failover away from the write server. Run
+`scripts/check-replication-conflicts.sh` to look for conflict entries that
+already exist.
 
 **Example setup:**
 
 ```bash
 op-freeipa init --service freeipa --url wss://freeipa-host:8046
 op-freeipa encryption --environment OPENPORTAL_SECRET
-op-freeipa extra --key freeipa-server --value ipa.example.com
+op-freeipa extra --key freeipa-server --value https://ipa1.example.com,https://ipa2.example.com,https://ipa3.example.com
+op-freeipa extra --key freeipa-write-server --value https://ipa1.example.com
 op-freeipa extra --key freeipa-user --value admin
 op-freeipa secret --key freeipa-password --value 'secret'
 ```
@@ -870,110 +922,7 @@ All of the sacctmgr-mode options above apply, plus:
 
 ---
 
-### 3.9 Cloud Account (`op-cloudaccount`)
-
-The cloud account agent represents a single cloud account (e.g. one AWS
-account) assigned to a project. Unlike the cluster/slurm split, it is a
-single agent that merges the Instance and Scheduler roles: there is no
-cloud-side API yet to record project/user assignment or to query usage, so
-this agent is both the source of truth for assignment and the thing that
-turns whatever cost-report files the cloud operators drop into a
-`ProjectUsageReport`. See `docs/plans/archive/op-cloudaccount-design.md` for the
-full design and rationale.
-
-| Default | Value |
-|---------|-------|
-| Name | `cloudaccount` |
-| Config file | `~/.config/openportal/cloudaccount-config.toml` |
-| WebSocket port | `8049` |
-| Agent type | `Instance` |
-
-**Optional extras:**
-
-| Key | Set via | Default | Description |
-|-----|---------|---------|-------------|
-| `state-dir` | `extra` | `~/.config/openportal/cloudaccount-state` | Directory holding one JSON file per assigned project, recording which projects/users have been added to this cloud account. Written to atomically; safe to inspect or edit by hand while debugging. |
-| `accounting-dir` | `extra` | `~/.config/openportal/cloudaccount-accounting` | Directory the cloud operators' cron job drops cost-report JSON files into (same shape as `cost_payload_example.json`). Read-only to this agent - files here are never modified or deleted. |
-| `currency` | `extra` | `"USD"` | Expected currency code. A cost-report file reporting a different currency is logged as a warning, not converted (no FX support). |
-
-**Usage reporting:**
-
-`Usage` (normally a count of compute-seconds elsewhere in OpenPortal) is
-reinterpreted here as micro-currency-units: 1 `Usage` second = 1e-6 of the
-configured currency. Cost-report totals are cumulative from
-`time_period.start`, so usage reports are reconstructed by diffing
-consecutive reports and spreading the delta evenly across the calendar
-days it spans - see the design doc for the full algorithm. Anything
-consuming a cloud account's `ProjectUsageReport` needs to know to divide
-by 1e6 and format as currency rather than using `Usage`'s default
-duration-formatting `Display` impl.
-
-**Typical peer relationships:**
-- **Server:** one `provider` agent (this agent plays the Instance role
-  directly - it has no platform agent equivalent to `op-clusters` yet, and
-  no separate account/filesystem/scheduler peers)
-
----
-
-### 3.10 Cloud Portal (`op-cloudportal`)
-
-The cloud portal agent is a self-contained `Portal` agent representing the
-"cloud" side of a portal-to-portal relationship (e.g. a central "airr"
-portal creating Awards on it). There is no real portal management
-software (no Waldur) behind it - like `op-cloudaccount`, it is a
-deliberately rough prototype that stores Award state itself instead of
-relaying to a bridge. See `docs/plans/archive/op-cloudportal-design.md` for the
-full design and rationale.
-
-| Default | Value |
-|---------|-------|
-| Name | `cloudportal` |
-| Config file | `~/.config/openportal/cloudportal-config.toml` |
-| WebSocket port | `8050` |
-| Agent type | `Portal` |
-
-**Optional extras:**
-
-| Key | Set via | Default | Description |
-|-----|---------|---------|-------------|
-| `state-dir` | `extra` | `~/.config/openportal/cloudportal-state` | Directory holding one JSON file per Award, recording its `AwardDetails`, approval `status` (`pending`/`approved`/`rejected`), and which members have been provisioned so far. Written to atomically; read fresh from disk on every instruction (no in-memory cache - see the design doc §5). |
-| `offerings` | `extra` | `""` | Comma-separated `template:peer` pairs mapping an `AwardDetails.template` value to the `op-cloudaccount` peer name that offering should provision against, e.g. `"aws:cloudaccount-aws,azure:cloudaccount-azure"`. `create_project` fails with a clear error if `template` is missing or not present in this table - there's no sensible default cloud provider to fall back to. |
-
-**Addressing model:** `airr` (or whichever upstream portal) addresses
-`cloudportal` directly - a plain, ordinary portal-to-portal connection,
-no different in kind from any other pair of connected agents. There is
-no virtual-resource/offering indirection (`op-portal`'s
-`sync_offerings`/`virtual_resource_runner` mechanism does not work for
-this - see the design doc §4 for why); which cloud provider an Award
-targets is carried entirely in `AwardDetails.template`.
-
-**Approval workflow:** Award creation (`create_project`) and
-infrastructure provisioning are deliberately decoupled - there is a
-human in the loop, since provisioning spends real money on a real cloud
-account. Three bespoke CLI subcommands, alongside the common ones in
-§2, manage this (they are pure state-file edits and never touch the
-network themselves):
-
-```bash
-op-cloudportal list-pending
-op-cloudportal approve --project someproject.cloud
-op-cloudportal reject  --project someproject.cloud --reason "..."
-```
-
-`approve` only flips the Award's status - the actual `add_project`/
-`add_user` calls against the resolved `op-cloudaccount` are made by a
-background poller inside the running `op-cloudportal run` process
-(checks every 30 seconds), so provisioning naturally retries if it
-partially fails.
-
-**Typical peer relationships:**
-- **Server:** the upstream portal (e.g. `airr`)
-- **Client:** one or more `op-cloudaccount` agents, resolved per-Award via
-  the `offerings` table
-
----
-
-### 3.11 Blind Relay Proxy (`op-proxy`)
+### 3.9 Blind Relay Proxy (`op-proxy`)
 
 Unlike every other agent in this document, `op-proxy` is **not** built on
 `templemeads::agent_core` - it depends only on `paddington`, has no
@@ -1034,12 +983,12 @@ table by hand and restart to revoke one.
   relayed "client" role connect to the proxy the same way - as an ordinary
   paddington client)
 
-#### 3.11.1 Connecting two real agents through a proxy
+#### 3.9.1 Connecting two real agents through a proxy
 
 Every other agent in this document (all built on the common CLI in §2)
 can act as one of the two relayed peers - the `client`/`server`
 subcommands take a `--proxy <relay-name>` flag for exactly this. Worked
-example: `airr` (an `op-portal`) and `brics` (an `op-cloudportal`) can
+example: `airr` (an `op-portal`) and `brics` (an `op-provider`) can
 each only make outbound connections, so they talk through a shared
 `proxy` (`op-proxy`).
 
@@ -1076,8 +1025,8 @@ re-bootstraps (with fresh session keys) on every reconnect - nothing
 templemeads-level (`Register`, `Sync`, Jobs, Notifications, health
 cascades, ...) needs to know a proxy is involved at all.
 
-Validated end-to-end with real compiled `op-proxy`/`op-portal`/
-`op-cloudportal` processes: the bootstrap completes, both sides log their
+Validated end-to-end with real compiled `op-proxy` and two real agent
+processes: the bootstrap completes, both sides log their
 synthesised `Connected` event, and `Register` (part of every agent's
 normal post-handshake sequence) is relayed and processed correctly.
 
@@ -1111,8 +1060,6 @@ same time. Each relayed peer entry names its own proxy independently.
 | FreeIPA | `op-freeipa` | 8046 |
 | Filesystem | `op-filesystem` | 8047 |
 | Slurm | `op-slurm` | 8048 |
-| Cloud Account | `op-cloudaccount` | 8049 |
-| Cloud Portal | `op-cloudportal` | 8050 |
 | Blind Relay Proxy | `op-proxy` | 8060 |
 
 Note: `op-cluster` and `op-freeipa` share the same default port (8046) because
@@ -1174,12 +1121,6 @@ op-freeipa  run
 | Slurm main (option names) | `slurm/src/main.rs` |
 | Filesystem volume config | `filesystem/src/volumeconfig.rs` |
 | Lustre quota engine | `filesystem/src/lustreengine.rs` |
-| Cloud account main (option names) | `cloudaccount/src/main.rs` |
-| Cloud account assignment state | `cloudaccount/src/state.rs` |
-| Cloud account usage-report reconstruction | `cloudaccount/src/accounting.rs` |
-| Cloud portal main (option names, CLI subcommands, poller) | `cloudportal/src/main.rs` |
-| Cloud portal Award state | `cloudportal/src/state.rs` |
-| Cloud portal email/UserIdentifier mapping | `cloudportal/src/identity.rs` |
 | Portal one-shot CLI mode | `templemeads/src/portal.rs` |
 | Blind relay proxy main (CLI subcommands) | `proxy/src/main.rs` |
 | Blind relay protocol, `RelayPolicy` | `paddington/src/relay.rs` |

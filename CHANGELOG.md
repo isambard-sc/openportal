@@ -19,6 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
+- `freeipa-write-server`, `freeipa-replication-window` and
+  `freeipa-concurrent-writes` options for `op-freeipa`,
+  and [scripts/check-replication-conflicts.sh](scripts/check-replication-conflicts.sh)
+  to find LDAP replication conflicts that already exist in a directory. Both are part
+  of the fix below.
 
 ### Changed
 
@@ -47,6 +52,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **OpenPortal was creating LDAP replication conflicts in multi-master FreeIPA
+  topologies.** A site reported 67 `namingConflict` entries accumulated over 11
+  months - 29 project groups, 19 users and their 19 server-generated private groups -
+  every one on an object created by OpenPortal, and two of the affected accounts had
+  home directories owned by the UID of the copy replication later discarded.
+
+  The write paths were already idempotent (FreeIPA's `DuplicateEntry` is treated as
+  "it exists", not as a reason to retry). The cause was that `get_connected_server`
+  chose a server at random for *every* call, so an existence check and the add that
+  depended on it were served by the same master only 1/n of the time - and a master
+  that has not yet received a recent add reports that the user does not exist. Three
+  changes:
+
+  - Writes, and the reads that decide whether to write, now all go to one server
+    (`freeipa-write-server`, defaulting to the first configured). Failover happens
+    only once that server is *confirmed* down - a refused connection, a rejected or
+    timed-out login, or a run of unanswered calls, but never one timeout on its own,
+    since that is indistinguishable from a write that landed and whose response was
+    lost - and not until `freeipa-replication-window` (30s) has passed, so anything it
+    accepted has had time to reach whichever master takes over.
+    Failover elects a single replacement in configuration order rather than spreading
+    writes over what is left, and reverts only once the original has been up again for
+    a full window: a server that has just come back may not have caught up with what
+    stood in for it, which would create the same conflict from the other direction.
+  - Before concluding that a user or group does not exist, every configured master is
+    asked, not just the one the pool happened to hand us. This also covers the case
+    the report described, where an add times out but has in fact landed.
+  - Group creation takes a per-group mutex, mirroring the existing per-user one. Two
+    `add_user` jobs for different users in one project both need that project's group
+    and are not duplicates of each other to the job Board, so they raced.
+
+  Writes have connections of their own - `freeipa-concurrent-writes`, default 2, on
+  whichever server currently holds the role - so write concurrency follows the write
+  server across a failover and can be raised without also multiplying the connections
+  reads share. Concurrency against a single master is safe; it is only two masters
+  accepting the same add that cannot be reconciled.
+
+  Every `freeipa-server` entry must name an individual master for this to hold: a VIP
+  or a round-robin DNS alias is several masters behind one name.
+- **A 401 from FreeIPA could hang a job until its deadline.** The replay path
+  reconnected - possibly to a different server - but reused the URL built from the
+  original one, so it posted the new server's session cookie to the old server, which
+  401s again. The URL is now rebuilt from the server actually being addressed, and the
+  replay is bounded.
 - **An empty home directory stopped a recycled one from being restored.** `create_dir`
   treated any existing directory as the finished article, so an account agent that
   creates a home when it creates the account left `op-filesystem` looking at an empty

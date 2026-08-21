@@ -43,6 +43,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     only once that server is *confirmed* down - a refused connection or a rejected
     login, never a timeout - and not until `freeipa-replication-window` (30s) has
     passed, so anything it accepted has had time to reach whichever master takes over.
+    Failover elects a single replacement in configuration order rather than spreading
+    writes over what is left, and reverts only once the original has been up again for
+    a full window: a server that has just come back may not have caught up with what
+    stood in for it, which would create the same conflict from the other direction.
   - Before concluding that a user or group does not exist, every configured master is
     asked, not just the one the pool happened to hand us. This also covers the case
     the report described, where an add times out but has in fact landed.

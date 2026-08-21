@@ -524,12 +524,16 @@ struct ServerHealth {
     /// Unix seconds at which this server was first confirmed down, or 0 if it
     /// is believed to be up.
     down_since: std::sync::atomic::AtomicI64,
+    /// Unix seconds at which this server last came back after being down, or 0
+    /// if it has been up for as long as we have known it.
+    up_since: std::sync::atomic::AtomicI64,
 }
 
 impl ServerHealth {
     fn new() -> Self {
         ServerHealth {
             down_since: std::sync::atomic::AtomicI64::new(0),
+            up_since: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -550,6 +554,8 @@ impl ServerHealth {
 
     fn mark_up(&self, url: &str) {
         if self.down_since.swap(0, std::sync::atomic::Ordering::SeqCst) != 0 {
+            self.up_since
+                .store(Utc::now().timestamp(), std::sync::atomic::Ordering::SeqCst);
             tracing::info!("FreeIPA server {} is reachable again.", url);
         }
     }
@@ -564,6 +570,29 @@ impl ServerHealth {
             since => Some(chrono::Duration::seconds(
                 Utc::now().timestamp().saturating_sub(since).max(0),
             )),
+        }
+    }
+
+    ///
+    /// Whether this server may be given writes, given how long replication
+    /// needs to converge.
+    ///
+    /// Recovery is as cautious as failover, and for the mirror-image reason: a
+    /// server that has just come back has not necessarily caught up with what
+    /// another master accepted while it was away, so writing to it too soon
+    /// would create the same conflict from the other direction.
+    ///
+    fn can_take_writes(&self, replication_window: chrono::Duration) -> bool {
+        if self.down_since.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            return false;
+        }
+
+        match self.up_since.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => true,
+            since => {
+                chrono::Duration::seconds(Utc::now().timestamp().saturating_sub(since).max(0))
+                    >= replication_window
+            }
         }
     }
 }
@@ -704,8 +733,45 @@ async fn resolve_write_target(pool: &[PoolEntry]) -> Target {
         return Target::Any;
     };
 
+    // the configured write server takes the writes whenever it is in a fit
+    // state to, which is the overwhelmingly common case
+    if entry.health.can_take_writes(config.replication_window) {
+        return Target::Named(write_server);
+    }
+
+    // Otherwise elect one replacement, rather than letting writes spread over
+    // whatever is left. "One master takes the writes" is the whole point, and
+    // it matters most when the topology is already disturbed. Configuration
+    // order makes the choice, so every task in this process picks the same
+    // server without having to agree about it.
+    let replacement = pool
+        .iter()
+        .find(|candidate| {
+            candidate.url != write_server
+                && candidate.health.can_take_writes(config.replication_window)
+        })
+        .map(|candidate| candidate.url.clone());
+
     match entry.health.down_for() {
-        None => Target::Named(write_server),
+        None => {
+            // It is up, but came back too recently to be sure it has caught up
+            // with what the server that stood in for it accepted. Leave the
+            // writes where they are until it has.
+            match replacement {
+                Some(replacement) => {
+                    tracing::warn!(
+                        "FreeIPA write server {} is reachable again but came back \
+                         less than {} seconds ago, so writes stay on {} until \
+                         replication has converged.",
+                        write_server,
+                        config.replication_window.num_seconds(),
+                        replacement
+                    );
+                    Target::Named(replacement)
+                }
+                None => Target::Named(write_server),
+            }
+        }
         Some(down_for) if down_for < config.replication_window => {
             // It is down, but too recently to be sure that another master has
             // caught up with what it already accepted. Keep sending writes at
@@ -721,17 +787,34 @@ async fn resolve_write_target(pool: &[PoolEntry]) -> Target {
             );
             Target::Named(write_server)
         }
-        Some(down_for) => {
-            tracing::warn!(
-                "REPLICATION-RISK: FreeIPA write server {} has been down for {} \
-                 seconds, so writes will go to another master. Anything it \
-                 accepted but did not replicate before failing may be added \
-                 again here, which would leave a replication conflict.",
-                write_server,
-                down_for.num_seconds()
-            );
-            Target::Any
-        }
+        Some(down_for) => match replacement {
+            Some(replacement) => {
+                tracing::warn!(
+                    "REPLICATION-RISK: FreeIPA write server {} has been down for {} \
+                     seconds, so writes will go to {} instead. Anything the old \
+                     server accepted but did not replicate before failing may be \
+                     added again there, which would leave a replication conflict.",
+                    write_server,
+                    down_for.num_seconds(),
+                    replacement
+                );
+                Target::Named(replacement)
+            }
+            None => {
+                // Nothing else is in a fit state to take writes either - either
+                // everything is down, or the only candidates came back too
+                // recently to trust. Keep aiming at the configured write server
+                // so the call fails cleanly rather than writing somewhere that
+                // may not have caught up.
+                tracing::error!(
+                    "FreeIPA write server {} has been down for {} seconds and no \
+                     other server can safely take writes yet.",
+                    write_server,
+                    down_for.num_seconds()
+                );
+                Target::Named(write_server)
+            }
+        },
     }
 }
 
@@ -4021,17 +4104,64 @@ mod tests {
             Target::Named(ref url) if *url == ipa2
         ));
 
-        // Down for longer than the replication window: now another master may
-        // take the writes, because anything this one accepted has had time to
-        // reach it.
+        // Down for longer than the replication window: one replacement is
+        // elected - writes move to a single other master, they do not spread
+        // over whatever is left.
         health.down_since.store(
             Utc::now().timestamp() - 61,
             std::sync::atomic::Ordering::SeqCst,
         );
-        assert!(matches!(resolve_write_target(&pool).await, Target::Any));
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa1
+        ));
 
-        // ...and back to normal once it answers again
+        // If there is nothing fit to stand in, keep aiming at the configured
+        // write server so the call fails cleanly rather than writing to a
+        // server that may not have caught up.
+        let other = match pool.iter().find(|entry| entry.url == ipa1) {
+            Some(entry) => entry.health.clone(),
+            None => unreachable!("the other server is not in the pool"),
+        };
+
+        other.mark_down(&ipa1);
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+        other.mark_up(&ipa1);
+
+        // A server that has only just come back has not necessarily caught up
+        // with what stood in for it, so it does not immediately take writes
+        // again - in either direction. ipa1 is back but too recently, so
+        // writes stay with the configured server...
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+
+        // ...and once ipa1 has been up long enough it can stand in again
+        other.up_since.store(
+            Utc::now().timestamp() - 61,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa1
+        ));
+
+        // When the write server itself answers again, writes stay on the
+        // stand-in until it has been up for a full replication window
         health.mark_up(&ipa2);
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa1
+        ));
+
+        health.up_since.store(
+            Utc::now().timestamp() - 61,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         assert!(matches!(
             resolve_write_target(&pool).await,
             Target::Named(ref url) if *url == ipa2

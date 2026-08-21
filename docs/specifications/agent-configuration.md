@@ -467,7 +467,7 @@ The FreeIPA agent manages user and project accounts in FreeIPA.
 |-----|---------|---------|-------------|
 | `freeipa-user` | `extra` | `admin` | FreeIPA admin username. |
 | `freeipa-write-server` | `extra` | first entry of `freeipa-server` | Which server takes all writes. Must be one of the `freeipa-server` entries. |
-| `freeipa-replication-window` | `extra` | `30` | Seconds that replication is assumed to need to converge. Writes are not sent to any other server until the write server has been confirmed down for at least this long. |
+| `freeipa-replication-window` | `extra` | `30` | Seconds that replication is assumed to need to converge. Writes are not moved to another server until the write server has been confirmed down for at least this long, nor moved back until it has been up again for that long. |
 | `system-groups` | `extra` | `""` | Comma-separated list of FreeIPA groups to add all users to automatically. |
 | `instance-groups` | `extra` | `""` | Per-instance group mappings. Format: `instance-name:group1,group2;...` |
 
@@ -486,9 +486,20 @@ Two things follow for how this is configured:
 - Every `freeipa-server` entry must name an **individual** server. A VIP or a
   round-robin DNS alias is several masters behind one name, so pinning writes
   to it pins nothing.
-- If the write server is given more than one slot (by listing it more than
-  once), writes can run concurrently against it. With a single slot, writes
-  are serialised.
+- Writes only ever go to one server at a time, but *which* server can change:
+  if the write server is confirmed down (a refused connection or a rejected
+  login - never merely a slow call) for longer than
+  `freeipa-replication-window`, one replacement is elected, in configuration
+  order. It reverts once the original has been up again for a full window -
+  recovery waits for the same reason failover does, since a server that has
+  just come back may not have caught up with what stood in for it. If nothing
+  is fit to take writes, calls fail rather than being sent to a server that may
+  be behind.
+- The number of times a server is listed is the number of concurrent
+  connections it gets. Since any server may end up taking the writes, list
+  them all the same number of times - the write server's slots are the limit on
+  write concurrency, and after a failover that will be a different server's
+  slots. A server listed once serialises writes.
 
 `op-freeipa` also checks every configured server before concluding that a user
 or group does not exist, since a master that has not yet received a recent add

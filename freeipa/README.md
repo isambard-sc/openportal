@@ -45,11 +45,19 @@ This is not load balancing that happens to be configurable - it is required.
 FreeIPA's replication cannot reconcile two independent `ADD`s of the same DN,
 and the conflict entry it leaves behind is invisible to `ipa user-find` and
 cannot be deleted through the IPA framework at all. So each entry must name an
-individual server (a VIP or round-robin alias pins nothing), and the write
-server should be listed more than once if writes need to run concurrently.
+individual server: a VIP or a round-robin alias is several masters behind one
+name, and pinning writes to it pins nothing.
+
+Writes go to one server at a time, but which server can change - if the write
+server is confirmed down for longer than `freeipa-replication-window`, one
+replacement is elected in configuration order, reverting once the original has
+been up again for a full window. Because any server may end up taking the
+writes, list them all the same number of times: the number of listings is the
+number of concurrent connections, and the write server's are the limit on write
+concurrency.
 
 ```bash
-op-freeipa extra -k freeipa-server -v https://ipa1.example.com,https://ipa1.example.com,https://ipa2.example.com
+op-freeipa extra -k freeipa-server -v https://ipa1.example.com,https://ipa1.example.com,https://ipa2.example.com,https://ipa2.example.com
 op-freeipa extra -k freeipa-write-server -v https://ipa1.example.com
 ```
 

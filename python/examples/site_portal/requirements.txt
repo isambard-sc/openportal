@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+# SPDX-License-Identifier: CC0-1.0
+
+# The example's own dependencies. `openportal` itself is built from this
+# repository - see the README - and is not on PyPI.
+fastapi>=0.115
+uvicorn>=0.32
+pydantic>=2.9

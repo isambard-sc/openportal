@@ -192,6 +192,13 @@ struct Registrar {
     /// have sent us a route must not have one held against it. See
     /// `crate::portalroutes`.
     route_capable: HashSet<Peer>,
+    /// Peers that advertised `supports_structured_errors` when they
+    /// registered. Nothing depends on this for correctness - a missing
+    /// structured error is reconstructed from the prose either way - but it
+    /// separates "this peer could not have sent one" from "this peer chose not
+    /// to", which is what makes a kind of `unknown` readable. See
+    /// `crate::joberror`.
+    structured_error_capable: HashSet<Peer>,
     name: String,
     typ: Type,
     zones: Vec<String>,
@@ -211,6 +218,7 @@ impl Registrar {
             peer_domains: HashMap::new(),
             expected_types: HashMap::new(),
             route_capable: HashSet::new(),
+            structured_error_capable: HashSet::new(),
             name: String::new(),
             typ: Type::Portal,
             zones: Vec::new(),
@@ -667,6 +675,31 @@ pub async fn set_route_capable(peer: &Peer, capable: bool) {
 /// Whether `peer` advertised support for `Command::PortalRoutes`.
 pub async fn is_route_capable(peer: &Peer) -> bool {
     REGISTRAR.read().await.route_capable.contains(peer)
+}
+
+/// Record whether `peer` attaches a structured `JobError` to failed jobs.
+pub async fn set_structured_error_capable(peer: &Peer, capable: bool) {
+    let mut registrar = REGISTRAR.write().await;
+
+    match capable {
+        true => {
+            registrar.structured_error_capable.insert(peer.clone());
+        }
+        false => {
+            registrar.structured_error_capable.remove(peer);
+        }
+    }
+}
+
+/// Whether `peer` advertised that it attaches a structured `JobError` to a
+/// failed job. A `false` here means a failure arriving from `peer` with no
+/// structured error is an old peer rather than an unclassified failure.
+pub async fn is_structured_error_capable(peer: &Peer) -> bool {
+    REGISTRAR
+        .read()
+        .await
+        .structured_error_capable
+        .contains(peer)
 }
 
 pub async fn my_agent_type() -> Type {

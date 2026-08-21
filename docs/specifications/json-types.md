@@ -39,6 +39,7 @@ The top-level container transmitted between agents. Every instruction creates a
   "state":           "<status>",
   "result":          "<json-string>" | null,
   "result_type":     "<type-name>" | null,
+  "error":           {"kind": "<kind>", "message": "<text>"} | absent,
   "forwarded_for":   "<destination>" | null,
   "domain":          "<domain-name>" | null,
   "domain_version":  "<domain-version>" | null
@@ -58,6 +59,7 @@ The top-level container transmitted between agents. Every instruction creates a
 | `state` | string | One of `created`, `pending`, `running`, `complete`, `error`, `duplicate` |
 | `result` | string or null | JSON-encoded result payload (see below); null when not yet complete |
 | `result_type` | string or null | Rust type name of the result (see [Result Types](#result-types)) |
+| `error` | object or absent | Why the job failed, structured. Present only on a failed job, and only from a peer that advertised `supports_structured_errors`. `kind` is a stable machine-readable discriminant - branch on this; `message` repeats verbatim what `result` holds, so a reader that only knows about `result` loses nothing. See [Error Kinds](#error-kinds). |
 | `forwarded_for` | string or null | Original job destination before the portal rewrote it for the bridge (e.g. `ukri.brics.isambard-ai`). Set by the portal's `virtual_resource_runner` when creating a bridge-board job; absent (`null`) on all other jobs. Web-portal code can use this to identify the true originating portal rather than reconstructing the path from the bridge destination. Absent from older jobs (treated as `null`). |
 | `domain` | string or null | The `Domain::name()` (e.g. `"greatwestern"`) that authored this Job's instruction, set once when the Job was created and unchanged thereafter - including by any domain-oblivious routing hop it passes through. `null` only for a Job from a peer running templemeads from before this field existed. See [writing-a-domain.md](writing-a-domain.md#1-the-domain-trait). |
 | `domain_version` | string or null | The domain's version, alongside `domain`. |
@@ -153,10 +155,45 @@ A JSON array of filesystem path strings.
 Returned by: `get_user_mapping`
 
 Serialised as a plain string in the instruction protocol format (see
-[instruction-protocol.md](instruction-protocol.md)).
+[instruction-protocol.md](instruction-protocol.md)), in the form
+`<user_id>:<local_user>:<local_group>`.
 
 ```json
 "alice.myproject.waldur:alice_hpc:hpc_myproject"
+```
+
+**`local_user` takes one of two forms**, depending on which layer produced the
+mapping:
+
+| Form | Produced by | Grammar |
+|------|-------------|---------|
+| Unix account name | account agents (`op-freeipa`, `op-localaccount`) and anything below them | `A-Za-z0-9`, `_`, `-`, `.`; no leading `-`, no leading/trailing `.`, no `..`; max 64 characters |
+| Email address | portals, whose members have no Unix account (see [site-portal-api.md](site-portal-api.md)) | local part from `A-Za-z0-9._+-` (max 64, same `.`/`-` rules as above), `@`, then a hostname of at least two labels drawn from `A-Za-z0-9-`; max 254 characters overall |
+
+The form is decided by whether an `@` is present, and each is validated against
+its own grammar — an address that a portal holds in `AwardDetails.members` may
+still be too exotic for a `UserMapping` (quoted local parts and the rarely-used
+`!#$%&'*/=?^`{|}~` characters are rejected). Agents that need a Unix account
+name accept only the first form and fail the job on the second, so a portal
+mapping can never be spliced into a path, an operand, or an RPC parameter.
+
+`local_group` is **not** widened this way: it names a Unix group at every layer,
+so it always follows the Unix account grammar above. A portal reports the
+project identifier (e.g. `myproject.waldur`), which already satisfies it.
+
+---
+
+### `Vec<UserMapping>`
+
+Returned by: `get_users`
+
+A JSON array of `UserMapping` strings.
+
+```json
+[
+  "alice.myproject.waldur:alice@example.ac.uk:myproject.waldur",
+  "bob.myproject.waldur:bob@example.ac.uk:myproject.waldur"
+]
 ```
 
 ---
@@ -175,7 +212,9 @@ Serialised as a plain string in the instruction protocol format.
 
 ### `Vec<UserIdentifier>`
 
-Returned by: `get_users`
+Not currently returned by any instruction — `get_users` returns
+`Vec<UserMapping>` (above) at every layer. Listed here because the type appears
+inside the usage and storage reports.
 
 A JSON array of user identifier strings, each in `username.project.portal` format.
 
@@ -284,6 +323,11 @@ The `*.` prefix matches any number of subdomain levels — `*.ac.uk` matches
 domain itself (`ac.uk`) is not matched. Wildcards are not permitted elsewhere
 in the pattern.
 
+`update_award` **replaces** the allow-list wholesale, as it does `members`: the
+awarding portal owns the set, so an update naming fewer domains removes the
+rest, and one sending `[]` permits nobody. Omitting the field entirely leaves it
+unchanged.
+
 When `allowed_domains` is absent (`null`), all email addresses are permitted.
 When it is present but empty (`[]`), no email addresses are permitted. The
 three-state semantics allow a portal to explicitly express "no members allowed"
@@ -307,9 +351,25 @@ All three fields are always present.
 
 ---
 
+### `Vec<ProjectMapping>`
+
+Returned by: `get_projects`
+
+A JSON array of `ProjectMapping` strings — *not* an array of `ProjectDetails`
+objects. Use `get_awards` when the details are what you want.
+
+```json
+[
+  "projecta.waldur:hpc_projecta",
+  "projectb.waldur:hpc_projectb"
+]
+```
+
+---
+
 ### `Vec<ProjectDetails>`
 
-Returned by: `get_projects`, `get_awards`
+Returned by: `get_awards`
 
 A JSON array of `ProjectDetails` objects.
 
@@ -752,10 +812,11 @@ structure:
 | `"String"` | JSON string | `get_home_dir`, `get_local_home_dir` |
 | `"Vec<String>"` | JSON array of strings | `get_project_dirs`, `get_local_project_dirs` |
 | `"UserMapping"` | Mapping string | `get_user_mapping` |
-| `"ProjectMapping"` | Mapping string | `get_project_mapping` |
-| `"Vec<UserIdentifier>"` | Array of identifier strings | `get_users` |
+| `"ProjectMapping"` | Mapping string | `get_project_mapping`, `create_project`, `update_project`, `remove_project` |
+| `"Vec<UserMapping>"` | Array of mapping strings | `get_users` |
+| `"Vec<ProjectMapping>"` | Array of mapping strings | `get_projects` |
 | `"ProjectDetails"` | Object | `get_project`, `get_award` |
-| `"Vec<ProjectDetails>"` | Array of objects | `get_projects`, `get_awards` |
+| `"Vec<ProjectDetails>"` | Array of objects | `get_awards` |
 | `"Usage"` | `{"seconds": <u64>}` | `get_limit`, `get_local_limit` |
 | `"Quota"` | `{"limit": "…", "usage": "…"}` | `get_*_quota` |
 | `"HashMap<Volume, Quota>"` | Object: volume → Quota | `get_*_quotas` |
@@ -765,6 +826,41 @@ structure:
 | `"StorageReport"` | Object (see above) | `get_storage_reports` |
 | `"Destinations"` | String | `get_offerings` |
 | `"Error"` | plain-text string | Any failed job |
+
+### Error Kinds
+
+A failed job carries its reason twice: as prose in `result`, which is what it
+has always carried and what an older peer reads, and as a structured `error`
+object beside it. Only the `kind` is machine-readable, and it is the field to
+branch on.
+
+`kind` is an open string, not an enum. `templemeads` defines the kinds that
+belong to the transport, and each `Domain` contributes its own, so a routing hop
+carries a kind it has never heard of without needing to understand it. **Treat
+an unrecognised kind as you would `unknown`** rather than as an error in itself.
+
+Transport kinds (`templemeads::joberror::kind`):
+
+| `kind` | Meaning |
+|--------|---------|
+| `expired` | The job passed its expiry while still unfinished |
+| `unroutable` | No agent could be found to handle it |
+| `unsupported` | The receiving agent does not implement the instruction |
+| `invalid` | Refused before it ran - failed authorisation, unparseable instruction |
+| `run` | The handling agent failed while running it, with no more specific kind |
+| `unknown` | No information about the failure at all |
+
+`greatwestern` kinds (`greatwestern::errorkind::kind`):
+
+| `kind` | Meaning |
+|--------|---------|
+| `award_pending` | Accepted but not in place yet, typically awaiting human approval. **Not a fault** - the caller retries |
+| `award_rejected` | Refused. Re-sending unchanged will be refused again |
+| `award_permission` | An award decision with no more specific kind |
+
+An `origin` field naming the agent the failure happened at may appear on a job
+*inside* the agent network. It is stripped from everything the bridge serves, so
+a connected portal never sees it.
 
 ---
 

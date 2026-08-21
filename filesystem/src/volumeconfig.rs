@@ -374,7 +374,7 @@ impl PathConfig {
         match mapping {
             UserOrProjectMapping::User(user_mapping) => {
                 let project_name = user_mapping.project().project().project();
-                let user_name = user_mapping.local_user();
+                let user_name = user_mapping.local_user().unix()?;
 
                 if project_name.is_empty() {
                     return Err(Error::MissingProject(
@@ -416,7 +416,7 @@ impl PathConfig {
             match mapping {
                 UserOrProjectMapping::User(user_mapping) => {
                     let project_name = user_mapping.project().project().project();
-                    let user_name = user_mapping.local_user();
+                    let user_name = user_mapping.local_user().unix()?;
 
                     if project_name.is_empty() {
                         return Err(Error::MissingProject(

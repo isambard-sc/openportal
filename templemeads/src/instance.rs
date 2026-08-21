@@ -31,12 +31,15 @@ pub async fn run<L: Domain>(config: Config, runner: AsyncRunnable<L>) -> Result<
 /// agent rather than routed down from the portal that owns the identifiers they
 /// name.
 ///
-/// `op-cloudaccount` is the case this exists for: it is driven directly by
-/// `op-cloudportal`, so its Jobs arrive on a `cloudportal.cloudaccount`
-/// destination while their instructions name the upstream portal that owns the
-/// project (e.g. `myproject.waldur`). The portal-ownership re-check that
-/// [`run`] applies would therefore reject every such Job, correctly - the
-/// property simply does not hold for this topology.
+/// The case this exists for is an Instance driven directly by a peer that is
+/// not the portal owning the identifiers: its Jobs arrive on a
+/// `delegator.instance` destination while their instructions name the upstream
+/// portal that owns the project (e.g. `myproject.waldur`). The
+/// portal-ownership re-check that [`run`] applies would therefore reject every
+/// such Job, correctly - the property simply does not hold for this topology.
+///
+/// No agent in this workspace currently uses it; it is kept for Instances
+/// outside the tree that sit in that position.
 ///
 /// Prefer [`run`] unless your Instance is in that position: this variant gives
 /// up a real defence, and the Jobs it accepts are bounded only by the

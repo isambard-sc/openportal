@@ -457,9 +457,10 @@ Register a project with an agent (add it to the agent's management scope).
 add_project <project_id>
 ```
 
-#### `remove_project`
+#### `remove_project` / `remove_award`
 
-Deregister a project from an agent's management scope.
+Deregister a project from an agent's management scope. `remove_award` is
+accepted as a synonym; `remove_project` is the canonical wire form for now.
 
 ```
 remove_project <project_id>
@@ -1086,12 +1087,12 @@ Returns: `Destinations`
 | `submit` | `<destination> <instruction>` | — | Route instruction to a specific destination |
 | `create_project` / `create_award` | `<project_id> <details_json>` | — | Create a project |
 | `update_project` / `update_award` | `<project_id> <details_json>` | — | Update project metadata |
-| `get_project` | `<project_id>` | `ProjectMapping` | Retrieve project details |
+| `get_project` | `<project_id>` | `AwardDetails` | Retrieve project details |
 | `get_projects` | `<portal_id>` | `Vec<ProjectMapping>` | List all projects for a portal |
 | `get_award` | `<project_id>` | `AwardDetails` | Retrieve award details for a project |
 | `get_awards` / `list_awards` | `<portal_id>` | `Vec<AwardDetails>` | List award details for all projects |
 | `add_project` | `<project_id>` | — | Add project to agent scope |
-| `remove_project` | `<project_id>` | — | Remove project from agent scope |
+| `remove_project` / `remove_award` | `<project_id>` | — | Remove project from agent scope |
 | `is_existing_project` | `<project_id>` | `bool` | Check if project exists |
 | `get_users` | `<project_id>` | `Vec<UserMapping>` | List users in a project |
 | `add_user` | `<user_id>` | — | Add user to project |

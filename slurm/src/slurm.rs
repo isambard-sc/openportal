@@ -1547,7 +1547,7 @@ async fn get_user_create_if_not_exists(
     )
     .await?;
 
-    let slurm_user = get_user(user.local_user(), expires).await?;
+    let slurm_user = get_user(user.local_user().unix()?, expires).await?;
     let cluster = cache::get_cluster().await?;
 
     if let Some(slurm_user) = slurm_user {
@@ -1573,7 +1573,7 @@ async fn get_user_create_if_not_exists(
     assert_not_expired(expires)?;
 
     // first, create the user
-    let username = clean_user_name(user.local_user())?;
+    let username = clean_user_name(user.local_user().unix()?)?;
 
     let payload = serde_json::json!({
         "users": [
@@ -1586,7 +1586,7 @@ async fn get_user_create_if_not_exists(
     call_post("slurmdb", "users", &payload, expires).await?;
 
     // now load the user from slurm to make sure it exists
-    let slurm_user = match get_user(user.local_user(), expires).await? {
+    let slurm_user = match get_user(user.local_user().unix()?, expires).await? {
         Some(user) => user,
         None => {
             return Err(Error::Call(format!(
@@ -2156,7 +2156,7 @@ impl SlurmAssociation {
         })?;
 
         Ok(SlurmAssociation {
-            user: clean_user_name(mapping.local_user())?,
+            user: clean_user_name(mapping.local_user().unix()?)?,
             account,
             cluster: "".to_string(),
         })
@@ -2288,7 +2288,7 @@ impl SlurmUser {
             })?;
 
         Ok(SlurmUser {
-            name: mapping.local_user().to_string(),
+            name: mapping.local_user().unix()?.to_string(),
             default_account: Some(default_account),
             associations: vec![SlurmAssociation::from_mapping(mapping)?],
         })

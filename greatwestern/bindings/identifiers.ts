@@ -30,6 +30,12 @@ export interface ProjectMappingParts {
   local_group: string;
 }
 
+/**
+ * `local_user` is either a local Unix account name or, when the mapping came
+ * from a portal, the member's email address (a portal has no Unix accounts to
+ * name). Neither form can contain a `:`, so the split below is unambiguous.
+ * See docs/specifications/project-portal-api.md §4.2.
+ */
 export interface UserMappingParts {
   user: UserIdentifierParts;
   local_user: string;

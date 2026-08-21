@@ -4,7 +4,7 @@
 [workspace]
 
 members = [
-    "bridge", "cloudaccount", "cloudportal", "cluster", "clusters",
+    "bridge", "cluster", "clusters",
     "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
     "provider", "proxy", "python", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
@@ -15,7 +15,7 @@ members = [
 # cargo, because its stub_gen binary requires Python symbols that are only
 # available in maturin's build environment.
 default-members = [
-    "bridge", "cloudaccount", "cloudportal", "cluster", "clusters",
+    "bridge", "cluster", "clusters",
     "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
     "provider", "proxy", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",

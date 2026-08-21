@@ -7,6 +7,7 @@ use crate::command::Command as ControlCommand;
 use crate::destination::{Destination, Position};
 use crate::domain::Domain;
 use crate::error::Error;
+use crate::joberror::JobError;
 use crate::named::NamedType;
 use crate::state;
 
@@ -222,6 +223,16 @@ pub struct Job<L: Domain> {
     result_type: Option<String>,
     #[serde(default)]
     forwarded_for: Option<Destination>,
+    /// Why this job failed, structured. `result` still carries the same text
+    /// this holds in `message`, so a peer that reads only that is unaffected;
+    /// this adds the machine-readable `kind` beside it.
+    ///
+    /// `None` either because the job did not fail, or because the peer that
+    /// failed it predates the field - `Register`'s `supports_structured_errors`
+    /// says which, and `JobError::infer` reconstructs a kind from the text
+    /// when it is the latter. See `docs/plans/structured-errors-design.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<JobError>,
     /// The `Domain::name()` that authored this Job's instruction, set once
     /// at `Job::parse()` and never touched again - including by any
     /// domain-oblivious router hop it passes through, which relays it as
@@ -277,6 +288,7 @@ impl<L: Domain> Job<L> {
             state: Status::Created,
             result: None,
             result_type: None,
+            error: None,
             forwarded_for: None,
             domain: Some(L::name().to_string()),
             domain_version: Some(L::version().to_string()),
@@ -375,6 +387,7 @@ impl<L: Domain> Job<L> {
             state: self.state.clone(),
             result: self.result.clone(),
             result_type: self.result_type.clone(),
+            error: self.error.clone(),
             forwarded_for: self.forwarded_for.clone(),
             domain: self.domain.clone(),
             domain_version: self.domain_version.clone(),
@@ -456,6 +469,7 @@ impl<L: Domain> Job<L> {
             state: self.state.clone(),
             result: self.result.clone(),
             result_type: self.result_type.clone(),
+            error: self.error.clone(),
             forwarded_for: self.forwarded_for.clone(),
             domain: self.domain.clone(),
             domain_version: self.domain_version.clone(),
@@ -513,6 +527,7 @@ impl<L: Domain> Job<L> {
                 state: Status::Pending,
                 result: self.result.clone(),
                 result_type: self.result_type.clone(),
+                error: self.error.clone(),
                 forwarded_for: self.forwarded_for.clone(),
                 domain: self.domain.clone(),
                 domain_version: self.domain_version.clone(),
@@ -558,6 +573,7 @@ impl<L: Domain> Job<L> {
                 state: Status::Duplicate,
                 result: job.id.to_string().into(),
                 result_type: None,
+                error: None,
                 forwarded_for: self.forwarded_for.clone(),
                 domain: self.domain.clone(),
                 domain_version: self.domain_version.clone(),
@@ -581,6 +597,7 @@ impl<L: Domain> Job<L> {
                 state: Status::Running,
                 result: progress,
                 result_type: None,
+                error: None,
                 forwarded_for: self.forwarded_for.clone(),
                 domain: self.domain.clone(),
                 domain_version: self.domain_version.clone(),
@@ -611,6 +628,7 @@ impl<L: Domain> Job<L> {
                 state: other.state.clone(),
                 result: other.result.clone(),
                 result_type: other.result_type.clone(),
+                error: other.error.clone(),
                 forwarded_for: self.forwarded_for.clone(),
                 domain: self.domain.clone(),
                 domain_version: self.domain_version.clone(),
@@ -634,6 +652,7 @@ impl<L: Domain> Job<L> {
                 state: Status::Complete,
                 result: None,
                 result_type: Some("None".to_string()),
+                error: None,
                 forwarded_for: self.forwarded_for.clone(),
                 domain: self.domain.clone(),
                 domain_version: self.domain_version.clone(),
@@ -661,6 +680,7 @@ impl<L: Domain> Job<L> {
                 state: Status::Complete,
                 result: Some(serde_json::to_string(&result)?),
                 result_type: Some(T::type_name()),
+                error: None,
                 forwarded_for: self.forwarded_for.clone(),
                 domain: self.domain.clone(),
                 domain_version: self.domain_version.clone(),
@@ -672,7 +692,25 @@ impl<L: Domain> Job<L> {
         }
     }
 
+    /// Mark this job as failed, with a kind inferred from `message`.
+    ///
+    /// Every existing caller keeps working and acquires a structured kind for
+    /// free: the domain is asked to classify the message first, and the
+    /// transport's own sentinels are recognised otherwise. Use
+    /// [`Self::errored_with`] when the kind is already known - which is always
+    /// better, since inference is a reading of prose and this is not.
     pub fn errored(&self, message: &str) -> Result<Job<L>, Error> {
+        let domain_kind = L::error_kind_for(JobError::unwrap_message(message));
+
+        self.errored_with(JobError::infer(message, domain_kind))
+    }
+
+    /// Mark this job as failed with an explicit [`JobError`].
+    ///
+    /// The error's `message` is also written to `result`, exactly where the
+    /// failure text has always been, so a peer that has never heard of
+    /// structured errors reads the same string it read before.
+    pub fn errored_with(&self, error: JobError) -> Result<Job<L>, Error> {
         match self.state {
             Status::Duplicate | Status::Pending | Status::Running => Ok(Job {
                 id: self.id,
@@ -682,8 +720,9 @@ impl<L: Domain> Job<L> {
                 version: self.version + 1000, // make sure this is the newest version
                 command: self.command.clone(),
                 state: Status::Error,
-                result: Some(message.to_owned()),
+                result: Some(error.message().to_owned()),
                 result_type: Some("Error".to_string()),
+                error: Some(error),
                 forwarded_for: self.forwarded_for.clone(),
                 domain: self.domain.clone(),
                 domain_version: self.domain_version.clone(),
@@ -703,6 +742,44 @@ impl<L: Domain> Job<L> {
         match self.state {
             Status::Error => self.result.clone(),
             _ => None,
+        }
+    }
+
+    /// Why this job failed, structured.
+    ///
+    /// `None` on a job that did not fail. Also `None` on one failed by a peer
+    /// that predates the field - use [`Self::error_or_infer`] to get the best
+    /// available answer in that case.
+    pub fn error(&self) -> Option<&JobError> {
+        match self.state {
+            Status::Error => self.error.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Why this job failed, falling back to inference for an older peer.
+    ///
+    /// Prefer this over [`Self::error`] anywhere the answer drives a decision:
+    /// it gives the same answer for a modern peer, and the best available one
+    /// for a peer that only sent prose.
+    pub fn error_or_infer(&self) -> Option<JobError> {
+        match self.error() {
+            Some(error) => Some(error.clone()),
+            None => self.error_message().map(|message| {
+                let domain_kind = L::error_kind_for(JobError::unwrap_message(&message));
+                JobError::infer(&message, domain_kind)
+            }),
+        }
+    }
+
+    /// Drop the `origin` from this job's error, if it has one.
+    ///
+    /// `origin` names an agent inside the network. The bridge applies this to
+    /// every job it serves, so a connected portal never learns internal
+    /// topology from a failure - see [`JobError::redact_origin`].
+    pub fn redact_error_origin(&mut self) {
+        if let Some(error) = self.error.as_mut() {
+            error.redact_origin();
         }
     }
 
@@ -1820,5 +1897,122 @@ mod tests {
             Ok(_) => unreachable!("Should not have a result"),
             Err(e) => assert_eq!(e.to_string(), "failed"),
         }
+    }
+    /// The whole point of the compatibility story: a job failed by a peer that
+    /// has never heard of structured errors still yields a usable kind.
+    #[test]
+    fn a_failure_from_an_older_peer_still_yields_a_kind() {
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e))
+            .pending()
+            .unwrap_or_else(|e| unreachable!("pending: {:?}", e));
+        let failed = job
+            .errored("RuntimeError{no such project}")
+            .unwrap_or_else(|e| unreachable!("errored: {:?}", e));
+
+        // Simulate the wire form an older peer sends: prose, no `error` field.
+        let mut json: serde_json::Value =
+            serde_json::to_value(&failed).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        json.as_object_mut()
+            .unwrap_or_else(|| unreachable!("job must be an object"))
+            .remove("error");
+
+        let legacy: Job = serde_json::from_value(json)
+            .unwrap_or_else(|e| unreachable!("a job with no error field must parse: {:?}", e));
+
+        // Nothing structured arrived...
+        assert!(legacy.error().is_none());
+        // ...but the message is intact, and a kind is recoverable from it.
+        assert_eq!(
+            legacy.error_message().as_deref(),
+            Some("RuntimeError{no such project}")
+        );
+        assert_eq!(
+            legacy.error_or_infer().map(|e| e.kind().to_owned()),
+            Some(crate::joberror::kind::RUN.to_owned())
+        );
+    }
+
+    /// A structured error must not change the prose. This is what keeps an old
+    /// peer - which reads only `result` - working unchanged.
+    #[test]
+    fn the_prose_is_unchanged_by_carrying_a_kind() {
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e))
+            .pending()
+            .unwrap_or_else(|e| unreachable!("pending: {:?}", e));
+
+        let message = "ManagedProjectPendingError: awaiting approval";
+        let failed = job
+            .errored_with(JobError::new("award_pending", message))
+            .unwrap_or_else(|e| unreachable!("errored: {:?}", e));
+
+        assert_eq!(failed.error_message().as_deref(), Some(message));
+        assert_eq!(failed.error().map(|e| e.kind()), Some("award_pending"));
+
+        // ...and it survives a round trip through the wire.
+        let json =
+            serde_json::to_string(&failed).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        let back: Job =
+            serde_json::from_str(&json).unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+
+        assert_eq!(back.error_message().as_deref(), Some(message));
+        assert_eq!(back.error().map(|e| e.kind()), Some("award_pending"));
+    }
+
+    /// A kind this build has never seen must survive being relayed. A router
+    /// hop carries a domain's vocabulary without understanding it.
+    #[test]
+    fn an_unknown_kind_relays_intact() {
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e))
+            .pending()
+            .unwrap_or_else(|e| unreachable!("pending: {:?}", e));
+        let failed = job
+            .errored_with(JobError::new("some_future_kind", "a thing happened"))
+            .unwrap_or_else(|e| unreachable!("errored: {:?}", e));
+
+        let json =
+            serde_json::to_string(&failed).unwrap_or_else(|e| unreachable!("serialise: {:?}", e));
+        let back: Job =
+            serde_json::from_str(&json).unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+
+        assert_eq!(back.error().map(|e| e.kind()), Some("some_future_kind"));
+    }
+
+    /// `origin` is diagnostic-only and must not reach anything outside the
+    /// agent network - the bridge redacts every job it serves.
+    #[test]
+    fn redacting_the_origin_keeps_the_kind_and_message() {
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e))
+            .pending()
+            .unwrap_or_else(|e| unreachable!("pending: {:?}", e));
+        let mut failed = job
+            .errored_with(
+                JobError::new("award_rejected", "no").with_origin("portal.clusters.shared"),
+            )
+            .unwrap_or_else(|e| unreachable!("errored: {:?}", e));
+
+        assert_eq!(
+            failed.error().and_then(|e| e.origin()),
+            Some("portal.clusters.shared")
+        );
+
+        failed.redact_error_origin();
+
+        assert_eq!(failed.error().and_then(|e| e.origin()), None);
+        assert_eq!(failed.error().map(|e| e.kind()), Some("award_rejected"));
+        assert_eq!(failed.error_message().as_deref(), Some("no"));
+    }
+
+    /// A job that did not fail has no error, however it is asked.
+    #[test]
+    fn a_job_that_did_not_fail_has_no_error() {
+        let job = Job::parse("portal.cluster add_user demo.proj.portal", true)
+            .unwrap_or_else(|e| unreachable!("parse: {:?}", e));
+
+        assert!(job.error().is_none());
+        assert!(job.error_or_infer().is_none());
     }
 }

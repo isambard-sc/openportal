@@ -36,10 +36,6 @@ Each agent type is its own binary crate that implements specific infrastructure 
 
 - **slurm** (`op-slurm`): Agent that interfaces with the Slurm scheduler.
 
-- **cloudaccount** (`op-cloudaccount`): Represents a single cloud account (e.g. an AWS account) assigned to a project. This is a deliberately rough prototype agent, co-developed alongside cloud operators who are still building out their side of the integration - it collapses what would normally be separate Instance + Account/Scheduler agents into one process (see `docs/plans/archive/op-cloudaccount-design.md`), holds its own project/user assignment state as plain JSON files (there's no cloud-side API for this yet), and reconstructs usage reports by parsing whatever cost-report JSON files the operators drop into a directory. Expect this to need reshaping once the cloud side of the integration matures.
-
-- **cloudportal** (`op-cloudportal`): A self-contained `Portal` agent representing the "cloud" side of a portal-to-portal relationship (e.g. a central portal creating Awards on it). Also a deliberately rough prototype (see `docs/plans/archive/op-cloudportal-design.md`): there's no real portal management software (no Waldur) behind it, so it stores Award state itself as plain JSON files, addresses/is addressed directly by the upstream portal (no virtual-resource/offering indirection - that mechanism turned out to be same-process-only, see the design doc §4), and requires a human operator to `approve`/`reject` a pending Award via CLI subcommands before a background poller provisions it on whichever `cloudaccount` its `AwardDetails.template` maps to. Also added one-shot CLI support (`run --one-shot`) to `templemeads::portal::run()`, previously only available to Account/Filesystem/Scheduler agents.
-
 - **bridge** (`op-bridge`): Bridges non-Rust portal implementations to the OpenPortal network. Runs a local HTTP server to translate API calls into OpenPortal Jobs.
 
 - **proxy** (`op-proxy`): A blind relay for two agents that can each only make outbound connections (neither can open a port the other can reach). Depends only on `paddington`, never `templemeads` - it has no `Domain`, no Jobs, and never decrypts the traffic it forwards; see `docs/plans/archive/blind-relay-proxy-design.md`. Agents opt in explicitly via a `proxy` field in their paddington config, and the proxy operator must separately `allow` each `(agent, agent)` pair before it will relay between them (default-deny).
@@ -59,10 +55,6 @@ Jobs flow through the system in a hierarchical manner:
 5. **Account/Filesystem** agents perform actual privileged operations
 
 Each agent only has the permissions needed for its specific role, avoiding centralized privileged access.
-
-Exception: **op-cloudaccount** is an Instance agent that does *not* delegate to separate Account/Scheduler agents - it's a rough prototype that merges those roles into one process (see the crate note above and `docs/plans/archive/op-cloudaccount-design.md`).
-
-Exception: **op-cloudportal** is a Portal agent that receives Jobs directly from its upstream portal rather than via a bridge, and provisions approved Awards on **op-cloudaccount** directly rather than via a Provider/Platform layer (see the crate note above and `docs/plans/archive/op-cloudportal-design.md`).
 
 ### Jobs and Job Boards
 
@@ -97,6 +89,8 @@ When writing or modifying code:
 - Lints are declared once in `[workspace.lints]` in the root `Cargo.toml`; member crates inherit them with `[lints] workspace = true`. `unwrap_used`, `expect_used`, `indexing_slicing` and `dbg_macro` are denied in production code (`clippy.toml` exempts tests), and `unsafe_code` is forbidden. Use `get`/`first`/`split_first`/slice patterns rather than indexing.
 - Release builds set `panic = "abort"` **and** `overflow-checks = true`, so any reachable panic or integer overflow is a remote process kill. Arithmetic on values that arrive from a peer must be explicitly saturating or checked - see `Usage` and `StorageSize` in `greatwestern`.
 - Any file containing key material must be written with `paddington::config::write_secret_file`, never a bare `fs::write`. `scripts/check-secret-writes.sh` (run by `make lint` and CI) enforces this.
+- Release binaries are **statically linked against musl**, and musl has no NSS implementation at all. Never resolve a Unix user or group through libc (`nix::unistd::User::from_name`, `Group::from_name`, `getpwnam_r`, `getgrnam_r`): in a musl binary those see only `/etc/passwd` and `/etc/group` plus a single fragile `nscd` attempt, so a directory-backed name looks absent whenever `nscd` is down and reports `EIO` whenever it is merely busy. Go through the host's `getent`, which consults every source in `nsswitch.conf` - `filesystem/src/nameservice.rs` is the reference implementation and explains it in full. `scripts/check-nss-lookups.sh` (run by `make lint` and CI) enforces this.
+- A name lookup that fails to answer is not a name that does not exist. Keep the two apart: report a genuine absence as a terminal error and an indeterminate result as a retryable one, or a transient outage in an identity service becomes a permanent job failure.
 
 ## Examples
 

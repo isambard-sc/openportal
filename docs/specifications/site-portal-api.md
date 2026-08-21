@@ -3,11 +3,12 @@ SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.
 SPDX-License-Identifier: CC0-1.0
 -->
 
-# Project Portal API Specification
+# Site Portal API Specification
 
 **Status:** Normative for the `greatwestern` domain
-**Audience:** Anyone connecting a *project portal* — the portal software that
-owns projects and their members (e.g. Waldur) — to an OpenPortal network.
+**Audience:** Anyone connecting their site's portal to OpenPortal — the software
+that runs a site's resources and owns its projects and their members
+(e.g. Waldur).
 
 ---
 
@@ -40,64 +41,72 @@ mechanics; use this one when writing the handler.
 | The instruction string grammar | [instruction-protocol.md](instruction-protocol.md) |
 | Which error to raise, and what the caller does with it | this document, §3.3 |
 | Doing it in Python | [python-api.md](python-api.md) |
-| A portal that already does all this | `waldur-mastermind`, `src/waldur_openportal/` (§7) |
+| A worked implementation to read | [`python/examples/site_portal/`](../../python/examples/site_portal/) |
+| A portal that already does all this in production | `waldur-mastermind`, `src/waldur_openportal/` (§7) |
 
 ---
 
 ## 1. The shape of a portal-to-portal exchange
 
-Two portals, each with their own OpenPortal agents:
+Two portals, each with their own OpenPortal agents. Throughout this document
+they are named after what they do:
 
-* **`ukri`** — the *awarding portal*. Makes awards; wants them provisioned
-  elsewhere.
-* **`aip1`** — the *project portal* (yours). Owns projects, members, and the
-  infrastructure behind them.
+* **`allocator`** — the *awarding portal*. Allocates awards, and wants them
+  provisioned somewhere else; hence the name.
+* **`site`** — the *site portal* (yours). Runs the resources, owns the projects
+  and their members, and provisions what `allocator` asks for.
 
-`aip1` advertises one or more **offerings** — named things `ukri` is allowed to
-address. An offering is written `<offering>.<local-portal>.<remote-portal>`,
-e.g. `isambard-ai.aip1.ukri`: "the resource `isambard-ai`, offered by `aip1`,
-to `ukri`".
+`site` advertises one or more **offerings**: named resources that `allocator` may
+address. An offering is registered as `<resource>.<site>.<allocator>` —
+`cluster1.site.allocator` reads "the resource `cluster1`, offered by `site`, to
+`allocator`".
+
+**Note the two forms are reversed.** You *register* `cluster1.site.allocator`,
+and `allocator` *addresses* `allocator.site.cluster1` — a destination always
+starts with the sender and ends with what is being addressed, while a
+registration starts with the thing being offered. The middle element is your own
+portal either way.
 
 A request then flows:
 
 ```
- 1.  ukri's portal software submits, through its own bridge:
-         ukri.aip1.isambard-ai create_award myproj.ukri {…AwardDetails…}
+ 1.  allocator's portal software submits, through its own bridge:
+         allocator.site.cluster1 create_award myaward1.allocator {…AwardDetails…}
 
- 2.  ukri's portal agent  ──────────►  aip1's portal agent
+ 2.  allocator's own agent  ─────────►  site's agent
          (the destination's first hop is the sending portal itself;
           the last hop names the offering)
 
- 3.  aip1's portal agent recognises the offering and re-issues the request
+ 3.  the site's agent recognises the offering and re-issues it
      to its own bridge, tagged with where it came from:
-         aip1.<bridge>.isambard-ai create_project myproj.ukri {…}
-         forwarded_for = ukri.aip1.isambard-ai
+         site.<bridge>.cluster1 create_project myaward1.allocator {…}
+         forwarded_for = allocator.site.cluster1
 
- 4.  aip1's bridge puts the Job on its board and signals your portal:
+ 4.  its bridge puts the Job on its board and signals your portal:
          GET <signal_url>?job_id=<uuid>
 
  5.  YOUR PORTAL: fetch the job, do the work, post the result.        ← §3
 
- 6.  The result travels back the way it came, to ukri.
+ 6.  The result travels back the way it came, to allocator.
 ```
 
 Everything above step 5 is handled by the agents. Steps 0 and 5 are yours.
 
 ### 1.1 Step 0: you must advertise offerings first
 
-Until an offering exists, requests from `ukri` have nowhere to land — they are
+Until an offering exists, requests from `allocator` have nowhere to land — they are
 held and only delivered once the offering is registered. On startup (and
 whenever the set changes) call `POST /sync_offerings` with the complete list:
 
 ```json
-["isambard-ai.aip1.ukri", "isambard-p1.aip1.ukri"]
+["cluster1.site.allocator", "cluster2.site.allocator"]
 ```
 
 `sync_offerings` is a *replace*, not a merge — anything absent is withdrawn.
 Use `add_offerings` / `remove_offerings` for incremental changes, and
 `get_offerings` to read the current set.
 
-The middle element must be your own portal's agent name, or the offering is
+The middle element must be your own site's agent name, or the offering is
 rejected.
 
 ### 1.2 Telling portal-to-portal requests apart
@@ -105,22 +114,74 @@ rejected.
 Two things distinguish an awarding portal's request from a local one:
 
 **`forwarded_for`** carries the original destination, e.g.
-`ukri.aip1.isambard-ai`. Its **first** element is the portal that asked; its
+`allocator.site.cluster1`. Its **first** element is the portal that asked; its
 **last** element is the offering they came in through. This is the field to
 authorise against — it is set by your own portal agent, not by the caller.
 
-**Identifiers name the awarding portal.** A project created by `ukri` is
-`myproj.ukri`, not `myproj.aip1`, and its members are
-`alice.myproj.ukri`. Key your records on the full identifier: the same project
-name may exist under two different awarding portals, and they are different
-projects.
+**Identifiers in a request name the awarding portal, not you.** An award made
+by `allocator` arrives as `myaward1.allocator` — never rewritten into your namespace —
+and its members as `alice.myaward1.allocator`. You will have your own identifier for
+the project you create for it (§4.1.1), but that is yours to return, not
+something to expect in an incoming request. Key your records on the full
+identifier as sent: the same project name may exist under two different awarding
+portals, and those are different projects.
 
 A locally-originated request has `forwarded_for` absent or naming only your own
 portal.
 
+### 1.3 The offering says *which resource*, and scopes everything
+
+An offering is a **virtual agent** on your portal: a name the awarding portal
+addresses directly, standing for one resource you run. `site` might offer
+`cluster1` and `cluster2`, and `allocator` addresses them as
+`allocator.site.cluster1` and `allocator.site.cluster2`.
+
+It is easy to read the offering as an access-control list — a set of names to
+check a request against — and that reading will produce a portal that answers
+the wrong questions. **The offering is part of what is being asked, not a
+permission to ask it.**
+
+`create_award` sent to `allocator.site.cluster1` is a request to *attach this
+award to a project on `cluster1`*. Usually that means creating a project for it,
+but you are free to attach it to one that already exists. The `template` in the
+`AwardDetails` is interpreted in the context of that resource — in Waldur it
+selects the organisation, the default offerings and the billing a project is
+created with, all of which belong to the resource — so the same template name may
+be offered on one and not another. Either way the project you attach is on that
+resource, and the identifier you return in the mapping (§4.1.1) names it.
+
+Three consequences:
+
+* **Key your records on `(offering, project_id)`.** `myaward1.allocator` on
+  `cluster1` and `myaward1.allocator` on `cluster2` are two different awards
+  for two different resources. The reference implementation keys its own records
+  exactly this way.
+* **Scope every answer by the offering the request came through.** `get_awards`
+  through `cluster1` means "what does `allocator` have *on `cluster1`*".
+* **A question about a project that is not on this resource is not an error.**
+  An awarding portal sweeping every offering it knows about will ask each one
+  about each award. The offering that holds nothing answers with an **empty
+  report**, not a failure — see §4.3.
+
+Read the offering from `forwarded_for`'s last element, falling back to the
+job's own destination (`site.<bridge>.cluster1`) which ends the same way for
+a locally-originated request.
+
+Worked through, with `allocator` holding two awards on `site`:
+
+| `allocator` sends | on | `site` creates | and returns |
+|---|---|---|---|
+| `create_award myaward1.allocator` to `allocator.site.cluster1` | `cluster1` | `myproject1.site` | `myaward1.allocator:myproject1.site` |
+| `create_award myaward2.allocator` to `allocator.site.cluster2` | `cluster2` | `myproject2.site` | `myaward2.allocator:myproject2.site` |
+
+`get_usage_report myaward1.allocator` through `cluster1` answers with the usage of
+`myproject1.site`, translated into `allocator`'s namespace. The same request
+through `cluster2` answers with an **empty** report: `myaward1.allocator` is not on
+`cluster2`. Nothing is wrong — it is simply not there.
+
 ---
 
-## 2. The `award` vocabulary
+## 2. The `*_award` vocabulary
 
 Awarding portals speak of awards; the wire vocabulary grew up around projects.
 Both spellings are accepted, and each `*_award` form is an exact synonym of the
@@ -138,6 +199,12 @@ You may receive **either** spelling: an agent that sends `create_award`
 produces the same `create_project` instruction internally, and that canonical
 form is what appears in the `command` field of the Job you fetch. Dispatch on
 the canonical name and you will handle both.
+
+Do not read the `*_project` spellings too literally. `create_project` asks you
+to *attach* an award to a project — usually by creating one, but attaching it to
+a project that already exists is equally valid — and `remove_project` asks you
+to *detach* one, leaving the project entirely intact. §4.1.1 and §4.1.2 cover
+each.
 
 ---
 
@@ -174,11 +241,11 @@ A fetched job looks like:
   "changed":       1700000005,
   "expires":       1700000120,
   "version":       2,
-  "command":       "aip1.bridge.isambard-ai get_award myproj.ukri",
+  "command":       "site.bridge.cluster1 get_award myaward1.allocator",
   "state":         "Pending",
   "result":        null,
   "result_type":   null,
-  "forwarded_for": "ukri.aip1.isambard-ai"
+  "forwarded_for": "allocator.site.cluster1"
 }
 ```
 
@@ -190,7 +257,7 @@ A fetched job looks like:
 `command` is the destination path followed by the instruction. Parse the
 instruction rather than the whole string: in Python, `job.instruction.command`
 gives the verb (`get_award`) and `job.instruction.arguments` the argument list
-(`["myproj.ukri"]`).
+(`["myaward1.allocator"]`).
 
 ### 3.2 Responding
 
@@ -210,7 +277,7 @@ Note the double encoding: `result` is a JSON **string containing JSON**. A
 
 ```json
 "state": "Complete",
-"result": "\"myproj.ukri:grp001\"",
+"result": "\"myaward1.allocator:myproject1.site\"",
 "result_type": "ProjectMapping"
 ```
 
@@ -403,20 +470,84 @@ you need to answer.
 
 | Instruction | Arguments | Must return | Wire form |
 |-------------|-----------|-------------|-----------|
-| `create_project` / `create_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
-| `update_project` / `update_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
-| `remove_project` / `remove_award` | `<project_id>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
+| `create_project` / `create_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
+| `update_project` / `update_award` | `<project_id> <AwardDetails JSON>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
+| `remove_project` / `remove_award` | `<project_id>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
 | `get_project` | `<project_id>` | `AwardDetails` | object |
 | `get_award` | `<project_id>` | `AwardDetails` | object |
 | `get_awards` / `list_awards` | `<portal_id>` | `Vec<AwardDetails>` | array of objects |
 | `get_projects` | `<portal_id>` | `Vec<ProjectMapping>` | array of **strings** |
-| `get_project_mapping` | `<project_id>` | `ProjectMapping` | `"myproj.ukri:grp001"` |
+| `get_project_mapping` | `<project_id>` | `ProjectMapping` | `"myaward1.allocator:myproject1.site"` |
 
 Notes:
 
-* **`ProjectMapping`** is `<project_id>:<local_group>` — the identifier the
-  awarding portal used, paired with whatever you call that project locally. It
-  is a string, not an object.
+* **`ProjectMapping`** is `<their project id>:<your project id>` — a string,
+  not an object, and the most important thing you return. See §4.1.1.
+#### 4.1.1 The mapping is where the two sides agree what to call a thing
+
+The awarding portal knows the award as `myaward1.allocator`. You create something
+for it and know that as, say, `myproject1.site`. Neither side can guess the other's
+name, and until they have been exchanged there is no way to say "that award" and
+"that project" and mean the same object.
+
+The `ProjectMapping` you return is that exchange. **Its second half is your own
+`ProjectIdentifier` for the award** — a full `<project>.<your-portal>`
+identifier in your namespace, naming the project you created *on the resource
+the award came in through* (§1.3), not a bare group name:
+
+```
+myaward1.allocator:myproject1.site
+```
+
+Once you have returned it, the award ID and the project ID are two names for one
+thing at this interface, and both sides hold the pair.
+
+**Deciding it is part of attaching.** You cannot answer with a mapping before
+the award is attached to a project, which is exactly why an award still awaiting
+approval answers with `ManagedProjectPendingError` instead (§3.3) — there is no
+honest identifier to put in the second half yet.
+
+**One project holds at most one award at a time.** The relationship is
+one-to-one while it lasts, so do not return the same project identifier for two
+different awards. You may *move* an award to a different project whenever your
+own records say so: return the new identifier in the mapping and the allocator
+picks it up on its next request, which frees the previous project to be attached
+to something else.
+
+**This is also the join for everything else.** Your accounting records usage
+against `myproject1.site` and has never heard of `myaward1.allocator`; the awarding
+portal asks `get_usage_report myaward1.allocator` and has never heard of
+`myproject1.site`. The mapping is what lets you answer. In practice: build the
+report against your own identifier, because that is the namespace the figures
+were recorded in, and then translate it — in Python,
+`report.remap_project(their_id)` rewrites the project and rebuilds every
+`UserIdentifier` with it, so `alice.myproject1.site` becomes `alice.myaward1.allocator`
+while the member's email stays as it is.
+
+**The rules on the identifier you return.** Its project component — the part
+before the `.` — is one component of a `ProjectIdentifier`, so it must be:
+
+| | |
+|---|---|
+| Characters | `A-Z`, `a-z`, `0-9`, `_`, `-` |
+| Must not start with | `-` |
+| Length | 1 to 64 characters |
+
+and its portal component must be your own portal's name. Within that the project
+component must uniquely identify the project on your site.
+
+The mapping as a whole is validated as a *mapping target*, which is why the `.`
+separating the two halves is permitted at all; a leading or trailing `.`, or
+`..`, is not. A portal with no identifier scheme of its own may reuse the
+incoming project name, but qualify it with your own portal so the mapping still
+says something.
+
+A practical note for anyone building the operator-facing side of this: ask for
+the project component alone and add the portal yourself. It is the one part of
+the identifier a human cannot usefully vary and can easily mistype, and an
+identifier naming another portal's namespace is not a claim you can make. The
+example does this — see its `approve` endpoint.
+
 * **A mapping is returned only on success.** `create_award` and `update_award`
   answer with a mapping when the award is in place; when it is not, they answer
   with an *error*, and that error is how the outcome is reported. This is not an
@@ -425,10 +556,11 @@ Notes:
   There is nothing truthful it could put in a mapping. See §3.3 for which error
   to raise; `ManagedProjectPendingError` is the one that means "not yet, ask me
   again".
-* **`remove_award` answers with `<project_id>:None`.** The award is gone, so
-  there is no local group left to name; the literal string `None` fills the
-  slot. The same form appears in `get_projects` for an award that has no local
-  project yet.
+* **`remove_award` answers with `<project_id>:None`.** The award is no longer
+  attached to anything, so there is no project of yours left to name; the literal
+  string `None` fills the slot. The same form appears in `get_projects` for an
+  award that has no project yet because nobody has approved it. What removal
+  does and does not end is §4.1.2.
 * **`update_*` is a merge.** Only the fields present in the supplied
   `AwardDetails` change; absent fields keep their current values. `members` and
   `allowed_domains`, when present, replace what you hold wholesale rather than
@@ -451,6 +583,94 @@ portal-to-portal work:
   `members_only`, `roles_only`, `locked`. Honour it — the awarding portal is
   entitled to assume you do.
 
+
+#### 4.1.2 `remove_award` disconnects an award; it does not delete a project
+
+`remove_award` is the counterpart of `create_award`, and it mirrors it exactly:
+`create_award` asks you to *attach* an award to a project, and `remove_award`
+asks you to *detach* it. Neither is about the existence of the project.
+
+**The project survives, and so does everything in it.** Accounts, files,
+membership, the project's own identity: none of it is affected. If your
+implementation of `remove_award` deletes a project, it is wrong — the reference
+implementation is explicit about this, and its handler deletes only the link
+record (`board.py`, `remove_award`: "This will delete the ManagedProject, but
+will not delete the project itself - this just severs the link"). A site that
+wants to wind a project down does so through its own processes, on its own
+schedule, for its own reasons.
+
+What removal ends is the project's ability to **bill usage against that award**.
+
+##### Which award a day is billed to
+
+Billing is per day, and the rule is:
+
+> A project's usage on a given day is billed to the award it was **last attached
+> to on that day**.
+
+Each clause carries weight:
+
+* **"last attached"** — if the attachment changed during a day, the later
+  attachment takes the *whole* day, not the part of it after the handover. So if
+  `myaward1` is attached to `myproject1`, is removed later the same day, and
+  `myaward2` is then attached, the whole of that day's usage for `myproject1` is
+  billed to `myaward2`. A day is indivisible: usage is accounted daily, and
+  splitting one would need per-hour attribution that neither side keeps.
+* **"on that day"** — an award detached *during* a day was attached during it,
+  so it keeps that day. It stops being billed from the following day. This is
+  why removal takes effect **at most the day after** it happens: exactly the day
+  after if nothing replaces the award, and the same day if something does.
+* **A project attached to nothing is billed to nothing.** From the first *whole*
+  day on which a project has no award attached, its usage appears in no report
+  at the awarding portal. The usage is still real and still yours; there is
+  simply no award for it to be attributed to.
+
+##### What this requires of a site portal
+
+Three consequences, and the first is the one that costs data if you get it
+wrong.
+
+* **Removal must not make the award's accrued usage unreportable.** The award
+  still owns every day up to and including its last attached day, and the
+  allocator has not necessarily collected those days yet — the final ones are
+  usually the *least* likely to have been collected. So keep the record and keep
+  the figures.
+
+  Deleting them has a failure mode worse than an error. A `get_usage_report` for
+  an award you have erased returns an **empty** report, and an empty report is
+  vacuously `is_complete` (§4.3) — so you would be telling the allocator that
+  nothing was ever used and that the figure is final. The last days of every
+  removed award would silently disappear. If you cannot report a removed award's
+  usage, fail the request rather than answering empty.
+
+* **A day's attribution is not settled until the day is over.** Attaching an
+  award this afternoon changes who owns this morning. This is a second, separate
+  reason not to infer `is_complete` from the calendar (§4.3), and a reason a day
+  whose attachment changed has to be re-reported to *both* awards — the one
+  that lost it needs to see it go.
+
+* **Store usage against your own project, not against the award.** Which award
+  owns a day is derived from the attachment history when a report is built. Filing
+  usage under "the currently attached award" as it arrives makes re-attribution
+  impossible, because the record of what the day belonged to has been overwritten
+  by the answer.
+
+##### Re-attaching
+
+An award you have detached may be attached again — to the same project or to a
+different one — and an allocator that still holds the award will keep sending
+`create_award` for it every cycle (§3.5). Treat that as a fresh attach request:
+it is a decision for whoever approves awards, not something to resurrect
+automatically. Answering `ManagedProjectPendingError` in the meantime is correct,
+because nothing is wrong and the award may well be attached again;
+`ManagedProjectRejectedError` would tell the allocator to give up on an award
+that is merely waiting.
+
+Keep the earlier attachment periods when you do. An award's history is a *list*
+of periods, not a single "attached since" date, and each period owns its own
+days. Collapsing them loses the days before the latest attachment — which are
+exactly the days already reported and billed.
+
 ### 4.2 Members
 
 | Instruction | Arguments | Must return |
@@ -458,7 +678,7 @@ portal-to-portal work:
 | `get_users` | `<project_id>` | `Vec<UserMapping>` |
 
 A `UserMapping` is `<user_id>:<local_user>:<local_group>`, e.g.
-`alice.myproj.ukri:alice@example.ac.uk:myproj.ukri`.
+`alice.myaward1.allocator:alice@example.ac.uk:myaward1.allocator`.
 
 At the portal layer the member's **email address is the `local_user`** — a
 portal has no Unix accounts to name, and the email is the portal-level
@@ -507,6 +727,10 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
 * **Usage reports are per-day.** A `ProjectUsageReport` holds `reports` keyed by
   date, plus a `users` map from `UserIdentifier` to local username. The
   portal-level `UsageReport` wraps per-project reports keyed by project.
+* **Report against the identifier you were asked about**, not your own. The
+  request names the awarding portal's project, so the answer must too — even
+  though your figures are recorded against your own. §4.1.1 covers the
+  translation.
 * **Storage reports are point-in-time.** The top-level fields of a
   `ProjectStorageReport` are the *latest* snapshot; `daily_reports` holds older
   ones, at most one per date. The date range therefore selects history, not the
@@ -523,6 +747,61 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
   "something is broken". The first is the truth and it is what a caller can act
   on — but since the two requests are independent, choosing the error costs you
   only the storage figures.
+* **A project that is not on this resource reports empty.** A request for a
+  project whose award was created through a *different* offering is a fair
+  question with the answer "nothing was used here" (§1.3). Answer it with an
+  empty report. An awarding portal may ask every offering it knows about which
+  ones hold a given award, and failing the ones that do not would break that
+  sweep for no reason.
+
+#### `is_complete` decides whether you are asked again
+
+`DailyProjectUsageReport` carries an `is_complete` flag, and
+`ProjectUsageReport.is_complete` is true when every day it contains is. It means
+one thing: *these figures will not change.*
+
+The awarding portal acts on it, and the rule is simple:
+
+* **A month you report incomplete is requested again.** Every sync cycle, for as
+  long as the award exists.
+* **A month you report complete is not.** The allocator records the figures and
+  moves on.
+* **The current month is exempt.** It is always re-requested, and an allocator
+  is entitled to disregard a `complete` claim about a month that has not
+  finished — Waldur will not even store one.
+
+So how long you keep being asked about a month is, in part, up to you. Two
+consequences:
+
+* **Reporting a month complete is a claim about the future**, so it is an
+  operations decision rather than something to infer from the calendar. "The day
+  has passed, so it must be settled" is not sound: a scheduler outage, a late job
+  record or a billing correction all move numbers after a month has ended. Only
+  the team running the accounting knows when their pipeline has settled.
+
+  Note which way the two mistakes run. Never reporting a month complete costs
+  one request per sync cycle and nothing else. Reporting one complete too early
+  is the expensive direction — the allocator records what it has and stops
+  asking, so a correction arriving afterwards is never collected.
+* **An empty report is complete vacuously.** `is_complete` is `all()` over the
+  days a report contains, which is true of no days at all — so a month you have
+  not ingested yet answers "nothing was used, and that is final" and will be
+  believed. This is the one way to make the expensive mistake *by accident*. If
+  you have no figures for a month and are not asserting that it is settled,
+  include an explicit zero-usage day that is **not** marked complete.
+* **A day's attribution can change after the day starts.** Which award a day is
+  billed to is decided by the attachment in force during it, and attaching an
+  award part-way through a day takes the whole of it (§4.1.2). So a day whose
+  attachment changed is not settled either, independently of whether its figures
+  are.
+
+> **Current Waldur limitation.** `sync_usage` (`remotebackend.py`) sweeps only a
+> rolling two-month window, `[last_month, this_month]`, and never walks further
+> back — so today a month that leaves that window still incomplete stops being
+> requested rather than being retried. That is a bug on the allocator side, not
+> the contract, and it is being fixed to retry every month from the award's start
+> date until it is reported complete. Implement against the rule above; a site
+> portal that does needs no change when the fix lands.
 
 ### 4.4 What you will not receive
 
@@ -571,22 +850,34 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
    as their `*_project` equivalents (§2).
 5. Authorise against `forwarded_for`, and store records under the full
    awarding-portal identifier (§1.2).
-6. Pick the instructions you will answer; decline the rest with
+6. Read the offering from the request, key your records on
+   `(offering, project_id)`, and scope every answer by it. A project that is
+   not on the requested resource reports empty, not an error (§1.3).
+7. Decide your own `ProjectIdentifier` for an award when you provision it, and
+   return it as the second half of the `ProjectMapping`. It is what the awarding
+   portal joins on, and what your usage figures translate through (§4.1.1).
+8. Pick the instructions you will answer; decline the rest with
    `OpenPortalUnsupportedCommandError` (§4.0). Return the exact type in §4 for
    the ones you keep, and never let a job go unanswered (§3.3).
-7. Fail with the right class — `ManagedProjectPendingError` for "not yet",
+9. Fail with the right class — `ManagedProjectPendingError` for "not yet",
    `ManagedProjectRejectedError` for "no" — because the caller treats them
    completely differently (§3.3).
-8. Make every handler idempotent: `create_award` for an award you already hold
+10. Make every handler idempotent: `create_award` for an award you already hold
    is normal traffic, and duplicate job ids must not do the work twice (§3.5).
-9. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
-   cache (§3.4).
-10. Handle `membership_control` and reject unknown `template` values (§4.1), and
+11. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
+    cache (§3.4).
+12. Report usage against the identifier you were asked about, not your own
+    (§4.1.1, §4.3).
+13. Treat `remove_award` as *detach*, not delete: keep the project, and keep the
+    award's accrued usage reportable for the days it was attached (§4.1.2).
+14. Set `is_complete` deliberately, and never on a month you have no figures
+    for — an empty report is complete vacuously, and the caller will believe it
+    and stop asking (§4.3).
+15. Handle `membership_control` and reject unknown `template` values (§4.1), and
     populate `AwardDetails.members` (§4.2).
-11. Fetch and acknowledge notifications (§5).
+16. Fetch and acknowledge notifications (§5).
 
 ---
-
 ## 7. Source file reference
 
 | Concept | Source file |
@@ -602,7 +893,19 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 | Generated TypeScript definitions for every result type | `greatwestern/bindings/` |
 | The error classes and their wire encoding | `python/src/lib.rs` (`OpenPortalError` and subclasses) |
 
-### 7.1 The reference implementation
+### 7.1 The example portal
+
+[`python/examples/site_portal/`](../../python/examples/site_portal/) implements this
+document — every instruction, the approval path, the retry contract, the
+answer-everything guarantee — in about 400 lines of commented Python, with a
+test suite that drives each handler without needing a bridge. It is written to be
+read rather than deployed, and its README is explicit about what a production
+portal would have to add.
+
+Start there if you are implementing this contract. Then read
+`waldur-mastermind` below for what it looks like at full size.
+
+### 7.2 The production implementation
 
 `waldur-mastermind` implements this contract on both sides, in
 `src/waldur_openportal/` (branch `feature_airrportal`). It is the most useful

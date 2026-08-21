@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **An example site portal** ([python/examples/site_portal/](python/examples/site_portal/)):
+  a complete, small, heavily commented implementation of
+  [site-portal-api.md](docs/specifications/site-portal-api.md) - every
+  instruction as one function, the approval path, the retry contract, and the
+  answer-everything guarantee - behind a FastAPI application, with a test suite
+  that drives every handler without a bridge, an agent or a network.
+
+  It is written to be **read, not deployed**, and its README is explicit about
+  what it deliberately lacks: no authentication on its operator API, no real
+  state storage, no durability. The point is the shape, and in particular the
+  five things that are easy to get wrong and hard to discover - failing being a
+  normal answer and *which* failure mattering, idempotency under retries, never
+  leaving a job unanswered, a thirty-second budget rather than two minutes, and
+  that a portal may implement as much or as little of the contract as it wants.
+
+  Nothing in it is Python-specific except the convenience of the module, so an
+  equivalent in another language belongs alongside it.
+
+- **`AwardDetails()` with no arguments** gives an empty award to fill in with the
+  setters, which is what code building one from scratch wants.
+  `AwardDetails(json)` is unchanged - the default argument is exactly the `"{}"`
+  that produced an empty award before, so no existing caller behaves differently.
+
 - **Structured errors on the wire.** A job's failure was a `String`, so every
   agent that wanted to *act* on one rather than log it had to parse prose - and
   crossing an agent boundary flattened whatever the failing agent had known. A
@@ -46,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   message, with prose-parsing kept only as the fallback for an older peer, and
   `job.error_kind` exposes the raw kind for anything the class hierarchy does
   not cover.
+
 - **`ProjectStorageReport.to_storage_report()`**, the mirror of
   `ProjectUsageReport.to_usage_report()`. A portal answering
   `get_storage_reports` builds one project report at a time and has to lift each
@@ -79,6 +103,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
 
+- **A specification of what a connected site portal must implement**
+  ([docs/specifications/site-portal-api.md](docs/specifications/site-portal-api.md)):
+  the requests that arrive on the bridge board, the exact result type each one must
+  return, the two-minute answering deadline, and how portal-to-portal working hangs
+  together - offerings, the `forwarded_for` tag that identifies the awarding portal,
+  and the fact that identifiers name that portal rather than the local one. Written
+  to be handed to someone connecting a new portal; `bridge-api.md` continues to
+  specify the HTTP transport itself.
+
+- `remove_award` is accepted as a synonym for `remove_project`, completing the
+  `*_award` spellings alongside `create_award` and `update_award`.
+
+- `freeipa-write-server`, `freeipa-replication-window` and
+  `freeipa-concurrent-writes` options for `op-freeipa`,
+  and [scripts/check-replication-conflicts.sh](scripts/check-replication-conflicts.sh)
+  to find LDAP replication conflicts that already exist in a directory. Both are part
+  of the fix below.
+
+### Changed
+
+- **`op-localaccount` now disables an account on removal rather than deleting it**, as
+  `op-freeipa` already did. `userdel` freed the account's uid, so a later re-add could
+  allocate a different one and leave every file the user owned - including the home
+  directory `op-filesystem` had recycled rather than deleted - belonging to a uid its
+  owner no longer had, or to whoever the old uid was issued to next. Removal now adds
+  the user to a `{managed-group}.removed` group, strips their supplementary groups, and
+  locks *and* expires the account; `add_user` re-enables an account it finds in that
+  state. Being locked and expired matters: `usermod -L` alone only stops password
+  authentication and leaves SSH keys working.
+
+  The removed group is separate from the blocked group, so a blocked user stays blocked
+  across a remove and re-add, and an operator can tell why an account is disabled. The
+  supplementary groups are stripped because `sync_groups` appends and never removes, so
+  a re-enabled user would otherwise get back the access they had before rather than what
+  they are entitled to now - the same reasoning `op-freeipa` applies. The `userdel`
+  configuration option is gone, being unused.
+
+- **`op-localaccount` no longer creates the home directory** (`useradd -m` is dropped).
+  Home directories belong to `op-filesystem`, which creates them and recycles rather
+  than deletes them, and this matches `op-freeipa`, whose `user_add` likewise only
+  records the attribute. The empty home that `useradd -m` created was enough to stop the
+  recycled one being restored - see below.
+
 ### Removed
 
 - **`op-cloudaccount` and `op-cloudportal`.** Both were prototypes written to give
@@ -87,7 +154,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   an agent, which is not where OpenPortal state belongs. The same need is met
   without either agent: the operators run a stock `op-portal` and `op-bridge` and
   put their own software behind the bridge, holding that state on their side of it.
-  [project-portal-api.md](docs/specifications/project-portal-api.md) specifies what
+  [site-portal-api.md](docs/specifications/site-portal-api.md) specifies what
   that software has to implement. The archived design documents are kept, marked
   withdrawn, as a record of the reasoning.
 
@@ -97,14 +164,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- A job failure whose `kind` has no exception class of its own no longer loses
+  the class its message names. `OpenPortalError` raised by a portal came back as
+  `OpenPortalOtherError`, because the kind-first path flattened everything it
+  could not place; it now defers to the message in that case, which is what the
+  older prose-only path always did.
+
 - **`AwardDetails.set_allowed_domains([])` meant the opposite of what it said.**
   The setter normalised an empty list to `None`, so the strictest setting a
   caller could ask for - permit nobody - silently became the most permissive
   one, permit everybody. The failure was invisible and it widened access:
 
   ```python
-  d.allowed_domains = []          # intent: nobody may join
-  d.is_domain_allowed("evil.com") # -> True
+  d.allowed_domains = []  # intent: nobody may join
+  d.is_domain_allowed("evil.com")  # -> True
   ```
 
   `allowed_domains` has three distinct states and both `json-types.md` and
@@ -126,6 +199,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   still changes nothing. The fields that accumulate on merge are `notes` (an
   audit trail) and `breakdown`, and they still do; `add_allowed_domain` remains
   the incremental path for a portal building a list up locally.
+
 - Documentation: `python-api.md` listed a `Status.expired()` that does not
   exist - expiry is not one of the six job states, and is read from
   `job.is_expired` - and omitted `Status.created()`, which does.
@@ -135,6 +209,126 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `RuntimeError{…}` was correct. Both reached the portal with doubled braces, so
   a portal matching the documented `ExpirationError{}` never matched. They now
   say what they are documented to say.
+
+- **OpenPortal was creating LDAP replication conflicts in multi-master FreeIPA
+  topologies.** A site reported 67 `namingConflict` entries accumulated over 11
+  months - 29 project groups, 19 users and their 19 server-generated private groups -
+  every one on an object created by OpenPortal, and two of the affected accounts had
+  home directories owned by the UID of the copy replication later discarded.
+
+  The write paths were already idempotent (FreeIPA's `DuplicateEntry` is treated as
+  "it exists", not as a reason to retry). The cause was that `get_connected_server`
+  chose a server at random for *every* call, so an existence check and the add that
+  depended on it were served by the same master only 1/n of the time - and a master
+  that has not yet received a recent add reports that the user does not exist. Three
+  changes:
+
+  - Writes, and the reads that decide whether to write, now all go to one server
+    (`freeipa-write-server`, defaulting to the first configured). Failover happens
+    only once that server is *confirmed* down - a refused connection, a rejected or
+    timed-out login, or a run of unanswered calls, but never one timeout on its own,
+    since that is indistinguishable from a write that landed and whose response was
+    lost - and not until `freeipa-replication-window` (30s) has passed, so anything it
+    accepted has had time to reach whichever master takes over.
+    Failover elects a single replacement in configuration order rather than spreading
+    writes over what is left, and reverts only once the original has been up again for
+    a full window: a server that has just come back may not have caught up with what
+    stood in for it, which would create the same conflict from the other direction.
+  - Before concluding that a user or group does not exist, every configured master is
+    asked, not just the one the pool happened to hand us. This also covers the case
+    the report described, where an add times out but has in fact landed.
+  - Group creation takes a per-group mutex, mirroring the existing per-user one. Two
+    `add_user` jobs for different users in one project both need that project's group
+    and are not duplicates of each other to the job Board, so they raced.
+
+  Writes have connections of their own - `freeipa-concurrent-writes`, default 2, on
+  whichever server currently holds the role - so write concurrency follows the write
+  server across a failover and can be raised without also multiplying the connections
+  reads share. Concurrency against a single master is safe; it is only two masters
+  accepting the same add that cannot be reconciled.
+
+  Every `freeipa-server` entry must name an individual master for this to hold: a VIP
+  or a round-robin DNS alias is several masters behind one name.
+
+- **A 401 from FreeIPA could hang a job until its deadline.** The replay path
+  reconnected - possibly to a different server - but reused the URL built from the
+  original one, so it posted the new server's session cookie to the old server, which
+  401s again. The URL is now rebuilt from the server actually being addressed, and the
+  replay is bounded.
+
+- **An empty home directory stopped a recycled one from being restored.** `create_dir`
+  treated any existing directory as the finished article, so an account agent that
+  creates a home when it creates the account left `op-filesystem` looking at an empty
+  directory and declining to restore the recycled one holding the user's real files.
+
+  An existing directory no longer wins automatically: if a recycled copy is waiting and
+  what is here holds nothing real, the recycled one is preferred. "Nothing real" is
+  strict - any non-hidden entry, or any hidden entry that is not a regular file, and the
+  existing directory is kept and the recycled copy left alone. Only hidden regular files
+  (the `/etc/skel` copies) are removed, one at a time, each logged, before a
+  non-recursive `remove_dir`; `EXPECTED_SKEL_FILES` names the unsurprising ones so
+  anything else is logged loudly rather than passing silently. Nothing here can remove a
+  subtree even if those checks are ever wrong.
+
+- **A directory restored from `.recycle` kept its old ownership.** Restoring moved the
+  directory back and stopped there, so a user volume restored for an account that had
+  been deleted and recreated came back owned by the *old* uid - which that user no
+  longer has, and which may since have been reassigned to somebody else. This is a
+  `op-localaccount` pairing in particular: it runs `userdel` where `op-freeipa`
+  disables the account, so the uid is freed and a later `useradd` need not get it back.
+
+  A restore now checks the ownership of what it restored and, if it is wrong, warns
+  loudly and corrects it - on a file descriptor opened `O_NOFOLLOW`, as directory
+  creation already did (finding R33). A restored *symlink* is reported and left alone
+  rather than chowned, since chowning it would transfer ownership of its target. Only
+  the directory itself is corrected: its contents still carry the old ownership, and
+  walking a tree of unbounded size does not belong inside a job with an answering
+  deadline, so the warning names both id pairs and says plainly that a recursive chown
+  may still be needed.
+
+- **`op-filesystem` intermittently failed to resolve users and groups that exist.**
+  Jobs failed with `Could not find a group called <name>` or `Could not search for
+  group <name>: EIO: I/O error` for groups that `getent group` on the same node
+  resolved correctly seconds earlier.
+
+  Both messages came from resolving names through libc (`nix::unistd::User::from_name`
+  and `Group::from_name`, i.e. `getpwnam_r`/`getgrnam_r`). Release binaries are
+  statically linked against **musl**, which has no NSS implementation: those calls read
+  `/etc/passwd` and `/etc/group` and, on a miss, make a single attempt over musl's own
+  minimal `nscd`-protocol client. There is no `nsswitch.conf`, no `sss` module and no
+  fallback, so a directory-backed group was invisible whenever `nscd` was not running -
+  musl reports a failed `connect()` as *not found* rather than as an error - and
+  reported `EIO` whenever the `nscd` exchange did not complete cleanly, which a
+  saturated `nscd` thread pool produces. Neither case ever reached SSSD, which is why
+  its logs showed nothing during a failure.
+
+  All name resolution now goes through the host's `getent` (`filesystem/src/nameservice.rs`),
+  a glibc-dynamic binary that consults every source in `nsswitch.conf` whether or not
+  `nscd` is healthy. Being a `tokio::process` call, it also no longer performs blocking
+  FFI on a Tokio worker thread. Dynamic linking would not have fixed this: the
+  limitation is musl's, not the linker's.
+
+  Which `getent` is used is decided once, on first use, and logged: `/usr/bin/getent`
+  if it exists, otherwise the first one found on the absolute entries of `PATH`, saved
+  as an absolute path. That one is then used for the life of the process. If it stops
+  being runnable the agent says so and lookups fail as indeterminate until it returns,
+  rather than silently resolving names through some other program - a `getent`
+  appearing or disappearing under a running agent means something is wrong with the
+  host, not that a different binary should be picked up.
+
+- **A name that could not be looked up was reported as a name that does not exist.**
+  The two are now distinguished. A genuine absence - every source on the host was asked
+  and none knows the name - fails immediately and says so. An indeterminate lookup
+  (`getent` timing out, being killed, exiting non-zero for any reason other than
+  "key not found", or returning something unparseable) is retried with a short backoff
+  and then reported as a temporary failure that can be retried, rather than as a
+  missing user or group. Lookups also carry a timeout, so an unresponsive name service
+  can no longer pin a task indefinitely as the libc call it replaces could.
+
+  `op-filesystem`'s Lustre quota engine had a second, separate copy of this logic
+  (`id -u` and `getent group`, with a `/etc/group` fallback that treated a local miss
+  as authoritative). It now shares the one implementation.
+
 - **A portal could not report its members.** `get_users` returns each member's email
   address as the `UserMapping` local user - the portal-level equivalent of a Unix
   username - but mapping validation rejected `@`, so every such mapping failed to
@@ -149,8 +343,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   filesystem path accepts the wider charset. `local_group` is unchanged: it names a
   Unix group at every layer.
 
-  This also fixes `op-cloudportal`'s `get_users`, which was constructing exactly such
-  a mapping and could never have succeeded.
 - Documentation errors in [docs/specifications/json-types.md](docs/specifications/json-types.md):
   `get_projects` returns `Vec<ProjectMapping>` (not `Vec<ProjectDetails>`), `get_users`
   returns `Vec<UserMapping>` (not `Vec<UserIdentifier>`), and `get_project` returns
@@ -221,9 +413,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   billed total; `Allocation` accepted `"NaN"` and `"inf"`. Release builds now set
   `overflow-checks = true`.
 - Boards, jobs, caches, nonce stores, connection slots and message sizes are all now
-  bounded - previously a peer could grow each without limit. Slurm and FreeIPA cache
-  eviction is targeted rather than wholesale, so a stale entry no longer forces every
-  project to re-query `slurmctld`.
+  bounded - previously a peer could grow each without limit. The Slurm caches evict
+  individual entries rather than flushing, so one entry reaching the cap no longer
+  forces every project to re-query `slurmctld`; the FreeIPA caches deliberately do
+  flush wholesale, since a miss there is a cheap re-query.
 - A stalled handshake held its connection slot indefinitely; there was no WebSocket
   message size limit; the message-exchange overload recovery was dead code.
 - Mapping targets permitted whitespace and separators; `PortalIdentifier` never

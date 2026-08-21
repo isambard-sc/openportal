@@ -203,16 +203,16 @@ the OpenPortal network. Covers:
 
 ---
 
-### [project-portal-api.md](project-portal-api.md)
-**What a connected project portal must implement**
+### [site-portal-api.md](site-portal-api.md)
+**What a connected site portal must implement**
 
 The contract the portal software behind a bridge has to meet, written for
-someone connecting a *new* project portal (e.g. Waldur) to an OpenPortal
+someone connecting a *new* site portal (e.g. Waldur) to an OpenPortal
 network. Where [bridge-api.md](bridge-api.md) specifies the HTTP transport,
 this specifies the obligations: which requests arrive on the bridge board,
 the exact result type each one must return, and the deadlines for answering.
 Covers portal-to-portal working — how an awarding portal creates and queries
-awards on a project portal, how offerings make that addressable, and how
+awards on a site portal, how offerings make that addressable, and how
 `forwarded_for` identifies who is asking.
 
 ---
@@ -249,7 +249,7 @@ The complete configuration reference for every agent type. Covers:
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  Portal software (Python, Django, …)                     │
-│    obligations   project-portal-api.md                   │
+│    obligations   site-portal-api.md                   │
 │    ↕  bridge-api.md                                      │
 ├──────────────────────────────────────────────────────────┤
 │  Instruction text protocol   instruction-protocol.md     │

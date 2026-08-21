@@ -22,6 +22,13 @@ maturin develop -m python/Cargo.toml
 
 This installs the `openportal` module into the current Python environment.
 
+## A worked example
+
+[`python/examples/site_portal/`](../../python/examples/site_portal/) is a complete, small,
+heavily commented site portal built on this module - the two `signal_url`
+endpoints, every instruction handler, and a test suite that runs without a
+bridge. It is the fastest way to see how the pieces below fit together.
+
 ## Initialisation
 
 Before calling any other function you must load the bridge configuration
@@ -401,6 +408,16 @@ job commands.
 returns the dot-path. Supports `==` / `!=` against another `Destination` or a
 plain string. Usable as a `dict` key or in a `set`.
 
+| Property | Type | Description |
+|---|---|---|
+| `agents` | `list[str]` | The path split into agent names |
+
+`agents` is how a portal reads the two ends that matter on a bridge-board job:
+for a `forwarded_for` of `allocator.site.cluster1`, `agents[0]` is the awarding
+portal that asked (`allocator`) and `agents[-1]` is the offering it came in
+through (`cluster1`). See
+[site-portal-api.md §1.2](site-portal-api.md).
+
 ---
 
 ### `UserIdentifier`
@@ -418,6 +435,11 @@ the OpenPortal network.
 
 A pair `project.portal` that uniquely identifies a project.
 
+Each component must be 1 to 64 characters of `A-Za-z0-9_-` and must not start
+with `-`; anything else raises `OSError`. So `myproject1`, `MyProject_1` and
+`my-project` are valid components, while `my.project`, `my project` and `-lead`
+are not.
+
 `ProjectIdentifier("myproject.myportal")` constructs from a string.
 `str(pid)` returns the dot-pair. Supports `==` / `!=` against another
 `ProjectIdentifier` or a plain string. Usable as a `dict` key or in a `set`.
@@ -434,6 +456,182 @@ plain string. Usable as a `dict` key or in a `set`.
 
 ---
 
+### `ProjectMapping`
+
+The pairing of two portals' names for the same thing:
+`<their project id>:<our project id>`, e.g. `"myaward1.allocator:myproject1.site"`.
+
+**This is a string, not an object**, and it is what `create_award`,
+`update_award`, `remove_award` and `get_project_mapping` must return — see
+[site-portal-api.md §4.1.1](site-portal-api.md), which explains why it
+matters.
+
+| Property | Type | Description |
+|---|---|---|
+| `project` | `ProjectIdentifier` | The identifier the awarding portal used |
+| `local_group` | `str` | The receiving portal's own identifier for it |
+
+`ProjectMapping("myaward1.allocator:myproject1.site")` constructs from a string, and
+raises `OSError` if either half is invalid. `str(m)` returns the pair. Supports
+`==` / `!=` against another `ProjectMapping`.
+
+The second half is named `local_group` for historical reasons — elsewhere in the
+network it does name a Unix group — but at the portal layer it is the receiving
+portal's own `ProjectIdentifier`, a full `<project>.<their-portal>`. It is the
+join key: usage recorded against it is reported against the *first* half, and
+`ProjectUsageReport.remap_project` is the translation. It is restricted to
+`A-Za-z0-9._-` (no leading `-`, no leading or trailing `.`, no `..`).
+
+`remove_award` answers with the literal `None` in this slot, since there is no
+project of the receiving portal's left to name.
+
+---
+
+### `UserMapping`
+
+The pairing of a user identifier with their local account and group:
+`<user_id>:<local_user>:<local_group>`, e.g.
+`"alice.myproject.myportal:alice@example.ac.uk:myproject.myportal"`. Also a
+string rather than an object, and the return type of `get_users`.
+
+| Property | Type | Description |
+|---|---|---|
+| `user` | `UserIdentifier` | The portal-level user identifier |
+| `local_user` | `str` | The local account name, **or an email address** |
+| `local_group` | `str` | The local group |
+
+`UserMapping("alice.p.portal:alice@example.ac.uk:p.portal")` constructs from a
+string. `str(m)` returns the triple. Supports `==` / `!=`.
+
+At the portal layer the member's **email address is the `local_user`** — a
+portal has no Unix accounts to name. This is supported explicitly, and the
+address grammar is deliberately narrower than RFC 5321: local part from
+`A-Za-z0-9._+-`, then a hostname of at least two labels, because the same field
+carries Unix account names elsewhere in the network. A mapping whose address
+does not fit is rejected outright, so substitute a sanitised form rather than
+letting a whole `get_users` response fail.
+
+---
+
+### `Allocation`
+
+A quantity of compute granted to an award — a size paired with a unit, e.g.
+`"1000 GBH"`. Carried by `AwardDetails.allocation`.
+
+**Constructors:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `Allocation` | `() → Allocation` | An empty allocation |
+| `from_size_and_units` | `(size: float, units: str) → Allocation` | *(static)* From a number and a unit name |
+| `parse` / `from_string` | `(allocation: str) → Allocation` | *(static)* From a string such as `"1000 GBH"` |
+| `from_node_hours` … `from_billing_hours` | `(usage: Usage, node: Node) → Allocation` | *(static)* Convert a `Usage` against a `Node`'s shape. One per unit family: `node`, `cpu`, `core`, `gpu`, `gb`, `billing` |
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `size` | `float \| None` | The numeric size |
+| `units` | `str \| None` | The canonical unit name |
+| `is_empty` | `bool` | `True` if no size or units are set |
+| `is_node_hours`, `is_cpu_hours`, `is_core_hours`, `is_gpu_hours`, `is_gb_hours`, `is_billing_hours` | `bool` | Which unit family this allocation is in |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `to_node_hours` | `(node: Node) → Usage` | Convert to a `Usage` against a node's shape |
+| `canonicalize` | `(units: str) → str` | *(static)* The canonical spelling of a unit name |
+
+The recognised units, and what each `is_*` predicate matches:
+
+| Canonical | Also accepted | Predicate |
+|---|---|---|
+| `NHR` | `node hours`, `node hour`, `nhr` | `is_node_hours` |
+| `CPUHR` | `cpu hours`, `cpu hour`, `cpuhr` | `is_cpu_hours` |
+| `COREHR` | `core hours`, `core hour`, `corehr` | `is_core_hours` |
+| `GPUHR` | `gpu hours`, `gpu hour`, `gpuhr` | `is_gpu_hours` |
+| `GBHR` | `gb hours`, `gb hour`, `gbhr` | `is_gb_hours` |
+| `BHR` | `billing hours`, `billing hour`, `bhr` | `is_billing_hours` |
+
+Matching is case-insensitive, and **an unrecognised unit is not an error** — it
+is stored lower-cased and every predicate returns `False` for it. So
+`from_size_and_units(100, "GBH")` (note the missing `R`) yields a valid
+`Allocation` in units `"gbh"` that nothing recognises. Check
+`Allocation.canonicalize(units)` against the table if you accept unit names from
+elsewhere.
+
+`str(a)` returns the size and units. Supports `==` / `!=`.
+
+---
+
+### `DateRange`
+
+An inclusive span of dates, and the second argument to every report
+instruction. `str(r)` returns the wire form, which is either an explicit range
+or one of the keywords below.
+
+**Constructors:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `DateRange` | `(start_date: date, end_date: date) → DateRange` | An explicit range |
+| `parse` | `(date_range: str) → DateRange` | *(static)* From the wire form, including the keywords |
+| `today`, `yesterday`, `tomorrow` | `() → DateRange` | *(static)* Single-day ranges |
+| `this_week`, `last_week`, `next_week` | `() → DateRange` | *(static)* |
+| `this_month`, `last_month`, `next_month` | `() → DateRange` | *(static)* |
+| `this_year`, `last_year`, `next_year` | `() → DateRange` | *(static)* |
+| `week`, `month`, `year` | `(date: date) → DateRange` | *(static)* The week/month/year containing `date` |
+
+**Properties (read-only):**
+
+| Property | Type | Description |
+|---|---|---|
+| `start_date`, `end_date` | `date` | The bounds, inclusive |
+| `start_time`, `end_time` | `datetime` | The bounds as UTC instants |
+| `days` | `list[date]` | Every date in the range |
+| `months`, `weeks`, `years` | `list[DateRange]` | The range split into whole months, weeks or years — useful for querying a per-month accounting store, as the reference portal does |
+
+When the argument is omitted from a report instruction the grammar fills in
+`this_week`, so a handler always receives one.
+
+---
+
+### `Link`
+
+A reference to something outside OpenPortal — an award record, a funding call, a
+project page. Carried by `AwardDetails.award`, `.call`, `.project_link` and
+`.renewal`.
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | `str \| None` | An identifier in the far system |
+| `url` | `str \| None` | A URL |
+
+`Link()` constructs an empty one; both fields have setters and a
+`clear_id()` / `clear_url()`. `is_empty()` returns `True` when neither is set.
+Supports `==` / `!=`.
+
+---
+
+### `Note`
+
+A timestamped, attributed comment on an award. `AwardDetails.notes` is a list of
+these, and it is the one field `merge` **accumulates** rather than replaces —
+it is an audit trail, so notes from both sides survive a merge, de-duplicated
+and sorted by timestamp.
+
+| Property | Type | Description |
+|---|---|---|
+| `timestamp` | `datetime` | UTC, set at construction |
+| `author` | `str` | Who wrote it |
+| `text` | `str` | What it says |
+
+`Note("alice@example.com", "approved by the allocation panel")` constructs one.
+Supports `==` / `!=`.
+
+---
+
 ### `AwardDetails`
 
 Details about an award (and the project it creates), including the project
@@ -442,6 +640,20 @@ See [json-types.md](json-types.md) for the full JSON schema.
 
 `openportal.ProjectDetails` is an alias for `AwardDetails` for backward
 compatibility; both refer to the same class.
+
+**Constructors:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `AwardDetails` | `(details: str = "{}") → AwardDetails` | Parse from JSON. With no argument, an empty award to fill in with the setters below. Raises `OSError` on malformed JSON. |
+| `from_json` | `(json: str) → AwardDetails` | *(static)* Same as passing JSON to the constructor. |
+
+**Methods:**
+
+| Method | Signature | Description |
+|---|---|---|
+| `to_json` | `() → str` | Serialise to a JSON string. |
+| `merge` | `(other: AwardDetails) → AwardDetails` | Return a copy with `other`'s set fields applied over this one's. Fields absent from `other` are left alone; `members` and `allowed_domains` are **replaced** wholesale when present, while `notes` and `breakdown` accumulate. Raises `OSError` if the two name different templates. |
 
 **Member management methods:**
 
@@ -576,7 +788,7 @@ date. Arithmetic operators (`+`, `+=`) are supported.
 | `daily_reports` | `(with_usage_only: bool = True) → list[DailyProjectUsageReport]` | Return the daily reports sorted by date. If `with_usage_only=True` (default), only days with non-zero usage are returned; pass `False` to include all days. |
 | `in_hours` | `() → str` | Return a multi-line human-readable string with all usage values expressed in hours, including per-user breakdowns, job counts, and average wait times. |
 | `filter` | `(range: DateRange) → ProjectUsageReport` | Return a copy of this report containing only days that fall within `range` (inclusive on both ends). |
-| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. |
+| `remap_project` | `(new_project: ProjectIdentifier) → None` | Replace the project identifier and rebuild all `UserIdentifier` keys so that `username.old_project.old_portal` becomes `username.new_project.new_portal`. This is how a portal answers a request about *their* project with figures recorded against *its own* — see [site-portal-api.md §4.1.1](site-portal-api.md). Local usernames are unchanged. |
 | `remap_portal` | `(new_portal: PortalIdentifier) → None` | Swap the portal while keeping each project name unchanged, e.g. `project.portal` → `project.new_portal`. |
 | `remap_users` | `(new_usermapping: dict[UserIdentifier, str]) → None` | Update local username strings for the specified users. Raises `OSError` if the remapping would merge two distinct users into the same local username. |
 
@@ -593,7 +805,7 @@ active projects. Arithmetic operators (`+`, `+=`) are supported.
 
 | Property | Type | Description |
 |---|---|---|
-| `portal` | `PortalIdentifier` | The portal this report covers |
+| `site` | `PortalIdentifier` | The portal this report covers |
 | `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
 | `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
 
@@ -703,7 +915,7 @@ aggregate of `ProjectStorageReport` objects for all active projects.
 
 | Property | Type | Description |
 |---|---|---|
-| `portal` | `PortalIdentifier` | The portal this report covers |
+| `site` | `PortalIdentifier` | The portal this report covers |
 | `projects` | `list[ProjectIdentifier]` | Sorted list of projects with reports |
 | `user_mapping` | `dict[UserIdentifier, str]` | Combined portal user → local username map across all contained project reports |
 
@@ -775,7 +987,7 @@ job = job.errored(openportal.ManagedProjectPendingError("awaiting approval"))
 openportal.send_result(job)
 
 # Reading a job you submitted — the same class comes back
-job = openportal.run("ukri.aip1.isambard-ai create_award myproj.ukri {…}", max_ms=30_000)
+job = openportal.run("allocator.site.cluster1 create_award myaward1.allocator {…}", max_ms=30_000)
 
 if job.is_error:
     match job.error:
@@ -800,9 +1012,9 @@ predates it — so the class you catch is the class that was raised, not a guess
 this module has no class for (it arrives as `OpenPortalOtherError` with its text
 intact). The kinds are listed in [json-types.md](json-types.md).
 
-Which error a project portal should return, and what an awarding portal does
+Which error a site portal should return, and what an awarding portal does
 with each, is specified in
-[project-portal-api.md §3.3](project-portal-api.md).
+[site-portal-api.md §3.3](site-portal-api.md).
 
 ---
 

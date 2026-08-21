@@ -12,11 +12,11 @@
 //! stays pending and treats the second as final, so getting them the wrong way
 //! round either strands an award that only needed approving, or retries forever
 //! against a decision that will never change. See
-//! `docs/specifications/project-portal-api.md` §3.3.
+//! `docs/specifications/site-portal-api.md` §3.3.
 //!
 //! # Why prose is still parsed
 //!
-//! A project portal is not an OpenPortal agent - it is Waldur, or a script,
+//! A site portal is not an OpenPortal agent - it is Waldur, or a script,
 //! answering over the bridge's HTTP API, and it reports a failure as a string.
 //! [`classify`] is the one place that string becomes a kind. New portals should
 //! keep sending the same class names; they are the stable, specified form.
@@ -35,7 +35,7 @@ pub mod kind {
     pub const AWARD_PERMISSION: &str = "award_permission";
 }
 
-/// The class-name prefixes a project portal reports failures with, and the
+/// The class-name prefixes a site portal reports failures with, and the
 /// kind each maps to.
 ///
 /// Ordered so that a subclass is tried before the base it shares a prefix with:

@@ -1573,7 +1573,7 @@ impl Job {
     /// one of the classes in `openportal` (`ManagedProjectPendingError`,
     /// `ManagedProjectRejectedError`, ...). An exception is encoded as
     /// `"<ClassName>: <message>"` so the awarding portal can recover which
-    /// class it was; see `docs/specifications/project-portal-api.md` §3.3.
+    /// class it was; see `docs/specifications/site-portal-api.md` §3.3.
     fn errored(&self, error: &Bound<'_, PyAny>) -> PyResult<Job> {
         let message = if error.is_instance_of::<pyo3::exceptions::PyBaseException>() {
             errors::from_exception(error)?
@@ -4813,7 +4813,15 @@ struct AwardDetails(grammar::AwardDetails);
 #[gen_stub_pymethods]
 #[pymethods]
 impl AwardDetails {
+    /// Construct an `AwardDetails`, optionally from JSON.
+    ///
+    /// `AwardDetails()` gives an empty one to fill in with the setters, which is
+    /// what code building an award from scratch wants. `AwardDetails(json)`
+    /// parses the supplied JSON, as it always has - the default argument is
+    /// exactly the empty object that produces an empty award, so no existing
+    /// caller changes behaviour.
     #[new]
+    #[pyo3(signature = (details = "{}"))]
     fn new(details: &str) -> PyResult<Self> {
         match grammar::AwardDetails::parse(details) {
             Ok(project_details) => Ok(Self(project_details)),

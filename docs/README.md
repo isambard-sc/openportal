@@ -228,6 +228,19 @@ The [bridge](bridge) example demonstrates how to connect the OpenPortal
 agent network to portal software written in Python using the `op-bridge`
 agent and the `openportal` Python library.
 
+### Example 5: a site portal
+
+The [site_portal](../python/examples/site_portal) example is a complete, small
+implementation of the *other* direction: the requests OpenPortal sends **to**
+portal software, which a portal must answer. It implements
+[site-portal-api.md](specifications/site-portal-api.md) - every
+instruction, the approval path, the retry contract - as commented Python behind
+a FastAPI application, with a test suite that runs without a bridge.
+
+It is written to be read, not deployed: its README is explicit about the
+authentication, state storage and durability a production portal would have to
+add. Read it if you are connecting your site's portal, in any language.
+
 ## Protocol Specifications
 
 The [specifications](specifications) directory contains formal protocol

@@ -867,9 +867,9 @@ See [instruction-protocol.md](instruction-protocol.md) for the full instruction
 grammar and argument formats.
 
 **Implementing the portal side of these:**
-[project-portal-api.md](project-portal-api.md) specifies what the connected
+[site-portal-api.md](site-portal-api.md) specifies what the connected
 portal must return for each one, and how portal-to-portal requests (an awarding
-portal creating and querying awards on a project portal) arrive through the
+portal creating and querying awards on a site portal) arrive through the
 bridge. That is the document to hand to someone connecting a new portal.
 
 ---

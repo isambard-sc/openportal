@@ -23,6 +23,7 @@ struct Database {
     instance_groups: HashMap<Peer, Vec<IPAGroup>>,
     users_in_group: HashMap<ProjectIdentifier, HashSet<UserIdentifier>>,
     user_mutexes: HashMap<UserIdentifier, Arc<Mutex<()>>>,
+    group_mutexes: HashMap<ProjectIdentifier, Arc<Mutex<()>>>,
 }
 
 static CACHE: Lazy<RwLock<Database>> = Lazy::new(|| RwLock::new(Database::default()));
@@ -89,6 +90,18 @@ fn enforce_cache_bounds(cache: &mut Database) {
             before - cache.user_mutexes.len()
         );
     }
+
+    if cache.group_mutexes.len() > MAX_CACHED_MUTEXES {
+        let before = cache.group_mutexes.len();
+        cache
+            .group_mutexes
+            .retain(|_, mutex| std::sync::Arc::strong_count(mutex) > 1);
+        tracing::warn!(
+            "Group mutex map exceeded {} entries - dropped {} that nobody was holding.",
+            MAX_CACHED_MUTEXES,
+            before - cache.group_mutexes.len()
+        );
+    }
 }
 
 ///
@@ -108,6 +121,27 @@ pub async fn get_user_mutex(identifier: &UserIdentifier) -> Result<Arc<Mutex<()>
     enforce_cache_bounds(&mut cache);
     Ok(cache
         .user_mutexes
+        .entry(identifier.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
+///
+/// Return a mutex that can be used to protect this group
+///
+/// This is the counterpart of `get_user_mutex`, and exists for the same
+/// reason: only one task at a time may decide that a group needs creating.
+/// Unlike users, concurrent group creations are not collapsed by the job
+/// Board - two AddUser jobs for different users in one project both need that
+/// project's group - so without this lock they race, and two `group_add`
+/// calls for one cn on two masters leave an unreconcilable LDAP replication
+/// conflict behind.
+///
+pub async fn get_group_mutex(identifier: &ProjectIdentifier) -> Result<Arc<Mutex<()>>, Error> {
+    let mut cache = CACHE.write().await;
+    enforce_cache_bounds(&mut cache);
+    Ok(cache
+        .group_mutexes
         .entry(identifier.clone())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone())

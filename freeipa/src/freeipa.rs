@@ -46,6 +46,11 @@ enum Target {
     /// Any healthy server in the pool may serve this call. Only safe for
     /// reads whose answer does not decide whether we write.
     Any,
+    /// This call must be served by the write server, so that writes - and the
+    /// reads that decide whether to write - all meet the same copy of the
+    /// directory. Falls back to another server only once the write server is
+    /// confirmed down and replication has had time to converge.
+    Pinned,
     /// This call must be served by the named server, whatever else the pool
     /// contains.
     Named(String),
@@ -69,6 +74,69 @@ where
     T: DeserializeOwned,
 {
     call_post_to(&Target::Any, func, args, kwargs, expires).await
+}
+
+///
+/// Send a JSON-RPC payload to the passed server, recording whether that server
+/// could be reached at all.
+///
+/// A connection that was refused marks the server down; a call that merely
+/// timed out does not. That distinction is the whole point: a slow master is
+/// still the master holding our writes, and treating slow as down is how a
+/// write ends up on a second master.
+///
+async fn send_payload(
+    client: &Client,
+    url: &str,
+    server: &str,
+    health: &Arc<ServerHealth>,
+    payload: &serde_json::Value,
+) -> Result<reqwest::Response, Error> {
+    match client
+        .post(url)
+        .header("Referer", format!("{}/ipa", server))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(payload)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            health.mark_up(server);
+            Ok(response)
+        }
+        Err(e) => {
+            if e.is_connect() {
+                health.mark_down(server);
+            }
+
+            Err(Error::Call(format!(
+                "Could not call function {} on server {}: {}",
+                payload, server, e
+            )))
+        }
+    }
+}
+
+///
+/// Call a post URL that *changes* the directory - an add, a modify, a delete,
+/// or a membership change.
+///
+/// Every one of these goes to the write server. Two masters both accepting an
+/// add of the same DN is a conflict 389-ds cannot reconcile, and it cannot be
+/// undone with `ipa user-del`, so writes are not something to spread across a
+/// multi-master topology for the sake of load.
+///
+async fn call_write<T>(
+    func: &str,
+    args: Option<Vec<String>>,
+    kwargs: Option<HashMap<String, String>>,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
+    call_post_to(&Target::Pinned, func, args, kwargs, expires).await
 }
 
 ///
@@ -146,15 +214,7 @@ where
     // loop.
     let mut url = format!("{}/ipa/session/json", lock.server());
 
-    let mut result = client
-        .post(&url)
-        .header("Referer", format!("{}/ipa", lock.server()))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .with_context(|| format!("Could not call function: {}", payload))?;
+    let mut result = send_payload(&client, &url, lock.server(), lock.health(), &payload).await?;
 
     // write a warning if this took a long time
     if (Utc::now() - start_time).num_seconds() > 5 {
@@ -229,15 +289,7 @@ where
             .context("Could not build client")?;
 
         // retry the call
-        result = client
-            .post(&url)
-            .header("Referer", format!("{}/ipa", lock.server()))
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .with_context(|| format!("Could not call function: {}", payload))?;
+        result = send_payload(&client, &url, lock.server(), lock.health(), &payload).await?;
 
         if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
             tracing::error!(
@@ -420,11 +472,16 @@ impl IPAServer {
 #[derive(Debug)]
 struct LockedIPAServer {
     server: tokio::sync::OwnedMutexGuard<IPAServer>,
+    health: Arc<ServerHealth>,
 }
 
 impl LockedIPAServer {
     fn server(&self) -> &str {
         &self.server.server
+    }
+
+    fn health(&self) -> &Arc<ServerHealth> {
+        &self.health
     }
 
     fn jar(&self) -> &Arc<Jar> {
@@ -447,13 +504,100 @@ impl LockedIPAServer {
 #[derive(Debug, Clone)]
 struct PoolEntry {
     url: String,
+    health: Arc<ServerHealth>,
     server: Arc<Mutex<IPAServer>>,
+}
+
+///
+/// Whether a server is reachable at all, shared by every slot for that server
+/// and held outside their mutexes so it can be read without waiting for an
+/// in-flight call.
+///
+/// Only *confirmed down* is recorded here - a connection that was refused, a
+/// name that did not resolve, a login that was rejected. A call that merely
+/// timed out does not count: a slow master is still the master that has our
+/// writes, and failing over off the back of a timeout is how the same DN ends
+/// up added on two of them.
+///
+#[derive(Debug)]
+struct ServerHealth {
+    /// Unix seconds at which this server was first confirmed down, or 0 if it
+    /// is believed to be up.
+    down_since: std::sync::atomic::AtomicI64,
+}
+
+impl ServerHealth {
+    fn new() -> Self {
+        ServerHealth {
+            down_since: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+
+    fn mark_down(&self, url: &str) {
+        if self
+            .down_since
+            .compare_exchange(
+                0,
+                Utc::now().timestamp(),
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            tracing::warn!("FreeIPA server {} is confirmed down.", url);
+        }
+    }
+
+    fn mark_up(&self, url: &str) {
+        if self.down_since.swap(0, std::sync::atomic::Ordering::SeqCst) != 0 {
+            tracing::info!("FreeIPA server {} is reachable again.", url);
+        }
+    }
+
+    ///
+    /// How long this server has been confirmed down, or None if it is
+    /// believed to be up.
+    ///
+    fn down_for(&self) -> Option<chrono::Duration> {
+        match self.down_since.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => None,
+            since => Some(chrono::Duration::seconds(
+                Utc::now().timestamp().saturating_sub(since).max(0),
+            )),
+        }
+    }
 }
 
 static FREEIPA_SERVERS: Lazy<Mutex<Vec<PoolEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+///
+/// The server that all writes are sent to, and the time that replication needs
+/// to converge before a write may be sent anywhere else.
+///
+#[derive(Debug, Clone, Default)]
+struct WriteConfig {
+    server: Option<String>,
+    replication_window: chrono::Duration,
+}
+
+static WRITE_CONFIG: Lazy<Mutex<WriteConfig>> = Lazy::new(|| {
+    Mutex::new(WriteConfig {
+        server: None,
+        replication_window: chrono::Duration::seconds(DEFAULT_REPLICATION_WINDOW),
+    })
+});
+
+/// How long replication is assumed to need to converge, if
+/// `freeipa-replication-window` is not set. A write must not be sent to a
+/// different server until at least this long after the write server was last
+/// known to be taking writes, or the new server may not yet have heard about
+/// what the old one accepted.
+const DEFAULT_REPLICATION_WINDOW: i64 = 30;
+
 pub async fn initialise_servers(
     servers: &[String],
+    write_server: &str,
+    replication_window: Option<i64>,
     user: &str,
     password: &SecretString,
 ) -> Result<(), Error> {
@@ -461,6 +605,9 @@ pub async fn initialise_servers(
 
     // clear any existing servers
     freeipa_servers.clear();
+
+    // one shared health record per server, however many slots it has
+    let mut health: HashMap<String, Arc<ServerHealth>> = HashMap::new();
 
     // now add each server
     for server in servers {
@@ -472,11 +619,120 @@ pub async fn initialise_servers(
 
         freeipa_servers.push(PoolEntry {
             url: server.to_string(),
+            health: health
+                .entry(server.to_string())
+                .or_insert_with(|| Arc::new(ServerHealth::new()))
+                .clone(),
             server: Arc::new(Mutex::new(IPAServer::new(server, user, password))),
         });
     }
 
+    // Writes all go to one server. In a multi-master topology every master
+    // accepts an add, and two masters accepting the same add is a conflict
+    // 389-ds cannot reconcile, so spreading writes across them is not load
+    // balancing - it is a race. Reads may still go anywhere.
+    let write_server = write_server.trim();
+
+    let write_server = match write_server.is_empty() {
+        // default to the first configured server
+        true => freeipa_servers.first().map(|entry| entry.url.clone()),
+        false => {
+            if !freeipa_servers
+                .iter()
+                .any(|entry| entry.url == write_server)
+            {
+                return Err(Error::Call(format!(
+                    "The FreeIPA write server {} is not one of the configured \
+                     servers - add it to freeipa-server.",
+                    write_server
+                )));
+            }
+
+            Some(write_server.to_string())
+        }
+    };
+
+    let replication_window = chrono::Duration::seconds(
+        replication_window
+            .filter(|window| *window >= 0)
+            .unwrap_or(DEFAULT_REPLICATION_WINDOW),
+    );
+
+    match &write_server {
+        Some(server) => tracing::info!(
+            "FreeIPA writes will be sent to {} (failing over only once it is \
+             confirmed down, and no sooner than {} seconds afterwards).",
+            server,
+            replication_window.num_seconds()
+        ),
+        None => tracing::warn!("No FreeIPA servers configured - writes have nowhere to go."),
+    }
+
+    *WRITE_CONFIG.lock().await = WriteConfig {
+        server: write_server,
+        replication_window,
+    };
+
     Ok(())
+}
+
+///
+/// Work out which server a write (or a read that decides a write) should go
+/// to.
+///
+/// Normally that is the configured write server, even if it is busy - the
+/// caller waits for a free slot rather than quietly writing somewhere else.
+/// It is only allowed elsewhere when the write server has been *confirmed*
+/// down (not merely slow) for longer than the replication convergence window,
+/// by which point anything it accepted has had time to reach the server we
+/// fall back to.
+///
+async fn resolve_write_target(pool: &[PoolEntry]) -> Target {
+    let config = WRITE_CONFIG.lock().await.clone();
+
+    let Some(write_server) = config.server else {
+        // no write server known - behave as we did before
+        return Target::Any;
+    };
+
+    let Some(entry) = pool.iter().find(|entry| entry.url == write_server) else {
+        tracing::warn!(
+            "The FreeIPA write server {} is no longer in the pool - any server \
+             will have to do.",
+            write_server
+        );
+        return Target::Any;
+    };
+
+    match entry.health.down_for() {
+        None => Target::Named(write_server),
+        Some(down_for) if down_for < config.replication_window => {
+            // It is down, but too recently to be sure that another master has
+            // caught up with what it already accepted. Keep sending writes at
+            // it: failing this call is recoverable, while adding the same DN
+            // on a second master is not.
+            tracing::warn!(
+                "FreeIPA write server {} has been down for {} seconds - not \
+                 failing over until {} seconds have passed, so that replication \
+                 can converge first.",
+                write_server,
+                down_for.num_seconds(),
+                config.replication_window.num_seconds()
+            );
+            Target::Named(write_server)
+        }
+        Some(down_for) => {
+            tracing::warn!(
+                "REPLICATION-RISK: FreeIPA write server {} has been down for {} \
+                 seconds, so writes will go to another master. Anything it \
+                 accepted but did not replicate before failing may be added \
+                 again here, which would leave a replication conflict.",
+                write_server,
+                down_for.num_seconds()
+            );
+            Target::Any
+        }
+    }
 }
 
 ///
@@ -498,6 +754,26 @@ async fn configured_servers() -> Vec<String> {
     urls
 }
 
+///
+/// The servers to ask when deciding whether something exists, write server
+/// first.
+///
+/// The write server holds our own recent writes, so asking it first answers
+/// the common case in one call - and if it is the one that cannot be reached,
+/// that is exactly the case the caller needs to warn about.
+///
+async fn servers_to_check() -> Vec<String> {
+    let mut servers = configured_servers().await;
+
+    if let Some(write_server) = WRITE_CONFIG.lock().await.server.clone() {
+        // a stable sort on "is not the write server" moves it to the front and
+        // leaves the rest in configuration order
+        servers.sort_by_key(|url| *url != write_server);
+    }
+
+    servers
+}
+
 async fn get_connected_server(
     target: &Target,
     expires: &chrono::DateTime<Utc>,
@@ -506,20 +782,27 @@ async fn get_connected_server(
     // try to connect
     assert_not_expired(expires)?;
 
-    let freeipa_servers: Vec<PoolEntry> = FREEIPA_SERVERS
-        .lock()
-        .await
-        .iter()
-        .filter(|entry| match target {
-            Target::Any => true,
+    let pool: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
+
+    // a write has to be aimed at one specific server - work out which
+    let target = match target {
+        Target::Pinned => resolve_write_target(&pool).await,
+        target => target.clone(),
+    };
+
+    let freeipa_servers: Vec<PoolEntry> = pool
+        .into_iter()
+        .filter(|entry| match &target {
+            Target::Any | Target::Pinned => true,
             Target::Named(url) => entry.url == *url,
         })
-        .cloned()
         .collect();
 
     if freeipa_servers.is_empty() {
-        return Err(match target {
-            Target::Any => Error::Call("No FreeIPA servers have been initialised".to_string()),
+        return Err(match &target {
+            Target::Any | Target::Pinned => {
+                Error::Call("No FreeIPA servers have been initialised".to_string())
+            }
             Target::Named(url) => Error::Call(format!(
                 "FreeIPA server {} is not one of the configured servers",
                 url
@@ -543,7 +826,10 @@ async fn get_connected_server(
                 Ok(mut server) => {
                     if server.is_logged_in() {
                         tracing::debug!("Already logged in to FreeIPA server: {}", server.server);
-                        return Ok(LockedIPAServer { server });
+                        return Ok(LockedIPAServer {
+                            server,
+                            health: entry.health.clone(),
+                        });
                     }
 
                     if server.should_backoff() {
@@ -562,7 +848,11 @@ async fn get_connected_server(
                             // update the jar in the server
                             tracing::info!("Login successful to FreeIPA server: {}", server.server);
                             server.set_login_success(jar);
-                            return Ok(LockedIPAServer { server });
+                            entry.health.mark_up(&entry.url);
+                            return Ok(LockedIPAServer {
+                                server,
+                                health: entry.health.clone(),
+                            });
                         }
                         Err(e) => {
                             tracing::error!(
@@ -571,6 +861,10 @@ async fn get_connected_server(
                                 e
                             );
                             server.set_login_failed();
+
+                            // a server we cannot log in to is confirmed down -
+                            // unlike one that is merely slow
+                            entry.health.mark_down(&entry.url);
 
                             // release the lock and try the next server
                         }
@@ -586,8 +880,8 @@ async fn get_connected_server(
         if should_all_backoff {
             tracing::error!(
                 "All FreeIPA servers ({}) are backing off because of repeated login failures.",
-                match target {
-                    Target::Any => "any".to_string(),
+                match &target {
+                    Target::Any | Target::Pinned => "any".to_string(),
                     Target::Named(url) => url.clone(),
                 }
             );
@@ -1691,7 +1985,7 @@ async fn force_get_user_everywhere(
     user: &UserIdentifier,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Option<IPAUser>, Error> {
-    let servers = configured_servers().await;
+    let servers = servers_to_check().await;
 
     let mut unreachable: Vec<String> = Vec::new();
 
@@ -1739,7 +2033,7 @@ async fn force_get_group_everywhere(
     project: &ProjectIdentifier,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Option<IPAGroup>, Error> {
-    let servers = configured_servers().await;
+    let servers = servers_to_check().await;
 
     let mut unreachable: Vec<String> = Vec::new();
 
@@ -1976,7 +2270,7 @@ async fn get_group_create_if_not_exists(
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!("Successfully created group: {}", group);
         }
@@ -2166,7 +2460,7 @@ async fn sync_groups(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
             Ok(_) => tracing::info!("Successfully added user {} to group {}", userid, group_cn),
             Err(e) => {
                 // this should not happen - it indicates that the group has disappeared
@@ -2331,7 +2625,7 @@ async fn reenable_user(user: &IPAUser, expires: &chrono::DateTime<Utc>) -> Resul
         kwargs
     };
 
-    match call_post::<IPAResponse>("user_enable", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_enable", None, Some(kwargs), expires).await {
         Ok(_) => {
             let mut user = user.clone();
             user.set_enabled();
@@ -2509,7 +2803,7 @@ pub async fn add_user(
 
     // we need to let the below go to completion, even if expired, as the
     // user needs to be removed if something goes wrong
-    let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs), expires).await {
+    let user = match call_write::<IPAResponse>("user_add", None, Some(kwargs), expires).await {
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
             result.users(&user.project_identifier())?.first().cloned().ok_or(Error::UnmanagedUser(format!(
@@ -2606,7 +2900,7 @@ pub async fn add_user(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 break Ok(());
             }
@@ -2661,7 +2955,7 @@ pub async fn add_user(
                 kwargs
             };
 
-            match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+            match call_write::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
                 Ok(_) => {
                     tracing::info!(
                         "Successfully removed user {} after failed group add",
@@ -2853,7 +3147,7 @@ pub async fn remove_user(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 tracing::info!(
                     "Successfully removed user {} from group {}",
@@ -2934,7 +3228,7 @@ pub async fn remove_user(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 tracing::info!(
                     "Successfully removed user {} from group {}",
@@ -2970,7 +3264,7 @@ pub async fn remove_user(
     // we don't actually remove users - instead we disable them so that
     // they can't log in. This way, if the user is re-added, then they
     // will get the same UID and other details
-    match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
         Ok(_) => {
             user.set_disabled();
             tracing::info!("Successfully removed user: {}", user.identifier());
@@ -3053,7 +3347,7 @@ pub async fn update_homedir(
         kwargs
     };
 
-    match call_post::<IPAResponse>("user_mod", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_mod", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!(
                 "Successfully updated homedir for user: {}",
@@ -3416,7 +3710,7 @@ async fn ensure_blocked_group_exists(expires: &chrono::DateTime<Utc>) -> Result<
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!("Created {} group in FreeIPA", blocked_cn);
             Ok(())
@@ -3508,7 +3802,7 @@ pub async fn block_user(
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!(
                 "Added user {} to openportal.blocked group",
@@ -3532,7 +3826,7 @@ pub async fn block_user(
     };
 
     let mut user = user;
-    match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
         Ok(_) => {
             user.set_disabled();
             tracing::info!("Blocked user: {}", user.identifier());
@@ -3617,7 +3911,7 @@ pub async fn unblock_user(
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!(
                 "Removed user {} from openportal.blocked group",
@@ -3645,23 +3939,29 @@ pub async fn unblock_user(
 mod tests {
     use super::*;
 
+    ///
+    /// One test for the whole server pool, because it is global state - as
+    /// separate tests these would race each other.
+    ///
     #[tokio::test]
-    async fn test_configured_servers_collapses_repeated_slots() {
+    async fn test_server_pool() {
+        let password = SecretString::from("secret");
+        let ipa1 = "https://ipa1.example.com".to_string();
+        let ipa2 = "https://ipa2.example.com".to_string();
+
+        let init = |servers: Vec<String>, write_server: &'static str, window: Option<i64>| {
+            let password = password.clone();
+            async move { initialise_servers(&servers, write_server, window, "admin", &password).await }
+        };
+
         // The `freeipa-server` option may list the same server several times,
         // which is how the pool is given more than one concurrent slot for it.
         // Those repeats are still one server as far as replication is
         // concerned, so the per-master existence checks must ask it once.
-        let password = SecretString::from("secret");
-
-        match initialise_servers(
-            &[
-                "https://ipa1.example.com".to_string(),
-                "https://ipa2.example.com".to_string(),
-                "https://ipa1.example.com".to_string(),
-                "  ".to_string(),
-            ],
-            "admin",
-            &password,
+        match init(
+            vec![ipa1.clone(), ipa2.clone(), ipa1.clone(), "  ".to_string()],
+            "",
+            None,
         )
         .await
         {
@@ -3669,13 +3969,73 @@ mod tests {
             Err(e) => unreachable!("initialise_servers: {:?}", e),
         }
 
+        assert_eq!(configured_servers().await, vec![ipa1.clone(), ipa2.clone()]);
+
+        // With no explicit write server, writes go to the first one configured
+        assert_eq!(WRITE_CONFIG.lock().await.server.clone(), Some(ipa1.clone()));
         assert_eq!(
-            configured_servers().await,
-            vec![
-                "https://ipa1.example.com".to_string(),
-                "https://ipa2.example.com".to_string()
-            ]
+            WRITE_CONFIG.lock().await.replication_window.num_seconds(),
+            DEFAULT_REPLICATION_WINDOW
         );
+
+        // A write server that is not in the pool is a configuration error, not
+        // something to quietly fall back from
+        assert!(init(vec![ipa1.clone()], "https://ipa3.example.com", None)
+            .await
+            .is_err());
+
+        // Name one explicitly, and it is asked about first when checking
+        // whether something exists - it is the server holding our own writes
+        match init(
+            vec![ipa1.clone(), ipa2.clone()],
+            "https://ipa2.example.com",
+            Some(60),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => unreachable!("initialise_servers: {:?}", e),
+        }
+
+        assert_eq!(servers_to_check().await, vec![ipa2.clone(), ipa1.clone()]);
+
+        let pool: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
+
+        // While it is up, every write is aimed at it
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+
+        let health = match pool.iter().find(|entry| entry.url == ipa2) {
+            Some(entry) => entry.health.clone(),
+            None => unreachable!("the write server is not in the pool"),
+        };
+
+        // Confirmed down, but only just: keep aiming writes at it. Failing the
+        // call is recoverable, whereas adding the same DN on a second master
+        // is not.
+        health.mark_down(&ipa2);
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+
+        // Down for longer than the replication window: now another master may
+        // take the writes, because anything this one accepted has had time to
+        // reach it.
+        health.down_since.store(
+            Utc::now().timestamp() - 61,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        assert!(matches!(resolve_write_target(&pool).await, Target::Any));
+
+        // ...and back to normal once it answers again
+        health.mark_up(&ipa2);
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
     }
 
     #[test]

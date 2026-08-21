@@ -76,6 +76,30 @@ async fn main() -> Result<()> {
     // get the details about the FreeIPA server - this must be set
     let freeipa_server = config.option("freeipa-server", "");
     let freeipa_user: String = config.option("freeipa-user", "admin");
+
+    // Which of those servers takes the writes. Empty means "the first one".
+    // Reads are spread over all of them, but every write has to go to one
+    // server: in a multi-master topology two masters both accepting an add of
+    // the same DN leaves a replication conflict that cannot be cleaned up
+    // through the IPA framework at all.
+    let freeipa_write_server = config.option("freeipa-write-server", "");
+
+    // How long replication is given to converge before a write is allowed to
+    // go to a different server.
+    let freeipa_replication_window: Option<i64> = {
+        let window = config.option("freeipa-replication-window", "");
+        let window = window.trim();
+
+        match window.is_empty() {
+            true => None,
+            false => Some(window.parse::<i64>().map_err(|e| {
+                anyhow::anyhow!(
+                    "Could not parse freeipa-replication-window as a number of seconds: {}",
+                    e
+                )
+            })?),
+        }
+    };
     let system_groups: Vec<IPAGroup> =
         IPAGroup::parse_system_groups(&config.option("system-groups", ""))?;
     let instance_groups: HashMap<Peer, Vec<IPAGroup>> =
@@ -111,7 +135,14 @@ async fn main() -> Result<()> {
     // connect the single shared FreeIPA client - this will be used in the
     // async function (we can't bind variables to async functions, or else
     // we would just pass the client with the environment)
-    freeipa::initialise_servers(&freeipa_servers, &freeipa_user, &freeipa_password).await?;
+    freeipa::initialise_servers(
+        &freeipa_servers,
+        &freeipa_write_server,
+        freeipa_replication_window,
+        &freeipa_user,
+        &freeipa_password,
+    )
+    .await?;
 
     // we need to bind the FreeIPA client into the freeipa_runner
     async_runnable! {

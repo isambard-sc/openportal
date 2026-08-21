@@ -83,11 +83,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `OpenPortalUnsupportedCommandError`, `ManagedProjectPermissionError`, and its
   two subclasses `ManagedProjectPendingError` and `ManagedProjectRejectedError`.
 
-  The distinction the hierarchy exists to carry is that **pending is not a
-  failure**. An award waiting on human approval has no `ProjectMapping` to
-  return, so it answers with an error — and the awarding portal must retry that
-  one while treating a rejection as final. Losing the class loses that
-  difference.
 
   A job carries one error string, so the class rides inside it as
   `"<ClassName>: <message>"`. `job.errored(exc)` encodes it, `job.error` decodes
@@ -97,6 +92,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   removed by prefix rather than by trimming a character set (which ate the start
   of any message beginning with those letters), and the message is no longer
   off-by-one for `OpenPortalError`.
+- **A specification of what a connected project portal must implement**
+  ([docs/specifications/project-portal-api.md](docs/specifications/project-portal-api.md)):
+  the requests that arrive on the bridge board, the exact result type each one must
+  return, the two-minute answering deadline, and how portal-to-portal working hangs
+  together - offerings, the `forwarded_for` tag that identifies the awarding portal,
+  and the fact that identifiers name that portal rather than the local one. Written
+  to be handed to someone connecting a new portal; `bridge-api.md` continues to
+  specify the HTTP transport itself.
+- `remove_award` is accepted as a synonym for `remove_project`, completing the
+  `*_award` spellings alongside `create_award` and `update_award`.
 
 - **A specification of what a connected site portal must implement**
   ([docs/specifications/site-portal-api.md](docs/specifications/site-portal-api.md)):
@@ -198,7 +203,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Documentation: `python-api.md` listed a `Status.expired()` that does not
   exist - expiry is not one of the six job states, and is read from
   `job.is_expired` - and omitted `Status.created()`, which does.
-
 - **The portal agent sent malformed error sentinels.** `ExpirationError{{}}` and
   `UnknownError{{}}` were written as plain string literals, where `{{` is not an
   escape — only `format!` treats it as one, which is why the neighbouring

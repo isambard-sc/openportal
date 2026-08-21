@@ -87,7 +87,6 @@ async fn main() -> Result<()> {
     // containerised use, set e.g.:
     //   useradd = "docker exec slurmctld useradd"
     let useradd = config.option("useradd", "useradd");
-    let userdel = config.option("userdel", "userdel");
     let groupadd = config.option("groupadd", "groupadd");
     let groupdel = config.option("groupdel", "groupdel");
     let usermod = config.option("usermod", "usermod");
@@ -109,7 +108,6 @@ async fn main() -> Result<()> {
 
     localaccount::initialise_commands(localaccount::Commands::new(
         &useradd,
-        &userdel,
         &groupadd,
         &groupdel,
         &usermod,

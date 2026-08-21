@@ -210,24 +210,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   of any message beginning with those letters), and the message is no longer
   off-by-one for `OpenPortalError`.
 
-### Removed
-
-- **`op-cloudaccount` and `op-cloudportal`.** Both were prototypes written to give
-  cloud operators something to work against while they had no portal software of
-  their own, and both held state - project/user assignment, Award approval - inside
-  an agent, which is not where OpenPortal state belongs. The same need is met
-  without either agent: the operators run a stock `op-portal` and `op-bridge` and
-  put their own software behind the bridge, holding that state on their side of it.
-  [site-portal-api.md](docs/specifications/site-portal-api.md) specifies what
-  that software has to implement. The archived design documents are kept, marked
-  withdrawn, as a record of the reasoning.
-
-  Nothing that came in alongside them is withdrawn: `templemeads::portal::run()`'s
-  one-shot mode, `instance::run_delegated`, and `UserMapping`'s acceptance of an
-  email address as the local user are all general-purpose and remain.
-
-### Added
-
 - **The site portal contract corrected against a real implementation.**
   [site-portal-api.md](docs/specifications/site-portal-api.md) was written
   without sight of `waldur-mastermind`'s side of it. Reading that implementation
@@ -299,6 +281,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   than deletes them, and this matches `op-freeipa`, whose `user_add` likewise only
   records the attribute. The empty home that `useradd -m` created was enough to stop the
   recycled one being restored - see below.
+
+### Removed
+
+- **`op-cloudaccount` and `op-cloudportal`.** Both were prototypes written to give
+  cloud operators something to work against while they had no portal software of
+  their own, and both held state - project/user assignment, Award approval - inside
+  an agent, which is not where OpenPortal state belongs. The same need is met
+  without either agent: the operators run a stock `op-portal` and `op-bridge` and
+  put their own software behind the bridge, holding that state on their side of it.
+  [site-portal-api.md](docs/specifications/site-portal-api.md) specifies what
+  that software has to implement. The archived design documents are kept, marked
+  withdrawn, as a record of the reasoning.
+
+  Nothing that came in alongside them is withdrawn: `templemeads::portal::run()`'s
+  one-shot mode, `instance::run_delegated`, and `UserMapping`'s acceptance of an
+  email address as the local user are all general-purpose and remain.
 
 ### Fixed
 

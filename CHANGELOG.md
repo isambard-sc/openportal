@@ -19,7 +19,105 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
 
+### Changed
+
+- **`op-localaccount` now disables an account on removal rather than deleting it**, as
+  `op-freeipa` already did. `userdel` freed the account's uid, so a later re-add could
+  allocate a different one and leave every file the user owned - including the home
+  directory `op-filesystem` had recycled rather than deleted - belonging to a uid its
+  owner no longer had, or to whoever the old uid was issued to next. Removal now adds
+  the user to a `{managed-group}.removed` group, strips their supplementary groups, and
+  locks *and* expires the account; `add_user` re-enables an account it finds in that
+  state. Being locked and expired matters: `usermod -L` alone only stops password
+  authentication and leaves SSH keys working.
+
+  The removed group is separate from the blocked group, so a blocked user stays blocked
+  across a remove and re-add, and an operator can tell why an account is disabled. The
+  supplementary groups are stripped because `sync_groups` appends and never removes, so
+  a re-enabled user would otherwise get back the access they had before rather than what
+  they are entitled to now - the same reasoning `op-freeipa` applies. The `userdel`
+  configuration option is gone, being unused.
+
+- **`op-localaccount` no longer creates the home directory** (`useradd -m` is dropped).
+  Home directories belong to `op-filesystem`, which creates them and recycles rather
+  than deletes them, and this matches `op-freeipa`, whose `user_add` likewise only
+  records the attribute. The empty home that `useradd -m` created was enough to stop the
+  recycled one being restored - see below.
+
 ### Fixed
+
+- **An empty home directory stopped a recycled one from being restored.** `create_dir`
+  treated any existing directory as the finished article, so an account agent that
+  creates a home when it creates the account left `op-filesystem` looking at an empty
+  directory and declining to restore the recycled one holding the user's real files.
+
+  An existing directory no longer wins automatically: if a recycled copy is waiting and
+  what is here holds nothing real, the recycled one is preferred. "Nothing real" is
+  strict - any non-hidden entry, or any hidden entry that is not a regular file, and the
+  existing directory is kept and the recycled copy left alone. Only hidden regular files
+  (the `/etc/skel` copies) are removed, one at a time, each logged, before a
+  non-recursive `remove_dir`; `EXPECTED_SKEL_FILES` names the unsurprising ones so
+  anything else is logged loudly rather than passing silently. Nothing here can remove a
+  subtree even if those checks are ever wrong.
+
+- **A directory restored from `.recycle` kept its old ownership.** Restoring moved the
+  directory back and stopped there, so a user volume restored for an account that had
+  been deleted and recreated came back owned by the *old* uid - which that user no
+  longer has, and which may since have been reassigned to somebody else. This is a
+  `op-localaccount` pairing in particular: it runs `userdel` where `op-freeipa`
+  disables the account, so the uid is freed and a later `useradd` need not get it back.
+
+  A restore now checks the ownership of what it restored and, if it is wrong, warns
+  loudly and corrects it - on a file descriptor opened `O_NOFOLLOW`, as directory
+  creation already did (finding R33). A restored *symlink* is reported and left alone
+  rather than chowned, since chowning it would transfer ownership of its target. Only
+  the directory itself is corrected: its contents still carry the old ownership, and
+  walking a tree of unbounded size does not belong inside a job with an answering
+  deadline, so the warning names both id pairs and says plainly that a recursive chown
+  may still be needed.
+
+- **`op-filesystem` intermittently failed to resolve users and groups that exist.**
+  Jobs failed with `Could not find a group called <name>` or `Could not search for
+  group <name>: EIO: I/O error` for groups that `getent group` on the same node
+  resolved correctly seconds earlier.
+
+  Both messages came from resolving names through libc (`nix::unistd::User::from_name`
+  and `Group::from_name`, i.e. `getpwnam_r`/`getgrnam_r`). Release binaries are
+  statically linked against **musl**, which has no NSS implementation: those calls read
+  `/etc/passwd` and `/etc/group` and, on a miss, make a single attempt over musl's own
+  minimal `nscd`-protocol client. There is no `nsswitch.conf`, no `sss` module and no
+  fallback, so a directory-backed group was invisible whenever `nscd` was not running -
+  musl reports a failed `connect()` as *not found* rather than as an error - and
+  reported `EIO` whenever the `nscd` exchange did not complete cleanly, which a
+  saturated `nscd` thread pool produces. Neither case ever reached SSSD, which is why
+  its logs showed nothing during a failure.
+
+  All name resolution now goes through the host's `getent` (`filesystem/src/nameservice.rs`),
+  a glibc-dynamic binary that consults every source in `nsswitch.conf` whether or not
+  `nscd` is healthy. Being a `tokio::process` call, it also no longer performs blocking
+  FFI on a Tokio worker thread. Dynamic linking would not have fixed this: the
+  limitation is musl's, not the linker's.
+
+  Which `getent` is used is decided once, on first use, and logged: `/usr/bin/getent`
+  if it exists, otherwise the first one found on the absolute entries of `PATH`, saved
+  as an absolute path. That one is then used for the life of the process. If it stops
+  being runnable the agent says so and lookups fail as indeterminate until it returns,
+  rather than silently resolving names through some other program - a `getent`
+  appearing or disappearing under a running agent means something is wrong with the
+  host, not that a different binary should be picked up.
+
+- **A name that could not be looked up was reported as a name that does not exist.**
+  The two are now distinguished. A genuine absence - every source on the host was asked
+  and none knows the name - fails immediately and says so. An indeterminate lookup
+  (`getent` timing out, being killed, exiting non-zero for any reason other than
+  "key not found", or returning something unparseable) is retried with a short backoff
+  and then reported as a temporary failure that can be retried, rather than as a
+  missing user or group. Lookups also carry a timeout, so an unresponsive name service
+  can no longer pin a task indefinitely as the libc call it replaces could.
+
+  `op-filesystem`'s Lustre quota engine had a second, separate copy of this logic
+  (`id -u` and `getent group`, with a `/etc/group` fallback that treated a local miss
+  as authoritative). It now shares the one implementation.
 
 - **A portal could not report its members.** `get_users` returns each member's email
   address as the `UserMapping` local user - the portal-level equivalent of a Unix
@@ -107,9 +205,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   billed total; `Allocation` accepted `"NaN"` and `"inf"`. Release builds now set
   `overflow-checks = true`.
 - Boards, jobs, caches, nonce stores, connection slots and message sizes are all now
-  bounded - previously a peer could grow each without limit. Slurm and FreeIPA cache
-  eviction is targeted rather than wholesale, so a stale entry no longer forces every
-  project to re-query `slurmctld`.
+  bounded - previously a peer could grow each without limit. The Slurm caches evict
+  individual entries rather than flushing, so one entry reaching the cap no longer
+  forces every project to re-query `slurmctld`; the FreeIPA caches deliberately do
+  flush wholesale, since a miss there is a cheap re-query.
 - A stalled handshake held its connection slot indefinitely; there was no WebSocket
   message size limit; the message-exchange overload recovery was dead code.
 - Mapping targets permitted whitespace and separators; `PortalIdentifier` never

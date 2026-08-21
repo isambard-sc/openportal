@@ -21,6 +21,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **`op-filesystem` intermittently failed to resolve users and groups that exist.**
+  Jobs failed with `Could not find a group called <name>` or `Could not search for
+  group <name>: EIO: I/O error` for groups that `getent group` on the same node
+  resolved correctly seconds earlier.
+
+  Both messages came from resolving names through libc (`nix::unistd::User::from_name`
+  and `Group::from_name`, i.e. `getpwnam_r`/`getgrnam_r`). Release binaries are
+  statically linked against **musl**, which has no NSS implementation: those calls read
+  `/etc/passwd` and `/etc/group` and, on a miss, make a single attempt over musl's own
+  minimal `nscd`-protocol client. There is no `nsswitch.conf`, no `sss` module and no
+  fallback, so a directory-backed group was invisible whenever `nscd` was not running -
+  musl reports a failed `connect()` as *not found* rather than as an error - and
+  reported `EIO` whenever the `nscd` exchange did not complete cleanly, which a
+  saturated `nscd` thread pool produces. Neither case ever reached SSSD, which is why
+  its logs showed nothing during a failure.
+
+  All name resolution now goes through the host's `getent` (`filesystem/src/nameservice.rs`),
+  a glibc-dynamic binary that consults every source in `nsswitch.conf` whether or not
+  `nscd` is healthy. Being a `tokio::process` call, it also no longer performs blocking
+  FFI on a Tokio worker thread. Dynamic linking would not have fixed this: the
+  limitation is musl's, not the linker's.
+
+- **A name that could not be looked up was reported as a name that does not exist.**
+  The two are now distinguished. A genuine absence - every source on the host was asked
+  and none knows the name - fails immediately and says so. An indeterminate lookup
+  (`getent` timing out, being killed, exiting non-zero for any reason other than
+  "key not found", or returning something unparseable) is retried with a short backoff
+  and then reported as a temporary failure that can be retried, rather than as a
+  missing user or group. Lookups also carry a timeout, so an unresponsive name service
+  can no longer pin a task indefinitely as the libc call it replaces could.
+
+  `op-filesystem`'s Lustre quota engine had a second, separate copy of this logic
+  (`id -u` and `getent group`, with a `/etc/group` fallback that treated a local miss
+  as authoritative). It now shares the one implementation.
+
 - **A portal could not report its members.** `get_users` returns each member's email
   address as the `UserMapping` local user - the portal-level equivalent of a Unix
   username - but mapping validation rejected `@`, so every such mapping failed to

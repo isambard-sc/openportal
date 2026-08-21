@@ -792,155 +792,21 @@ impl LustreEngine {
         })
     }
 
-    /// Get the UID for a username by running `id -u <username>`
+    /// Get the UID for a username.
     ///
-    /// Tries /usr/bin/id first (standard location), then falls back to PATH.
+    /// Delegates to `crate::nameservice`, which is the workspace's single name-lookup
+    /// path - the comments there explain why it must not be libc, and why it
+    /// distinguishes a name that does not exist from one it could not look up. This
+    /// previously ran `id -u` and parsed its output, which could not tell those apart.
     async fn get_uid(&self, username: &str) -> Result<u32, Error> {
-        // Try /usr/bin/id first (standard location)
-        let result = tokio::process::Command::new("/usr/bin/id")
-            .arg("-u")
-            .arg(username)
-            .output()
-            .await;
-
-        let output = match result {
-            Ok(output) => output,
-            Err(_) => {
-                // Fall back to searching PATH
-                tokio::process::Command::new("id")
-                    .arg("-u")
-                    .arg(username)
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        Error::Failed(format!("Failed to execute 'id -u {}': {}", username, e))
-                    })?
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::Failed(format!(
-                "Failed to get UID for user '{}': {}",
-                username, stderr
-            )));
-        }
-
-        let uid_str = String::from_utf8_lossy(&output.stdout);
-        let uid = uid_str.trim().parse::<u32>().map_err(|e| {
-            Error::Failed(format!(
-                "Failed to parse UID '{}' for user '{}': {}",
-                uid_str.trim(),
-                username,
-                e
-            ))
-        })?;
-
-        tracing::info!("Resolved username '{}' to UID {}", username, uid);
-
-        Ok(uid)
+        crate::nameservice::resolve_uid(username).await
     }
 
-    /// Get the GID for a group name by running `getent group <groupname>`
+    /// Get the GID for a group name.
     ///
-    /// This uses the system's getent command which queries NSS databases
-    /// (including /etc/group, LDAP, IPA, etc.). Tries /usr/bin/getent first
-    /// (standard Linux location), then falls back to searching PATH, and finally
-    /// falls back to reading /etc/group directly (for development on macOS).
+    /// Delegates to `crate::nameservice` - see `get_uid`.
     async fn get_gid(&self, groupname: &str) -> Result<u32, Error> {
-        // Try /usr/bin/getent first (standard Linux location)
-        let result = tokio::process::Command::new("/usr/bin/getent")
-            .arg("group")
-            .arg(groupname)
-            .output()
-            .await;
-
-        let output = match result {
-            Ok(output) if output.status.success() => output,
-            _ => {
-                // Fall back to searching PATH
-                let result2 = tokio::process::Command::new("getent")
-                    .arg("group")
-                    .arg(groupname)
-                    .output()
-                    .await;
-
-                match result2 {
-                    Ok(output) if output.status.success() => output,
-                    _ => {
-                        // Final fallback: read /etc/group directly (for macOS development)
-                        return self.get_gid_from_file(groupname).await;
-                    }
-                }
-            }
-        };
-
-        // getent group returns: groupname:x:gid:members
-        let group_info = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = group_info.trim().split(':').collect();
-
-        if parts.len() < 3 {
-            return Err(Error::Failed(format!(
-                "Invalid group info format for '{}': {}",
-                groupname,
-                group_info.trim()
-            )));
-        }
-
-        // `get` rather than indexed - this is `getent` output, not ours. See
-        // docs/specifications/security-review-2.md (finding R1).
-        let gid_str = parts.get(2).copied().unwrap_or_default();
-        let gid = gid_str.parse::<u32>().map_err(|e| {
-            Error::Failed(format!(
-                "Failed to parse GID '{}' for group '{}': {}",
-                gid_str, groupname, e
-            ))
-        })?;
-
-        tracing::info!("Resolved group name '{}' to GID {}", groupname, gid);
-
-        Ok(gid)
-    }
-
-    /// Fallback method to get GID by reading /etc/group directly
-    ///
-    /// This mimics the shell getent function behavior for development on macOS.
-    async fn get_gid_from_file(&self, groupname: &str) -> Result<u32, Error> {
-        let contents = tokio::fs::read_to_string("/etc/group")
-            .await
-            .map_err(|e| Error::Failed(format!("Failed to read /etc/group: {}", e)))?;
-
-        // Search for line matching "^groupname:"
-        for line in contents.lines() {
-            // Skip comments
-            let line = match line.split('#').next() {
-                Some(l) => l.trim(),
-                None => continue,
-            };
-
-            if line.is_empty() {
-                continue;
-            }
-
-            // Check if line starts with "groupname:"
-            if line.starts_with(&format!("{}:", groupname)) {
-                let parts: Vec<&str> = line.split(':').collect();
-                if let Some(gid_str) = parts.get(2) {
-                    let gid = gid_str.parse::<u32>().map_err(|e| {
-                        Error::Failed(format!(
-                            "Failed to parse GID '{}' for group '{}': {}",
-                            gid_str, groupname, e
-                        ))
-                    })?;
-                    return Ok(gid);
-                }
-            }
-        }
-
-        Err(Error::Failed(format!(
-            "Group '{}' not found in /etc/group",
-            groupname
-        )))
+        crate::nameservice::resolve_gid(groupname).await
     }
 
     /// Compute the quota ID for a user on a specific volume

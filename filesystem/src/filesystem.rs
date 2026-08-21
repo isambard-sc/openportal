@@ -5,12 +5,14 @@ use anyhow::{Context, Result};
 use once_cell::sync::{Lazy, OnceCell};
 use templemeads::Error;
 
+use crate::nameservice;
+
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use nix::unistd::{Gid, Group, Uid, User};
+use nix::unistd::{Gid, Uid};
 
 use tokio::sync::Mutex;
 
@@ -473,43 +475,12 @@ async fn create_dir_native(
     groupname: &str,
     permissions: u32,
 ) -> Result<(), Error> {
-    // convert the username into a uid
-    let uid = match User::from_name(username) {
-        Ok(user) => match user {
-            Some(user) => user.uid,
-            None => {
-                return Err(Error::State(format!(
-                    "Could not find a user called {}",
-                    username
-                )))
-            }
-        },
-        Err(e) => {
-            return Err(Error::State(format!(
-                "Could not search for user {}: {}",
-                username, e
-            )))
-        }
-    };
-
-    // conver the groupname into a gid
-    let gid = match Group::from_name(groupname) {
-        Ok(group) => match group {
-            Some(group) => group.gid,
-            None => {
-                return Err(Error::State(format!(
-                    "Could not find a group called {}",
-                    groupname
-                )))
-            }
-        },
-        Err(e) => {
-            return Err(Error::State(format!(
-                "Could not search for group {}: {}",
-                groupname, e
-            )))
-        }
-    };
+    // Resolve the names to ids. This goes through `getent` rather than libc - see
+    // `crate::nameservice` for why a static musl binary cannot use `getpwnam_r` /
+    // `getgrnam_r`, and why a lookup that fails to answer must not be reported as a
+    // name that does not exist.
+    let uid = Uid::from_raw(nameservice::resolve_uid(username).await?);
+    let gid = Gid::from_raw(nameservice::resolve_gid(groupname).await?);
 
     // check to see if the directory already exists
     if path.exists() {

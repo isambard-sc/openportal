@@ -2644,12 +2644,19 @@ impl AwardDetails {
         }
     }
 
+    /// Replace the allow-list with exactly what is given.
+    ///
+    /// An empty list is stored as an empty list, not as "no restriction". The
+    /// three states are distinct and all of them are reachable: `None` permits
+    /// everything, `Some([])` permits nothing, and a populated list permits what
+    /// it names. Use [`Self::clear_allowed_domains`] to reach `None`.
+    ///
+    /// This used to normalise an empty list to `None`, which silently inverted
+    /// the strictest setting a caller could ask for into the most permissive
+    /// one - and contradicted both `json-types.md` and `python-api.md`, which
+    /// have always specified the three states.
     pub fn set_allowed_domains(&mut self, domains: Vec<DomainPattern>) {
-        if domains.is_empty() {
-            self.allowed_domains = None;
-        } else {
-            self.allowed_domains = Some(domains);
-        }
+        self.allowed_domains = Some(domains);
     }
 
     pub fn clear_allowed_domains(&mut self) {
@@ -2796,21 +2803,16 @@ impl AwardDetails {
             merged.membership_control = other.membership_control.clone();
         }
 
+        // Replaced wholesale, not unioned. The allow-list is a definitive set
+        // decided by the awarding portal, so an update that names fewer domains
+        // means fewer - a union could only ever widen it, which left an
+        // allow-list that could never be reduced and made `Some([])`
+        // undeliverable to a project that already had entries. This matches
+        // `members` and `membership_control` above; the accumulating fields are
+        // `notes` (an audit trail) and `breakdown`, and they accumulate on
+        // purpose.
         if other.allowed_domains.is_some() {
-            if self.allowed_domains.is_none() {
-                merged.allowed_domains = other.allowed_domains.clone();
-            } else {
-                let mut domains = self.allowed_domains.clone().unwrap_or_default();
-                let other_domains = other.allowed_domains.clone().unwrap_or_default();
-
-                for domain in other_domains {
-                    if !domains.contains(&domain) {
-                        domains.push(domain);
-                    }
-                }
-
-                merged.allowed_domains = Some(domains);
-            }
+            merged.allowed_domains = other.allowed_domains.clone();
         }
 
         Ok(merged)
@@ -5389,8 +5391,8 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let project = ProjectIdentifier::parse("project.portal").unwrap();
 
-        // A '.'-containing local group is still allowed (cloudaccount reuses
-        // "project.portal" as a placeholder group).
+        // A '.'-containing local group is still allowed (a portal with no Unix
+        // groups of its own reuses "project.portal" as a placeholder group).
         assert!(ProjectMapping::new(&project, "project.portal").is_ok());
 
         // Path separators and leading dashes in local names are rejected.
@@ -5406,8 +5408,8 @@ mod tests {
         let user = UserIdentifier::parse("alice.project.portal").unwrap();
 
         // A portal reports the member's email as the local user - this is what
-        // `get_users` returns from `op-portal` and `op-cloudportal`, and it was
-        // rejected outright before `LocalUser` existed.
+        // `get_users` returns from `op-portal`, and it was rejected outright
+        // before `LocalUser` existed.
         let mapping = UserMapping::new(&user, "alice@example.com", "project.portal")
             .unwrap_or_else(|e| unreachable!("an email local_user must parse: {:?}", e));
 
@@ -5744,6 +5746,134 @@ mod tests {
             // Explicit email allowance overrides domain restriction
             details.add_allowed_domain(DomainPattern::parse("chris@gmail.com").unwrap());
             assert!(details.add_member("chris@gmail.com", "member").is_ok());
+        }
+    }
+
+    /// `allowed_domains` has three distinct states and all of them must be
+    /// reachable through the setter. The empty list is the strictest setting a
+    /// caller can ask for, and normalising it to `None` turned it into the most
+    /// permissive one - silently, and in the direction that widens access.
+    #[test]
+    fn test_set_allowed_domains_keeps_an_empty_list_empty() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+
+            // Unset: no restriction.
+            assert_eq!(details.allowed_domains(), None);
+            assert!(details.is_domain_allowed("evil.com"));
+            assert!(details.is_email_allowed("bob@evil.com"));
+
+            // A populated list restricts to what it names.
+            details.set_allowed_domains(vec![DomainPattern::parse("*.ac.uk").unwrap()]);
+            assert!(!details.is_domain_allowed("evil.com"));
+            assert!(details.is_domain_allowed("bristol.ac.uk"));
+
+            // An empty list denies everything, and is stored as an empty list.
+            details.set_allowed_domains(vec![]);
+            assert_eq!(details.allowed_domains(), Some(vec![]));
+            assert!(!details.is_domain_allowed("evil.com"));
+            assert!(!details.is_domain_allowed("bristol.ac.uk"));
+            assert!(!details.is_email_allowed("bob@evil.com"));
+
+            // No member may be added while nothing is permitted.
+            assert!(details.add_member("bob@bristol.ac.uk", "member").is_err());
+
+            // `clear` is how a caller asks for "no restriction", and still works.
+            details.clear_allowed_domains();
+            assert_eq!(details.allowed_domains(), None);
+            assert!(details.is_domain_allowed("evil.com"));
+        }
+    }
+
+    /// The empty list has to survive the wire, not just the setter - a portal
+    /// that means "nobody" must be able to say so to another portal.
+    #[test]
+    fn test_an_empty_allow_list_round_trips_through_json() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.set_allowed_domains(vec![]);
+
+            let json = details.to_string();
+            let back = AwardDetails::parse(&json).unwrap();
+
+            assert_eq!(back.allowed_domains(), Some(vec![]));
+            assert!(!back.is_email_allowed("bob@evil.com"));
+
+            // ...and the unset state stays distinguishable from it.
+            let unset = AwardDetails::default();
+            let back = AwardDetails::parse(&unset.to_string()).unwrap();
+            assert_eq!(back.allowed_domains(), None);
+            assert!(back.is_email_allowed("bob@evil.com"));
+        }
+    }
+
+    /// The allow-list is a definitive set decided by the awarding portal, so
+    /// `merge` replaces it rather than unioning the two. A union could only
+    /// widen the list: a domain once granted could never be withdrawn, and
+    /// `Some([])` was undeliverable to a project that already had entries.
+    #[test]
+    fn test_merge_replaces_the_allow_list_rather_than_unioning_it() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let ac_uk = DomainPattern::parse("*.ac.uk").unwrap();
+            let example = DomainPattern::parse("example.com").unwrap();
+
+            let mut base = AwardDetails::default();
+            base.set_allowed_domains(vec![ac_uk.clone()]);
+
+            // A narrower update narrows: the old entry is gone, not merged in.
+            let mut narrower = AwardDetails::default();
+            narrower.set_allowed_domains(vec![example.clone()]);
+
+            let merged = base.merge(&narrower).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![example.clone()]));
+            assert!(!merged.is_domain_allowed("bristol.ac.uk"));
+            assert!(merged.is_domain_allowed("example.com"));
+
+            // An empty update now reaches a project that already has entries,
+            // which is the whole point - "nobody" is deliverable.
+            let mut deny_all = AwardDetails::default();
+            deny_all.set_allowed_domains(vec![]);
+
+            let merged = base.merge(&deny_all).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![]));
+            assert!(!merged.is_domain_allowed("bristol.ac.uk"));
+            assert!(!merged.is_email_allowed("bob@bristol.ac.uk"));
+
+            // An update that says nothing about the field still changes nothing,
+            // which is what "absent fields keep their current values" means.
+            let silent = AwardDetails::default();
+            let merged = base.merge(&silent).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![ac_uk.clone()]));
+
+            // ...and onto an unset list, an update still applies wholesale.
+            let merged = AwardDetails::default().merge(&base).unwrap();
+            assert_eq!(merged.allowed_domains(), Some(vec![ac_uk]));
+        }
+    }
+
+    /// `merge` replaces the allow-list, but `add_allowed_domain` is still the
+    /// incremental path for a portal building one up locally.
+    #[test]
+    fn test_add_allowed_domain_still_accumulates() {
+        #[allow(clippy::unwrap_used)]
+        {
+            let mut details = AwardDetails::default();
+            details.add_allowed_domain(DomainPattern::parse("*.ac.uk").unwrap());
+            details.add_allowed_domain(DomainPattern::parse("example.com").unwrap());
+
+            assert_eq!(details.allowed_domains().unwrap_or_default().len(), 2);
+
+            // Adding to an empty (deny-all) list starts it populated rather
+            // than being ignored.
+            let mut details = AwardDetails::default();
+            details.set_allowed_domains(vec![]);
+            details.add_allowed_domain(DomainPattern::parse("*.ac.uk").unwrap());
+
+            assert_eq!(details.allowed_domains().unwrap_or_default().len(), 1);
+            assert!(details.is_domain_allowed("bristol.ac.uk"));
         }
     }
 

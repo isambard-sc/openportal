@@ -416,7 +416,7 @@ portal to process (e.g. `create_project`, `remove_project`, `update_project`,
     "expires":     1700000120,
     "version":     2,
     "command":     "resource-a.waldur.provider create_project myproject.waldur ...",
-    "state":       "pending",
+    "state":       "Pending",
     "result":      null,
     "result_type": null
   }
@@ -462,7 +462,7 @@ The `command` string follows the OpenPortal instruction protocol format:
   "expires":     1700000300,
   "version":     1,
   "command":     "waldur.provider get_offerings",
-  "state":       "pending",
+  "state":       "Pending",
   "result":      null,
   "result_type": null
 }
@@ -568,7 +568,7 @@ Set `state` to `"complete"` and populate `result` and `result_type`, or set
   "expires":     1700000120,
   "version":     3,
   "command":     "resource-a.waldur.provider create_project myproject.waldur ...",
-  "state":       "complete",
+  "state":       "Complete",
   "result":      null,
   "result_type": "None"
 }
@@ -867,9 +867,9 @@ See [instruction-protocol.md](instruction-protocol.md) for the full instruction
 grammar and argument formats.
 
 **Implementing the portal side of these:**
-[project-portal-api.md](project-portal-api.md) specifies what the connected
+[site-portal-api.md](site-portal-api.md) specifies what the connected
 portal must return for each one, and how portal-to-portal requests (an awarding
-portal creating and querying awards on a project portal) arrive through the
+portal creating and querying awards on a site portal) arrive through the
 bridge. That is the document to hand to someone connecting a new portal.
 
 ---

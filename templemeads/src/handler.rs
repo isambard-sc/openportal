@@ -533,6 +533,7 @@ async fn process_command<L: Domain>(
             domain,
             domain_version,
             supports_portal_routes,
+            supports_structured_errors,
         } => {
             // A peer that didn't send a domain at all (pre-0.33.0) may still
             // be one this Domain recognises by historical version alone -
@@ -590,6 +591,7 @@ async fn process_command<L: Domain>(
             }
 
             agent::set_route_capable(&sender_peer, *supports_portal_routes).await;
+            agent::set_structured_error_capable(&sender_peer, *supports_structured_errors).await;
 
             agent::register_peer(
                 &Peer::new(sender, zone),
@@ -1363,10 +1365,10 @@ mod tests {
     #[test]
     fn test_check_portal_ownership_is_skipped_when_not_enabled() {
         // Account/Filesystem/Scheduler agents, and `instance::run_delegated`
-        // Instances such as `op-cloudaccount`, receive Jobs whose destination is
-        // rooted at the *delegating* agent rather than at the owning portal. For
-        // them the property does not hold and must not be enforced.
-        let delegated = job("cloudportal.cloudaccount add_user bob.proj.waldur");
+        // Instances, receive Jobs whose destination is rooted at the
+        // *delegating* agent rather than at the owning portal. For them the
+        // property does not hold and must not be enforced.
+        let delegated = job("delegator.instance add_user bob.proj.waldur");
 
         assert!(check_portal_ownership(&delegated, false).is_ok());
         // ...and it would indeed have been rejected had it been enabled, which

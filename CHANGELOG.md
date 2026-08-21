@@ -8,8 +8,240 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- **A specification of what a connected project portal must implement**
-  ([docs/specifications/project-portal-api.md](docs/specifications/project-portal-api.md)):
+- **`site-portal-api.md` §4.1.2, on what `remove_award` actually does.** It
+  detaches an award from a project; it does not delete the project. The
+  reference implementation has always been explicit about this - `board.py`'s
+  handler removes the link record and comments "will not delete the project
+  itself" - but the specification only said the award was "gone", which invites
+  the wrong reading.
+
+  The section states the billing rule that gives removal its meaning: a
+  project's usage on a given day is billed to the award it was **last attached
+  to on that day**. So a handover part-way through a day gives the *whole* day
+  to the incoming award; an award detached during a day keeps that day and stops
+  from the next one, which is why removal bites at most the day after; and from
+  the first whole day with no award attached, a project's usage is billed to
+  nobody.
+
+  Three consequences are spelled out, because each is a way to lose data.
+  Removal must leave the award's accrued usage reportable - it owns every day up
+  to its last attached day, and those are the days least likely to have been
+  collected yet. Deleting the record is worse than erroring: the report comes
+  back empty, an empty report is vacuously `is_complete`, and the allocator
+  records "nothing was ever used, and that is final". And usage must be stored
+  against the site's own project rather than against the award, because which
+  award owns a day is derived from the attachment history when a report is
+  built - filing it under "the award attached right now" overwrites the record
+  with a provisional answer.
+
+  §4.3 also notes the second reason completeness is not a calendar question: a
+  day's *attribution* is not settled until the day ends either, since attaching
+  an award this afternoon changes who owns this morning.
+
+- **The example site portal implements the attachment history.** `remove_award`
+  now detaches instead of deleting, an award's attachments are a list of
+  `(project, since, to)` periods rather than a single date - so an award
+  re-attached after a gap, or moved between projects, keeps the days it already
+  owned - and usage and finalised months moved from the award record to a
+  per-project record. `site_portal.owner_of_day` resolves the billing rule,
+  `POST /awards/.../approve` records the attachment date, and the operator API
+  keeps working after removal so the last days can still be pushed and the month
+  still declared final. Re-asserting a removed award returns it to the pending
+  queue rather than silently re-attaching it.
+
+- **`site-portal-api.md` §4.3 and the example on what `is_complete` commits you
+  to.** The flag means "these figures will not change", and it is what decides
+  whether a month is requested again: report a month incomplete and the
+  allocator asks for it on every sync cycle; report it complete and it stops.
+  The current month is exempt - it is always re-requested, and an allocator may
+  disregard a `complete` claim about a month that has not finished.
+
+  Two traps are now spelled out. Completeness is a claim about the future, so it
+  is an operations decision rather than something to infer from the calendar - a
+  late job record or a billing correction moves numbers after a month has ended.
+  And `ProjectUsageReport::is_complete` is `all()` over the days a report
+  contains, so an **empty report is complete vacuously**: a month that has
+  simply not been ingested yet otherwise answers "nothing was used, and that is
+  final" and is believed. Both documents note which way the mistakes run -
+  leaving a month open costs one request per cycle, closing it early loses every
+  correction that arrives later.
+
+  The example follows both. `store.Award.final_months` records the months the
+  site has declared final, `POST /projects/{id}/usage/finalise` is how an
+  operator sets or clears one, and `build_usage_report` writes an explicit
+  zero-usage, *not*-complete day for any requested month it has no data for and
+  has not been told is final. It previously inferred completeness from the
+  calendar ("the day has passed, so it must be settled"), which claimed
+  something it could not know.
+
+  Both documents also flag a current limitation on the allocator side, as a
+  limitation rather than as the contract: Waldur's `sync_usage` sweeps only a
+  rolling two-month window, `[last_month, this_month]`, and never walks further
+  back, so today a month that leaves that window still incomplete stops being
+  requested. That is being fixed in Waldur to retry every month from the award's
+  start date until it is reported complete. A site portal implemented against
+  the rule above needs no change when it lands.
+
+- **§4.1.1 spells out what a returned project identifier may contain** - 1 to 64
+  characters of `A-Za-z0-9_-`, not starting with `-`, for the project component,
+  and your own portal's name for the other. Wider than it looks: uppercase,
+  underscore and hyphen are all allowed. `python-api.md` states the same rules on
+  `ProjectIdentifier` itself, and the section recommends asking an operator for
+  the project component alone and adding the portal yourself.
+- **`site-portal-api.md` on what `create_award` actually asks for.** The
+  document said it was a request to create a project on a resource. It is a
+  request to *attach* an award to a project on that resource - usually by
+  creating one, but a site is free to attach it to a project that already
+  exists. §4.1.1 also now states the constraint that follows: a project holds at
+  most one award at a time, and moving an award to a different project is a
+  legitimate thing for a site to do, which the allocator picks up from the next
+  mapping it is given.
+- **`site-portal-api.md` §1.3, on what an offering actually is.** The
+  document introduced offerings as "named things `ukri` is allowed to address",
+  which invites reading them as an access-control list. They are virtual agents
+  standing for one resource each, and the offering a request arrives through is
+  *part of what is being asked*: `create_award` to `ukri.aip1.isambard-ai` is a
+  request to create a project on Isambard-AI, the template is interpreted in
+  that resource's context, and the project stays tied to it.
+
+  So awards are keyed on `(offering, project_id)` - the same name on two
+  resources is two awards - every answer is scoped by the offering it was asked
+  through, and a question about a project that is not on this resource returns
+  an **empty report rather than an error**, because an awarding portal sweeping
+  its offerings to find which one holds an award should not be failed by the
+  ones that hold nothing.
+- **`site-portal-api.md` §4.1.1, on what a `ProjectMapping` is for.** The
+  document described its second half as "whatever you call that project
+  locally", which undersold it. It is the receiving portal's own
+  `ProjectIdentifier`, decided when the award is provisioned, and it is the only
+  thing that lets two portals name the same object: the awarding portal cannot
+  guess it, and without it usage recorded on one side cannot be reported to the
+  other. The new section says so, and says how the translation works -
+  `remap_project` into the caller's namespace.
+- **An example site portal** ([python/examples/site_portal/](python/examples/site_portal/)):
+  a complete, small, heavily commented implementation of
+  [site-portal-api.md](docs/specifications/site-portal-api.md) - every
+  instruction as one function, the approval path, the retry contract, and the
+  answer-everything guarantee - behind a FastAPI application, with a test suite
+  that drives every handler without a bridge, an agent or a network.
+
+  It is written to be **read, not deployed**, and its README is explicit about
+  what it deliberately lacks: no authentication on its operator API, no real
+  state storage, no durability. The point is the shape, and in particular the
+  five things that are easy to get wrong and hard to discover - failing being a
+  normal answer and *which* failure mattering, idempotency under retries, never
+  leaving a job unanswered, a thirty-second budget rather than two minutes, and
+  that a portal may implement as much or as little of the contract as it wants.
+
+  Nothing in it is Python-specific except the convenience of the module, so an
+  equivalent in another language belongs alongside it.
+- **The six `openportal` types that the contract needs but the reference did not
+  describe**: `ProjectMapping` and `UserMapping` - the required return type of
+  five of the eight award instructions - plus `Allocation`, `DateRange`, `Link`
+  and `Note`. `Destination.agents` and the recognised `Allocation` units are
+  documented too; an unrecognised unit is silently accepted and matches no
+  predicate, which is worth knowing before it bites.
+- **`AwardDetails()` with no arguments** gives an empty award to fill in with the
+  setters, which is what code building one from scratch wants.
+  `AwardDetails(json)` is unchanged - the default argument is exactly the `"{}"`
+  that produced an empty award before, so no existing caller behaves differently.
+- **Structured errors on the wire.** A job's failure was a `String`, so every
+  agent that wanted to *act* on one rather than log it had to parse prose - and
+  crossing an agent boundary flattened whatever the failing agent had known. A
+  failed job now also carries `templemeads::joberror::JobError`: a stable,
+  machine-readable `kind` beside the message.
+
+  `kind` is an open string rather than an enum, because templemeads is
+  domain-agnostic and cannot own a vocabulary of award decisions. It defines the
+  transport kinds (`expired`, `unroutable`, `unsupported`, `invalid`, `run`,
+  `unknown`); a `Domain` contributes its own through the new
+  `Domain::error_kind_for`, with `greatwestern` supplying `award_pending`,
+  `award_rejected` and `award_permission`. A routing hop relays a kind it has
+  never heard of without needing to understand it.
+
+  **Nothing deployed has to change.** The prose in `result` is byte-for-byte
+  what it always was, including the portal agent's `RuntimeError{…}` wrapper, so
+  a peer that reads only that is unaffected. The structured field is additive
+  and optional, and a failure arriving without one has its kind reconstructed
+  from the message by `Job::error_or_infer`. `Register` gains
+  `supports_structured_errors` alongside `supports_portal_routes` - not needed
+  for correctness, but it separates "this peer could not have sent a kind" from
+  "this failure genuinely had none".
+
+  `Job::errored(message)` keeps its signature and infers a kind, so every
+  existing call site acquired one without being rewritten; `Job::errored_with`
+  is the explicit path for code that already knows. The portal agent now carries
+  a downstream failure's kind through its wrapping instead of discarding it.
+
+  A `JobError` may also record the `origin` agent, for diagnostics. It does not
+  leave the agent network: `bridge_server::outbound` is the single funnel every
+  job served to a connected portal passes through, and it strips the origin
+  there, so internal topology is not volunteered to software outside. The kind
+  and message both survive, so nothing a portal acts on is lost.
+
+  In Python the exception class is now chosen from the kind rather than from the
+  message, with prose-parsing kept only as the fallback for an older peer, and
+  `job.error_kind` exposes the raw kind for anything the class hierarchy does
+  not cover.
+- **`ProjectStorageReport.to_storage_report()`**, the mirror of
+  `ProjectUsageReport.to_usage_report()`. A portal answering
+  `get_storage_reports` builds one project report at a time and has to lift each
+  into a portal-level `StorageReport` before combining them; without this the
+  path raised `AttributeError`.
+- **A typed error hierarchy in the `openportal` Python module**, replacing the
+  hand-rolled classes and string parser that every portal implementation had to
+  write for itself: `OpenPortalError` (deriving from `OSError`, so existing
+  `except OSError` code is unaffected), `OpenPortalOtherError`,
+  `OpenPortalUnsupportedCommandError`, `ManagedProjectPermissionError`, and its
+  two subclasses `ManagedProjectPendingError` and `ManagedProjectRejectedError`.
+
+  The distinction the hierarchy exists to carry is that **pending is not a
+  failure**. An award waiting on human approval has no `ProjectMapping` to
+  return, so it answers with an error — and the awarding portal must retry that
+  one while treating a rejection as final. Losing the class loses that
+  difference.
+
+  A job carries one error string, so the class rides inside it as
+  `"<ClassName>: <message>"`. `job.errored(exc)` encodes it, `job.error` decodes
+  it back to the same class, `job.result` and `job.raise_for_error()` raise it,
+  and `openportal.error_from_message()` converts a raw message you already hold.
+  Decoding fixes two faults in the implementation it replaces: the wrapper is
+  removed by prefix rather than by trimming a character set (which ate the start
+  of any message beginning with those letters), and the message is no longer
+  off-by-one for `OpenPortalError`.
+
+- **The site portal contract corrected against a real implementation.**
+  [site-portal-api.md](docs/specifications/site-portal-api.md) was written
+  without sight of `waldur-mastermind`'s side of it. Reading that implementation
+  changed several things it claimed:
+
+  - **`create_award` and `update_award` do not always return a mapping.** The
+    document said a portal queueing awards for approval "still returns the
+    mapping immediately"; it cannot, because there is no local project to name
+    yet. It answers with `ManagedProjectPendingError` (§3.3, §4.1).
+  - **Everything is retried, so everything must be idempotent** (new §3.5). The
+    awarding portal re-sends `create_award` for awards it already holds on every
+    synchronisation cycle — "add it again just to be sure" — and `update_award`
+    for an award the portal has never seen is treated as a create.
+  - **Usage and storage reports are independent** (§4.3). They are issued by
+    separate scheduled tasks; the previous claim that "an error fails both" was
+    backwards.
+  - **A portal implements as much of the contract as it wants** (new §4.0), and
+    declines the rest with `OpenPortalUnsupportedCommandError`. The reference
+    implementation does not implement `get_users` — members travel in
+    `AwardDetails.members` instead (§4.2).
+  - **The answering budget is 30 seconds, not 90** (§3.4). The awarding portal
+    gives up long before the two-minute job expiry.
+  - **`state` is capitalised on the wire** (`"Pending"`, not `"pending"`) — also
+    corrected in [bridge-api.md](docs/specifications/bridge-api.md) — and
+    `remove_award` answers with `<project_id>:None`.
+  - The signal endpoint's job id is a shared secret, and the reference
+    implementation answers an unknown one with 403 (§3.1).
+
+  §7 now points at `waldur-mastermind`'s `src/waldur_openportal/`, file by file,
+  as the worked implementation of each part.
+- **A specification of what a connected site portal must implement**
+  ([docs/specifications/site-portal-api.md](docs/specifications/site-portal-api.md)):
   the requests that arrive on the bridge board, the exact result type each one must
   return, the two-minute answering deadline, and how portal-to-portal working hangs
   together - offerings, the `forwarded_for` tag that identifies the awarding portal,
@@ -50,7 +282,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   records the attribute. The empty home that `useradd -m` created was enough to stop the
   recycled one being restored - see below.
 
+### Removed
+
+- **`op-cloudaccount` and `op-cloudportal`.** Both were prototypes written to give
+  cloud operators something to work against while they had no portal software of
+  their own, and both held state - project/user assignment, Award approval - inside
+  an agent, which is not where OpenPortal state belongs. The same need is met
+  without either agent: the operators run a stock `op-portal` and `op-bridge` and
+  put their own software behind the bridge, holding that state on their side of it.
+  [site-portal-api.md](docs/specifications/site-portal-api.md) specifies what
+  that software has to implement. The archived design documents are kept, marked
+  withdrawn, as a record of the reasoning.
+
+  Nothing that came in alongside them is withdrawn: `templemeads::portal::run()`'s
+  one-shot mode, `instance::run_delegated`, and `UserMapping`'s acceptance of an
+  email address as the local user are all general-purpose and remain.
+
 ### Fixed
+
+- A job failure whose `kind` has no exception class of its own no longer loses
+  the class its message names. `OpenPortalError` raised by a portal came back as
+  `OpenPortalOtherError`, because the kind-first path flattened everything it
+  could not place; it now defers to the message in that case, which is what the
+  older prose-only path always did.
+- **`AwardDetails.set_allowed_domains([])` meant the opposite of what it said.**
+  The setter normalised an empty list to `None`, so the strictest setting a
+  caller could ask for - permit nobody - silently became the most permissive
+  one, permit everybody. The failure was invisible and it widened access:
+
+  ```python
+  d.allowed_domains = []          # intent: nobody may join
+  d.is_domain_allowed("evil.com") # -> True
+  ```
+
+  `allowed_domains` has three distinct states and both `json-types.md` and
+  `python-api.md` have always specified them, so this was the setter
+  contradicting the type rather than a policy. It now stores what it is given;
+  `clear_allowed_domains()` and passing `None` remain the ways to reach "no
+  restriction". `from_json`, `to_json` and `merge` already preserved the empty
+  list, so the setter was the only path that lost it.
+
+- **`update_award` could widen an allow-list but never narrow it.** `merge`
+  took the union of the two lists, so a domain once granted could not be
+  withdrawn and an empty list sent to a project that already had entries was a
+  no-op - which made the state the fix above restores undeliverable over the
+  wire.
+
+  It now replaces the list wholesale, as `members` and `membership_control`
+  already did: `allowed_domains` is a definitive set decided by the awarding
+  portal, so an update naming fewer domains means fewer. Omitting the field
+  still changes nothing. The fields that accumulate on merge are `notes` (an
+  audit trail) and `breakdown`, and they still do; `add_allowed_domain` remains
+  the incremental path for a portal building a list up locally.
+- Documentation: `python-api.md` listed a `Status.expired()` that does not
+  exist - expiry is not one of the six job states, and is read from
+  `job.is_expired` - and omitted `Status.created()`, which does.
+
+- **The portal agent sent malformed error sentinels.** `ExpirationError{{}}` and
+  `UnknownError{{}}` were written as plain string literals, where `{{` is not an
+  escape — only `format!` treats it as one, which is why the neighbouring
+  `RuntimeError{…}` was correct. Both reached the portal with doubled braces, so
+  a portal matching the documented `ExpirationError{}` never matched. They now
+  say what they are documented to say.
 
 - **OpenPortal was creating LDAP replication conflicts in multi-master FreeIPA
   topologies.** A site reported 67 `namingConflict` entries accumulated over 11

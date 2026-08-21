@@ -43,6 +43,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   FFI on a Tokio worker thread. Dynamic linking would not have fixed this: the
   limitation is musl's, not the linker's.
 
+  Which `getent` is used is decided once, on first use, and logged: `/usr/bin/getent`
+  if it exists, otherwise the first one found on the absolute entries of `PATH`, saved
+  as an absolute path. That one is then used for the life of the process. If it stops
+  being runnable the agent says so and lookups fail as indeterminate until it returns,
+  rather than silently resolving names through some other program - a `getent`
+  appearing or disappearing under a running agent means something is wrong with the
+  host, not that a different binary should be picked up.
+
 - **A name that could not be looked up was reported as a name that does not exist.**
   The two are now distinguished. A genuine absence - every source on the host was asked
   and none knows the name - fails immediately and says so. An indeterminate lookup

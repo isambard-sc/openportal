@@ -41,9 +41,11 @@
 
 use templemeads::Error;
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::process::Command;
+use tokio::sync::OnceCell;
 use tokio::time::timeout;
 
 /// How long a single `getent` invocation is given before it is abandoned.
@@ -62,6 +64,23 @@ const LOOKUP_ATTEMPTS: u32 = 3;
 
 /// Base delay between retries, multiplied by the attempt number.
 const RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Where `getent` lives on a normal Linux host.
+const STANDARD_GETENT: &str = "/usr/bin/getent";
+
+///
+/// The `getent` this process will use for the whole of its life, resolved once on
+/// first use. `None` means none was found, and the flat-file fallback is all there is.
+///
+/// **Locked in deliberately.** Which `getent` a host has is not something that changes
+/// under a running agent, so if the one we resolved stops working we say so loudly and
+/// fail the lookup until it comes back, rather than quietly moving to a different
+/// binary. A `getent` appearing or disappearing mid-run is a sign that something is
+/// wrong with the host, and silently resolving names through a *different* program
+/// than the one this process started with - possibly one earlier on `PATH`, possibly
+/// answering from different sources - is not a failure mode worth having.
+///
+static GETENT: OnceCell<Option<PathBuf>> = OnceCell::const_new();
 
 ///
 /// Which name-service database to query.
@@ -228,48 +247,129 @@ fn check_name(database: Database, name: &str) -> Result<(), Error> {
 }
 
 ///
-/// Make one attempt to look `name` up in `database`.
+/// The `getent` this process uses, resolved on first use and then fixed.
 ///
-/// `getent` is tried at its standard absolute path first and then on `PATH`, since a
-/// host that has it somewhere else is more likely than a host without it. Only a
-/// failure to *run* the program moves on to the next candidate: once one has run, its
-/// answer is the answer.
+/// Resolution is by **existence**, not by trying it and seeing whether it works: if
+/// `/usr/bin/getent` is there, that is the one, and a host that has it somewhere else
+/// gets whatever `PATH` yields - saved as an absolute path, so the program run later
+/// cannot depend on `PATH` or on the working directory having changed since.
 ///
-async fn lookup(database: Database, name: &str) -> Outcome {
-    let mut missing = Vec::new();
+async fn getent() -> Option<&'static Path> {
+    GETENT.get_or_init(find_getent).await.as_deref()
+}
 
-    for program in ["/usr/bin/getent", "getent"] {
-        match run_getent(program, database, name).await {
-            Ok(outcome) => return outcome,
-            Err(e) => missing.push(format!("could not run '{}' ({})", program, e)),
+///
+/// Find a `getent` to lock on to. Called exactly once per process.
+///
+async fn find_getent() -> Option<PathBuf> {
+    let standard = PathBuf::from(STANDARD_GETENT);
+
+    if is_program(&standard).await {
+        tracing::info!("Resolving users and groups with '{}'", standard.display());
+        return Some(standard);
+    }
+
+    // Not at the standard location, so fall back to `PATH` - but only its absolute
+    // entries. A relative entry would resolve against whatever the working directory
+    // happens to be, which is neither reproducible nor something we want deciding
+    // which program resolves the names behind a `chown`.
+    let path = std::env::var_os("PATH")?;
+
+    for dir in std::env::split_paths(&path) {
+        if !dir.is_absolute() {
+            tracing::debug!(
+                "Ignoring the relative PATH entry '{}' while looking for getent",
+                dir.display()
+            );
+            continue;
+        }
+
+        let candidate = dir.join("getent");
+
+        if is_program(&candidate).await {
+            tracing::warn!(
+                "'{}' does not exist - resolving users and groups with '{}', found via \
+                 PATH. This process will use that one from now on.",
+                STANDARD_GETENT,
+                candidate.display()
+            );
+            return Some(candidate);
         }
     }
 
-    // No `getent` on this host at all. Read the flat file directly, which is enough
-    // for a development machine or a minimal container, but cannot see the directory.
-    // A *hit* is therefore trustworthy and a *miss* is not - see `read_file`.
     tracing::warn!(
-        "No usable 'getent' on this host ({}) - falling back to reading {} directly",
-        missing.join(", "),
-        database.file()
+        "No 'getent' exists on this host - users and groups can only be resolved from \
+         the local files, so no name held only in the directory can be looked up. \
+         Every such lookup will fail as indeterminate until a 'getent' is installed \
+         and this agent is restarted."
     );
 
-    read_file(database, name).await
+    None
+}
+
+///
+/// Is `path` a program we can run? An existence check, not a trial run.
+///
+async fn is_program(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+///
+/// Make one attempt to look `name` up in `database`.
+///
+/// Uses the `getent` this process locked on to at startup, and *only* that one. If it
+/// cannot be run the lookup is indeterminate and says so loudly: the binary that was
+/// there when this agent started has gone, which is a problem with the host and not
+/// something to paper over by finding another one. Lookups resume as soon as it is
+/// back, since the next attempt tries the same path again.
+///
+async fn lookup(database: Database, name: &str) -> Outcome {
+    let Some(program) = getent().await else {
+        // No `getent` existed when this process started - already warned about once,
+        // at discovery. The flat file holds only local entries, so a hit is
+        // trustworthy and a miss is not; see `read_file`.
+        return read_file(database, name).await;
+    };
+
+    match run_getent(program, database, name).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::error!(
+                "'{}' could not be run ({}) - it existed when this agent started, so \
+                 something has changed on this host. Refusing to resolve names through \
+                 any other program; lookups will fail until it is back.",
+                program.display(),
+                e
+            );
+
+            Outcome::Indeterminate(format!("'{}' could not be run: {}", program.display(), e))
+        }
+    }
 }
 
 ///
 /// Run one `getent` and interpret its exit status.
 ///
-/// `Err` means the program could not be run at all, which is the caller's cue to try
-/// another candidate. Everything else - including a timeout, a signal, or output that
-/// makes no sense - is an `Outcome`, because the program did run.
+/// `Err` means the program could not be run at all, which the caller reports as a host
+/// problem. Everything else - including a timeout, a signal, or output that makes no
+/// sense - is an `Outcome`, because the program did run.
 ///
 async fn run_getent(
-    program: &str,
+    program: &Path,
     database: Database,
     name: &str,
 ) -> Result<Outcome, std::io::Error> {
-    tracing::debug!("Running: {} {} {}", program, database.as_str(), name);
+    tracing::debug!(
+        "Running: {} {} {}",
+        program.display(),
+        database.as_str(),
+        name
+    );
 
     let mut command = Command::new(program);
     command.arg(database.as_str()).arg(name);
@@ -280,7 +380,7 @@ async fn run_getent(
         Err(_) => {
             return Ok(Outcome::Indeterminate(format!(
                 "'{} {} {}' did not answer within {} seconds",
-                program,
+                program.display(),
                 database.as_str(),
                 name,
                 LOOKUP_TIMEOUT.as_secs()
@@ -300,7 +400,7 @@ async fn run_getent(
         Some(2) => Ok(Outcome::Absent),
         Some(code) => Ok(Outcome::Indeterminate(format!(
             "'{} {} {}' exited with code {}: {}",
-            program,
+            program.display(),
             database.as_str(),
             name,
             code,
@@ -308,7 +408,7 @@ async fn run_getent(
         ))),
         None => Ok(Outcome::Indeterminate(format!(
             "'{} {} {}' was killed by a signal",
-            program,
+            program.display(),
             database.as_str(),
             name
         ))),
@@ -521,6 +621,49 @@ mod tests {
                 check_name(Database::Group, name).is_err(),
                 "should have rejected {:?}",
                 name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_program_accepts_a_real_program() {
+        assert!(is_program(Path::new("/bin/sh")).await);
+    }
+
+    #[tokio::test]
+    async fn test_is_program_rejects_a_non_executable_file() {
+        assert!(!is_program(Path::new("/etc/passwd")).await);
+    }
+
+    #[tokio::test]
+    async fn test_is_program_rejects_a_directory() {
+        // Has the executable bit set, but is not something we can run - which is what
+        // stops a `PATH` entry containing a *directory* called `getent` being locked
+        // on to.
+        assert!(!is_program(Path::new("/usr/bin")).await);
+    }
+
+    #[tokio::test]
+    async fn test_is_program_rejects_a_missing_path() {
+        assert!(!is_program(Path::new("/nonexistent/openportal/getent")).await);
+    }
+
+    #[tokio::test]
+    async fn test_getent_is_locked_in() {
+        // Whatever this host has, the answer must be stable for the life of the
+        // process and must be an absolute path - the point of resolving once is that
+        // the program used cannot change under a running agent, nor depend on `PATH`
+        // or the working directory at the moment of a lookup.
+        let first = getent().await;
+        let second = getent().await;
+
+        assert_eq!(first, second);
+
+        if let Some(program) = first {
+            assert!(
+                program.is_absolute(),
+                "{} is not absolute",
+                program.display()
             );
         }
     }

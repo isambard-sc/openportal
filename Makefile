@@ -30,6 +30,7 @@ lint:
 	@rustup component add clippy 2> /dev/null
 	cargo clippy --all-targets --all-features -- -D warnings
 	@./scripts/check-secret-writes.sh
+	@./scripts/check-nss-lookups.sh
 
 audit:
 	@cargo audit --version > /dev/null 2>&1 || cargo install cargo-audit --locked

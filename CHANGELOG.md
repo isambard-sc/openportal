@@ -142,9 +142,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   billed total; `Allocation` accepted `"NaN"` and `"inf"`. Release builds now set
   `overflow-checks = true`.
 - Boards, jobs, caches, nonce stores, connection slots and message sizes are all now
-  bounded - previously a peer could grow each without limit. Slurm and FreeIPA cache
-  eviction is targeted rather than wholesale, so a stale entry no longer forces every
-  project to re-query `slurmctld`.
+  bounded - previously a peer could grow each without limit. The Slurm caches evict
+  individual entries rather than flushing, so one entry reaching the cap no longer
+  forces every project to re-query `slurmctld`; the FreeIPA caches deliberately do
+  flush wholesale, since a miss there is a cheap re-query.
 - A stalled handshake held its connection slot indefinitely; there was no WebSocket
   message size limit; the message-exchange overload recovery was dead code.
 - Mapping targets permitted whitespace and separators; `PortalIdentifier` never

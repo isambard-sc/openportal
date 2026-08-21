@@ -32,9 +32,140 @@ struct FreeResponse {
 }
 
 ///
+/// Which FreeIPA server should serve a call.
+///
+/// This matters because a logical operation is usually a read followed by a
+/// write that depends on it ("does this user exist? no - then add them"). In
+/// a multi-master topology a master that has not yet received a recent add
+/// answers "no such user", and adding on the strength of that answer is how
+/// the same DN comes to be created twice, leaving 389-ds with a
+/// namingConflict it cannot reconcile.
+///
+#[derive(Debug, Clone)]
+enum Target {
+    /// Any healthy server in the pool may serve this call. Only safe for
+    /// reads whose answer does not decide whether we write.
+    Any,
+    /// This call must be served by the write server, so that writes - and the
+    /// reads that decide whether to write - all meet the same copy of the
+    /// directory. Falls back to another server only once the write server is
+    /// confirmed down and replication has had time to converge.
+    Pinned,
+    /// This call must be served by the named server, whatever else the pool
+    /// contains.
+    Named(String),
+}
+
+/// Maximum number of times a single call will re-login and replay after a
+/// 401. Without a bound this loop can spin against a server that accepts
+/// the login but rejects the session until the job's deadline.
+const MAX_LOGIN_RETRIES: u32 = 3;
+
+///
 /// Call a post URL on the FreeIPA server described in 'auth'.
 ///
 async fn call_post<T>(
+    func: &str,
+    args: Option<Vec<String>>,
+    kwargs: Option<HashMap<String, String>>,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
+    call_post_to(&Target::Any, func, args, kwargs, expires).await
+}
+
+///
+/// Send a JSON-RPC payload to the passed server, recording whether that server
+/// could be reached at all.
+///
+/// A connection that was refused marks the server down; a call that merely
+/// timed out does not. That distinction is the whole point: a slow master is
+/// still the master holding our writes, and treating slow as down is how a
+/// write ends up on a second master.
+///
+async fn send_payload(
+    client: &Client,
+    url: &str,
+    server: &str,
+    health: &Arc<ServerHealth>,
+    payload: &serde_json::Value,
+) -> Result<reqwest::Response, SendFailure> {
+    match client
+        .post(url)
+        .header("Referer", format!("{}/ipa", server))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(payload)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            health.mark_up(server);
+            Ok(response)
+        }
+        Err(e) => {
+            let message = format!(
+                "Could not call function {} on server {}: {}",
+                payload, server, e
+            );
+
+            if e.is_timeout() {
+                health.mark_timeout(server);
+
+                return Err(SendFailure::TimedOut(Error::Timeout(message)));
+            }
+
+            if e.is_connect() {
+                // nothing is listening - that is not ambiguous
+                health.mark_down(server);
+            }
+
+            Err(SendFailure::Failed(Error::Call(message)))
+        }
+    }
+}
+
+///
+/// Why a call did not get a response, to the extent that the caller has to care
+/// about the difference.
+///
+enum SendFailure {
+    /// The server did not answer in time. The call may well have been applied,
+    /// so this must never be treated as "the write did not happen".
+    TimedOut(Error),
+    /// The call did not get a response for some other reason.
+    Failed(Error),
+}
+
+///
+/// Call a post URL that *changes* the directory - an add, a modify, a delete,
+/// or a membership change.
+///
+/// Every one of these goes to the write server. Two masters both accepting an
+/// add of the same DN is a conflict 389-ds cannot reconcile, and it cannot be
+/// undone with `ipa user-del`, so writes are not something to spread across a
+/// multi-master topology for the sake of load.
+///
+async fn call_write<T>(
+    func: &str,
+    args: Option<Vec<String>>,
+    kwargs: Option<HashMap<String, String>>,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
+    call_post_to(&Target::Pinned, func, args, kwargs, expires).await
+}
+
+///
+/// Call a post URL on a FreeIPA server chosen according to the passed
+/// `Target`.
+///
+async fn call_post_to<T>(
+    target: &Target,
     func: &str,
     args: Option<Vec<String>>,
     kwargs: Option<HashMap<String, String>>,
@@ -54,7 +185,7 @@ where
         kwargs
     );
     tracing::debug!("Getting a connected server...");
-    let mut lock = get_connected_server(expires).await?;
+    let mut lock = get_connected_server(target, expires).await?;
     tracing::debug!(
         "Connected server obtained! Took {} ms",
         (Utc::now() - start_time).num_milliseconds()
@@ -64,7 +195,7 @@ where
     let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
 
     if time_left < 5 {
-        return Err(Error::Call(
+        return Err(Error::Expired(
             "Not enough time left to call FreeIPA server".to_string(),
         ));
     }
@@ -74,8 +205,6 @@ where
         func,
         time_left
     );
-
-    let url = format!("{}/ipa/session/json", lock.server());
 
     // make id a random integer between 1 and 1000
     let id = rand::random::<u16>() % 1000;
@@ -101,15 +230,27 @@ where
         .build()
         .context("Could not build client")?;
 
-    let mut result = client
-        .post(&url)
-        .header("Referer", format!("{}/ipa", lock.server()))
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .with_context(|| format!("Could not call function: {}", payload))?;
+    // The URL has to be built from the server we are actually about to talk
+    // to, and rebuilt after any reconnect below - see the note in the 401
+    // loop.
+    let mut url = format!("{}/ipa/session/json", lock.server());
+
+    let mut result = match send_payload(&client, &url, lock.server(), lock.health(), &payload).await
+    {
+        Ok(result) => result,
+        Err(SendFailure::TimedOut(e)) => {
+            // Throw away the session, so the next call to this server has to
+            // log in again. A server that is listening but not answering keeps
+            // its session cookie valid for ever, so without this nothing would
+            // ever probe it by any other means and it would go on absorbing
+            // every write. The login is a separate, short-lived request: if
+            // that cannot get through either, the server is confirmed down and
+            // failover can begin.
+            lock.set_login_failed();
+            return Err(e);
+        }
+        Err(SendFailure::Failed(e)) => return Err(e),
+    };
 
     // write a warning if this took a long time
     if (Utc::now() - start_time).num_seconds() > 5 {
@@ -129,9 +270,20 @@ where
     }
 
     // if this is an authorisation error, try to reconnect
+    let mut login_retries: u32 = 0;
+
     while result.status().as_u16() == 401 {
         tracing::warn!("Login error: 401 - authorisation failed.");
         lock.set_login_failed();
+
+        login_retries = login_retries.saturating_add(1);
+
+        if login_retries > MAX_LOGIN_RETRIES {
+            return Err(Error::Login(format!(
+                "Could not authorise call to function {} after {} attempts",
+                func, MAX_LOGIN_RETRIES
+            )));
+        }
 
         // try to get another lock
         drop(lock);
@@ -139,7 +291,14 @@ where
         assert_not_expired(expires)?;
 
         tracing::error!("Authorisation (401) error. Reconnecting.");
-        lock = get_connected_server(expires).await?;
+        lock = get_connected_server(target, expires).await?;
+
+        // Reconnecting can hand us a *different* server, so the URL has to be
+        // rebuilt. It used to be computed once before this loop, so a replay
+        // after reconnecting to another server posted that server's session
+        // cookie to the original server, which 401s again - the loop could
+        // then only ever end when the job expired.
+        url = format!("{}/ipa/session/json", lock.server());
 
         if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
             tracing::info!(
@@ -153,7 +312,7 @@ where
         let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
 
         if time_left < 5 {
-            return Err(Error::Call(
+            return Err(Error::Expired(
                 "Not enough time left to call FreeIPA server".to_string(),
             ));
         }
@@ -166,15 +325,14 @@ where
             .context("Could not build client")?;
 
         // retry the call
-        result = client
-            .post(&url)
-            .header("Referer", format!("{}/ipa", lock.server()))
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .with_context(|| format!("Could not call function: {}", payload))?;
+        result = match send_payload(&client, &url, lock.server(), lock.health(), &payload).await {
+            Ok(result) => result,
+            Err(SendFailure::TimedOut(e)) => {
+                lock.set_login_failed();
+                return Err(e);
+            }
+            Err(SendFailure::Failed(e)) => return Err(e),
+        };
 
         if Utc::now().signed_duration_since(start_time).num_seconds() > 10 {
             tracing::error!(
@@ -357,11 +515,16 @@ impl IPAServer {
 #[derive(Debug)]
 struct LockedIPAServer {
     server: tokio::sync::OwnedMutexGuard<IPAServer>,
+    health: Arc<ServerHealth>,
 }
 
 impl LockedIPAServer {
     fn server(&self) -> &str {
         &self.server.server
+    }
+
+    fn health(&self) -> &Arc<ServerHealth> {
+        &self.health
     }
 
     fn jar(&self) -> &Arc<Jar> {
@@ -373,18 +536,319 @@ impl LockedIPAServer {
     }
 }
 
-static FREEIPA_SERVERS: Lazy<Mutex<Vec<Arc<Mutex<IPAServer>>>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
+///
+/// One connection slot in the pool. The URL is held outside the mutex so that
+/// the pool can be inspected (and a specific server selected) without waiting
+/// behind whatever call currently owns that slot.
+///
+/// The same URL may appear in several slots - that is how the `freeipa-server`
+/// option buys concurrency against a single server.
+///
+#[derive(Debug, Clone)]
+struct PoolEntry {
+    url: String,
+    health: Arc<ServerHealth>,
+    server: Arc<Mutex<IPAServer>>,
+}
+
+///
+/// Whether a server is reachable at all, shared by every slot for that server
+/// and held outside their mutexes so it can be read without waiting for an
+/// in-flight call.
+///
+/// Only *confirmed down* is recorded here - a connection that was refused, a
+/// name that did not resolve, a login that was rejected. A call that merely
+/// timed out does not count: a slow master is still the master that has our
+/// writes, and failing over off the back of a timeout is how the same DN ends
+/// up added on two of them.
+///
+#[derive(Debug)]
+struct ServerHealth {
+    /// Unix seconds at which this server was first confirmed down, or 0 if it
+    /// is believed to be up.
+    down_since: std::sync::atomic::AtomicI64,
+    /// Unix seconds at which this server last came back after being down, or 0
+    /// if it has been up for as long as we have known it.
+    up_since: std::sync::atomic::AtomicI64,
+    /// How many calls in a row this server has failed to answer in time. Reset
+    /// by any answer at all.
+    consecutive_timeouts: std::sync::atomic::AtomicI64,
+}
+
+/// How many calls a server may fail to answer in a row before it is treated as
+/// down. A server that is listening but never replies would otherwise take
+/// every write forever: nothing marks it down, because a timeout on its own is
+/// not evidence that the write did not land.
+///
+/// Each of these is a separate call that waited out its own timeout, so this is
+/// minutes of a server not answering, not one slow request. Failover then still
+/// waits the replication window on top.
+const MAX_CONSECUTIVE_TIMEOUTS: i64 = 3;
+
+impl ServerHealth {
+    fn new() -> Self {
+        ServerHealth {
+            down_since: std::sync::atomic::AtomicI64::new(0),
+            up_since: std::sync::atomic::AtomicI64::new(0),
+            consecutive_timeouts: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+
+    fn mark_down(&self, url: &str) {
+        if self
+            .down_since
+            .compare_exchange(
+                0,
+                Utc::now().timestamp(),
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            tracing::warn!("FreeIPA server {} is confirmed down.", url);
+        }
+    }
+
+    ///
+    /// Record that a call to this server did not answer in time, and treat the
+    /// server as down once enough of them have gone unanswered in a row.
+    ///
+    /// A single timeout deliberately does not count. It is indistinguishable
+    /// from a write that landed and whose response was lost, and failing over
+    /// on the strength of one is what leaves the same DN added on two masters.
+    /// A run of them is different: it says the server is not answering
+    /// *anything*, and the replication window still has to pass before a write
+    /// goes anywhere else - long enough for whatever it did accept to have
+    /// replicated to the server that takes over.
+    ///
+    fn mark_timeout(&self, url: &str) {
+        let timeouts = self
+            .consecutive_timeouts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+
+        tracing::warn!(
+            "FreeIPA server {} did not answer in time ({} call(s) in a row).",
+            url,
+            timeouts
+        );
+
+        if timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
+            tracing::error!(
+                "FreeIPA server {} has failed to answer {} calls in a row - \
+                 treating it as down.",
+                url,
+                timeouts
+            );
+            self.mark_down(url);
+        }
+    }
+
+    fn mark_up(&self, url: &str) {
+        self.consecutive_timeouts
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+
+        if self.down_since.swap(0, std::sync::atomic::Ordering::SeqCst) != 0 {
+            self.up_since
+                .store(Utc::now().timestamp(), std::sync::atomic::Ordering::SeqCst);
+            tracing::info!("FreeIPA server {} is reachable again.", url);
+        }
+    }
+
+    ///
+    /// How long this server has been confirmed down, or None if it is
+    /// believed to be up.
+    ///
+    fn down_for(&self) -> Option<chrono::Duration> {
+        match self.down_since.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => None,
+            since => Some(chrono::Duration::seconds(
+                Utc::now().timestamp().saturating_sub(since).max(0),
+            )),
+        }
+    }
+
+    ///
+    /// Whether this server may be given writes, given how long replication
+    /// needs to converge.
+    ///
+    /// Recovery is as cautious as failover, and for the mirror-image reason: a
+    /// server that has just come back has not necessarily caught up with what
+    /// another master accepted while it was away, so writing to it too soon
+    /// would create the same conflict from the other direction.
+    ///
+    fn can_take_writes(&self, replication_window: chrono::Duration) -> bool {
+        if self.down_since.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            return false;
+        }
+
+        match self.up_since.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => true,
+            since => {
+                chrono::Duration::seconds(Utc::now().timestamp().saturating_sub(since).max(0))
+                    >= replication_window
+            }
+        }
+    }
+}
+
+/// The connection slots that reads may use - one per entry in
+/// `freeipa-server`.
+static FREEIPA_SERVERS: Lazy<Mutex<Vec<PoolEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+/// The connection slots reserved for writes, keyed by server.
+///
+/// Writes get their own slots so that write concurrency can be raised without
+/// also multiplying the read pool - and because which server takes the writes
+/// changes on failover, so it cannot be expressed by listing one server more
+/// often in `freeipa-server`.
+///
+/// Slots are created the first time a server takes writes and then kept, so
+/// that handing the role back to a server that has held it before reuses its
+/// sessions instead of logging in again.
+static WRITE_SLOTS: Lazy<Mutex<HashMap<String, Vec<PoolEntry>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Whether each server is answering, keyed by server.
+///
+/// One record per server, shared by every slot for it, read and write alike:
+/// evidence that a server has stopped answering is evidence however it was
+/// gathered, and failover decisions are made by comparing servers, so they
+/// cannot be reading from two separate sets of books.
+static SERVER_HEALTH: Lazy<Mutex<HashMap<String, Arc<ServerHealth>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+///
+/// The credentials every slot logs in with. Held so that a write slot can be
+/// created later, when a server first takes the writes.
+///
+#[derive(Debug, Clone)]
+struct Credentials {
+    user: String,
+    password: SecretString,
+}
+
+static CREDENTIALS: Lazy<Mutex<Option<Credentials>>> = Lazy::new(|| Mutex::new(None));
+
+///
+/// The server that all writes are sent to, the time that replication needs to
+/// converge before a write may be sent anywhere else, and how many writes may
+/// run against that server at once.
+///
+#[derive(Debug, Clone, Default)]
+struct WriteConfig {
+    server: Option<String>,
+    replication_window: chrono::Duration,
+    concurrent_writes: usize,
+}
+
+static WRITE_CONFIG: Lazy<Mutex<WriteConfig>> = Lazy::new(|| {
+    Mutex::new(WriteConfig {
+        server: None,
+        replication_window: chrono::Duration::seconds(DEFAULT_REPLICATION_WINDOW),
+        concurrent_writes: DEFAULT_CONCURRENT_WRITES,
+    })
+});
+
+/// How long replication is assumed to need to converge, if
+/// `freeipa-replication-window` is not set. A write must not be sent to a
+/// different server until at least this long after the write server was last
+/// known to be taking writes, or the new server may not yet have heard about
+/// what the old one accepted.
+const DEFAULT_REPLICATION_WINDOW: i64 = 30;
+
+/// How many writes may run against the write server at once, if
+/// `freeipa-concurrent-writes` is not set.
+///
+/// More than one is safe: a single 389-ds serialises DN uniqueness itself, so
+/// two simultaneous adds of one DN on one server give a success and a
+/// `DuplicateEntry`, which is handled. It is only two *masters* accepting the
+/// same add that cannot be reconciled.
+const DEFAULT_CONCURRENT_WRITES: usize = 2;
+
+/// Each concurrent write is a live session on the server, so refuse to open an
+/// implausible number of them because of a mistyped config value.
+const MAX_CONCURRENT_WRITES: usize = 64;
+
+///
+/// Return the health record for the passed server, creating it if this is the
+/// first slot to ask.
+///
+async fn health_for(url: &str) -> Arc<ServerHealth> {
+    SERVER_HEALTH
+        .lock()
+        .await
+        .entry(url.to_string())
+        .or_insert_with(|| Arc::new(ServerHealth::new()))
+        .clone()
+}
+
+///
+/// Return the connection slots reserved for writes on the passed server,
+/// creating them if it has not taken the writes before.
+///
+async fn write_slots_for(url: &str) -> Result<Vec<PoolEntry>, Error> {
+    let mut slots = WRITE_SLOTS.lock().await;
+
+    if let Some(existing) = slots.get(url) {
+        return Ok(existing.clone());
+    }
+
+    let credentials = match CREDENTIALS.lock().await.clone() {
+        Some(credentials) => credentials,
+        None => {
+            return Err(Error::Call(
+                "No FreeIPA credentials have been initialised".to_string(),
+            ))
+        }
+    };
+
+    let concurrent_writes = WRITE_CONFIG.lock().await.concurrent_writes.max(1);
+    let health = health_for(url).await;
+
+    let entries: Vec<PoolEntry> = (0..concurrent_writes)
+        .map(|_| PoolEntry {
+            url: url.to_string(),
+            health: health.clone(),
+            server: Arc::new(Mutex::new(IPAServer::new(
+                url,
+                &credentials.user,
+                &credentials.password,
+            ))),
+        })
+        .collect();
+
+    tracing::info!(
+        "Opened {} write connection(s) to FreeIPA server {}.",
+        entries.len(),
+        url
+    );
+
+    slots.insert(url.to_string(), entries.clone());
+
+    Ok(entries)
+}
 
 pub async fn initialise_servers(
     servers: &[String],
+    write_server: &str,
+    replication_window: Option<i64>,
+    concurrent_writes: Option<i64>,
     user: &str,
     password: &SecretString,
 ) -> Result<(), Error> {
     let mut freeipa_servers = FREEIPA_SERVERS.lock().await;
 
-    // clear any existing servers
+    // clear any existing servers, along with the write slots and health
+    // records that belonged to them
     freeipa_servers.clear();
+    WRITE_SLOTS.lock().await.clear();
+    SERVER_HEALTH.lock().await.clear();
+
+    *CREDENTIALS.lock().await = Some(Credentials {
+        user: user.to_string(),
+        password: password.clone(),
+    });
 
     // now add each server
     for server in servers {
@@ -394,23 +858,270 @@ pub async fn initialise_servers(
             continue;
         }
 
-        freeipa_servers.push(Arc::new(Mutex::new(IPAServer::new(server, user, password))));
+        freeipa_servers.push(PoolEntry {
+            url: server.to_string(),
+            health: health_for(server).await,
+            server: Arc::new(Mutex::new(IPAServer::new(server, user, password))),
+        });
     }
+
+    // Writes all go to one server. In a multi-master topology every master
+    // accepts an add, and two masters accepting the same add is a conflict
+    // 389-ds cannot reconcile, so spreading writes across them is not load
+    // balancing - it is a race. Reads may still go anywhere.
+    let write_server = write_server.trim();
+
+    let write_server = match write_server.is_empty() {
+        // default to the first configured server
+        true => freeipa_servers.first().map(|entry| entry.url.clone()),
+        false => {
+            if !freeipa_servers
+                .iter()
+                .any(|entry| entry.url == write_server)
+            {
+                return Err(Error::Call(format!(
+                    "The FreeIPA write server {} is not one of the configured \
+                     servers - add it to freeipa-server.",
+                    write_server
+                )));
+            }
+
+            Some(write_server.to_string())
+        }
+    };
+
+    let replication_window = chrono::Duration::seconds(
+        replication_window
+            .filter(|window| *window >= 0)
+            .unwrap_or(DEFAULT_REPLICATION_WINDOW),
+    );
+
+    let concurrent_writes = match concurrent_writes {
+        Some(requested) => {
+            let clamped = requested.clamp(1, MAX_CONCURRENT_WRITES as i64);
+
+            if clamped != requested {
+                tracing::warn!(
+                    "freeipa-concurrent-writes of {} is out of range - using {}.",
+                    requested,
+                    clamped
+                );
+            }
+
+            clamped as usize
+        }
+        None => DEFAULT_CONCURRENT_WRITES,
+    };
+
+    match &write_server {
+        Some(server) => tracing::info!(
+            "FreeIPA writes will be sent to {}, up to {} at a time (failing over \
+             only once it is confirmed down, and no sooner than {} seconds \
+             afterwards).",
+            server,
+            concurrent_writes,
+            replication_window.num_seconds()
+        ),
+        None => tracing::warn!("No FreeIPA servers configured - writes have nowhere to go."),
+    }
+
+    *WRITE_CONFIG.lock().await = WriteConfig {
+        server: write_server,
+        replication_window,
+        concurrent_writes,
+    };
 
     Ok(())
 }
 
-async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedIPAServer, Error> {
+///
+/// Work out which server a write (or a read that decides a write) should go
+/// to.
+///
+/// Normally that is the configured write server, even if it is busy - the
+/// caller waits for a free slot rather than quietly writing somewhere else.
+/// It is only allowed elsewhere when the write server has been *confirmed*
+/// down (not merely slow) for longer than the replication convergence window,
+/// by which point anything it accepted has had time to reach the server we
+/// fall back to.
+///
+async fn resolve_write_target(pool: &[PoolEntry]) -> Target {
+    let config = WRITE_CONFIG.lock().await.clone();
+
+    let Some(write_server) = config.server else {
+        // no write server known - behave as we did before
+        return Target::Any;
+    };
+
+    let Some(entry) = pool.iter().find(|entry| entry.url == write_server) else {
+        tracing::warn!(
+            "The FreeIPA write server {} is no longer in the pool - any server \
+             will have to do.",
+            write_server
+        );
+        return Target::Any;
+    };
+
+    // the configured write server takes the writes whenever it is in a fit
+    // state to, which is the overwhelmingly common case
+    if entry.health.can_take_writes(config.replication_window) {
+        return Target::Named(write_server);
+    }
+
+    // Otherwise elect one replacement, rather than letting writes spread over
+    // whatever is left. "One master takes the writes" is the whole point, and
+    // it matters most when the topology is already disturbed. Configuration
+    // order makes the choice, so every task in this process picks the same
+    // server without having to agree about it.
+    let replacement = pool
+        .iter()
+        .find(|candidate| {
+            candidate.url != write_server
+                && candidate.health.can_take_writes(config.replication_window)
+        })
+        .map(|candidate| candidate.url.clone());
+
+    match entry.health.down_for() {
+        None => {
+            // It is up, but came back too recently to be sure it has caught up
+            // with what the server that stood in for it accepted. Leave the
+            // writes where they are until it has.
+            match replacement {
+                Some(replacement) => {
+                    tracing::warn!(
+                        "FreeIPA write server {} is reachable again but came back \
+                         less than {} seconds ago, so writes stay on {} until \
+                         replication has converged.",
+                        write_server,
+                        config.replication_window.num_seconds(),
+                        replacement
+                    );
+                    Target::Named(replacement)
+                }
+                None => Target::Named(write_server),
+            }
+        }
+        Some(down_for) if down_for < config.replication_window => {
+            // It is down, but too recently to be sure that another master has
+            // caught up with what it already accepted. Keep sending writes at
+            // it: failing this call is recoverable, while adding the same DN
+            // on a second master is not.
+            tracing::warn!(
+                "FreeIPA write server {} has been down for {} seconds - not \
+                 failing over until {} seconds have passed, so that replication \
+                 can converge first.",
+                write_server,
+                down_for.num_seconds(),
+                config.replication_window.num_seconds()
+            );
+            Target::Named(write_server)
+        }
+        Some(down_for) => match replacement {
+            Some(replacement) => {
+                tracing::warn!(
+                    "REPLICATION-RISK: FreeIPA write server {} has been down for {} \
+                     seconds, so writes will go to {} instead. Anything the old \
+                     server accepted but did not replicate before failing may be \
+                     added again there, which would leave a replication conflict.",
+                    write_server,
+                    down_for.num_seconds(),
+                    replacement
+                );
+                Target::Named(replacement)
+            }
+            None => {
+                // Nothing else is in a fit state to take writes either - either
+                // everything is down, or the only candidates came back too
+                // recently to trust. Keep aiming at the configured write server
+                // so the call fails cleanly rather than writing somewhere that
+                // may not have caught up.
+                tracing::error!(
+                    "FreeIPA write server {} has been down for {} seconds and no \
+                     other server can safely take writes yet.",
+                    write_server,
+                    down_for.num_seconds()
+                );
+                Target::Named(write_server)
+            }
+        },
+    }
+}
+
+///
+/// Return the distinct FreeIPA servers that this agent is configured to talk
+/// to, in configuration order.
+///
+/// Duplicated entries are collapsed: several slots pointing at the same server
+/// are one server as far as replication is concerned.
+///
+async fn configured_servers() -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+
+    for entry in FREEIPA_SERVERS.lock().await.iter() {
+        if !urls.contains(&entry.url) {
+            urls.push(entry.url.clone());
+        }
+    }
+
+    urls
+}
+
+///
+/// The servers to ask when deciding whether something exists, write server
+/// first.
+///
+/// The write server holds our own recent writes, so asking it first answers
+/// the common case in one call - and if it is the one that cannot be reached,
+/// that is exactly the case the caller needs to warn about.
+///
+async fn servers_to_check() -> Vec<String> {
+    let mut servers = configured_servers().await;
+
+    if let Some(write_server) = WRITE_CONFIG.lock().await.server.clone() {
+        // a stable sort on "is not the write server" moves it to the front and
+        // leaves the rest in configuration order
+        servers.sort_by_key(|url| *url != write_server);
+    }
+
+    servers
+}
+
+async fn get_connected_server(
+    target: &Target,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<LockedIPAServer, Error> {
     // get a copy of the servers, so that we don't hold the lock while we
     // try to connect
     assert_not_expired(expires)?;
 
-    let freeipa_servers = FREEIPA_SERVERS.lock().await.clone();
+    let pool: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
+
+    let freeipa_servers: Vec<PoolEntry> = match target {
+        // A write has to be aimed at one specific server, and it takes that
+        // server's own write slots rather than competing with reads for the
+        // shared ones.
+        Target::Pinned => match resolve_write_target(&pool).await {
+            Target::Named(url) => write_slots_for(&url).await?,
+            // no write server is configured - fall back to how this behaved
+            // before there was one
+            _ => pool,
+        },
+        Target::Any => pool,
+        // Named is a read of one particular server - the per-master existence
+        // checks - so it uses the read pool.
+        Target::Named(url) => pool.into_iter().filter(|entry| entry.url == *url).collect(),
+    };
 
     if freeipa_servers.is_empty() {
-        return Err(Error::Call(
-            "No FreeIPA servers have been initialised".to_string(),
-        ));
+        return Err(match target {
+            Target::Any | Target::Pinned => {
+                Error::Call("No FreeIPA servers have been initialised".to_string())
+            }
+            Target::Named(url) => Error::Call(format!(
+                "FreeIPA server {} is not one of the configured servers",
+                url
+            )),
+        });
     }
 
     let mut rng = rand::rngs::StdRng::from_os_rng();
@@ -419,17 +1130,20 @@ async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedI
         let mut should_all_backoff: bool = true;
 
         // randomise the order of the servers for each loop
-        for server in freeipa_servers
+        for entry in freeipa_servers
             .iter()
             .choose_multiple(&mut rng, freeipa_servers.len())
         {
             assert_not_expired(expires)?;
 
-            match server.clone().try_lock_owned() {
+            match entry.server.clone().try_lock_owned() {
                 Ok(mut server) => {
                     if server.is_logged_in() {
                         tracing::debug!("Already logged in to FreeIPA server: {}", server.server);
-                        return Ok(LockedIPAServer { server });
+                        return Ok(LockedIPAServer {
+                            server,
+                            health: entry.health.clone(),
+                        });
                     }
 
                     if server.should_backoff() {
@@ -448,7 +1162,17 @@ async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedI
                             // update the jar in the server
                             tracing::info!("Login successful to FreeIPA server: {}", server.server);
                             server.set_login_success(jar);
-                            return Ok(LockedIPAServer { server });
+
+                            // Deliberately *not* marked up here. Being able to
+                            // log in does not prove the server is serving -
+                            // one that accepts a login and then hangs on every
+                            // call would otherwise have its timeout streak
+                            // reset on each re-login and could never be
+                            // treated as down. Only an answered call counts.
+                            return Ok(LockedIPAServer {
+                                server,
+                                health: entry.health.clone(),
+                            });
                         }
                         Err(e) => {
                             tracing::error!(
@@ -457,6 +1181,16 @@ async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedI
                                 e
                             );
                             server.set_login_failed();
+
+                            // A server we cannot log in to is confirmed down -
+                            // including one that accepted the connection and
+                            // then never answered, which is how a hung server
+                            // is caught. Running out of the job's own time
+                            // budget says nothing about the server, so it does
+                            // not count.
+                            if !matches!(e, Error::Expired(_)) {
+                                entry.health.mark_down(&entry.url);
+                            }
 
                             // release the lock and try the next server
                         }
@@ -471,7 +1205,12 @@ async fn get_connected_server(expires: &chrono::DateTime<Utc>) -> Result<LockedI
 
         if should_all_backoff {
             tracing::error!(
-                "All FreeIPA servers are backing off because of repeated login failures."
+                "All FreeIPA servers ({}) are backing off because of repeated login failures.",
+                match target {
+                    Target::Any => "any".to_string(),
+                    Target::Pinned => "the write server".to_string(),
+                    Target::Named(url) => url.clone(),
+                }
             );
             return Err(Error::Call(
                 "All FreeIPA servers are backing off because of repeated login failures."
@@ -506,7 +1245,10 @@ async fn login(
     let time_left = expires.signed_duration_since(Utc::now()).num_seconds();
 
     if time_left < 5 {
-        return Err(Error::Call(
+        // Expired, not Call: this is our own job budget running out, not
+        // anything wrong with the server, and it must not be read as evidence
+        // that the server is down.
+        return Err(Error::Expired(
             "Not enough time left to login to FreeIPA server".to_string(),
         ));
     }
@@ -1320,6 +2062,7 @@ fn identifier_to_projectid(project: &ProjectIdentifier, legacy: bool) -> Result<
 /// Return all of the users who are part of the specified group
 ///
 async fn force_get_users_in_group(
+    target: &Target,
     group: &IPAGroup,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Vec<IPAUser>, Error> {
@@ -1340,7 +2083,8 @@ async fn force_get_users_in_group(
         kwargs
     };
 
-    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs), expires).await?;
+    let result =
+        call_post_to::<IPAResponse>(target, "user_find", None, Some(kwargs), expires).await?;
 
     tracing::debug!(
         "user_find result for group {}: {:?}",
@@ -1369,45 +2113,99 @@ async fn get_group(
 ) -> Result<Option<IPAGroup>, Error> {
     match cache::get_group(project).await? {
         Some(group) => Ok(Some(group)),
-        None => {
-            let kwargs = {
-                let mut kwargs = HashMap::new();
-                kwargs.insert("cn".to_string(), identifier_to_projectid(project, false)?);
-                kwargs
-            };
+        None => force_get_group_on(&Target::Any, project, expires).await,
+    }
+}
 
-            tracing::debug!("Call group_find for project: {}", project);
-            let result =
-                call_post::<IPAResponse>("group_find", None, Some(kwargs), expires).await?;
-            tracing::debug!("group_find result: {:?}", result);
+///
+/// Look the group up in FreeIPA, ignoring the cache, asking the server
+/// selected by the passed `Target`.
+///
+async fn force_get_group_on(
+    target: &Target,
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<IPAGroup>, Error> {
+    let kwargs = {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("cn".to_string(), identifier_to_projectid(project, false)?);
+        kwargs
+    };
 
-            if is_internal_portal(&project.portal()) {
-                let internal_groups = cache::get_internal_group_ids().await?;
+    tracing::debug!("Call group_find for project: {}", project);
+    let result =
+        call_post_to::<IPAResponse>(target, "group_find", None, Some(kwargs), expires).await?;
+    tracing::debug!("group_find result: {:?}", result);
 
-                match result.internal_groups(&internal_groups)?.first() {
-                    Some(group) => {
-                        let group = match group.identifier() != project {
-                            true => {
-                                tracing::warn!(
-                                    "Disagreement of identifier of found group: {} versus {}",
-                                    group.identifier(),
-                                    project
-                                );
+    if is_internal_portal(&project.portal()) {
+        let internal_groups = cache::get_internal_group_ids().await?;
 
-                                IPAGroup::new(group.groupid(), project, group.description())?
-                            }
-                            false => group.clone(),
-                        };
+        match result.internal_groups(&internal_groups)?.first() {
+            Some(group) => {
+                let group = match group.identifier() != project {
+                    true => {
+                        tracing::warn!(
+                            "Disagreement of identifier of found group: {} versus {}",
+                            group.identifier(),
+                            project
+                        );
 
-                        // add this group to the cache
-                        cache::add_existing_group(&group).await?;
-
-                        Ok(Some(group))
+                        IPAGroup::new(group.groupid(), project, group.description())?
                     }
-                    None => Ok(None),
+                    false => group.clone(),
+                };
+
+                // add this group to the cache
+                cache::add_existing_group(&group).await?;
+
+                Ok(Some(group))
+            }
+            None => Ok(None),
+        }
+    } else {
+        match result.groups()?.first() {
+            Some(group) => {
+                let group = match group.identifier() != project {
+                    true => {
+                        tracing::warn!(
+                            "Disagreement of identifier of found group: {} versus {}",
+                            group.identifier(),
+                            project
+                        );
+
+                        IPAGroup::new(group.groupid(), project, group.description())?
+                    }
+                    false => group.clone(),
+                };
+
+                // add this group to the cache - also force get all
+                // of the users currently in this group
+                cache::add_existing_group(&group).await?;
+
+                // if this is a project group, then get and cache all users
+                // in this group
+                if group.is_project_group() {
+                    let users = force_get_users_in_group(target, &group, expires).await?;
+                    cache::set_users_in_group(&group, &users).await?;
                 }
-            } else {
-                match result.groups()?.first() {
+
+                Ok(Some(group))
+            }
+            None => {
+                // try to find the legacy group - this is for porting tech/prep projects
+                let kwargs = {
+                    let mut kwargs = HashMap::new();
+                    kwargs.insert("cn".to_string(), identifier_to_projectid(project, true)?);
+                    kwargs
+                };
+
+                tracing::debug!("Call group_find for legacy project: {}", project);
+                let result =
+                    call_post_to::<IPAResponse>(target, "group_find", None, Some(kwargs), expires)
+                        .await?;
+                tracing::debug!("group_find legacy result: {:?}", result);
+
+                match result.legacy_groups(&project.portal_identifier())?.first() {
                     Some(group) => {
                         let group = match group.identifier() != project {
                             true => {
@@ -1429,62 +2227,13 @@ async fn get_group(
                         // if this is a project group, then get and cache all users
                         // in this group
                         if group.is_project_group() {
-                            let users = force_get_users_in_group(&group, expires).await?;
+                            let users = force_get_users_in_group(target, &group, expires).await?;
                             cache::set_users_in_group(&group, &users).await?;
                         }
 
                         Ok(Some(group))
                     }
-                    None => {
-                        // try to find the legacy group - this is for porting tech/prep projects
-                        let kwargs = {
-                            let mut kwargs = HashMap::new();
-                            kwargs
-                                .insert("cn".to_string(), identifier_to_projectid(project, true)?);
-                            kwargs
-                        };
-
-                        tracing::debug!("Call group_find for legacy project: {}", project);
-                        let result =
-                            call_post::<IPAResponse>("group_find", None, Some(kwargs), expires)
-                                .await?;
-                        tracing::debug!("group_find legacy result: {:?}", result);
-
-                        match result.legacy_groups(&project.portal_identifier())?.first() {
-                            Some(group) => {
-                                let group = match group.identifier() != project {
-                                    true => {
-                                        tracing::warn!(
-                                        "Disagreement of identifier of found group: {} versus {}",
-                                        group.identifier(),
-                                        project
-                                    );
-
-                                        IPAGroup::new(
-                                            group.groupid(),
-                                            project,
-                                            group.description(),
-                                        )?
-                                    }
-                                    false => group.clone(),
-                                };
-
-                                // add this group to the cache - also force get all
-                                // of the users currently in this group
-                                cache::add_existing_group(&group).await?;
-
-                                // if this is a project group, then get and cache all users
-                                // in this group
-                                if group.is_project_group() {
-                                    let users = force_get_users_in_group(&group, expires).await?;
-                                    cache::set_users_in_group(&group, &users).await?;
-                                }
-
-                                Ok(Some(group))
-                            }
-                            None => Ok(None),
-                        }
-                    }
+                    None => Ok(None),
                 }
             }
         }
@@ -1511,6 +2260,17 @@ async fn force_get_user(
     user: &UserIdentifier,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<Option<IPAUser>, Error> {
+    force_get_user_on(&Target::Any, user, expires).await
+}
+
+///
+/// Force get the user from the server selected by the passed `Target`.
+///
+async fn force_get_user_on(
+    target: &Target,
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<IPAUser>, Error> {
     // only get users whose portals are not in the internal set
     if is_internal_portal(&user.portal()) {
         return Ok(None);
@@ -1523,7 +2283,8 @@ async fn force_get_user(
         kwargs
     };
 
-    let result = call_post::<IPAResponse>("user_find", None, Some(kwargs), expires).await?;
+    let result =
+        call_post_to::<IPAResponse>(target, "user_find", None, Some(kwargs), expires).await?;
 
     match result.users(&user.project_identifier())?.first() {
         Some(user) => {
@@ -1532,6 +2293,112 @@ async fn force_get_user(
         }
         None => Ok(None),
     }
+}
+
+///
+/// Look for the passed user on *every* configured FreeIPA server, returning
+/// them from the first server that has them.
+///
+/// A single `user_find` only says what one master currently knows. A master
+/// that has not yet received a recent `user_add` answers "no such user", and
+/// "no such user" is the one answer that makes us write - which is how the
+/// same DN came to be added twice on two masters and left 389-ds with a
+/// namingConflict it cannot reconcile. So before concluding that a user does
+/// not exist, ask them all.
+///
+/// If a server cannot be reached we carry on with the servers that answered,
+/// because refusing to provision while one master is down would be worse than
+/// the risk of a conflict - but say so loudly, because a conflict seeded here
+/// is silent and expensive to clean up.
+///
+async fn force_get_user_everywhere(
+    user: &UserIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<IPAUser>, Error> {
+    let servers = servers_to_check().await;
+
+    let mut unreachable: Vec<String> = Vec::new();
+
+    for server in &servers {
+        assert_not_expired(expires)?;
+
+        match force_get_user_on(&Target::Named(server.clone()), user, expires).await {
+            Ok(Some(found)) => return Ok(Some(found)),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Could not check whether user {} exists on FreeIPA server {}. Error: {}",
+                    user,
+                    server,
+                    e
+                );
+                unreachable.push(server.clone());
+            }
+        }
+    }
+
+    if !unreachable.is_empty() {
+        tracing::warn!(
+            "REPLICATION-RISK: about to treat user {} as not existing, but {} of {} \
+             FreeIPA servers could not be asked ({}). If the user does exist on one of \
+             those, adding them now will create an LDAP replication conflict.",
+            user,
+            unreachable.len(),
+            servers.len(),
+            unreachable.join(", ")
+        );
+    }
+
+    Ok(None)
+}
+
+///
+/// Look for the group of the passed project on *every* configured FreeIPA
+/// server, returning it from the first server that has it.
+///
+/// See `force_get_user_everywhere` for why this is asked of every master
+/// rather than of whichever one the pool happened to hand us.
+///
+async fn force_get_group_everywhere(
+    project: &ProjectIdentifier,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<Option<IPAGroup>, Error> {
+    let servers = servers_to_check().await;
+
+    let mut unreachable: Vec<String> = Vec::new();
+
+    for server in &servers {
+        assert_not_expired(expires)?;
+
+        match force_get_group_on(&Target::Named(server.clone()), project, expires).await {
+            Ok(Some(found)) => return Ok(Some(found)),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Could not check whether the group for project {} exists on FreeIPA \
+                     server {}. Error: {}",
+                    project,
+                    server,
+                    e
+                );
+                unreachable.push(server.clone());
+            }
+        }
+    }
+
+    if !unreachable.is_empty() {
+        tracing::warn!(
+            "REPLICATION-RISK: about to treat the group for project {} as not existing, \
+             but {} of {} FreeIPA servers could not be asked ({}). If the group does exist \
+             on one of those, adding it now will create an LDAP replication conflict.",
+            project,
+            unreachable.len(),
+            servers.len(),
+            unreachable.join(", ")
+        );
+    }
+
+    Ok(None)
 }
 
 ///
@@ -1664,10 +2531,62 @@ async fn get_group_create_if_not_exists(
     group: &IPAGroup,
     expires: &chrono::DateTime<Utc>,
 ) -> Result<IPAGroup, Error> {
-    // check if it already exist in FreeIPA (this also checks cache)
-    if let Some(group) = get_group(group.identifier(), expires).await? {
-        cache::add_existing_group(&group).await?;
+    // If we already know this group exists then there is no decision to
+    // serialise, and every add_user comes through here five times or so - for
+    // the system groups, the instance groups, the managed group and the
+    // project group - so the warm path must not queue behind the lock below.
+    if let Some(group) = cache::get_group(group.identifier()).await? {
         return Ok(group);
+    }
+
+    // Take the lock for this group before looking, so that only one task at a
+    // time can decide that this group needs creating. Two AddUser jobs for two
+    // different users in the same project both come through here for the same
+    // project group, and they are not duplicates of each other as far as the
+    // job Board is concerned, so without this they both look, both see nothing
+    // and both add - on whichever masters the pool handed them. That is the
+    // largest single source of the namingConflict entries this guards against.
+    let now = chrono::Utc::now();
+
+    let _guard = loop {
+        match cache::get_group_mutex(group.identifier())
+            .await?
+            .try_lock_owned()
+        {
+            Ok(guard) => break guard,
+            Err(_) => {
+                if chrono::Utc::now().signed_duration_since(now).num_seconds() > 5 {
+                    tracing::warn!(
+                        "Could not get lock to add group {} - another task is adding it.",
+                        group
+                    );
+
+                    return Err(Error::Locked(format!(
+                        "Could not get lock to add group {} - another task is adding it.",
+                        group
+                    )));
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+    };
+
+    // another task may have created it while we were waiting for the lock
+    if let Some(group) = cache::get_group(group.identifier()).await? {
+        return Ok(group);
+    }
+
+    // Ask FreeIPA. This has to ask *every* master: a lookup served by one of
+    // them says nothing about a group another one has just been given, and
+    // "it does not exist" is the answer that makes us write.
+    if let Some(existing) = force_get_group_everywhere(group.identifier(), expires).await? {
+        tracing::info!(
+            "Group {} already exists on another FreeIPA server - not creating it again.",
+            existing
+        );
+        cache::add_existing_group(&existing).await?;
+        return Ok(existing);
     }
 
     // it doesn't - try to create the group - we will encode the ProjectIdentifier
@@ -1681,19 +2600,30 @@ async fn get_group_create_if_not_exists(
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!("Successfully created group: {}", group);
+        }
+        Err(Error::Duplicate(_)) => {
+            // another writer got there first - that is a success, not a reason
+            // to try again
+            tracing::info!(
+                "Group {} already existed when we tried to create it - continuing.",
+                group
+            );
         }
         Err(e) => {
             tracing::error!("Could not add group: {}. Error: {}", group, e);
         }
     }
 
-    // the group should now exist in FreeIPA (either we added it,
-    // or another thread beat us to it - get the group as it is in
-    // FreeIPA
-    match get_group(group.identifier(), expires).await? {
+    // The group should now exist in FreeIPA (either we added it, or another
+    // writer beat us to it) - read it back as it actually is. This has to ask
+    // every master rather than whichever one the pool hands us: the master
+    // that served the add is the only one guaranteed to have it, and a
+    // spurious "it isn't there" here would fail the job and invite the retry
+    // that creates the second copy.
+    match force_get_group_everywhere(group.identifier(), expires).await? {
         Some(group) => Ok(group),
         None => {
             tracing::error!("Failed to add group {} to FreeIPA", group);
@@ -1860,7 +2790,7 @@ async fn sync_groups(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
             Ok(_) => tracing::info!("Successfully added user {} to group {}", userid, group_cn),
             Err(e) => {
                 // this should not happen - it indicates that the group has disappeared
@@ -1973,7 +2903,7 @@ pub async fn remove_project(
     assert_not_expired(expires)?;
 
     // now get all of the users in this project and remove them as well!
-    let users = force_get_users_in_group(&project_group, expires).await?;
+    let users = force_get_users_in_group(&Target::Any, &project_group, expires).await?;
 
     tracing::info!(
         "Removing group {} for project {}. Users to remove: {}",
@@ -2025,7 +2955,7 @@ async fn reenable_user(user: &IPAUser, expires: &chrono::DateTime<Utc>) -> Resul
         kwargs
     };
 
-    match call_post::<IPAResponse>("user_enable", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_enable", None, Some(kwargs), expires).await {
         Ok(_) => {
             let mut user = user.clone();
             user.set_enabled();
@@ -2105,8 +3035,11 @@ pub async fn add_user(
 
     assert_not_expired(expires)?;
 
-    // return the up-to-date user if they already exist
-    if let Some(mut user) = force_get_user(user, expires).await? {
+    // Return the up-to-date user if they already exist. This asks every
+    // master, not just the one the pool hands us: this is the check that
+    // decides whether we issue a `user_add`, and a master that has not yet
+    // received a recent add would tell us the user does not exist.
+    if let Some(mut user) = force_get_user_everywhere(user, expires).await? {
         assert_not_expired(expires)?;
 
         if !user.is_managed() {
@@ -2200,7 +3133,7 @@ pub async fn add_user(
 
     // we need to let the below go to completion, even if expired, as the
     // user needs to be removed if something goes wrong
-    let user = match call_post::<IPAResponse>("user_add", None, Some(kwargs), expires).await {
+    let user = match call_write::<IPAResponse>("user_add", None, Some(kwargs), expires).await {
         Ok(result) => {
             tracing::info!("Successfully added user: {}", user);
             result.users(&user.project_identifier())?.first().cloned().ok_or(Error::UnmanagedUser(format!(
@@ -2217,7 +3150,7 @@ pub async fn add_user(
             );
             cache::clear().await?;
 
-            match get_user(user, expires).await? {
+            match force_get_user_everywhere(user, expires).await? {
                 Some(mut user) => {
                     if user.is_blocked() {
                         // blocked users must be explicitly unblocked - don't re-enable them here
@@ -2262,9 +3195,13 @@ pub async fn add_user(
             }
         }
         Err(e) => {
-            // failed to add - maybe they already exist?
+            // The add failed - but a timeout or a dropped response is
+            // indistinguishable here from a rejected write, and the add may
+            // well have landed. Ask every master before deciding, because
+            // treating a completed add as a failure is what makes the caller
+            // retry and create the second copy.
             tracing::error!("Could not add user: {}. Error: {}", user, e);
-            match get_user(user, expires).await? {
+            match force_get_user_everywhere(user, expires).await? {
                 Some(user) => {
                     tracing::debug!("User already exists: {}", user);
                     user
@@ -2293,7 +3230,7 @@ pub async fn add_user(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 break Ok(());
             }
@@ -2348,7 +3285,7 @@ pub async fn add_user(
                 kwargs
             };
 
-            match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+            match call_write::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
                 Ok(_) => {
                     tracing::info!(
                         "Successfully removed user {} after failed group add",
@@ -2540,7 +3477,7 @@ pub async fn remove_user(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 tracing::info!(
                     "Successfully removed user {} from group {}",
@@ -2621,7 +3558,7 @@ pub async fn remove_user(
             kwargs
         };
 
-        match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+        match call_write::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
             Ok(_) => {
                 tracing::info!(
                     "Successfully removed user {} from group {}",
@@ -2657,7 +3594,7 @@ pub async fn remove_user(
     // we don't actually remove users - instead we disable them so that
     // they can't log in. This way, if the user is re-added, then they
     // will get the same UID and other details
-    match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
         Ok(_) => {
             user.set_disabled();
             tracing::info!("Successfully removed user: {}", user.identifier());
@@ -2740,7 +3677,7 @@ pub async fn update_homedir(
         kwargs
     };
 
-    match call_post::<IPAResponse>("user_mod", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_mod", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!(
                 "Successfully updated homedir for user: {}",
@@ -3004,7 +3941,7 @@ pub async fn get_users(
 
     // there are no users, meaning that we have not checked yet, or there
     // really are no users in this project...
-    let users = force_get_users_in_group(&project_group, expires).await?;
+    let users = force_get_users_in_group(&Target::Any, &project_group, expires).await?;
 
     cache::set_users_in_group(&project_group, &users).await?;
 
@@ -3103,7 +4040,7 @@ async fn ensure_blocked_group_exists(expires: &chrono::DateTime<Utc>) -> Result<
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_add", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!("Created {} group in FreeIPA", blocked_cn);
             Ok(())
@@ -3195,7 +4132,7 @@ pub async fn block_user(
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_add_member", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!(
                 "Added user {} to openportal.blocked group",
@@ -3219,7 +4156,7 @@ pub async fn block_user(
     };
 
     let mut user = user;
-    match call_post::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("user_disable", None, Some(kwargs), expires).await {
         Ok(_) => {
             user.set_disabled();
             tracing::info!("Blocked user: {}", user.identifier());
@@ -3304,7 +4241,7 @@ pub async fn unblock_user(
         kwargs
     };
 
-    match call_post::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
+    match call_write::<IPAResponse>("group_remove_member", None, Some(kwargs), expires).await {
         Ok(_) => {
             tracing::info!(
                 "Removed user {} from openportal.blocked group",
@@ -3331,6 +4268,256 @@ pub async fn unblock_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    ///
+    /// One test for the whole server pool, because it is global state - as
+    /// separate tests these would race each other.
+    ///
+    #[tokio::test]
+    async fn test_server_pool() {
+        let password = SecretString::from("secret");
+        let ipa1 = "https://ipa1.example.com".to_string();
+        let ipa2 = "https://ipa2.example.com".to_string();
+
+        let init = |servers: Vec<String>, write_server: &'static str, window: Option<i64>| {
+            let password = password.clone();
+            async move {
+                initialise_servers(&servers, write_server, window, None, "admin", &password).await
+            }
+        };
+
+        // The `freeipa-server` option may list the same server several times,
+        // which is how the pool is given more than one concurrent slot for it.
+        // Those repeats are still one server as far as replication is
+        // concerned, so the per-master existence checks must ask it once.
+        match init(
+            vec![ipa1.clone(), ipa2.clone(), ipa1.clone(), "  ".to_string()],
+            "",
+            None,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => unreachable!("initialise_servers: {:?}", e),
+        }
+
+        assert_eq!(configured_servers().await, vec![ipa1.clone(), ipa2.clone()]);
+
+        // With no explicit write server, writes go to the first one configured
+        assert_eq!(WRITE_CONFIG.lock().await.server.clone(), Some(ipa1.clone()));
+        assert_eq!(
+            WRITE_CONFIG.lock().await.replication_window.num_seconds(),
+            DEFAULT_REPLICATION_WINDOW
+        );
+
+        // A write server that is not in the pool is a configuration error, not
+        // something to quietly fall back from
+        assert!(init(vec![ipa1.clone()], "https://ipa3.example.com", None)
+            .await
+            .is_err());
+
+        // Name one explicitly, and it is asked about first when checking
+        // whether something exists - it is the server holding our own writes
+        match init(
+            vec![ipa1.clone(), ipa2.clone()],
+            "https://ipa2.example.com",
+            Some(60),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => unreachable!("initialise_servers: {:?}", e),
+        }
+
+        assert_eq!(servers_to_check().await, vec![ipa2.clone(), ipa1.clone()]);
+
+        // A mistyped concurrency is clamped rather than opening an
+        // implausible number of sessions - or none at all
+        for (requested, expected) in [(0_i64, 1_usize), (10_000, MAX_CONCURRENT_WRITES)] {
+            match initialise_servers(
+                &[ipa1.clone(), ipa2.clone()],
+                "https://ipa2.example.com",
+                Some(60),
+                Some(requested),
+                "admin",
+                &password,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => unreachable!("initialise_servers: {:?}", e),
+            }
+
+            assert_eq!(WRITE_CONFIG.lock().await.concurrent_writes, expected);
+
+            match write_slots_for(&ipa2).await {
+                Ok(slots) => assert_eq!(slots.len(), expected),
+                Err(e) => unreachable!("write_slots_for: {:?}", e),
+            }
+        }
+
+        // back to the defaults for the rest of this test
+        match init(
+            vec![ipa1.clone(), ipa2.clone()],
+            "https://ipa2.example.com",
+            Some(60),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => unreachable!("initialise_servers: {:?}", e),
+        }
+
+        // Writes get their own connections to whichever server is taking them,
+        // so raising write concurrency does not multiply the connections that
+        // reads share. They are created on first use and then kept, so a
+        // server that takes the writes back reuses its sessions.
+        let write_slots = match write_slots_for(&ipa2).await {
+            Ok(slots) => slots,
+            Err(e) => unreachable!("write_slots_for: {:?}", e),
+        };
+
+        assert_eq!(write_slots.len(), DEFAULT_CONCURRENT_WRITES);
+        assert!(write_slots.iter().all(|slot| slot.url == ipa2));
+
+        // ...and they are not the slots that reads use
+        let read_slots: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
+
+        for write_slot in &write_slots {
+            assert!(!read_slots
+                .iter()
+                .any(|read_slot| Arc::ptr_eq(&read_slot.server, &write_slot.server)));
+
+            // Health is one record per server whatever kind of slot reports
+            // it: a server that has stopped answering has stopped answering,
+            // and failover compares servers with each other.
+            match read_slots.iter().find(|read_slot| read_slot.url == ipa2) {
+                Some(read_slot) => {
+                    assert!(Arc::ptr_eq(&read_slot.health, &write_slot.health))
+                }
+                None => unreachable!("the write server has no read slot"),
+            }
+        }
+
+        match write_slots_for(&ipa2).await {
+            Ok(again) => assert!(again
+                .iter()
+                .zip(write_slots.iter())
+                .all(|(a, b)| Arc::ptr_eq(&a.server, &b.server))),
+            Err(e) => unreachable!("write_slots_for: {:?}", e),
+        }
+
+        let pool: Vec<PoolEntry> = FREEIPA_SERVERS.lock().await.clone();
+
+        // While it is up, every write is aimed at it
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+
+        let health = match pool.iter().find(|entry| entry.url == ipa2) {
+            Some(entry) => entry.health.clone(),
+            None => unreachable!("the write server is not in the pool"),
+        };
+
+        // A server that is listening but never answering has to be caught too,
+        // or it would absorb every write for ever. One timeout is not enough -
+        // it is indistinguishable from a write that landed and whose response
+        // was lost - but a run of them is.
+        for _ in 1..MAX_CONSECUTIVE_TIMEOUTS {
+            health.mark_timeout(&ipa2);
+            assert!(matches!(
+                resolve_write_target(&pool).await,
+                Target::Named(ref url) if *url == ipa2
+            ));
+            assert!(health.down_for().is_none());
+        }
+
+        health.mark_timeout(&ipa2);
+        assert!(health.down_for().is_some());
+
+        // and any answered call clears it again
+        health.mark_up(&ipa2);
+        assert!(health.down_for().is_none());
+        assert_eq!(
+            health
+                .consecutive_timeouts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        // Confirmed down, but only just: keep aiming writes at it. Failing the
+        // call is recoverable, whereas adding the same DN on a second master
+        // is not.
+        health.mark_down(&ipa2);
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+
+        // Down for longer than the replication window: one replacement is
+        // elected - writes move to a single other master, they do not spread
+        // over whatever is left.
+        health.down_since.store(
+            Utc::now().timestamp() - 61,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa1
+        ));
+
+        // If there is nothing fit to stand in, keep aiming at the configured
+        // write server so the call fails cleanly rather than writing to a
+        // server that may not have caught up.
+        let other = match pool.iter().find(|entry| entry.url == ipa1) {
+            Some(entry) => entry.health.clone(),
+            None => unreachable!("the other server is not in the pool"),
+        };
+
+        other.mark_down(&ipa1);
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+        other.mark_up(&ipa1);
+
+        // A server that has only just come back has not necessarily caught up
+        // with what stood in for it, so it does not immediately take writes
+        // again - in either direction. ipa1 is back but too recently, so
+        // writes stay with the configured server...
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+
+        // ...and once ipa1 has been up long enough it can stand in again
+        other.up_since.store(
+            Utc::now().timestamp() - 61,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa1
+        ));
+
+        // When the write server itself answers again, writes stay on the
+        // stand-in until it has been up for a full replication window
+        health.mark_up(&ipa2);
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa1
+        ));
+
+        health.up_since.store(
+            Utc::now().timestamp() - 61,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        assert!(matches!(
+            resolve_write_target(&pool).await,
+            Target::Named(ref url) if *url == ipa2
+        ));
+    }
 
     #[test]
     fn test_internal_portals_map_to_bare_group_names() {

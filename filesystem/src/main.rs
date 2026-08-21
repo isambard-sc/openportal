@@ -30,6 +30,7 @@ mod fakequotaengine;
 mod filesystem;
 mod linuxquotaengine;
 mod lustreengine;
+mod nameservice;
 mod quotaengine;
 mod volumeconfig;
 

@@ -469,6 +469,34 @@ pub async fn create_dir(
     }
 }
 
+///
+/// Open `path` as a directory **without following symlinks**, so ownership and
+/// permissions can be set on the file descriptor rather than on a path that could be
+/// swapped underneath us between the check and the act.
+///
+/// `nix::unistd::chown` and `std::fs::set_permissions` both follow, so operating on a
+/// path would let anything that replaced `path` have ownership of the symlink's
+/// *target* transferred to it. `O_NOFOLLOW` makes the open itself fail if `path` is a
+/// symlink, and `O_DIRECTORY` if it is not a directory - stronger than a nofollow path
+/// operation, which still resolves the path once more. See
+/// `docs/specifications/security-review-2.md` (finding R33).
+///
+fn open_dir_nofollow(path: &Path) -> Result<std::fs::File, Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    Ok(std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "Could not open the directory '{}' to set its ownership - it is not a \
+                 directory, or it is a symlink",
+                path.to_string_lossy()
+            )
+        })?)
+}
+
 async fn create_dir_native(
     path: &Path,
     username: &str,
@@ -525,7 +553,7 @@ async fn create_dir_native(
 
     // Check if this directory exists in .recycle - if so, restore it
     if let Some(recycle_path) = check_recycle_native(path).await? {
-        restore_from_recycle_native(&recycle_path, path).await?;
+        restore_from_recycle_native(&recycle_path, path, uid, gid).await?;
         return Ok(());
     }
 
@@ -573,21 +601,7 @@ async fn create_dir_native(
     // on the **file descriptor**, so the target cannot be swapped underneath us at
     // all - stronger than a nofollow path operation, which still resolves the path
     // once more. `O_NOFOLLOW` makes the open itself fail if `path` is a symlink.
-    let dir = {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-            .open(path)
-            .with_context(|| {
-                format!(
-                    "Could not open the newly created directory '{}' to set its \
-                     ownership - it is not a directory, or it is a symlink",
-                    path.to_string_lossy()
-                )
-            })?
-    };
+    let dir = open_dir_nofollow(path)?;
 
     nix::unistd::fchown(&dir, Some(uid), Some(gid)).with_context(|| {
         format!(
@@ -642,7 +656,7 @@ async fn create_dir_remote(
 
     // Check if this directory exists in .recycle - if so, restore it.
     if let Some(recycle_path) = check_recycle_remote(path, prefix).await? {
-        restore_from_recycle_remote(&recycle_path, path, prefix).await?;
+        restore_from_recycle_remote(&recycle_path, path, username, groupname, prefix).await?;
         return Ok(());
     }
 
@@ -902,7 +916,12 @@ async fn check_recycle_remote(path: &Path, prefix: &[String]) -> Result<Option<P
 /// Restore a directory from .recycle by moving it back to its original location.
 /// This is used when recreating a directory that was previously recycled.
 ///
-async fn restore_from_recycle_native(recycle: &Path, target: &Path) -> Result<(), Error> {
+async fn restore_from_recycle_native(
+    recycle: &Path,
+    target: &Path,
+    uid: Uid,
+    gid: Gid,
+) -> Result<(), Error> {
     tracing::info!(
         "Restoring '{}' from recycle to '{}'",
         recycle.to_string_lossy(),
@@ -932,13 +951,107 @@ async fn restore_from_recycle_native(recycle: &Path, target: &Path) -> Result<()
         )
     })?;
 
+    // A recycled directory carries the ownership it had when it was recycled, which is
+    // not necessarily the ownership it should have now - see
+    // `correct_restored_ownership_native`.
+    correct_restored_ownership_native(target, uid, gid).await?;
+
     tracing::info!("Successfully restored directory from recycle");
+    Ok(())
+}
+
+///
+/// Check that a directory just restored from `.recycle` is owned by who it should be,
+/// and correct it if not.
+///
+/// A recycled directory keeps the uid and gid it had when it was recycled. That is
+/// usually still right, but not always: an account agent that *deletes* an account
+/// rather than disabling it (`op-localaccount` runs `userdel`, where `op-freeipa`
+/// disables) frees its uid, and recreating the account later can allocate a different
+/// one. The restored directory then belongs to a uid its owner no longer has - or, if
+/// the old uid has since been reused, to somebody else entirely. Restoring used to
+/// move the directory back and stop there, so this went unnoticed until a user could
+/// not read their own home directory.
+///
+/// **Only the directory itself is corrected here.** Everything inside it still carries
+/// the old ownership, and fixing that means walking a tree of unbounded size - which
+/// does not belong inside a job with an answering deadline. The warning below says so
+/// explicitly, with the ids needed to put it right, rather than leaving a half-fixed
+/// tree looking fully fixed.
+///
+async fn correct_restored_ownership_native(path: &Path, uid: Uid, gid: Gid) -> Result<(), Error> {
+    // `symlink_metadata` so a symlink is described rather than followed.
+    let metadata = std::fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "Could not read the ownership of the restored path '{}'",
+            path.to_string_lossy()
+        )
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        // `recycle_dir` moves a symlink as a symlink, so one can legitimately come
+        // back. Chowning it would transfer ownership of whatever it points at, which
+        // is exactly what finding R33 was about, so leave it alone and say so.
+        tracing::warn!(
+            "Restored path '{}' is a symlink, not a directory - leaving its ownership \
+             untouched",
+            path.to_string_lossy()
+        );
+        return Ok(());
+    }
+
+    let current_uid = Uid::from_raw(metadata.uid());
+    let current_gid = Gid::from_raw(metadata.gid());
+
+    if current_uid == uid && current_gid == gid {
+        tracing::debug!(
+            "Restored directory '{}' is already owned by {}:{}",
+            path.to_string_lossy(),
+            uid,
+            gid
+        );
+        return Ok(());
+    }
+
+    tracing::warn!(
+        "Restored directory '{}' is owned by {}:{} but should be owned by {}:{}. This \
+         happens when an account is deleted and recreated with a different uid or gid \
+         rather than being disabled and re-enabled. Correcting the directory itself \
+         now - but note that ITS CONTENTS ARE STILL OWNED BY {}:{} and are not changed \
+         here, so a recursive chown may be needed before the owner can use them.",
+        path.to_string_lossy(),
+        current_uid,
+        current_gid,
+        uid,
+        gid,
+        current_uid,
+        current_gid
+    );
+
+    let dir = open_dir_nofollow(path)?;
+
+    nix::unistd::fchown(&dir, Some(uid), Some(gid)).with_context(|| {
+        format!(
+            "Could not correct the ownership of the restored directory '{}'",
+            path.to_string_lossy()
+        )
+    })?;
+
+    tracing::info!(
+        "Corrected the ownership of restored directory '{}' to {}:{}",
+        path.to_string_lossy(),
+        uid,
+        gid
+    );
+
     Ok(())
 }
 
 async fn restore_from_recycle_remote(
     recycle: &Path,
     target: &Path,
+    username: &str,
+    groupname: &str,
     prefix: &[String],
 ) -> Result<(), Error> {
     let recycle_str = recycle.to_string_lossy();
@@ -958,7 +1071,89 @@ async fn restore_from_recycle_remote(
         )));
     }
 
+    correct_restored_ownership_remote(target, username, groupname, prefix).await?;
+
     tracing::info!("Successfully restored directory from recycle (remote)");
+    Ok(())
+}
+
+///
+/// The remote counterpart of `correct_restored_ownership_native` - see there for why a
+/// restored directory can have the wrong owner, and for why only the directory itself
+/// is corrected.
+///
+/// Ownership is compared by **name** rather than by id, since that is what this side
+/// has: `stat -c '%U:%G'` prints names, falling back to numbers for an id that no
+/// longer resolves - which is itself a mismatch, and so gets corrected.
+///
+async fn correct_restored_ownership_remote(
+    path: &Path,
+    username: &str,
+    groupname: &str,
+    prefix: &[String],
+) -> Result<(), Error> {
+    let path_str = path.to_string_lossy();
+    let owner = format!("{}:{}", username, groupname);
+
+    let (exit_code, stdout, stderr) =
+        run_remote(prefix, &["stat", "-c", "%U:%G", &path_str]).await?;
+
+    if exit_code == 0 {
+        let current = stdout.trim();
+
+        if current == owner {
+            tracing::debug!(
+                "Restored directory '{}' is already owned by {}",
+                path_str,
+                owner
+            );
+            return Ok(());
+        }
+
+        tracing::warn!(
+            "Restored directory '{}' is owned by {} but should be owned by {}. This \
+             happens when an account is deleted and recreated with a different uid or \
+             gid rather than being disabled and re-enabled. Correcting the directory \
+             itself now - but note that ITS CONTENTS ARE STILL OWNED BY {} and are not \
+             changed here, so a recursive chown may be needed before the owner can use \
+             them.",
+            path_str,
+            current,
+            owner,
+            current
+        );
+    } else {
+        // Could not find out. Correct it anyway - an unnecessary chown to the ownership
+        // it should already have costs nothing, where skipping a necessary one leaves a
+        // user locked out of their own directory.
+        tracing::warn!(
+            "Could not read the ownership of the restored directory '{}' (stat exited \
+             {}: {}) - setting it to {} regardless",
+            path_str,
+            exit_code,
+            stderr.trim(),
+            owner
+        );
+    }
+
+    // `-h` so a symlink is never followed - `recycle_dir` moves a symlink as a symlink,
+    // so one can legitimately come back here. See finding R33.
+    let (exit_code, _, stderr) = run_remote(prefix, &["chown", "-h", &owner, &path_str]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "chown '{}' '{}' failed while correcting a restored directory: exit code \
+             {}, stderr: {}",
+            owner, path_str, exit_code, stderr
+        )));
+    }
+
+    tracing::info!(
+        "Corrected the ownership of restored directory '{}' to {}",
+        path_str,
+        owner
+    );
+
     Ok(())
 }
 
@@ -1168,6 +1363,70 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_restore_from_recycle_keeps_ownership_that_is_already_right() {
+        let base = std::env::temp_dir().join(format!("op-restore-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let recycle = base.join(".recycle").join("fred");
+        let target = base.join("fred");
+        std::fs::create_dir_all(&recycle).expect("mkdir recycle/fred");
+        std::fs::create_dir(recycle.join("keep-me")).expect("mkdir keep-me");
+
+        let uid = nix::unistd::getuid();
+        let gid = nix::unistd::getgid();
+
+        restore_from_recycle_native(&recycle, &target, uid, gid)
+            .await
+            .expect("restore");
+
+        assert!(target.join("keep-me").exists(), "contents must come back");
+        assert!(!recycle.exists(), "the recycled copy must be gone");
+
+        let metadata = std::fs::symlink_metadata(&target).expect("stat");
+        assert_eq!(Uid::from_raw(metadata.uid()), uid);
+        assert_eq!(Gid::from_raw(metadata.gid()), gid);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_correct_restored_ownership_leaves_a_symlink_alone() {
+        // `recycle_dir` moves a symlink as a symlink, so one can come back here.
+        // Chowning it would transfer ownership of its *target*, which is finding R33 -
+        // so it must be left alone even when the ownership does not match, and the
+        // mismatch reported rather than acted on.
+        let base = std::env::temp_dir().join(format!("op-restore-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir base");
+
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("mkdir elsewhere");
+
+        let link = base.join("fred");
+        std::os::unix::fs::symlink(&elsewhere, &link).expect("symlink");
+
+        // Deliberately mismatched ids - root, which this test is not.
+        correct_restored_ownership_native(&link, Uid::from_raw(0), Gid::from_raw(0))
+            .await
+            .expect("a symlink must be reported, not treated as an error");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("stat")
+                .file_type()
+                .is_symlink(),
+            "the symlink must still be a symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("read_link"),
+            elsewhere,
+            "the symlink must still point where it did"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn test_resolve_deepest_existing_resolves_symlinks_in_the_prefix() {

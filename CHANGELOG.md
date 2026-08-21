@@ -21,6 +21,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **A directory restored from `.recycle` kept its old ownership.** Restoring moved the
+  directory back and stopped there, so a user volume restored for an account that had
+  been deleted and recreated came back owned by the *old* uid - which that user no
+  longer has, and which may since have been reassigned to somebody else. This is a
+  `op-localaccount` pairing in particular: it runs `userdel` where `op-freeipa`
+  disables the account, so the uid is freed and a later `useradd` need not get it back.
+
+  A restore now checks the ownership of what it restored and, if it is wrong, warns
+  loudly and corrects it - on a file descriptor opened `O_NOFOLLOW`, as directory
+  creation already did (finding R33). A restored *symlink* is reported and left alone
+  rather than chowned, since chowning it would transfer ownership of its target. Only
+  the directory itself is corrected: its contents still carry the old ownership, and
+  walking a tree of unbounded size does not belong inside a job with an answering
+  deadline, so the warning names both id pairs and says plainly that a recursive chown
+  may still be needed.
+
 - **`op-filesystem` intermittently failed to resolve users and groups that exist.**
   Jobs failed with `Could not find a group called <name>` or `Could not search for
   group <name>: EIO: I/O error` for groups that `getent group` on the same node

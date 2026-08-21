@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   and the fact that identifiers name that portal rather than the local one. Written
   to be handed to someone connecting a new portal; `bridge-api.md` continues to
   specify the HTTP transport itself.
+
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
 
@@ -133,8 +134,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   filesystem path accepts the wider charset. `local_group` is unchanged: it names a
   Unix group at every layer.
 
-  This also fixes `op-cloudportal`'s `get_users`, which was constructing exactly such
-  a mapping and could never have succeeded.
 - Documentation errors in [docs/specifications/json-types.md](docs/specifications/json-types.md):
   `get_projects` returns `Vec<ProjectMapping>` (not `Vec<ProjectDetails>`), `get_users`
   returns `Vec<UserMapping>` (not `Vec<UserIdentifier>`), and `get_project` returns
@@ -761,9 +760,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
   ```python
   d = openportal.diagnostics("brics")
-  d.logs()                                    # all entries, oldest first
-  d.logs(level="WARN+")                       # warnings and errors
-  d.logs(50, level="WARN+", search="timeout") # last 50 matching entries
+  d.logs()  # all entries, oldest first
+  d.logs(level="WARN+")  # warnings and errors
+  d.logs(50, level="WARN+", search="timeout")  # last 50 matching entries
   ```
 - **`LogEntry` Python class** — properties: `timestamp` (UTC `datetime`),
   `level` (`str`), `target` (Rust module path, e.g. `"templemeads::agent"`),

@@ -33,3 +33,31 @@ comma-separated list of group names.
 ```bash
 op-freeipa extra -k system-groups -v group1,group2
 ```
+
+## Multi-master topologies
+
+`freeipa-server` may list several servers, comma-separated, and the same
+server more than once to give it more than one concurrent connection slot.
+Reads are spread over all of them; every write goes to one, named by
+`freeipa-write-server` and defaulting to the first entry.
+
+This is not load balancing that happens to be configurable - it is required.
+FreeIPA's replication cannot reconcile two independent `ADD`s of the same DN,
+and the conflict entry it leaves behind is invisible to `ipa user-find` and
+cannot be deleted through the IPA framework at all. So each entry must name an
+individual server (a VIP or round-robin alias pins nothing), and the write
+server should be listed more than once if writes need to run concurrently.
+
+```bash
+op-freeipa extra -k freeipa-server -v https://ipa1.example.com,https://ipa1.example.com,https://ipa2.example.com
+op-freeipa extra -k freeipa-write-server -v https://ipa1.example.com
+```
+
+To find conflict entries that already exist - the agent reports the risk of
+creating one under the `REPLICATION-RISK` marker, but nothing self-heals the
+ones already in the directory:
+
+```bash
+kinit admin
+scripts/check-replication-conflicts.sh ldaps://ipa1.example.com ldaps://ipa2.example.com
+```

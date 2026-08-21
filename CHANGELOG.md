@@ -18,8 +18,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   specify the HTTP transport itself.
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
+- `freeipa-write-server` and `freeipa-replication-window` options for `op-freeipa`,
+  and [scripts/check-replication-conflicts.sh](scripts/check-replication-conflicts.sh)
+  to find LDAP replication conflicts that already exist in a directory. Both are part
+  of the fix below.
 
 ### Fixed
+
+- **OpenPortal was creating LDAP replication conflicts in multi-master FreeIPA
+  topologies.** A site reported 67 `namingConflict` entries accumulated over 11
+  months - 29 project groups, 19 users and their 19 server-generated private groups -
+  every one on an object created by OpenPortal, and two of the affected accounts had
+  home directories owned by the UID of the copy replication later discarded.
+
+  The write paths were already idempotent (FreeIPA's `DuplicateEntry` is treated as
+  "it exists", not as a reason to retry). The cause was that `get_connected_server`
+  chose a server at random for *every* call, so an existence check and the add that
+  depended on it were served by the same master only 1/n of the time - and a master
+  that has not yet received a recent add reports that the user does not exist. Three
+  changes:
+
+  - Writes, and the reads that decide whether to write, now all go to one server
+    (`freeipa-write-server`, defaulting to the first configured). Failover happens
+    only once that server is *confirmed* down - a refused connection or a rejected
+    login, never a timeout - and not until `freeipa-replication-window` (30s) has
+    passed, so anything it accepted has had time to reach whichever master takes over.
+  - Before concluding that a user or group does not exist, every configured master is
+    asked, not just the one the pool happened to hand us. This also covers the case
+    the report described, where an add times out but has in fact landed.
+  - Group creation takes a per-group mutex, mirroring the existing per-user one. Two
+    `add_user` jobs for different users in one project both need that project's group
+    and are not duplicates of each other to the job Board, so they raced.
+
+  Every `freeipa-server` entry must name an individual master for this to hold: a VIP
+  or a round-robin DNS alias is several masters behind one name.
+- **A 401 from FreeIPA could hang a job until its deadline.** The replay path
+  reconnected - possibly to a different server - but reused the URL built from the
+  original one, so it posted the new server's session cookie to the old server, which
+  401s again. The URL is now rebuilt from the server actually being addressed, and the
+  replay is bounded.
 
 - **A portal could not report its members.** `get_users` returns each member's email
   address as the `UserMapping` local user - the portal-level equivalent of a Unix

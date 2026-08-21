@@ -83,6 +83,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `OpenPortalUnsupportedCommandError`, `ManagedProjectPermissionError`, and its
   two subclasses `ManagedProjectPendingError` and `ManagedProjectRejectedError`.
 
+  The distinction the hierarchy exists to carry is that **pending is not a
+  failure**. An award waiting on human approval has no `ProjectMapping` to
+  return, so it answers with an error — and the awarding portal must retry that
+  one while treating a rejection as final. Losing the class loses that
+  difference.
 
   A job carries one error string, so the class rides inside it as
   `"<ClassName>: <message>"`. `job.errored(exc)` encodes it, `job.error` decodes
@@ -193,6 +198,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Documentation: `python-api.md` listed a `Status.expired()` that does not
   exist - expiry is not one of the six job states, and is read from
   `job.is_expired` - and omitted `Status.created()`, which does.
+
 - **The portal agent sent malformed error sentinels.** `ExpirationError{{}}` and
   `UnknownError{{}}` were written as plain string literals, where `{{` is not an
   escape — only `format!` treats it as one, which is why the neighbouring

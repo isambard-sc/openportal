@@ -19,7 +19,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
 
+### Changed
+
+- **`op-localaccount` now disables an account on removal rather than deleting it**, as
+  `op-freeipa` already did. `userdel` freed the account's uid, so a later re-add could
+  allocate a different one and leave every file the user owned - including the home
+  directory `op-filesystem` had recycled rather than deleted - belonging to a uid its
+  owner no longer had, or to whoever the old uid was issued to next. Removal now adds
+  the user to a `{managed-group}.removed` group, strips their supplementary groups, and
+  locks *and* expires the account; `add_user` re-enables an account it finds in that
+  state. Being locked and expired matters: `usermod -L` alone only stops password
+  authentication and leaves SSH keys working.
+
+  The removed group is separate from the blocked group, so a blocked user stays blocked
+  across a remove and re-add, and an operator can tell why an account is disabled. The
+  supplementary groups are stripped because `sync_groups` appends and never removes, so
+  a re-enabled user would otherwise get back the access they had before rather than what
+  they are entitled to now - the same reasoning `op-freeipa` applies. The `userdel`
+  configuration option is gone, being unused.
+
+- **`op-localaccount` no longer creates the home directory** (`useradd -m` is dropped).
+  Home directories belong to `op-filesystem`, which creates them and recycles rather
+  than deletes them, and this matches `op-freeipa`, whose `user_add` likewise only
+  records the attribute. The empty home that `useradd -m` created was enough to stop the
+  recycled one being restored - see below.
+
 ### Fixed
+
+- **An empty home directory stopped a recycled one from being restored.** `create_dir`
+  treated any existing directory as the finished article, so an account agent that
+  creates a home when it creates the account left `op-filesystem` looking at an empty
+  directory and declining to restore the recycled one holding the user's real files.
+
+  An existing directory no longer wins automatically: if a recycled copy is waiting and
+  what is here holds nothing real, the recycled one is preferred. "Nothing real" is
+  strict - any non-hidden entry, or any hidden entry that is not a regular file, and the
+  existing directory is kept and the recycled copy left alone. Only hidden regular files
+  (the `/etc/skel` copies) are removed, one at a time, each logged, before a
+  non-recursive `remove_dir`; `EXPECTED_SKEL_FILES` names the unsurprising ones so
+  anything else is logged loudly rather than passing silently. Nothing here can remove a
+  subtree even if those checks are ever wrong.
 
 - **A directory restored from `.recycle` kept its old ownership.** Restoring moved the
   directory back and stopped there, so a user volume restored for an account that had

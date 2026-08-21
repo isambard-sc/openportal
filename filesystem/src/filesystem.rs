@@ -19,6 +19,17 @@ use tokio::sync::Mutex;
 static FS_LOCK: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
 
 ///
+/// The hidden files an account agent is expected to leave in a brand-new home
+/// directory, copied from `/etc/skel` when the account was created.
+///
+/// This is only used to decide how loudly to report removing one. Any *hidden* file is
+/// removable when a recycled directory is waiting to take its place - the list says
+/// which ones are unsurprising, so that anything else stands out in the log and can be
+/// added here (or investigated) rather than passing silently.
+///
+const EXPECTED_SKEL_FILES: &[&str] = &[".bash_logout", ".bash_profile", ".bashrc"];
+
+///
 /// Optional exec prefix for all filesystem operations. When set, every
 /// operation that would normally use a Rust stdlib call is instead performed
 /// by running an external command prefixed with these tokens.
@@ -512,6 +523,20 @@ async fn create_dir_native(
 
     // check to see if the directory already exists
     if path.exists() {
+        // A directory being here does not mean it is the one that should be here. An
+        // account agent that creates a home directory when it creates the account
+        // (`useradd -m`) leaves an empty one holding nothing but `/etc/skel` copies,
+        // and that used to be enough to stop the recycled directory - the one with the
+        // user's actual files in it - from ever being restored. So if something is
+        // waiting in `.recycle`, and what is here holds nothing real, prefer the
+        // recycled one.
+        if let Some(recycle_path) = check_recycle_native(path).await? {
+            if clear_placeholder_dir_native(path).await? {
+                restore_from_recycle_native(&recycle_path, path, uid, gid).await?;
+                return Ok(());
+            }
+        }
+
         // directory already exists - check it has the right permissions
         // and user / group ownership
         let metadata = path.metadata()?;
@@ -649,14 +674,21 @@ async fn create_dir_remote(
     let path_str = path.to_string_lossy();
 
     // Check if the directory already exists on the remote.
-    if remote_exists(prefix, path).await? {
-        tracing::info!("Directory already exists (remote): {}", path_str);
-        return Ok(());
+    let already_exists = remote_exists(prefix, path).await?;
+
+    // Check if this directory exists in .recycle - if so, restore it. A directory that
+    // is already here does not stop that: if it holds nothing real it is the empty home
+    // an account agent leaves behind, and the recycled copy is the one that matters.
+    // See `clear_placeholder_dir_native`.
+    if let Some(recycle_path) = check_recycle_remote(path, prefix).await? {
+        if !already_exists || clear_placeholder_dir_remote(path, prefix).await? {
+            restore_from_recycle_remote(&recycle_path, path, username, groupname, prefix).await?;
+            return Ok(());
+        }
     }
 
-    // Check if this directory exists in .recycle - if so, restore it.
-    if let Some(recycle_path) = check_recycle_remote(path, prefix).await? {
-        restore_from_recycle_remote(&recycle_path, path, username, groupname, prefix).await?;
+    if already_exists {
+        tracing::info!("Directory already exists (remote): {}", path_str);
         return Ok(());
     }
 
@@ -869,6 +901,120 @@ async fn create_link_remote(path: &Path, link: &Path, prefix: &[String]) -> Resu
 }
 
 ///
+/// Decide whether `path` is a placeholder that a recycled directory should replace, and
+/// if it is, remove it so the restore can proceed. Returns whether it did.
+///
+/// "Placeholder" means it holds nothing a person put there:
+///
+/// - **Any non-hidden entry** means something real is already here. Nothing is removed
+///   and the recycled copy is left where it is - the alternative is deleting a user's
+///   files because a stale copy happened to be in `.recycle`.
+/// - **A hidden directory or symlink** is refused too. Removing it would mean recursing,
+///   and something has put more than skel files here, so this is not the empty home
+///   this is meant to recognise.
+/// - **Hidden regular files** are the skel copies (`.bashrc` and friends). They are
+///   removed one at a time, each one logged, and then the directory itself with
+///   `remove_dir` - the non-recursive one, so it *cannot* take a subtree with it even if
+///   the checks above are ever wrong.
+///
+/// If the final `remove_dir` fails after the files are gone, all that has been lost is
+/// a few regenerable skel copies, and the next attempt finds an empty directory and
+/// gets further. Nothing is destroyed that the account agent will not put back.
+///
+async fn clear_placeholder_dir_native(path: &Path) -> Result<bool, Error> {
+    // `read_dir` yields neither "." nor "..", so there is nothing to filter out here.
+    let entries = std::fs::read_dir(path).with_context(|| {
+        format!(
+            "Could not list the contents of '{}'",
+            path.to_string_lossy()
+        )
+    })?;
+
+    let mut hidden = Vec::new();
+
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("Could not read an entry of '{}'", path.to_string_lossy()))?;
+
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        if !name.starts_with('.') {
+            tracing::info!(
+                "'{}' already contains '{}', so it holds real content - keeping it and \
+                 leaving the recycled copy alone",
+                path.to_string_lossy(),
+                name
+            );
+            return Ok(false);
+        }
+
+        // `file_type` on the directory entry, which does not follow symlinks.
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "Could not determine the type of '{}'",
+                entry.path().to_string_lossy()
+            )
+        })?;
+
+        if !file_type.is_file() {
+            tracing::warn!(
+                "'{}' contains the hidden {} '{}' - not something a newly created \
+                 account leaves behind, so keeping this directory and leaving the \
+                 recycled copy alone rather than recursing into it",
+                path.to_string_lossy(),
+                if file_type.is_dir() {
+                    "directory"
+                } else {
+                    "symlink"
+                },
+                name
+            );
+            return Ok(false);
+        }
+
+        hidden.push((name, entry.path()));
+    }
+
+    tracing::warn!(
+        "'{}' holds only {} hidden file(s) and a recycled copy of it exists, so it is \
+         the empty home directory an account agent leaves behind. Removing it and \
+         restoring the recycled directory in its place.",
+        path.to_string_lossy(),
+        hidden.len()
+    );
+
+    for (name, file) in &hidden {
+        if EXPECTED_SKEL_FILES.contains(&name.as_str()) {
+            tracing::info!("Removing the skel file '{}'", file.to_string_lossy());
+        } else {
+            // Removed all the same - it is hidden, and a recycled directory is waiting -
+            // but said loudly, because it is not one of the files this expects.
+            tracing::warn!(
+                "Removing the unexpected hidden file '{}' - it is not one of {:?}. If \
+                 this is a normal part of a new account on this system, add it to \
+                 EXPECTED_SKEL_FILES.",
+                file.to_string_lossy(),
+                EXPECTED_SKEL_FILES
+            );
+        }
+
+        std::fs::remove_file(file)
+            .with_context(|| format!("Could not remove '{}'", file.to_string_lossy()))?;
+    }
+
+    // `remove_dir`, never `remove_dir_all`: if anything is left, this fails loudly
+    // rather than deleting a subtree.
+    std::fs::remove_dir(path).with_context(|| {
+        format!(
+            "Could not remove the now-empty directory '{}'",
+            path.to_string_lossy()
+        )
+    })?;
+
+    Ok(true)
+}
+
+///
 /// Check if a directory exists in the .recycle subdirectory of its parent.
 /// Returns Some(recycle_path) if found, None otherwise.
 ///
@@ -890,6 +1036,116 @@ async fn check_recycle_native(path: &Path) -> Result<Option<PathBuf>, Error> {
     } else {
         Ok(None)
     }
+}
+
+///
+/// The remote counterpart of `clear_placeholder_dir_native` - see there for the rules
+/// and why they are what they are.
+///
+/// `ls -A -F` does the listing: `-A` leaves out "." and "..", and `-F` marks each name
+/// with its type, so a directory or a symlink can be told apart from a regular file
+/// without a `stat` per entry.
+///
+async fn clear_placeholder_dir_remote(path: &Path, prefix: &[String]) -> Result<bool, Error> {
+    let path_str = path.to_string_lossy();
+
+    let (exit_code, stdout, stderr) = run_remote(prefix, &["ls", "-A", "-F", &path_str]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "ls -A -F '{}' failed: exit code {}, stderr: {}",
+            path_str, exit_code, stderr
+        )));
+    }
+
+    let mut hidden = Vec::new();
+
+    for line in stdout.lines() {
+        let entry = line.trim_end();
+
+        if entry.is_empty() {
+            continue;
+        }
+
+        // A trailing '/' marks a directory and '@' a symlink; the other indicators
+        // ('*' executable, '=' socket, '|' FIFO, '>' door) all mark things that are
+        // still files as far as `rm` is concerned, so strip them and carry on.
+        let (name, is_file) = match entry.strip_suffix(['/', '@']) {
+            Some(_) => (entry, false),
+            None => (entry.trim_end_matches(['*', '=', '|', '>']), true),
+        };
+
+        if !name.starts_with('.') {
+            tracing::info!(
+                "'{}' already contains '{}', so it holds real content - keeping it and \
+                 leaving the recycled copy alone",
+                path_str,
+                name
+            );
+            return Ok(false);
+        }
+
+        if !is_file {
+            tracing::warn!(
+                "'{}' contains the hidden entry '{}', which is not a regular file - not \
+                 something a newly created account leaves behind, so keeping this \
+                 directory and leaving the recycled copy alone",
+                path_str,
+                name
+            );
+            return Ok(false);
+        }
+
+        hidden.push(name.to_string());
+    }
+
+    tracing::warn!(
+        "'{}' holds only {} hidden file(s) and a recycled copy of it exists, so it is \
+         the empty home directory an account agent leaves behind. Removing it and \
+         restoring the recycled directory in its place.",
+        path_str,
+        hidden.len()
+    );
+
+    for name in &hidden {
+        let file = path.join(name);
+        let file_str = file.to_string_lossy();
+
+        if EXPECTED_SKEL_FILES.contains(&name.as_str()) {
+            tracing::info!("Removing the skel file '{}'", file_str);
+        } else {
+            tracing::warn!(
+                "Removing the unexpected hidden file '{}' - it is not one of {:?}. If \
+                 this is a normal part of a new account on this system, add it to \
+                 EXPECTED_SKEL_FILES.",
+                file_str,
+                EXPECTED_SKEL_FILES
+            );
+        }
+
+        // `--` so a name can never be read as an option.
+        let (exit_code, _, stderr) = run_remote(prefix, &["rm", "-f", "--", &file_str]).await?;
+
+        if exit_code != 0 {
+            return Err(Error::State(format!(
+                "rm '{}' failed: exit code {}, stderr: {}",
+                file_str, exit_code, stderr
+            )));
+        }
+    }
+
+    // `rmdir`, not `rm -r`: if anything is left this fails loudly rather than deleting a
+    // subtree.
+    let (exit_code, _, stderr) = run_remote(prefix, &["rmdir", "--", &path_str]).await?;
+
+    if exit_code != 0 {
+        return Err(Error::State(format!(
+            "rmdir '{}' failed: exit code {}, stderr: {}",
+            path_str, exit_code, stderr
+        )));
+    }
+
+    Ok(true)
 }
 
 async fn check_recycle_remote(path: &Path, prefix: &[String]) -> Result<Option<PathBuf>, Error> {
@@ -1363,6 +1619,130 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a directory with the given entries. A name ending in '/' is made a
+    /// directory, everything else an empty file.
+    fn make_dir(base: &Path, entries: &[&str]) -> PathBuf {
+        std::fs::create_dir_all(base).expect("mkdir base");
+
+        for entry in entries {
+            match entry.strip_suffix('/') {
+                Some(dir) => std::fs::create_dir(base.join(dir)).expect("mkdir entry"),
+                None => {
+                    std::fs::File::create(base.join(entry)).expect("create entry");
+                }
+            }
+        }
+
+        base.to_path_buf()
+    }
+
+    #[tokio::test]
+    async fn test_placeholder_with_only_skel_files_is_cleared() {
+        let base = std::env::temp_dir().join(format!("op-ph-skel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let home = make_dir(
+            &base.join("fred"),
+            &[".bashrc", ".bash_logout", ".bash_profile"],
+        );
+
+        assert!(
+            clear_placeholder_dir_native(&home).await.expect("clear"),
+            "a home holding only skel files must be cleared"
+        );
+        assert!(!home.exists(), "the placeholder directory must be gone");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_an_empty_placeholder_is_cleared() {
+        let base = std::env::temp_dir().join(format!("op-ph-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let home = make_dir(&base.join("fred"), &[]);
+
+        assert!(clear_placeholder_dir_native(&home).await.expect("clear"));
+        assert!(!home.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_a_directory_with_real_files_is_never_cleared() {
+        // The case that must never go wrong: something non-hidden is a person's work,
+        // and a stale copy in `.recycle` must not be an excuse to delete it.
+        let base = std::env::temp_dir().join(format!("op-ph-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let home = make_dir(&base.join("fred"), &[".bashrc", "thesis.tex"]);
+
+        assert!(
+            !clear_placeholder_dir_native(&home).await.expect("clear"),
+            "a home holding real files must be kept"
+        );
+        assert!(home.join("thesis.tex").exists(), "nothing may be removed");
+        assert!(home.join(".bashrc").exists(), "not even the skel files");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_a_hidden_directory_is_never_cleared() {
+        // `.ssh` is the one that matters - clearing it would need recursion, and it
+        // holds credentials rather than skel defaults.
+        let base = std::env::temp_dir().join(format!("op-ph-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let home = make_dir(&base.join("fred"), &[".bashrc", ".ssh/"]);
+        std::fs::File::create(home.join(".ssh").join("authorized_keys")).expect("create key");
+
+        assert!(
+            !clear_placeholder_dir_native(&home).await.expect("clear"),
+            "a home holding a hidden directory must be kept"
+        );
+        assert!(home.join(".ssh").join("authorized_keys").exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_a_hidden_symlink_is_never_cleared() {
+        let base = std::env::temp_dir().join(format!("op-ph-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let home = make_dir(&base.join("fred"), &[".bashrc"]);
+        let elsewhere = make_dir(&base.join("elsewhere"), &["secret"]);
+        std::os::unix::fs::symlink(&elsewhere, home.join(".hidden-link")).expect("symlink");
+
+        assert!(
+            !clear_placeholder_dir_native(&home).await.expect("clear"),
+            "a home holding a hidden symlink must be kept"
+        );
+        assert!(
+            elsewhere.join("secret").exists(),
+            "the symlink's target must be untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_an_unexpected_hidden_file_is_still_cleared() {
+        // Not on the expected list, so it is logged loudly - but a hidden file with a
+        // recycled directory waiting is still a placeholder, or the fix would stop
+        // working on any host whose /etc/skel differs.
+        let base = std::env::temp_dir().join(format!("op-ph-unexp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let home = make_dir(&base.join("fred"), &[".bashrc", ".zshrc"]);
+
+        assert!(clear_placeholder_dir_native(&home).await.expect("clear"));
+        assert!(!home.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[tokio::test]
     async fn test_restore_from_recycle_keeps_ownership_that_is_already_right() {

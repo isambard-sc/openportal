@@ -6,8 +6,8 @@ SPDX-License-Identifier: CC0-1.0
 # Slurm requeue accounting: counting the attempts we never saw
 
 Status: **proposed**. Nothing below is implemented. The measurement in §1 has
-been done on one production account-day; the field-availability question in
-§2.4 is still open.
+been done on one production account-day, and the JSON fields the design relies
+on have been confirmed present on the production Slurm (§2.4).
 
 ## 1. The problem
 
@@ -45,6 +45,24 @@ de-duplicated by the daily query and both retained by the hourly one. Today's
 reported usage for a day therefore depends on whether a `sacct` call happened
 to time out, which is not reproducible.
 
+### 1.1 This is not only a billing question
+
+`set_limit` configures each account's `GrpTRESMins` through `sacctmgr`, and
+Slurm enforces that limit against *its own* accumulated usage - which counts
+every requeued attempt, because `slurmdbd` records them all. Our reports do
+not. So the two disagree, and Slurm is the one that is right.
+
+The visible symptom is an attempt that fails with reason
+`AssocGrpCPUMinutesLimit`: Slurm killed the job because the account had
+exhausted a limit which, according to the figures we were reporting, was
+nowhere near exhausted. This is precisely the confusion that prompted the
+investigation - a project believing it had allocation remaining while Slurm
+disagreed.
+
+Fixing the measurement therefore reconciles our reporting with the enforcement
+mechanism we ourselves configure. That is a correctness argument for the
+change, independent of the policy question in §3 about what should be charged.
+
 ## 2. What `sacct --duplicates` actually gives us
 
 ### 2.1 One record per attempt
@@ -80,16 +98,26 @@ A requeued attempt reports `state.current` as something like
 whole set, both for §6 and because "PENDING" is an actively misleading thing
 to have recorded about an attempt that ran for hours.
 
-### 2.4 Open: is there a per-record submit time?
+### 2.4 There is a per-record submit time: `time.submission`
 
-`.time.submit` came back null in the sample, so it is either absent from this
-Slurm version's JSON or unpopulated on this path. We do not need it for
-ordering - `restart_cnt` serves - but without some submit time or database
-index we cannot distinguish two unrelated jobs that share a JobID after a
-`slurmctld` job-id reset. That is rare and time-window-bounded, but it is the
-one failure mode that silently corrupts the split rather than failing loudly.
-Resolve before implementation: if the field exists under another name, or
-`JobIDRaw` gives a usable per-record key, group on it as well as `job_id`.
+Confirmed on the production Slurm. The field is `time.submission`, not
+`time.submit`, and it is populated on every record - the earlier null was my
+jq asking for a key that does not exist. `submission` plus `job_id` is
+`slurmdbd`'s own primary key for a job record, which resolves the job-id-reset
+concern outright: grouping on `(job_id, submission)` cannot conflate two
+unrelated jobs that happen to share a JobID, because their submit times
+differ.
+
+It also gives an independent ordering of attempts. On a sampled requeued job
+the ordering by `submission` and by `restart_cnt` agree, and a requeued
+attempt's `submission` equals the previous attempt's `end` - Slurm resubmits
+at the moment of the requeue. The design uses `submission` as the ordering key
+and treats disagreement with `restart_cnt` ordering as a condition to log,
+since `submission` is the database key while `restart_cnt` is a counter
+maintained alongside it.
+
+Two other fields in the record are worth knowing about: `failed_node` (see §6)
+and `array`/`het`, which confirm the fixture cases in §7 are obtainable.
 
 ## 3. The contract: a base figure and a requeue figure
 
@@ -226,9 +254,14 @@ Three wait figures then fall out for consumers:
 | mean wait per requeue | `requeue_wait_seconds / num_requeue_events` |
 | mean total wait per job, including requeues | `(total_wait_seconds + requeue_wait_seconds) / num_jobs` |
 
-One caveat for whoever reads the middle row: Slurm imposes a begin-time hold
-after a requeue, so requeue wait includes an enforced delay and is not a
-measure of contention.
+A note on the middle row, correcting an earlier reading of this. Slurm imposes
+a begin-time hold after a requeue, but it advances `eligible` past that hold,
+and `wait_time()` measures `eligible -> start`. So the hold is *excluded* from
+requeue wait, and the figure is genuine time spent waiting to be scheduled.
+The hold itself - `submission -> eligible`, a couple of minutes on the sampled
+job - is not captured by any field in this design. That seems right: it is a
+policy delay rather than contention, and conflating the two would make the
+requeue wait figure less useful, not more.
 
 ## 5. Where the code changes
 
@@ -245,7 +278,7 @@ watching after deployment on accounts with heavy preemption.
 
 ### 5.2 `get_consumers` classifies before it filters
 
-`SlurmJob` gains `restart_cnt` and a classification - an enum
+`SlurmJob` gains `submission`, `restart_cnt` and a classification - an enum
 (`Attempt::Base` / `Attempt::Requeued`) is clearer than a bool. The cache
 holds `SlurmJob` in memory only, so adding fields costs nothing.
 
@@ -253,8 +286,9 @@ The order of operations in `get_consumers` is load-bearing and easy to get
 wrong:
 
 1. Construct every record, with no filtering.
-2. Group by `job_id` (and any disambiguating key from §2.4) and mark the
-   highest `restart_cnt` in each group as `Base`, the rest as `Requeued`.
+2. Group by `job_id`, keyed within the group on `time.submission` (§2.4), and
+   mark the attempt with the latest `submission` as `Base`, the rest as
+   `Requeued`.
 3. Only then clip `start_time`/`end_time` to the query window.
 4. Only then drop zero-duration records.
 
@@ -293,6 +327,13 @@ question the single requeue total cannot. `NODE_FAIL` time is a site problem;
 `PREEMPTED` time is a policy the project opted into; `CANCELLED` may be the
 user's own doing. Those are different conversations with different answers,
 and the flat requeue figure lumps them together.
+
+The record's `failed_node` field is worth capturing alongside this. For a
+`NODE_FAIL` attempt it names the node responsible, which turns "the site lost
+this work" into something actionable - correlating repeated failures against
+particular nodes, and evidencing the case when a project disputes a charge.
+It does not belong in the usage report itself; logging it at `info` from the
+slurm agent is enough.
 
 Both maps are keyed by a normalised terminal-state string. The key must be
 derived deterministically from the state set (a requeued attempt reports both
@@ -355,15 +396,17 @@ an end, not a standing choice.
 
 ## 9. Open questions
 
-1. §2.4 - is there a per-record submit time or database index available, and
-   should we group on it to survive a job-id reset?
-2. Should `requeue_states` key on the raw Slurm state string, or on a smaller
+1. Should `requeue_states` key on the raw Slurm state string, or on a smaller
    normalised set (`node_fail` / `preempted` / `requeued` / `cancelled` /
    `other`)? The latter is friendlier to consumers and hides Slurm version
    differences; the former loses nothing.
-3. Do we want a distinct-jobs-requeued count as well as the event count?
+2. Do we want a distinct-jobs-requeued count as well as the event count?
    Deferred rather than rejected - it needs the cross-window grouping of §3.1
    to be meaningful.
-4. Is the wait time of a requeued attempt worth attributing per user, or is
+3. Is the wait time of a requeued attempt worth attributing per user, or is
    the project-level total enough? The schema in §4 includes the per-user map
    for symmetry; it may not be worth the width.
+4. Given §1.1, is a reconciliation check worth building - comparing our
+   reported usage against the account's `GrpTRESMins` consumption as Slurm
+   sees it, and warning when they diverge? It would have caught this class of
+   bug without anyone having to notice a confused project.

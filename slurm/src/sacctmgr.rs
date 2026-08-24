@@ -1034,6 +1034,7 @@ struct ReportTotals {
     usage: u64,
     num_jobs: u64,
     wait_seconds: u64,
+    runtime_seconds: u64,
     requeue_usage: u64,
     requeue_events: u64,
     requeue_wait_seconds: u64,
@@ -1140,6 +1141,13 @@ fn record_job(
         totals.num_jobs = totals.num_jobs.saturating_add(1);
         totals.wait_seconds = totals.wait_seconds.saturating_add(wait_seconds);
 
+        // The expansion factor is queue time over runtime, so it uses the job's
+        // whole runtime rather than the part that fell inside this window - the
+        // ratio is a property of the job, like the wait it is divided into.
+        let runtime_seconds = job.total_duration().num_seconds().max(0) as u64;
+        report.add_expansion(job.user(), wait_seconds, runtime_seconds);
+        totals.runtime_seconds = totals.runtime_seconds.saturating_add(runtime_seconds);
+
         if job.is_reserved() {
             // counted as `num_jobs` is, so a job spanning several windows is one
             // job in the reservation rather than one per window
@@ -1200,6 +1208,17 @@ fn check_counter_consistency(
     project: &ProjectMapping,
     day: &greatwestern::grammar::Date,
 ) {
+    if report.total_runtime_seconds() != totals.runtime_seconds {
+        tracing::warn!(
+            "Runtime inconsistency for project {} on {}: local counter ({}s) differs from \
+             report total ({}s). This may indicate a bug.",
+            project.project(),
+            day,
+            totals.runtime_seconds,
+            report.total_runtime_seconds()
+        );
+    }
+
     if report.num_jobs() != totals.num_jobs || report.total_wait_seconds() != totals.wait_seconds {
         tracing::warn!(
             "Job count/wait time inconsistency for project {} on {}: \
@@ -2228,6 +2247,62 @@ mod tests {
         assert_eq!(
             report.average_wait_seconds_including_requeues(),
             (66480 + 21000) / 9
+        );
+    }
+
+    #[test]
+    fn test_the_expansion_factor_uses_the_whole_job_not_the_windowed_part() {
+        // Both halves of the ratio are properties of the job rather than of the
+        // window it is reported in, so a job running past midnight must not be
+        // recorded as having a runtime of "until the window closed" - that would
+        // inflate the factor for exactly the long jobs it should reassure about.
+        //
+        // Job 900's attempt ran for twelve hours from 20:00 on day one, so four
+        // of them fall inside day one. It waited twelve hours to start.
+        let (report, totals) = report_for(day_one());
+
+        // the runtime counted is the whole twelve hours, not the four
+        assert_eq!(report.runtime_seconds_for_user("user_six"), 43200);
+        assert_eq!(totals.runtime_seconds, report.total_runtime_seconds());
+
+        // 43200 waited over 43200 run
+        assert!((report.expansion_factor_for_user("user_six") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_only_the_jobs_counted_as_jobs_contribute_an_expansion_factor() {
+        // The mean needs a denominator it agrees with, so the population is
+        // exactly `num_jobs` - one job, once, in the window it started in. A
+        // superseded attempt has its own wait recorded as requeue wait instead.
+        let (day_one_report, _) = report_for(day_one());
+        let (day_two_report, _) = report_for(day_two());
+
+        // job 900 is counted on day one, where it started
+        assert!(day_one_report.runtime_seconds_for_user("user_six") > 0);
+
+        // on day two the same attempt is a superseded one, so it contributes no
+        // expansion factor there - it is not a job that started that day
+        assert_eq!(day_two_report.runtime_seconds_for_user("user_six"), 0);
+        assert_eq!(day_two_report.average_expansion_factor(), 0.0);
+
+        // and the report agrees with itself
+        assert!(day_one_report.is_consistent());
+        assert!(day_two_report.is_consistent());
+    }
+
+    #[test]
+    fn test_the_days_expansion_factors_are_reported_both_ways() {
+        let (report, _) = report_for(day_one());
+
+        // nine jobs, each contributing its own ratio
+        assert_eq!(report.num_jobs(), 9);
+        assert!(report.average_expansion_factor() > 0.0);
+        assert!(report.aggregate_expansion_factor() > 0.0);
+
+        // the two differ, which is the reason for carrying both: the mean is
+        // moved by the short jobs and the aggregate by the long ones
+        assert!(
+            (report.average_expansion_factor() - report.aggregate_expansion_factor()).abs() > 1e-9
         );
     }
 

@@ -62,6 +62,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   failure is not the user's fault - so both figures are reported and the choice
   is left to the portal. See
   [docs/plans/slurm-requeue-accounting-design.md](docs/plans/slurm-requeue-accounting-design.md).
+- **Expansion factor.** Usage reports now record each project's total wall-clock
+  runtime and the expansion factor of its jobs - queue time over runtime - so
+  that a project waiting a long time for a little work can be spotted. The
+  particular pattern of a job that queues for hours and then exits in seconds,
+  repeatedly, is what a user fighting a job that will not run looks like from
+  the outside.
+
+  Two forms are reported, because they fail in opposite directions:
+  `average_expansion_factor` is the mean of the per-job ratios, which one short
+  job that waited a long time moves a long way, and
+  `aggregate_expansion_factor` is total wait over total runtime, which no single
+  job moves much. The divergence between them is itself the signal - a mean far
+  above the aggregate means a few short jobs waited forever - and
+  `expansion_factor_for_user()` then says who. Both appear in the printed report
+  alongside the job count.
+
+  Note the convention: this is `wait / run`, so zero would mean nothing ever
+  waited. The classical expansion factor - turnaround over runtime, never below
+  one - is exactly this plus one, so convert before comparing with `sreport`.
+
+  This could not be derived from what was already collected: the denominator has
+  to be runtime, and the nearest existing figure is usage, which weights each
+  second by the fraction of a node a job held.
 - **Reservation accounting.** Usage reports now record which Slurm reservation a
   job ran under, so that what a project put into a reservation can be seen at
   all:

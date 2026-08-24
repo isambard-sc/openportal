@@ -20,6 +20,23 @@ num_jobs: bigint,
  */
 total_wait_seconds: bigint, 
 /**
+ * Per-user sum of per-job expansion factors, in thousandths.
+ */
+user_expansion_milli: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_expansion_milli when populated.
+ */
+total_expansion_milli: bigint, 
+/**
+ * Per-user total wall-clock runtime, in seconds. Not the same as usage,
+ * which is weighted by the fraction of a node a job held.
+ */
+user_runtime_seconds: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_runtime_seconds when populated.
+ */
+total_runtime_seconds: bigint, 
+/**
  * Usage from attempts superseded by a requeue, per local user.
  */
 requeue_reports: { [key in string]?: Usage }, 

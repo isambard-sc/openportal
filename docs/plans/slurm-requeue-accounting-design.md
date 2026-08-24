@@ -524,6 +524,65 @@ instructions to read back a reservation's definition and the projects entitled t
 use it belong in that vocabulary rather than being bolted onto a usage report.
 That is also where per-instance identity would live, if it is ever wanted.
 
+## 7.3 Expansion factor
+
+Queue time over runtime, per job. A project whose jobs wait a long time for a
+little work is being poorly served, or is doing something odd; a rising figure
+is worth a look, and the particular pattern of a job that queues for hours and
+then exits in seconds, repeatedly, is what a user fighting a job that will not
+run looks like from the outside.
+
+It cannot be derived from what was already collected. The numerator was there -
+`total_wait_seconds` - but the denominator has to be runtime, and the only thing
+resembling it in a report is *usage*, which is `node_fraction × duration`. For
+anything but a whole-node job those differ, so total runtime is now recorded
+alongside, in seconds. It is a genuinely new quantity, not a rearrangement of
+existing ones.
+
+**Two forms are reported, because they fail in opposite directions.**
+
+- `average_expansion_factor` is the mean of the per-job ratios. One job that
+  queued for hours and exited in seconds moves it a long way, which is the whole
+  point.
+- `aggregate_expansion_factor` is total wait over total runtime - the project as
+  one job. No single job moves it much, and equally it will not show a handful of
+  short jobs that waited forever.
+
+Carrying both is cheap, and the *divergence between them* turns out to be the
+most useful signal of the two: a mean far above the aggregate says a few short
+jobs waited a long time, which is exactly the case worth chasing. Per-user
+figures then say who. Neither can be reconstructed from the other, so storing
+one would have been a choice about which question to allow.
+
+**The form is `wait / run`, not `(wait + run) / run`.** The two differ by exactly
+one, so nothing is lost, but `sreport` and most of the literature use the second,
+and a figure of 0.27 in one convention is 1.27 in the other. Both the API docs
+and the printed line say which is which.
+
+**The ratios are accumulated as thousandths, not as floats.** Float addition is
+not associative, so summing the same daily reports in a different order would
+give a different total - and these reports are merged out of `HashMap`s whose
+iteration order is arbitrary, which would make the shadow-counter checks in §5.4
+fail for no reason and the tests order-dependent. Thousandths of an expansion
+factor is far finer than anyone reads.
+
+Two smaller things follow from the definition. The population is exactly the one
+`num_jobs` counts - one job, once, in the window it started in - so the mean has
+a denominator it agrees with; a superseded attempt's wait is already covered by
+the requeue figures. And both halves of the ratio are the job's own, not the
+window's, so a job running past midnight contributes its whole runtime rather
+than the part that fell inside the day: the alternative would inflate the factor
+for precisely the long jobs it ought to reassure about. This is the same reason
+`wait_time()` measures from the unclipped start (§4.2).
+
+A project-level figure is computed from the summed thousandths over the summed
+job count, never by averaging each day's average - a day with four jobs must not
+weigh as heavily as a day with four hundred.
+
+Finally, every scaling operation leaves these figures alone. A credit conversion
+rescales usage; it does not change how many jobs ran, how long they queued, or a
+dimensionless ratio of the two.
+
 ## 8. Compatibility and rollout
 
 Nothing on the wire breaks. Every new field is `#[serde(default)]`, so an

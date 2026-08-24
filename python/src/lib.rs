@@ -3130,6 +3130,42 @@ impl ProjectUsageReport {
         Ok(self.0.average_wait_seconds())
     }
 
+    /// Total wall-clock runtime of the jobs in this report, in seconds. Not the
+    /// same as usage, which weights each second by the fraction of a node held.
+    #[getter]
+    fn total_runtime_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.total_runtime_seconds())
+    }
+
+    /// Mean expansion factor per job: queue time over runtime. Zero would mean
+    /// nothing ever waited.
+    ///
+    /// This is the "wait over run" form; the classical expansion factor -
+    /// turnaround over runtime, never below one - is this plus one. Convert
+    /// before comparing with `sreport` or the literature.
+    ///
+    /// Being a mean of ratios, one job that queued for hours and exited in
+    /// seconds moves it a long way. That is the point - it is what a user
+    /// fighting a job that will not run looks like - but read it alongside
+    /// `aggregate_expansion_factor`, which no single job can move much.
+    #[getter]
+    fn average_expansion_factor(&self) -> PyResult<f64> {
+        Ok(self.0.average_expansion_factor())
+    }
+
+    /// Total queue time over total runtime - the robust companion to
+    /// `average_expansion_factor`.
+    #[getter]
+    fn aggregate_expansion_factor(&self) -> PyResult<f64> {
+        Ok(self.0.aggregate_expansion_factor())
+    }
+
+    /// Mean expansion factor for one local user - which is where a struggling
+    /// user shows up, the project-wide mean having averaged them away.
+    fn expansion_factor_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.expansion_factor_for_user(user))
+    }
+
     /// Usage consumed by job attempts that were superseded by a requeue. Not
     /// included in `total_usage`, which counts only each job's final attempt -
     /// the figure OpenPortal has always reported. Which of the two a project
@@ -3903,6 +3939,46 @@ impl DailyProjectUsageReport {
 
     fn get_component(&self, component: &str) -> PyResult<DailyProjectUsageReport> {
         Ok(self.0.get_component(component).into())
+    }
+
+    /// Total wall-clock runtime of the jobs in this report, in seconds. Not the
+    /// same as usage, which weights each second by the fraction of a node held.
+    #[getter]
+    fn total_runtime_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.total_runtime_seconds())
+    }
+
+    /// Mean expansion factor per job: queue time over runtime. Zero would mean
+    /// nothing ever waited.
+    ///
+    /// This is the "wait over run" form; the classical expansion factor -
+    /// turnaround over runtime, never below one - is this plus one. Convert
+    /// before comparing with `sreport` or the literature.
+    ///
+    /// Being a mean of ratios, one job that queued for hours and exited in
+    /// seconds moves it a long way. That is the point - it is what a user
+    /// fighting a job that will not run looks like - but read it alongside
+    /// `aggregate_expansion_factor`, which no single job can move much.
+    #[getter]
+    fn average_expansion_factor(&self) -> PyResult<f64> {
+        Ok(self.0.average_expansion_factor())
+    }
+
+    /// Total queue time over total runtime - the robust companion to
+    /// `average_expansion_factor`.
+    #[getter]
+    fn aggregate_expansion_factor(&self) -> PyResult<f64> {
+        Ok(self.0.aggregate_expansion_factor())
+    }
+
+    /// Mean expansion factor for one local user - which is where a struggling
+    /// user shows up, the project-wide mean having averaged them away.
+    fn expansion_factor_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.expansion_factor_for_user(user))
+    }
+
+    fn runtime_seconds_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.runtime_seconds_for_user(user))
     }
 
     /// Usage this user consumed on attempts superseded by a requeue.

@@ -406,6 +406,11 @@ impl UserUsageReport {
     }
 }
 
+/// Expansion factors are accumulated as thousandths, so that summing them is
+/// exact and order-independent - see the field comments in
+/// [`DailyProjectUsageReport`].
+const EXPANSION_SCALE: u64 = 1000;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DailyProjectUsageReport {
@@ -425,6 +430,41 @@ pub struct DailyProjectUsageReport {
     /// Scalar total — equals sum of user_wait_seconds when populated.
     #[serde(default)]
     total_wait_seconds: u64,
+
+    // ---- Expansion factor ---------------------------------------------------
+    //
+    // Queue time over runtime, per job, which says how much waiting a project
+    // endured for the work it got. A rising figure is worth looking at: a job
+    // that queues for hours and then exits in seconds, over and over, is what a
+    // user struggling to debug something looks like from the outside.
+    //
+    // The sum of the per-job *ratios* is kept, not a ratio of sums, because the
+    // two answer different questions and fail in opposite directions. The mean
+    // of ratios is dominated by a short job that waited a long time, which is
+    // exactly the case worth catching; a ratio of sums is dominated by whichever
+    // job ran longest, which hides it. Total runtime is kept as well so both are
+    // available - see `average_expansion_factor` and
+    // `aggregate_expansion_factor`.
+    //
+    // The ratios are accumulated as thousandths rather than as floating point.
+    // Float addition is not associative, so summing the same reports in a
+    // different order would give a different total, and these reports are
+    // merged out of `HashMap`s whose order is arbitrary; the shadow-counter
+    // checks would then fail for no reason. Thousandths of an expansion factor
+    // is far finer than anyone reads.
+    /// Per-user sum of per-job expansion factors, in thousandths.
+    #[serde(default)]
+    user_expansion_milli: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_expansion_milli when populated.
+    #[serde(default)]
+    total_expansion_milli: u64,
+    /// Per-user total wall-clock runtime, in seconds. Not the same as usage,
+    /// which is weighted by the fraction of a node a job held.
+    #[serde(default)]
+    user_runtime_seconds: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_runtime_seconds when populated.
+    #[serde(default)]
+    total_runtime_seconds: u64,
 
     // ---- Requeue accounting -------------------------------------------------
     //
@@ -537,6 +577,15 @@ impl std::fmt::Display for DailyProjectUsageReport {
                 } else {
                     writeln!(f, "Number of jobs: {}", n)?;
                 }
+
+                if self.total_runtime_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Expansion factor: {:.2} mean per job, {:.2} overall",
+                        self.average_expansion_factor(),
+                        self.aggregate_expansion_factor()
+                    )?;
+                }
             }
         }
 
@@ -607,6 +656,15 @@ impl std::fmt::Display for DailyProjectUsageReportHoursDisplay<'_> {
                     )?;
                 } else {
                     writeln!(f, "Number of jobs: {}", n)?;
+                }
+
+                if report.total_runtime_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Expansion factor: {:.2} mean per job, {:.2} overall",
+                        report.average_expansion_factor(),
+                        report.aggregate_expansion_factor()
+                    )?;
                 }
             }
         }
@@ -696,6 +754,113 @@ impl DailyProjectUsageReport {
         self.total_wait_seconds = self.total_wait_seconds.saturating_add(seconds);
     }
 
+    ///
+    /// Record one job's queue time and runtime, for the expansion factor.
+    ///
+    /// Called for the same population as `add_jobs` - one job, once, in the
+    /// window it started in - so that the mean has a well-defined denominator.
+    /// Both figures are properties of the job rather than of the window, so they
+    /// are the job's whole wait and whole runtime even where that runs past the
+    /// window's end.
+    ///
+    /// A job with no runtime is ignored rather than counted as an infinite
+    /// expansion: `op-slurm` does not report jobs that consumed nothing, so this
+    /// should not arise, but a division by zero here would be a process kill.
+    ///
+    pub fn add_expansion(&mut self, user: &str, wait_seconds: u64, runtime_seconds: u64) {
+        if runtime_seconds == 0 {
+            return;
+        }
+
+        let expansion_milli = wait_seconds
+            .saturating_mul(EXPANSION_SCALE)
+            .saturating_div(runtime_seconds);
+
+        *self
+            .user_expansion_milli
+            .entry(user.to_string())
+            .or_default() += expansion_milli;
+        self.total_expansion_milli = self.total_expansion_milli.saturating_add(expansion_milli);
+
+        *self
+            .user_runtime_seconds
+            .entry(user.to_string())
+            .or_default() += runtime_seconds;
+        self.total_runtime_seconds = self.total_runtime_seconds.saturating_add(runtime_seconds);
+    }
+
+    /// Total wall-clock runtime of the jobs counted in this report. This is not
+    /// usage: usage weights each second by the fraction of a node the job held,
+    /// while this counts the seconds themselves.
+    pub fn total_runtime_seconds(&self) -> u64 {
+        self.total_runtime_seconds
+    }
+
+    /// The summed per-job expansion factors, in thousandths. Exposed so that a
+    /// report spanning several days can compute one mean over every job rather
+    /// than averaging each day's average.
+    pub fn total_expansion_milli(&self) -> u64 {
+        self.total_expansion_milli
+    }
+
+    pub fn expansion_milli_for_user(&self, user: &str) -> u64 {
+        self.user_expansion_milli.get(user).copied().unwrap_or(0)
+    }
+
+    pub fn runtime_seconds_for_user(&self, user: &str) -> u64 {
+        self.user_runtime_seconds.get(user).copied().unwrap_or(0)
+    }
+
+    ///
+    /// The mean expansion factor of the jobs counted in this report: queue time
+    /// over runtime, averaged per job.
+    ///
+    /// Zero would mean nothing ever waited. This is the "wait over run" form, so
+    /// the classical expansion factor - turnaround over runtime, which is never
+    /// below one - is exactly this plus one. Neither form is more correct;
+    /// `sreport` and most of the literature use the classical one, so convert
+    /// before comparing.
+    ///
+    /// Being a mean of ratios, one job that queued for hours and then exited in
+    /// seconds moves this a long way. That is deliberate - it is the signature
+    /// of a user fighting a job that will not run - but it means a single figure
+    /// should be read alongside `aggregate_expansion_factor`, which cannot be
+    /// moved by one short job.
+    ///
+    pub fn average_expansion_factor(&self) -> f64 {
+        match self.num_jobs {
+            0 => 0.0,
+            n => self.total_expansion_milli as f64 / (EXPANSION_SCALE as f64 * n as f64),
+        }
+    }
+
+    /// The mean expansion factor for one user - which is where a struggling user
+    /// shows up, the project-wide mean having averaged them away.
+    pub fn expansion_factor_for_user(&self, user: &str) -> f64 {
+        match self.num_jobs_for_user(user) {
+            0 => 0.0,
+            n => {
+                let milli = self.user_expansion_milli.get(user).copied().unwrap_or(0);
+                milli as f64 / (EXPANSION_SCALE as f64 * n as f64)
+            }
+        }
+    }
+
+    ///
+    /// Total queue time over total runtime - the whole project treated as one
+    /// job.
+    ///
+    /// The robust companion to `average_expansion_factor`: no single job can
+    /// move it much, which also means it will not show a handful of short jobs
+    /// that waited a long time. Read the two together.
+    ///
+    pub fn aggregate_expansion_factor(&self) -> f64 {
+        match self.total_runtime_seconds {
+            0 => 0.0,
+            runtime => self.total_wait_seconds as f64 / runtime as f64,
+        }
+    }
+
     pub fn num_jobs_for_user(&self, user: &str) -> u64 {
         self.user_job_counts.get(user).copied().unwrap_or(0)
     }
@@ -724,7 +889,29 @@ impl DailyProjectUsageReport {
         }
         let jobs_sum: u64 = self.user_job_counts.values().sum();
         let wait_sum: u64 = self.user_wait_seconds.values().sum();
-        jobs_sum == self.num_jobs && wait_sum == self.total_wait_seconds
+
+        if jobs_sum != self.num_jobs || wait_sum != self.total_wait_seconds {
+            return false;
+        }
+
+        // The expansion sums are exact integers, so these are equalities rather
+        // than tolerances - which is the point of accumulating thousandths
+        // instead of floats.
+        if !self.user_expansion_milli.is_empty() {
+            let expansion_sum: u64 = self.user_expansion_milli.values().sum();
+            if expansion_sum != self.total_expansion_milli {
+                return false;
+            }
+        }
+
+        if !self.user_runtime_seconds.is_empty() {
+            let runtime_sum: u64 = self.user_runtime_seconds.values().sum();
+            if runtime_sum != self.total_runtime_seconds {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// The same check for the requeue counters.
@@ -1232,6 +1419,11 @@ impl DailyProjectUsageReport {
     /// be scaled by the same factor, or `total_usage()` and
     /// `total_requeue_usage()` end up in different units and the sum a client
     /// makes of them is meaningless.
+    ///
+    /// Job counts, wait times, runtimes and expansion factors are deliberately
+    /// untouched by every scaling operation on this type. A credit conversion
+    /// rescales usage; it does not change how many jobs ran, how long they
+    /// queued, or a dimensionless ratio of the two.
     fn scale_totals(&mut self, factor: f64) {
         for usage in self.reports.values_mut() {
             *usage *= factor;
@@ -1357,6 +1549,24 @@ impl DailyProjectUsageReport {
             })
             .collect();
 
+        let old_expansion = std::mem::take(&mut self.user_expansion_milli);
+        self.user_expansion_milli = old_expansion
+            .into_iter()
+            .map(|(user, milli)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, milli)
+            })
+            .collect();
+
+        let old_runtimes = std::mem::take(&mut self.user_runtime_seconds);
+        self.user_runtime_seconds = old_runtimes
+            .into_iter()
+            .map(|(user, secs)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, secs)
+            })
+            .collect();
+
         // The requeue maps are keyed the same way and need the same treatment.
         // `requeue_states` and `requeue_state_usage` are keyed by Slurm state
         // rather than by user, so they are deliberately left alone.
@@ -1452,6 +1662,25 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             .total_wait_seconds
             .saturating_add(other.total_wait_seconds);
 
+        for (user, milli) in &other.user_expansion_milli {
+            *new_report
+                .user_expansion_milli
+                .entry(user.clone())
+                .or_default() += milli;
+        }
+        for (user, secs) in &other.user_runtime_seconds {
+            *new_report
+                .user_runtime_seconds
+                .entry(user.clone())
+                .or_default() += secs;
+        }
+        new_report.total_expansion_milli = self
+            .total_expansion_milli
+            .saturating_add(other.total_expansion_milli);
+        new_report.total_runtime_seconds = self
+            .total_runtime_seconds
+            .saturating_add(other.total_runtime_seconds);
+
         for (user, usage) in other.requeue_reports {
             new_report.add_requeue_usage(&user, usage);
         }
@@ -1526,6 +1755,19 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
         self.total_wait_seconds = self
             .total_wait_seconds
             .saturating_add(other.total_wait_seconds);
+
+        for (user, milli) in &other.user_expansion_milli {
+            *self.user_expansion_milli.entry(user.clone()).or_default() += milli;
+        }
+        for (user, secs) in &other.user_runtime_seconds {
+            *self.user_runtime_seconds.entry(user.clone()).or_default() += secs;
+        }
+        self.total_expansion_milli = self
+            .total_expansion_milli
+            .saturating_add(other.total_expansion_milli);
+        self.total_runtime_seconds = self
+            .total_runtime_seconds
+            .saturating_add(other.total_runtime_seconds);
 
         for (user, usage) in other.requeue_reports {
             self.add_requeue_usage(&user, usage);
@@ -1678,6 +1920,15 @@ impl std::fmt::Display for ProjectUsageReport {
                     } else {
                         writeln!(f, "Number of jobs: {}", n)?;
                     }
+
+                    if report.total_runtime_seconds() > 0 {
+                        writeln!(
+                            f,
+                            "Expansion factor: {:.2} mean per job, {:.2} overall",
+                            report.average_expansion_factor(),
+                            report.aggregate_expansion_factor()
+                        )?;
+                    }
                 }
             }
             if report.has_requeues() {
@@ -1723,6 +1974,15 @@ impl std::fmt::Display for ProjectUsageReport {
                     )?;
                 } else {
                     writeln!(f, "Number of jobs: {}", n)?;
+                }
+
+                if self.total_runtime_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Expansion factor: {:.2} mean per job, {:.2} overall",
+                        self.average_expansion_factor(),
+                        self.aggregate_expansion_factor()
+                    )?;
                 }
             }
         }
@@ -1816,6 +2076,15 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                     } else {
                         writeln!(f, "Number of jobs: {}", n)?;
                     }
+
+                    if daily.total_runtime_seconds() > 0 {
+                        writeln!(
+                            f,
+                            "Expansion factor: {:.2} mean per job, {:.2} overall",
+                            daily.average_expansion_factor(),
+                            daily.aggregate_expansion_factor()
+                        )?;
+                    }
                 }
             }
             if daily.has_requeues() {
@@ -1861,6 +2130,15 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                     )?;
                 } else {
                     writeln!(f, "Number of jobs: {}", n)?;
+                }
+
+                if report.total_runtime_seconds() > 0 {
+                    writeln!(
+                        f,
+                        "Expansion factor: {:.2} mean per job, {:.2} overall",
+                        report.average_expansion_factor(),
+                        report.aggregate_expansion_factor()
+                    )?;
                 }
             }
         }
@@ -2174,6 +2452,67 @@ impl ProjectUsageReport {
         match num_jobs {
             0 => 0,
             n => self.total_wait_seconds() / n,
+        }
+    }
+
+    /// Total wall-clock runtime of every job in this report. Not usage - usage
+    /// weights each second by the fraction of a node held.
+    pub fn total_runtime_seconds(&self) -> u64 {
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.total_runtime_seconds())
+        })
+    }
+
+    ///
+    /// The mean expansion factor across every job in this report - queue time
+    /// over runtime, averaged per job.
+    ///
+    /// Computed from the summed thousandths and the total job count, not by
+    /// averaging each day's average: a day with four jobs would otherwise weigh
+    /// as heavily as a day with four hundred.
+    ///
+    /// See `DailyProjectUsageReport::average_expansion_factor` for what the
+    /// figure means, and for its relationship to the classical form.
+    ///
+    pub fn average_expansion_factor(&self) -> f64 {
+        let jobs = self.num_jobs();
+
+        match jobs {
+            0 => 0.0,
+            n => {
+                let milli = self.reports.values().fold(0u64, |total, report| {
+                    total.saturating_add(report.total_expansion_milli())
+                });
+
+                milli as f64 / (EXPANSION_SCALE as f64 * n as f64)
+            }
+        }
+    }
+
+    /// The mean expansion factor for one local user, across every day.
+    pub fn expansion_factor_for_user(&self, user: &str) -> f64 {
+        let jobs = self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.num_jobs_for_user(user))
+        });
+
+        match jobs {
+            0 => 0.0,
+            n => {
+                let milli = self.reports.values().fold(0u64, |total, report| {
+                    total.saturating_add(report.expansion_milli_for_user(user))
+                });
+
+                milli as f64 / (EXPANSION_SCALE as f64 * n as f64)
+            }
+        }
+    }
+
+    /// Total queue time over total runtime - the robust companion to
+    /// `average_expansion_factor`, which no single job can move much.
+    pub fn aggregate_expansion_factor(&self) -> f64 {
+        match self.total_runtime_seconds() {
+            0 => 0.0,
+            runtime => self.total_wait_seconds() as f64 / runtime as f64,
         }
     }
 
@@ -3553,6 +3892,196 @@ mod tests {
         report.add_requeue_wait_seconds("bob", 120);
 
         report
+    }
+
+    #[test]
+    fn test_the_expansion_factor_is_the_mean_of_per_job_ratios() {
+        // Queue time over runtime, per job, averaged. A mean of ratios rather
+        // than a ratio of sums, so that a job which queued for a long time and
+        // then exited quickly shows up instead of being swallowed.
+        let mut report = DailyProjectUsageReport::default();
+
+        // an hour's wait for an hour's work
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 3600);
+        report.add_expansion("alice", 3600, 3600);
+
+        // no wait at all
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 0);
+        report.add_expansion("alice", 0, 7200);
+
+        assert_eq!(report.num_jobs(), 2);
+        assert_eq!(report.total_runtime_seconds(), 10800);
+
+        // (1.0 + 0.0) / 2
+        assert!((report.average_expansion_factor() - 0.5).abs() < 1e-9);
+
+        // 3600 waited over 10800 run - the same jobs, weighted by size
+        assert!((report.aggregate_expansion_factor() - (1.0 / 3.0)).abs() < 1e-9);
+
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_a_long_wait_for_a_job_that_dies_immediately_is_visible() {
+        // The case the statistic exists for: a user fighting a job that will not
+        // run. Two hours queued, four seconds of work, over and over.
+        let mut struggling = DailyProjectUsageReport::default();
+
+        for _ in 0..5 {
+            struggling.add_jobs("alice", 1);
+            struggling.add_wait_seconds("alice", 7200);
+            struggling.add_expansion("alice", 7200, 4);
+        }
+
+        // 1800 in this form, 1801 in the classical one - either way, loud
+        assert!(struggling.average_expansion_factor() > 1000.0);
+
+        // and it survives being averaged with a well-behaved day, which is the
+        // reason for preferring the mean of ratios: the aggregate form would
+        // bury these five jobs under one long-running one
+        let mut healthy = DailyProjectUsageReport::default();
+        healthy.add_jobs("bob", 1);
+        healthy.add_wait_seconds("bob", 60);
+        healthy.add_expansion("bob", 60, 86400);
+
+        let combined = struggling + healthy;
+
+        assert!(
+            combined.average_expansion_factor() > 1000.0,
+            "the mean of ratios must still show it: {}",
+            combined.average_expansion_factor()
+        );
+        assert!(
+            combined.aggregate_expansion_factor() < 1.0,
+            "while the aggregate form buries it: {}",
+            combined.aggregate_expansion_factor()
+        );
+
+        // per user is where you look to find who it was
+        assert!(combined.expansion_factor_for_user("alice") > 1000.0);
+        assert!(combined.expansion_factor_for_user("bob") < 1.0);
+        assert!(combined.is_consistent());
+    }
+
+    #[test]
+    fn test_a_job_with_no_runtime_cannot_divide_by_zero() {
+        // `op-slurm` does not report jobs that consumed nothing, so this should
+        // never arise - but a division by zero here would abort the process, and
+        // the values come from a peer.
+        let mut report = DailyProjectUsageReport::default();
+        report.add_jobs("alice", 1);
+        report.add_expansion("alice", 3600, 0);
+
+        assert_eq!(report.total_runtime_seconds(), 0);
+        assert_eq!(report.average_expansion_factor(), 0.0);
+        assert_eq!(report.aggregate_expansion_factor(), 0.0);
+
+        // and an empty report is 0.0 rather than a NaN
+        let empty = DailyProjectUsageReport::default();
+        assert_eq!(empty.average_expansion_factor(), 0.0);
+        assert_eq!(empty.aggregate_expansion_factor(), 0.0);
+    }
+
+    #[test]
+    fn test_expansion_sums_are_order_independent() {
+        // Accumulated as thousandths precisely so that merging the same reports
+        // in a different order gives the same answer - these reports are merged
+        // out of HashMaps whose iteration order is arbitrary, and float addition
+        // is not associative.
+        let day = |wait: u64, run: u64| {
+            let mut report = DailyProjectUsageReport::default();
+            report.add_jobs("alice", 1);
+            report.add_wait_seconds("alice", wait);
+            report.add_expansion("alice", wait, run);
+            report
+        };
+
+        let forwards = day(1, 3) + day(2, 7) + day(5, 11);
+        let backwards = day(5, 11) + day(2, 7) + day(1, 3);
+
+        assert_eq!(
+            forwards.total_expansion_milli(),
+            backwards.total_expansion_milli()
+        );
+        assert_eq!(
+            forwards.average_expansion_factor(),
+            backwards.average_expansion_factor()
+        );
+    }
+
+    #[test]
+    fn test_a_projects_expansion_factor_weighs_every_job_not_every_day() {
+        // Averaging each day's average would let a day with one job weigh as
+        // heavily as a day with a hundred.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut busy = DailyProjectUsageReport::default();
+        for _ in 0..99 {
+            busy.add_jobs("alice", 1);
+            busy.add_wait_seconds("alice", 0);
+            busy.add_expansion("alice", 0, 3600);
+        }
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &busy);
+
+        let mut quiet = DailyProjectUsageReport::default();
+        quiet.add_jobs("alice", 1);
+        quiet.add_wait_seconds("alice", 3600);
+        quiet.add_expansion("alice", 3600, 3600);
+        report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet);
+
+        // one job in a hundred had an expansion factor of 1, so the mean is 0.01
+        assert_eq!(report.num_jobs(), 100);
+        assert!((report.average_expansion_factor() - 0.01).abs() < 1e-9);
+
+        // not 0.5, which is what averaging the two daily means would give
+        assert!(report.average_expansion_factor() < 0.1);
+    }
+
+    #[test]
+    fn test_scaling_usage_leaves_the_expansion_factor_alone() {
+        // A credit conversion rescales usage. It does not change how many jobs
+        // ran, how long they queued, or a dimensionless ratio of the two.
+        let mut report = DailyProjectUsageReport::default();
+        report.add_usage("alice", Usage::new(3600));
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 1800);
+        report.add_expansion("alice", 1800, 3600);
+
+        let scaled = report.clone() * 10.0;
+
+        assert_eq!(scaled.total_usage(), Usage::new(36000));
+        assert_eq!(scaled.total_runtime_seconds(), 3600);
+        assert_eq!(
+            scaled.average_expansion_factor(),
+            report.average_expansion_factor()
+        );
+
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut project_report = ProjectUsageReport::new(&project);
+        project_report.set_report(&Date::parse("2026-03-01").unwrap(), &report);
+        project_report.scale_total(0.5);
+
+        assert!((project_report.average_expansion_factor() - 0.5).abs() < 1e-9);
+        assert_eq!(project_report.total_runtime_seconds(), 3600);
+    }
+
+    #[test]
+    fn test_a_report_from_an_instance_without_expansion_factors_still_loads() {
+        let legacy = serde_json::json!({
+            "reports": { "alice": { "seconds": 1800 } },
+            "num_jobs": 1,
+            "total_wait_seconds": 60,
+            "is_complete": true
+        });
+
+        let report: DailyProjectUsageReport = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(report.total_runtime_seconds(), 0);
+        assert_eq!(report.average_expansion_factor(), 0.0);
+        assert!(report.is_consistent());
     }
 
     /// A two-day project report: one day with requeues, one without.

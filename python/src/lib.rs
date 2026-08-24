@@ -2874,6 +2874,26 @@ impl UsageReport {
         Ok(self.0.get_component(component).into())
     }
 
+    /// Usage consumed by job attempts that were superseded by a requeue. This
+    /// is not included in `total_usage`, which counts only each job's final
+    /// attempt - the figure OpenPortal has always reported.
+    #[getter]
+    fn total_requeue_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_requeue_usage().into())
+    }
+
+    /// True consumption: `total_usage` plus `total_requeue_usage`.
+    #[getter]
+    fn total_usage_including_requeues(&self) -> PyResult<Usage> {
+        Ok(self.0.total_usage_including_requeues().into())
+    }
+
+    /// The number of requeue events - a job requeued four times counts four.
+    #[getter]
+    fn num_requeue_events(&self) -> PyResult<u64> {
+        Ok(self.0.num_requeue_events())
+    }
+
     fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> PyResult<()> {
         self.0
             .remap_portal(&new_portal.0)
@@ -3079,6 +3099,58 @@ impl ProjectUsageReport {
     #[getter]
     fn average_wait_seconds(&self) -> PyResult<u64> {
         Ok(self.0.average_wait_seconds())
+    }
+
+    /// Usage consumed by job attempts that were superseded by a requeue. Not
+    /// included in `total_usage`, which counts only each job's final attempt -
+    /// the figure OpenPortal has always reported. Which of the two a project
+    /// should be charged for is a policy decision, so both are reported.
+    #[getter]
+    fn total_requeue_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_requeue_usage().into())
+    }
+
+    /// True consumption: `total_usage` plus `total_requeue_usage`.
+    #[getter]
+    fn total_usage_including_requeues(&self) -> PyResult<Usage> {
+        Ok(self.0.total_usage_including_requeues().into())
+    }
+
+    /// The number of requeue events - a job requeued four times counts four.
+    #[getter]
+    fn num_requeue_events(&self) -> PyResult<u64> {
+        Ok(self.0.num_requeue_events())
+    }
+
+    /// Queue wait accumulated by superseded attempts, in seconds.
+    #[getter]
+    fn requeue_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.requeue_wait_seconds())
+    }
+
+    /// Mean wait per requeue - not per job.
+    #[getter]
+    fn average_requeue_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.average_requeue_wait_seconds())
+    }
+
+    /// Mean total queue wait per job, counting the waits of every attempt.
+    #[getter]
+    fn average_wait_seconds_including_requeues(&self) -> PyResult<u64> {
+        Ok(self.0.average_wait_seconds_including_requeues())
+    }
+
+    /// Requeue events by the terminal state of the superseded attempt, e.g.
+    /// `NODE_FAIL` (a site problem) against `PREEMPTED` (site policy) against
+    /// `CANCELLED`. Returned as a list of `(state, count)` pairs.
+    #[getter]
+    fn requeue_states(&self) -> PyResult<Vec<(String, u64)>> {
+        Ok(self.0.requeue_states())
+    }
+
+    /// Requeue usage attributable to superseded attempts that ended in `state`.
+    fn requeue_usage_in_state(&self, state: &str) -> PyResult<Usage> {
+        Ok(self.0.requeue_usage_in_state(state).into())
     }
 
     #[getter]
@@ -3714,6 +3786,81 @@ impl DailyProjectUsageReport {
 
     fn get_component(&self, component: &str) -> PyResult<DailyProjectUsageReport> {
         Ok(self.0.get_component(component).into())
+    }
+
+    /// Usage this user consumed on attempts superseded by a requeue.
+    fn requeue_usage(&self, user: &str) -> PyResult<Usage> {
+        Ok(self.0.requeue_usage(user).into())
+    }
+
+    /// Usage consumed by job attempts that were superseded by a requeue. Not
+    /// included in `total_usage` - see `ProjectUsageReport`.
+    #[getter]
+    fn total_requeue_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_requeue_usage().into())
+    }
+
+    /// True consumption: `total_usage` plus `total_requeue_usage`.
+    #[getter]
+    fn total_usage_including_requeues(&self) -> PyResult<Usage> {
+        Ok(self.0.total_usage_including_requeues().into())
+    }
+
+    /// The number of requeue events - a job requeued four times counts four.
+    #[getter]
+    fn num_requeue_events(&self) -> PyResult<u64> {
+        Ok(self.0.num_requeue_events())
+    }
+
+    fn requeue_events_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.requeue_events_for_user(user))
+    }
+
+    /// Queue wait accumulated by superseded attempts, in seconds.
+    #[getter]
+    fn requeue_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.requeue_wait_seconds())
+    }
+
+    fn requeue_wait_seconds_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.requeue_wait_seconds_for_user(user))
+    }
+
+    /// Mean wait per requeue - not per job.
+    #[getter]
+    fn average_requeue_wait_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.average_requeue_wait_seconds())
+    }
+
+    /// Mean total queue wait per job, counting the waits of every attempt.
+    #[getter]
+    fn average_wait_seconds_including_requeues(&self) -> PyResult<u64> {
+        Ok(self.0.average_wait_seconds_including_requeues())
+    }
+
+    /// Requeue events by the terminal state of the superseded attempt, as a
+    /// list of `(state, count)` pairs.
+    #[getter]
+    fn requeue_states(&self) -> PyResult<Vec<(String, u64)>> {
+        Ok(self.0.requeue_states())
+    }
+
+    fn requeue_events_in_state(&self, state: &str) -> PyResult<u64> {
+        Ok(self.0.requeue_events_in_state(state))
+    }
+
+    fn requeue_usage_in_state(&self, state: &str) -> PyResult<Usage> {
+        Ok(self.0.requeue_usage_in_state(state).into())
+    }
+
+    /// The components for which requeue usage was recorded.
+    #[getter]
+    fn requeue_components(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.requeue_components())
+    }
+
+    fn total_requeue_component_usage(&self, component: &str) -> PyResult<Usage> {
+        Ok(self.0.total_requeue_component_usage(component).into())
     }
 
     #[getter]

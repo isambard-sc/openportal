@@ -1025,6 +1025,183 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
     Ok(())
 }
 
+///
+/// The totals accumulated alongside a `DailyProjectUsageReport`, kept so that
+/// what the report says about itself can be checked against what we counted.
+///
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReportTotals {
+    usage: u64,
+    num_jobs: u64,
+    wait_seconds: u64,
+    requeue_usage: u64,
+    requeue_events: u64,
+    requeue_wait_seconds: u64,
+}
+
+///
+/// Accumulate one Slurm accounting record into `report`.
+///
+/// A record describing an attempt superseded by a requeue goes into the
+/// report's requeue figures; every other record goes into the figures we have
+/// always reported. Keeping the two apart is the whole point of requeue
+/// accounting - see `docs/plans/slurm-requeue-accounting-design.md`.
+///
+/// Usage is accumulated for every record overlapping the window, since the
+/// record has already been clipped to it. Job and event *counts*, and the wait
+/// times that go with them, are accumulated only for records that started
+/// inside the window, so that an attempt spanning several windows is counted
+/// once rather than once per window.
+///
+fn record_job(
+    report: &mut DailyProjectUsageReport,
+    job: &SlurmJob,
+    window_start: &chrono::DateTime<Utc>,
+    totals: &mut ReportTotals,
+) {
+    let usage = job.billed_node_seconds();
+    let started_in_window = job.original_start_time() >= window_start;
+    let wait_seconds = job.wait_time().num_seconds().max(0) as u64;
+
+    if job.is_requeued_attempt() {
+        let state = job.terminal_state();
+
+        report.add_requeue_usage(job.user(), Usage::new(usage));
+        report.add_requeue_state_usage(state, Usage::new(usage));
+        totals.requeue_usage = totals.requeue_usage.saturating_add(usage);
+
+        report.add_requeue_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+        report.add_requeue_component_usage("memory", job.user(), Usage::new(job.memory_seconds()));
+        report.add_requeue_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+        report.add_requeue_component_usage(
+            "billing",
+            job.user(),
+            Usage::new(job.billing_seconds()),
+        );
+
+        if started_in_window {
+            report.add_requeue_events(job.user(), state, 1);
+            report.add_requeue_wait_seconds(job.user(), wait_seconds);
+            totals.requeue_events = totals.requeue_events.saturating_add(1);
+            totals.requeue_wait_seconds = totals.requeue_wait_seconds.saturating_add(wait_seconds);
+        }
+
+        return;
+    }
+
+    report.add_usage(job.user(), Usage::new(usage));
+    totals.usage = totals.usage.saturating_add(usage);
+
+    report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+    report.add_component_usage("memory", job.user(), Usage::new(job.memory_seconds()));
+    report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+    report.add_component_usage("billing", job.user(), Usage::new(job.billing_seconds()));
+
+    if started_in_window {
+        report.add_jobs(job.user(), 1);
+        report.add_wait_seconds(job.user(), wait_seconds);
+        totals.num_jobs = totals.num_jobs.saturating_add(1);
+        totals.wait_seconds = totals.wait_seconds.saturating_add(wait_seconds);
+    }
+}
+
+///
+/// Report a node that Slurm blamed for losing a job.
+///
+/// This is deliberately loud: a node failure destroys a user's work, and on a
+/// requeued job it is the difference between "the project spent this" and "the
+/// site lost this", which is exactly what a charging dispute turns on. Site
+/// monitoring picks these up.
+///
+/// Called only where a fresh `sacct` response has just been parsed, never when
+/// replaying the cache, so that re-reading a cached hour does not re-report a
+/// failure that has already been reported.
+///
+fn report_node_failures(jobs: &[SlurmJob], project: &ProjectMapping) {
+    for job in jobs {
+        if job.terminal_state() != "NODE_FAIL" {
+            continue;
+        }
+
+        match job.failed_node().is_empty() {
+            true => tracing::error!(
+                "Node failure lost job {} of project {} (user {}) after {} seconds \
+                 (states: {}). Slurm did not name the node.",
+                job.id(),
+                project.project(),
+                job.user(),
+                job.duration().num_seconds(),
+                job.states().join(", ")
+            ),
+            false => tracing::error!(
+                "Node failure on {} lost job {} of project {} (user {}) after {} seconds \
+                 (states: {}).",
+                job.failed_node(),
+                job.id(),
+                project.project(),
+                job.user(),
+                job.duration().num_seconds(),
+                job.states().join(", ")
+            ),
+        }
+    }
+}
+
+///
+/// Warn if the report disagrees with what we counted while building it. A
+/// mismatch means a bug in the accumulation above, not bad data from Slurm.
+///
+fn check_counter_consistency(
+    report: &DailyProjectUsageReport,
+    totals: &ReportTotals,
+    project: &ProjectMapping,
+    day: &greatwestern::grammar::Date,
+) {
+    if report.num_jobs() != totals.num_jobs || report.total_wait_seconds() != totals.wait_seconds {
+        tracing::warn!(
+            "Job count/wait time inconsistency for project {} on {}: \
+             local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
+             This may indicate a bug.",
+            project.project(),
+            day,
+            totals.num_jobs,
+            totals.wait_seconds,
+            report.num_jobs(),
+            report.total_wait_seconds()
+        );
+    }
+
+    if report.num_requeue_events() != totals.requeue_events
+        || report.requeue_wait_seconds() != totals.requeue_wait_seconds
+        || report.total_requeue_usage().seconds() != totals.requeue_usage
+    {
+        tracing::warn!(
+            "Requeue accounting inconsistency for project {} on {}: \
+             local counters ({} events, {}s wait, {}s usage) differ from report totals \
+             ({} events, {}s wait, {}s usage). This may indicate a bug.",
+            project.project(),
+            day,
+            totals.requeue_events,
+            totals.requeue_wait_seconds,
+            totals.requeue_usage,
+            report.num_requeue_events(),
+            report.requeue_wait_seconds(),
+            report.total_requeue_usage().seconds()
+        );
+    }
+
+    // the per-state maps must account for every event and every second of
+    // requeue usage - an unrecognised Slurm state is bucketed, never dropped
+    if !report.is_consistent() {
+        tracing::warn!(
+            "Report for project {} on {} is internally inconsistent - its per-user or \
+             per-state maps do not sum to its own totals. This may indicate a bug.",
+            project.project(),
+            day
+        );
+    }
+}
+
 async fn get_hourly_report(
     expires: &chrono::DateTime<Utc>,
     project: &ProjectMapping,
@@ -1036,9 +1213,7 @@ async fn get_hourly_report(
 ) -> Result<DailyProjectUsageReport, Error> {
     let now = chrono::Utc::now();
     let mut daily_report = DailyProjectUsageReport::default();
-    let mut total_usage: u64 = 0;
-    let mut num_jobs: u64 = 0;
-    let mut total_wait_seconds: u64 = 0;
+    let mut totals = ReportTotals::default();
 
     // we need to get the report hour by hour from slurm, as users may have
     // run very large numbers of jobs in a day, and sacct may time out
@@ -1053,29 +1228,8 @@ async fn get_hourly_report(
 
             let hour_start_time = hour.start_time().and_utc();
 
-            for job in hourly_report {
-                total_usage += job.billed_node_seconds();
-                daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
-
-                daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
-                daily_report.add_component_usage(
-                    "memory",
-                    job.user(),
-                    Usage::new(job.memory_seconds()),
-                );
-                daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
-                daily_report.add_component_usage(
-                    "billing",
-                    job.user(),
-                    Usage::new(job.billing_seconds()),
-                );
-
-                if job.original_start_time() >= &hour_start_time {
-                    num_jobs += 1;
-                    total_wait_seconds += job.wait_time().num_seconds() as u64;
-                    daily_report.add_jobs(job.user(), 1);
-                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
-                }
+            for job in &hourly_report {
+                record_job(&mut daily_report, job, &hour_start_time, &mut totals);
             }
 
             continue;
@@ -1114,6 +1268,10 @@ async fn get_hourly_report(
                 "--noconvert".to_string(),
                 "--allocations".to_string(),
                 "--allusers".to_string(),
+                // one record per attempt, not just the last one - without this
+                // everything a requeued job consumed before its final attempt
+                // is invisible. `get_consumers` classifies them.
+                "--duplicates".to_string(),
                 format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
                 format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
                 format!("--account={}", account.name()),
@@ -1147,66 +1305,35 @@ async fn get_hourly_report(
             }
         }
 
-        for job in jobs {
-            total_usage += job.billed_node_seconds();
-            daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+        report_node_failures(&jobs, project);
 
-            daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
-            daily_report.add_component_usage(
-                "memory",
-                job.user(),
-                Usage::new(job.memory_seconds()),
-            );
-            daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
-            daily_report.add_component_usage(
-                "billing",
-                job.user(),
-                Usage::new(job.billing_seconds()),
-            );
-
-            // only count wait time for jobs that started in this hour
-            if job.original_start_time() >= &start_time {
-                num_jobs += 1;
-                total_wait_seconds += job.wait_time().num_seconds() as u64;
-                daily_report.add_jobs(job.user(), 1);
-                daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
-            }
+        for job in &jobs {
+            record_job(&mut daily_report, job, &start_time, &mut totals);
         }
     }
 
     tracing::debug!(
-        "Got {} jobs consuming {} seconds for project {} on {}",
-        num_jobs,
-        total_usage,
+        "Got {} jobs consuming {} seconds for project {} on {}, plus {} requeue events \
+         consuming {} seconds",
+        totals.num_jobs,
+        totals.usage,
         project.project(),
-        day
+        day,
+        totals.requeue_events,
+        totals.requeue_usage
     );
 
     // runtime consistency check: local shadow counters must match the report's scalar totals
-    if daily_report.num_jobs() != num_jobs
-        || daily_report.total_wait_seconds() != total_wait_seconds
-    {
-        tracing::warn!(
-            "Job count/wait time inconsistency for project {} on {}: \
-             local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
-             This may indicate a bug.",
-            project.project(),
-            day,
-            num_jobs,
-            total_wait_seconds,
-            daily_report.num_jobs(),
-            daily_report.total_wait_seconds()
-        );
-    }
+    check_counter_consistency(&daily_report, &totals, project, day);
 
     // check that the total usage in the daily report matches the total usage calculated manually
-    if daily_report.total_usage().seconds() != total_usage {
+    if daily_report.total_usage().seconds() != totals.usage {
         // it doesn't - we don't want to mark this as complete or cache it, because
         // this points to some error when generating the values...
         tracing::error!(
             "Total usage in daily report does not match total usage calculated manually: {} != {}",
             daily_report.total_usage().seconds(),
-            total_usage
+            totals.usage
         );
     } else if day.day().end_time().and_utc() < now {
         // we can set this day as completed if it is in the past
@@ -1284,6 +1411,8 @@ async fn get_daily_report(
             "--noconvert".to_string(),
             "--allocations".to_string(),
             "--allusers".to_string(),
+            // see the note in `get_hourly_report` - one record per attempt
+            "--duplicates".to_string(),
             format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
             format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
             format!("--account={}", account.name()),
@@ -1310,62 +1439,25 @@ async fn get_daily_report(
             );
 
             let mut daily_report = DailyProjectUsageReport::default();
-            let mut total_usage: u64 = 0;
-            let mut num_jobs_started: u64 = 0;
-            let mut total_wait_seconds: u64 = 0;
+            let mut totals = ReportTotals::default();
 
-            for job in jobs {
-                total_usage += job.billed_node_seconds();
-                daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+            report_node_failures(&jobs, project);
 
-                // only count jobs and wait time for jobs that started in this day
-                if job.original_start_time() >= &start_time {
-                    num_jobs_started += 1;
-                    total_wait_seconds += job.wait_time().num_seconds() as u64;
-                    daily_report.add_jobs(job.user(), 1);
-                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
-                }
-
-                // also add in all of the components
-                daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
-                daily_report.add_component_usage(
-                    "memory",
-                    job.user(),
-                    Usage::new(job.memory_seconds()),
-                );
-                daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
-                daily_report.add_component_usage(
-                    "billing",
-                    job.user(),
-                    Usage::new(job.billing_seconds()),
-                );
+            for job in &jobs {
+                record_job(&mut daily_report, job, &start_time, &mut totals);
             }
 
             // runtime consistency check
-            if daily_report.num_jobs() != num_jobs_started
-                || daily_report.total_wait_seconds() != total_wait_seconds
-            {
-                tracing::warn!(
-                    "Job count/wait time inconsistency for project {} on {}: \
-                     local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
-                     This may indicate a bug.",
-                    project.project(),
-                    day,
-                    num_jobs_started,
-                    total_wait_seconds,
-                    daily_report.num_jobs(),
-                    daily_report.total_wait_seconds()
-                );
-            }
+            check_counter_consistency(&daily_report, &totals, project, day);
 
             // check that the total usage in the daily report matches the total usage calculated manually
-            if daily_report.total_usage().seconds() != total_usage {
+            if daily_report.total_usage().seconds() != totals.usage {
                 // it doesn't - we don't want to mark this as complete or cache it, because
                 // this points to some error when generating the values...
                 tracing::error!(
                     "Total usage in daily report does not match total usage calculated manually: {} != {}",
                     daily_report.total_usage().seconds(),
-                    total_usage
+                    totals.usage
                 );
             } else if day.day().end_time().and_utc() < now {
                 // we can set this day as completed if it is in the past

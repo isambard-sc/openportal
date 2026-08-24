@@ -425,6 +425,50 @@ pub struct DailyProjectUsageReport {
     /// Scalar total — equals sum of user_wait_seconds when populated.
     #[serde(default)]
     total_wait_seconds: u64,
+
+    // ---- Requeue accounting -------------------------------------------------
+    //
+    // Slurm keeps one accounting record per *attempt* of a job, and a requeued
+    // job has several. The fields above describe only the last attempt of each
+    // job - the one `sacct` returns by default - so that what they report is
+    // unchanged by the arrival of the earlier attempts. Everything the earlier
+    // attempts consumed lands in the fields below instead.
+    //
+    // `total_usage() + total_requeue_usage()` is therefore a project's true
+    // consumption, and `total_usage()` alone is what we have always reported.
+    // Which of the two a project should be charged for is a policy question,
+    // which is why both are carried. See
+    // `docs/plans/slurm-requeue-accounting-design.md`.
+    //
+    // All are `serde(default)`, so a report from an instance that predates them
+    // deserialises as "no requeues seen" rather than failing.
+    /// Usage from attempts superseded by a requeue, per local user.
+    #[serde(default)]
+    requeue_reports: HashMap<String, Usage>,
+    /// The same, broken down by resource component.
+    #[serde(default)]
+    requeue_components: HashMap<String, HashMap<String, Usage>>,
+    /// Per-user count of requeue *events* (superseded attempts, not jobs).
+    #[serde(default)]
+    user_requeue_events: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_requeue_events when populated.
+    #[serde(default)]
+    num_requeue_events: u64,
+    /// Per-user queue wait accumulated by superseded attempts.
+    #[serde(default)]
+    user_requeue_wait_seconds: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_requeue_wait_seconds when populated.
+    #[serde(default)]
+    requeue_wait_seconds: u64,
+    /// Requeue events by the terminal state of the superseded attempt. Sums to
+    /// `num_requeue_events`.
+    #[serde(default)]
+    requeue_states: HashMap<String, u64>,
+    /// Requeue usage by the terminal state of the superseded attempt. Sums to
+    /// `total_requeue_usage()`.
+    #[serde(default)]
+    requeue_state_usage: HashMap<String, Usage>,
+
     is_complete: bool,
 }
 
@@ -473,6 +517,21 @@ impl std::fmt::Display for DailyProjectUsageReport {
                     writeln!(f, "Number of jobs: {}", n)?;
                 }
             }
+        }
+
+        if self.num_requeue_events() > 0 || !self.total_requeue_usage().is_zero() {
+            writeln!(
+                f,
+                "Requeued: {} {} | {} | Average requeue wait: {}",
+                self.num_requeue_events(),
+                if self.num_requeue_events() == 1 {
+                    "event"
+                } else {
+                    "events"
+                },
+                self.total_requeue_usage(),
+                Usage::new(self.average_requeue_wait_seconds())
+            )?;
         }
 
         match self.is_complete() {
@@ -529,6 +588,21 @@ impl std::fmt::Display for DailyProjectUsageReportHoursDisplay<'_> {
                     writeln!(f, "Number of jobs: {}", n)?;
                 }
             }
+        }
+
+        if report.num_requeue_events() > 0 || !report.total_requeue_usage().is_zero() {
+            writeln!(
+                f,
+                "Requeued: {} {} | {} | Average requeue wait: {}",
+                report.num_requeue_events(),
+                if report.num_requeue_events() == 1 {
+                    "event"
+                } else {
+                    "events"
+                },
+                report.total_requeue_usage().in_hours(),
+                Usage::new(report.average_requeue_wait_seconds()).in_hours()
+            )?;
         }
 
         match report.is_complete() {
@@ -620,12 +694,59 @@ impl DailyProjectUsageReport {
     /// Returns true if the scalar totals equal the sums of the per-user maps.
     /// Always true for legacy data (both maps empty, scalars may be non-zero).
     pub fn is_consistent(&self) -> bool {
+        if !self.requeues_are_consistent() {
+            return false;
+        }
+
         if self.user_job_counts.is_empty() && self.user_wait_seconds.is_empty() {
             return true; // legacy data — no maps to check against
         }
         let jobs_sum: u64 = self.user_job_counts.values().sum();
         let wait_sum: u64 = self.user_wait_seconds.values().sum();
         jobs_sum == self.num_jobs && wait_sum == self.total_wait_seconds
+    }
+
+    /// The same check for the requeue counters.
+    ///
+    /// Each map is checked only when it is populated. Absent maps are not a
+    /// failure: legacy data has none of them, and a component report from
+    /// `get_component` deliberately carries the requeue usage of one component
+    /// without the per-state breakdown, which describes the whole report and
+    /// cannot be apportioned to a single component.
+    ///
+    /// Where a per-state map *is* present it must account for every event and
+    /// every second of requeue usage - which is why an unrecognised Slurm state
+    /// has to be bucketed rather than dropped.
+    fn requeues_are_consistent(&self) -> bool {
+        if !self.user_requeue_events.is_empty() {
+            let event_sum: u64 = self.user_requeue_events.values().sum();
+            if event_sum != self.num_requeue_events {
+                return false;
+            }
+        }
+
+        if !self.user_requeue_wait_seconds.is_empty() {
+            let wait_sum: u64 = self.user_requeue_wait_seconds.values().sum();
+            if wait_sum != self.requeue_wait_seconds {
+                return false;
+            }
+        }
+
+        if !self.requeue_states.is_empty() {
+            let state_sum: u64 = self.requeue_states.values().sum();
+            if state_sum != self.num_requeue_events {
+                return false;
+            }
+        }
+
+        if !self.requeue_state_usage.is_empty() {
+            let state_usage: Usage = self.requeue_state_usage.values().cloned().sum();
+            if state_usage != self.total_requeue_usage() {
+                return false;
+            }
+        }
+
+        true
     }
 
     pub fn total_wait_seconds(&self) -> u64 {
@@ -671,31 +792,264 @@ impl DailyProjectUsageReport {
     // the fields that need to change via a clone
     #[allow(clippy::field_reassign_with_default)]
     pub fn get_component(&self, component: &str) -> DailyProjectUsageReport {
-        match self.components.get(component) {
-            Some(reports) => {
-                let mut report = DailyProjectUsageReport::default();
+        let mut report = DailyProjectUsageReport::default();
 
-                for (user, usage) in reports {
-                    report.set_usage(user, *usage);
-                }
-
-                report.user_job_counts = self.user_job_counts.clone();
-                report.user_wait_seconds = self.user_wait_seconds.clone();
-                report.num_jobs = self.num_jobs;
-                report.total_wait_seconds = self.total_wait_seconds;
-                report.is_complete = self.is_complete;
-
-                report
+        if let Some(reports) = self.components.get(component) {
+            for (user, usage) in reports {
+                report.set_usage(user, *usage);
             }
-            None => {
-                let mut report = DailyProjectUsageReport::default();
-                report.user_job_counts = self.user_job_counts.clone();
-                report.user_wait_seconds = self.user_wait_seconds.clone();
-                report.num_jobs = self.num_jobs;
-                report.total_wait_seconds = self.total_wait_seconds;
-                report.is_complete = self.is_complete;
+        }
 
-                report
+        // the requeue usage for the same component, so that a caller asking
+        // for "gpu" gets both the base and the requeue figure for GPUs
+        if let Some(reports) = self.requeue_components.get(component) {
+            report.requeue_reports = reports.clone();
+        }
+
+        report.user_job_counts = self.user_job_counts.clone();
+        report.user_wait_seconds = self.user_wait_seconds.clone();
+        report.num_jobs = self.num_jobs;
+        report.total_wait_seconds = self.total_wait_seconds;
+
+        report.user_requeue_events = self.user_requeue_events.clone();
+        report.num_requeue_events = self.num_requeue_events;
+        report.user_requeue_wait_seconds = self.user_requeue_wait_seconds.clone();
+        report.requeue_wait_seconds = self.requeue_wait_seconds;
+
+        // The per-state maps are deliberately not copied. They account for the
+        // whole report's requeue events and usage, and there is no way to
+        // apportion them to one component - copying them would leave a report
+        // whose state breakdown claims more usage than the report contains.
+
+        report.is_complete = self.is_complete;
+
+        report
+    }
+
+    // ---- Requeue accounting -------------------------------------------------
+
+    /// Usage this user consumed on attempts that were superseded by a requeue.
+    pub fn requeue_usage(&self, local_user: &str) -> Usage {
+        self.requeue_reports
+            .get(local_user)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Total usage consumed on attempts that were superseded by a requeue.
+    pub fn total_requeue_usage(&self) -> Usage {
+        self.requeue_reports.values().cloned().sum()
+    }
+
+    /// A project's true consumption: the usage we have always reported, plus
+    /// the superseded attempts that were previously invisible.
+    pub fn total_usage_including_requeues(&self) -> Usage {
+        self.total_usage() + self.total_requeue_usage()
+    }
+
+    pub fn add_requeue_usage(&mut self, local_user: &str, usage: Usage) {
+        *self
+            .requeue_reports
+            .entry(local_user.to_string())
+            .or_default() += usage;
+    }
+
+    pub fn add_requeue_component_usage(&mut self, component: &str, local_user: &str, usage: Usage) {
+        if usage.is_zero() {
+            return;
+        }
+
+        let component_reports = self
+            .requeue_components
+            .entry(component.to_string())
+            .or_default();
+
+        *component_reports.entry(local_user.to_string()).or_default() += usage;
+    }
+
+    /// Record `count` requeue events for a user, whose superseded attempts
+    /// ended in `state`. The scalar total, the per-user map and the per-state
+    /// map are updated together so they cannot drift apart.
+    pub fn add_requeue_events(&mut self, user: &str, state: &str, count: u64) {
+        *self
+            .user_requeue_events
+            .entry(user.to_string())
+            .or_default() += count;
+        self.num_requeue_events = self.num_requeue_events.saturating_add(count);
+        *self.requeue_states.entry(state.to_string()).or_default() += count;
+    }
+
+    /// Record usage against the terminal state of a superseded attempt. Kept
+    /// separate from `add_requeue_events` because usage is counted for every
+    /// superseded attempt overlapping the window, whereas events are counted
+    /// only for those that *started* in it - see `add_jobs`.
+    pub fn add_requeue_state_usage(&mut self, state: &str, usage: Usage) {
+        if usage.is_zero() {
+            return;
+        }
+
+        *self
+            .requeue_state_usage
+            .entry(state.to_string())
+            .or_default() += usage;
+    }
+
+    pub fn add_requeue_wait_seconds(&mut self, user: &str, seconds: u64) {
+        *self
+            .user_requeue_wait_seconds
+            .entry(user.to_string())
+            .or_default() += seconds;
+        self.requeue_wait_seconds = self.requeue_wait_seconds.saturating_add(seconds);
+    }
+
+    /// The number of requeue *events* - a job requeued four times contributes
+    /// four. Deliberately not a count of jobs affected: an event count is
+    /// additive over any date range, whereas counting distinct jobs would need
+    /// grouping across query windows.
+    pub fn num_requeue_events(&self) -> u64 {
+        self.num_requeue_events
+    }
+
+    pub fn requeue_events_for_user(&self, user: &str) -> u64 {
+        self.user_requeue_events.get(user).copied().unwrap_or(0)
+    }
+
+    /// Queue wait accumulated by superseded attempts. This measures
+    /// `eligible -> start`, so the begin-time hold Slurm imposes after a
+    /// requeue is excluded - Slurm advances `eligible` past it.
+    pub fn requeue_wait_seconds(&self) -> u64 {
+        self.requeue_wait_seconds
+    }
+
+    pub fn requeue_wait_seconds_for_user(&self, user: &str) -> u64 {
+        self.user_requeue_wait_seconds
+            .get(user)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Mean wait per requeue - not per job.
+    pub fn average_requeue_wait_seconds(&self) -> u64 {
+        match self.num_requeue_events {
+            0 => 0,
+            n => self.requeue_wait_seconds / n,
+        }
+    }
+
+    /// Mean total queue wait per job, counting the waits of every attempt.
+    pub fn average_wait_seconds_including_requeues(&self) -> u64 {
+        match self.num_jobs {
+            0 => 0,
+            n => {
+                self.total_wait_seconds
+                    .saturating_add(self.requeue_wait_seconds)
+                    / n
+            }
+        }
+    }
+
+    /// The terminal states of superseded attempts, with their event counts,
+    /// sorted by state. `NODE_FAIL` is a site problem, `PREEMPTED` a policy the
+    /// project opted into, `CANCELLED` possibly the user's own doing - the flat
+    /// requeue total cannot tell them apart.
+    pub fn requeue_states(&self) -> Vec<(String, u64)> {
+        let mut states: Vec<(String, u64)> = self
+            .requeue_states
+            .iter()
+            .map(|(state, count)| (state.clone(), *count))
+            .collect();
+        states.sort();
+        states
+    }
+
+    pub fn requeue_events_in_state(&self, state: &str) -> u64 {
+        self.requeue_states.get(state).copied().unwrap_or(0)
+    }
+
+    pub fn requeue_usage_in_state(&self, state: &str) -> Usage {
+        self.requeue_state_usage
+            .get(state)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn requeue_components(&self) -> Vec<String> {
+        let mut components = self.requeue_components.keys().cloned().collect::<Vec<_>>();
+        components.sort();
+        components
+    }
+
+    pub fn requeue_component_usage(&self, component: &str, local_user: &str) -> Usage {
+        self.requeue_components
+            .get(component)
+            .and_then(|reports| reports.get(local_user))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn total_requeue_component_usage(&self, component: &str) -> Usage {
+        match self.requeue_components.get(component) {
+            Some(reports) => reports.values().cloned().sum(),
+            None => Usage::default(),
+        }
+    }
+
+    /// Scale the usage totals - base and requeue together. The two must always
+    /// be scaled by the same factor, or `total_usage()` and
+    /// `total_requeue_usage()` end up in different units and the sum a client
+    /// makes of them is meaningless.
+    fn scale_totals(&mut self, factor: f64) {
+        for usage in self.reports.values_mut() {
+            *usage *= factor;
+        }
+        for usage in self.requeue_reports.values_mut() {
+            *usage *= factor;
+        }
+        for usage in self.requeue_state_usage.values_mut() {
+            *usage *= factor;
+        }
+    }
+
+    /// Scale the component breakdowns - base and requeue together, for the
+    /// same reason as `scale_totals`.
+    fn scale_components(&mut self, factor: f64) {
+        for component_reports in self.components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage *= factor;
+            }
+        }
+        for component_reports in self.requeue_components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage *= factor;
+            }
+        }
+    }
+
+    /// `scale_totals`, dividing. Spelled out rather than multiplying by a
+    /// reciprocal: `Usage` truncates to whole seconds, so `3 / 3.0` and
+    /// `3 * (1.0 / 3.0)` do not agree.
+    fn divide_totals(&mut self, divisor: f64) {
+        for usage in self.reports.values_mut() {
+            *usage /= divisor;
+        }
+        for usage in self.requeue_reports.values_mut() {
+            *usage /= divisor;
+        }
+        for usage in self.requeue_state_usage.values_mut() {
+            *usage /= divisor;
+        }
+    }
+
+    /// `scale_components`, dividing.
+    fn divide_components(&mut self, divisor: f64) {
+        for component_reports in self.components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage /= divisor;
+            }
+        }
+        for component_reports in self.requeue_components.values_mut() {
+            for usage in component_reports.values_mut() {
+                *usage /= divisor;
             }
         }
     }
@@ -752,6 +1106,51 @@ impl DailyProjectUsageReport {
                 (new_user, secs)
             })
             .collect();
+
+        // The requeue maps are keyed the same way and need the same treatment.
+        // `requeue_states` and `requeue_state_usage` are keyed by Slurm state
+        // rather than by user, so they are deliberately left alone.
+        let old_requeue = std::mem::take(&mut self.requeue_reports);
+        self.requeue_reports = old_requeue
+            .into_iter()
+            .map(|(user, usage)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, usage)
+            })
+            .collect();
+
+        let old_requeue_components = std::mem::take(&mut self.requeue_components);
+        self.requeue_components = old_requeue_components
+            .into_iter()
+            .map(|(component, user_map)| {
+                let new_user_map = user_map
+                    .into_iter()
+                    .map(|(user, usage)| {
+                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                        (new_user, usage)
+                    })
+                    .collect();
+                (component, new_user_map)
+            })
+            .collect();
+
+        let old_requeue_events = std::mem::take(&mut self.user_requeue_events);
+        self.user_requeue_events = old_requeue_events
+            .into_iter()
+            .map(|(user, count)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, count)
+            })
+            .collect();
+
+        let old_requeue_waits = std::mem::take(&mut self.user_requeue_wait_seconds);
+        self.user_requeue_wait_seconds = old_requeue_waits
+            .into_iter()
+            .map(|(user, secs)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, secs)
+            })
+            .collect();
     }
 }
 
@@ -781,8 +1180,45 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
                 .entry(user.clone())
                 .or_default() += secs;
         }
-        new_report.num_jobs = self.num_jobs + other.num_jobs;
-        new_report.total_wait_seconds = self.total_wait_seconds + other.total_wait_seconds;
+        // Saturating: these totals are summed from peer-supplied reports, and
+        // `overflow-checks` is on in release, so a bare `+` is a process kill.
+        new_report.num_jobs = self.num_jobs.saturating_add(other.num_jobs);
+        new_report.total_wait_seconds = self
+            .total_wait_seconds
+            .saturating_add(other.total_wait_seconds);
+
+        for (user, usage) in other.requeue_reports {
+            new_report.add_requeue_usage(&user, usage);
+        }
+        for (component, reports) in other.requeue_components {
+            for (user, usage) in reports {
+                new_report.add_requeue_component_usage(&component, &user, usage);
+            }
+        }
+        for (user, count) in &other.user_requeue_events {
+            *new_report
+                .user_requeue_events
+                .entry(user.clone())
+                .or_default() += count;
+        }
+        for (user, secs) in &other.user_requeue_wait_seconds {
+            *new_report
+                .user_requeue_wait_seconds
+                .entry(user.clone())
+                .or_default() += secs;
+        }
+        for (state, count) in &other.requeue_states {
+            *new_report.requeue_states.entry(state.clone()).or_default() += count;
+        }
+        for (state, usage) in other.requeue_state_usage {
+            new_report.add_requeue_state_usage(&state, usage);
+        }
+        new_report.num_requeue_events = self
+            .num_requeue_events
+            .saturating_add(other.num_requeue_events);
+        new_report.requeue_wait_seconds = self
+            .requeue_wait_seconds
+            .saturating_add(other.requeue_wait_seconds);
 
         new_report.is_complete = false; // combine reports are never complete
 
@@ -809,10 +1245,40 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
         for (user, secs) in &other.user_wait_seconds {
             *self.user_wait_seconds.entry(user.clone()).or_default() += secs;
         }
-        self.num_jobs += other.num_jobs;
+        self.num_jobs = self.num_jobs.saturating_add(other.num_jobs);
         self.total_wait_seconds = self
             .total_wait_seconds
             .saturating_add(other.total_wait_seconds);
+
+        for (user, usage) in other.requeue_reports {
+            self.add_requeue_usage(&user, usage);
+        }
+        for (component, reports) in other.requeue_components {
+            for (user, usage) in reports {
+                self.add_requeue_component_usage(&component, &user, usage);
+            }
+        }
+        for (user, count) in &other.user_requeue_events {
+            *self.user_requeue_events.entry(user.clone()).or_default() += count;
+        }
+        for (user, secs) in &other.user_requeue_wait_seconds {
+            *self
+                .user_requeue_wait_seconds
+                .entry(user.clone())
+                .or_default() += secs;
+        }
+        for (state, count) in &other.requeue_states {
+            *self.requeue_states.entry(state.clone()).or_default() += count;
+        }
+        for (state, usage) in other.requeue_state_usage {
+            self.add_requeue_state_usage(&state, usage);
+        }
+        self.num_requeue_events = self
+            .num_requeue_events
+            .saturating_add(other.num_requeue_events);
+        self.requeue_wait_seconds = self
+            .requeue_wait_seconds
+            .saturating_add(other.requeue_wait_seconds);
 
         self.is_complete = false; // combine reports are never complete
     }
@@ -823,17 +1289,8 @@ impl std::ops::Mul<f64> for DailyProjectUsageReport {
 
     fn mul(self, rhs: f64) -> Self {
         let mut new_report = self.clone();
-        for usage in new_report.reports.values_mut() {
-            *usage *= rhs;
-        }
-
-        // do the same for the component usage
-        for component_reports in new_report.components.values_mut() {
-            for usage in component_reports.values_mut() {
-                *usage *= rhs;
-            }
-        }
-
+        new_report.scale_totals(rhs);
+        new_report.scale_components(rhs);
         new_report
     }
 }
@@ -843,34 +1300,21 @@ impl std::ops::Div<f64> for DailyProjectUsageReport {
 
     fn div(self, rhs: f64) -> Self {
         let mut new_report = self.clone();
-        for usage in new_report.reports.values_mut() {
-            *usage /= rhs;
-        }
-
-        // do the same for the component usage
-        for component_reports in new_report.components.values_mut() {
-            for usage in component_reports.values_mut() {
-                *usage /= rhs;
-            }
-        }
-
+        new_report.divide_totals(rhs);
+        new_report.divide_components(rhs);
         new_report
     }
 }
 
 impl std::ops::MulAssign<f64> for DailyProjectUsageReport {
     fn mul_assign(&mut self, rhs: f64) {
-        for usage in self.reports.values_mut() {
-            *usage *= rhs;
-        }
+        self.scale_totals(rhs);
     }
 }
 
 impl std::ops::DivAssign<f64> for DailyProjectUsageReport {
     fn div_assign(&mut self, rhs: f64) {
-        for usage in self.reports.values_mut() {
-            *usage /= rhs;
-        }
+        self.divide_totals(rhs);
     }
 }
 
@@ -966,6 +1410,21 @@ impl std::fmt::Display for ProjectUsageReport {
                 }
             }
         }
+        if self.num_requeue_events() > 0 || !self.total_requeue_usage().is_zero() {
+            writeln!(
+                f,
+                "Requeued: {} {} | {} | Average requeue wait: {}",
+                self.num_requeue_events(),
+                if self.num_requeue_events() == 1 {
+                    "event"
+                } else {
+                    "events"
+                },
+                self.total_requeue_usage(),
+                Usage::new(self.average_requeue_wait_seconds())
+            )?;
+        }
+
         writeln!(f, "Total: {}", self.total_usage())
     }
 }
@@ -1054,6 +1513,21 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                 }
             }
         }
+        if report.num_requeue_events() > 0 || !report.total_requeue_usage().is_zero() {
+            writeln!(
+                f,
+                "Requeued: {} {} | {} | Average requeue wait: {}",
+                report.num_requeue_events(),
+                if report.num_requeue_events() == 1 {
+                    "event"
+                } else {
+                    "events"
+                },
+                report.total_requeue_usage().in_hours(),
+                Usage::new(report.average_requeue_wait_seconds()).in_hours()
+            )?;
+        }
+
         writeln!(f, "Total: {}", report.total_usage().in_hours())
     }
 }
@@ -1196,12 +1670,23 @@ impl ProjectUsageReport {
     /// Scale only the main usage totals, leaving component breakdowns unchanged.
     /// Use this when the scale factor converts credit units but components are
     /// in physical units (GPU-hours, CPU-hours etc.) that should not be scaled.
+    ///
+    /// The requeue totals are scaled with the base totals, never separately: a
+    /// caller converts to credits and then subtracts one from the other, so the
+    /// two must stay in the same units. The requeue *component* breakdowns are
+    /// left alone for the same reason the base ones are.
     pub fn scale_total(&mut self, factor: f64) {
         for report in self.reports.values_mut() {
             for usage in report.reports.values_mut() {
                 *usage *= factor;
             }
             // unattributed usage is also in the reports map under a special key
+            for usage in report.requeue_reports.values_mut() {
+                *usage *= factor;
+            }
+            for usage in report.requeue_state_usage.values_mut() {
+                *usage *= factor;
+            }
         }
     }
 
@@ -1323,6 +1808,76 @@ impl ProjectUsageReport {
             0 => 0,
             n => self.total_wait_seconds() / n,
         }
+    }
+
+    /// Usage consumed on attempts superseded by a requeue. This is the usage
+    /// that was invisible before requeue accounting: `total_usage()` counts
+    /// only each job's last attempt.
+    pub fn total_requeue_usage(&self) -> Usage {
+        self.reports.values().map(|r| r.total_requeue_usage()).sum()
+    }
+
+    /// This project's true consumption - `total_usage()` plus every superseded
+    /// attempt.
+    pub fn total_usage_including_requeues(&self) -> Usage {
+        self.total_usage() + self.total_requeue_usage()
+    }
+
+    /// The number of requeue events, not the number of jobs requeued.
+    pub fn num_requeue_events(&self) -> u64 {
+        self.reports.values().fold(0u64, |total, r| {
+            total.saturating_add(r.num_requeue_events())
+        })
+    }
+
+    pub fn requeue_wait_seconds(&self) -> u64 {
+        self.reports.values().fold(0u64, |total, r| {
+            total.saturating_add(r.requeue_wait_seconds())
+        })
+    }
+
+    /// Mean wait per requeue - not per job.
+    pub fn average_requeue_wait_seconds(&self) -> u64 {
+        match self.num_requeue_events() {
+            0 => 0,
+            n => self.requeue_wait_seconds() / n,
+        }
+    }
+
+    /// Mean total queue wait per job, counting the waits of every attempt.
+    pub fn average_wait_seconds_including_requeues(&self) -> u64 {
+        match self.num_jobs() {
+            0 => 0,
+            n => {
+                self.total_wait_seconds()
+                    .saturating_add(self.requeue_wait_seconds())
+                    / n
+            }
+        }
+    }
+
+    /// Requeue events by the terminal state of the superseded attempt, summed
+    /// over every day in this report and sorted by state.
+    pub fn requeue_states(&self) -> Vec<(String, u64)> {
+        let mut totals: HashMap<String, u64> = HashMap::new();
+
+        for report in self.reports.values() {
+            for (state, count) in report.requeue_states() {
+                *totals.entry(state).or_default() += count;
+            }
+        }
+
+        let mut states: Vec<(String, u64)> = totals.into_iter().collect();
+        states.sort();
+        states
+    }
+
+    /// Requeue usage by the terminal state of the superseded attempt.
+    pub fn requeue_usage_in_state(&self, state: &str) -> Usage {
+        self.reports
+            .values()
+            .map(|r| r.requeue_usage_in_state(state))
+            .sum()
     }
 
     /// Returns a display adapter that formats all usage values in hours only.
@@ -1876,6 +2431,24 @@ impl UsageReport {
         self.reports.values().map(|r| r.total_usage()).sum()
     }
 
+    /// Usage consumed on attempts superseded by a requeue - see
+    /// `ProjectUsageReport::total_requeue_usage`.
+    pub fn total_requeue_usage(&self) -> Usage {
+        self.reports.values().map(|r| r.total_requeue_usage()).sum()
+    }
+
+    /// True consumption across every project in this report.
+    pub fn total_usage_including_requeues(&self) -> Usage {
+        self.total_usage() + self.total_requeue_usage()
+    }
+
+    /// The number of requeue events, not the number of jobs requeued.
+    pub fn num_requeue_events(&self) -> u64 {
+        self.reports.values().fold(0u64, |total, r| {
+            total.saturating_add(r.num_requeue_events())
+        })
+    }
+
     /// Remap all projects in this report to a new portal.
     ///
     /// Updates `self.portal` and remaps every contained `ProjectUsageReport`
@@ -2069,6 +2642,206 @@ impl Allocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daily report with both a base and a requeue figure, as `op-slurm`
+    /// builds one: two jobs' worth of base usage and three superseded attempts.
+    fn report_with_requeues() -> DailyProjectUsageReport {
+        let mut report = DailyProjectUsageReport::default();
+
+        report.add_usage("alice", Usage::new(1800));
+        report.add_component_usage("cpu", "alice", Usage::new(3600));
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 60);
+
+        report.add_usage("bob", Usage::new(600));
+        report.add_jobs("bob", 1);
+        report.add_wait_seconds("bob", 30);
+
+        report.add_requeue_usage("alice", Usage::new(7200));
+        report.add_requeue_state_usage("NODE_FAIL", Usage::new(7200));
+        report.add_requeue_component_usage("cpu", "alice", Usage::new(14400));
+        report.add_requeue_events("alice", "NODE_FAIL", 2);
+        report.add_requeue_wait_seconds("alice", 300);
+
+        report.add_requeue_usage("bob", Usage::new(900));
+        report.add_requeue_state_usage("PREEMPTED", Usage::new(900));
+        report.add_requeue_events("bob", "PREEMPTED", 1);
+        report.add_requeue_wait_seconds("bob", 120);
+
+        report
+    }
+
+    #[test]
+    fn test_requeue_usage_is_reported_separately_from_the_usage_we_always_reported() {
+        // The contract: `total_usage` is unchanged by requeue accounting, the
+        // requeue figure is carried alongside it, and the sum is a project's
+        // true consumption. Which of the two to charge for is a policy
+        // decision, so both have to survive to the client.
+        let report = report_with_requeues();
+
+        assert_eq!(report.total_usage(), Usage::new(2400));
+        assert_eq!(report.total_requeue_usage(), Usage::new(8100));
+        assert_eq!(report.total_usage_including_requeues(), Usage::new(10500));
+
+        // events are counted, not jobs: alice was requeued twice
+        assert_eq!(report.num_jobs(), 2);
+        assert_eq!(report.num_requeue_events(), 3);
+        assert_eq!(report.requeue_events_for_user("alice"), 2);
+
+        // and the three wait figures a client can now derive
+        assert_eq!(report.average_wait_seconds(), 45);
+        assert_eq!(report.average_requeue_wait_seconds(), 140);
+        assert_eq!(report.average_wait_seconds_including_requeues(), 255);
+    }
+
+    #[test]
+    fn test_requeue_events_are_bucketed_by_terminal_state() {
+        // A node failure is the site's problem and a preemption is site policy
+        // the project opted into - different arguments about who pays, which the
+        // flat requeue total cannot distinguish.
+        let report = report_with_requeues();
+
+        assert_eq!(
+            report.requeue_states(),
+            vec![("NODE_FAIL".to_string(), 2), ("PREEMPTED".to_string(), 1)]
+        );
+        assert_eq!(report.requeue_usage_in_state("NODE_FAIL"), Usage::new(7200));
+        assert_eq!(report.requeue_usage_in_state("PREEMPTED"), Usage::new(900));
+
+        // the per-state maps must account for every event and every second
+        assert_eq!(
+            report
+                .requeue_states()
+                .iter()
+                .map(|(_, count)| count)
+                .sum::<u64>(),
+            report.num_requeue_events()
+        );
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_scaling_keeps_base_and_requeue_usage_in_the_same_units() {
+        // A client converts to credits and then subtracts one figure from the
+        // other. If a scale factor reached only one of them the subtraction
+        // would be between two different units - which is why the requeue
+        // figures are first-class fields rather than another entry in the
+        // `components` map, whose units deliberately differ from the total's.
+        let report = report_with_requeues();
+
+        let doubled = report.clone() * 2.0;
+        assert_eq!(doubled.total_usage(), Usage::new(4800));
+        assert_eq!(doubled.total_requeue_usage(), Usage::new(16200));
+        assert_eq!(
+            doubled.requeue_usage_in_state("NODE_FAIL"),
+            Usage::new(14400)
+        );
+
+        let halved = report.clone() / 2.0;
+        assert_eq!(halved.total_usage(), Usage::new(1200));
+        assert_eq!(halved.total_requeue_usage(), Usage::new(4050));
+
+        // `*=` scales the totals but not the component breakdowns, as it always
+        // has - the base and requeue totals still move together
+        let mut in_place = report.clone();
+        in_place *= 3.0;
+        assert_eq!(in_place.total_usage(), Usage::new(7200));
+        assert_eq!(in_place.total_requeue_usage(), Usage::new(24300));
+
+        // and `scale_total` at the project level, which is what the Python
+        // bindings expose for a credit conversion
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut project_report = ProjectUsageReport::new(&project);
+        project_report.set_report(&Date::parse("2026-03-01").unwrap(), &report);
+        project_report.scale_total(0.5);
+
+        assert_eq!(project_report.total_usage(), Usage::new(1200));
+        assert_eq!(project_report.total_requeue_usage(), Usage::new(4050));
+    }
+
+    #[test]
+    fn test_merging_reports_adds_the_requeue_figures_too() {
+        let mut merged = report_with_requeues();
+        merged += report_with_requeues();
+
+        assert_eq!(merged.total_usage(), Usage::new(4800));
+        assert_eq!(merged.total_requeue_usage(), Usage::new(16200));
+        assert_eq!(merged.num_requeue_events(), 6);
+        assert_eq!(merged.requeue_wait_seconds(), 840);
+        assert_eq!(merged.requeue_events_in_state("NODE_FAIL"), 4);
+        assert!(merged.is_consistent());
+
+        let summed = report_with_requeues() + report_with_requeues();
+        assert_eq!(summed.total_requeue_usage(), merged.total_requeue_usage());
+        assert_eq!(summed.num_requeue_events(), merged.num_requeue_events());
+        assert!(summed.is_consistent());
+    }
+
+    #[test]
+    fn test_a_report_from_an_instance_without_requeue_accounting_still_loads() {
+        // Every requeue field is `serde(default)`, so a report from a peer that
+        // predates them deserialises as "no requeues seen" rather than failing.
+        // Nothing on the wire had to change to deploy this.
+        let legacy = serde_json::json!({
+            "reports": { "alice": { "seconds": 1800 } },
+            "num_jobs": 1,
+            "total_wait_seconds": 60,
+            "is_complete": true
+        });
+
+        let report: DailyProjectUsageReport = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(report.total_usage(), Usage::new(1800));
+        assert_eq!(report.num_jobs(), 1);
+        assert_eq!(report.total_requeue_usage(), Usage::default());
+        assert_eq!(report.num_requeue_events(), 0);
+        assert!(report.requeue_states().is_empty());
+        assert!(report.is_consistent());
+
+        // and a round trip of a report that does carry them keeps them
+        let round_tripped: DailyProjectUsageReport =
+            serde_json::from_str(&serde_json::to_string(&report_with_requeues()).unwrap()).unwrap();
+        assert_eq!(round_tripped.total_requeue_usage(), Usage::new(8100));
+        assert_eq!(round_tripped.num_requeue_events(), 3);
+    }
+
+    #[test]
+    fn test_a_component_report_carries_the_requeue_usage_for_that_component() {
+        // Asking for "cpu" gives both what the final attempts spent on CPU and
+        // what the superseded ones did - the requeued GPU-seconds of a
+        // preemption-heavy project being the more interesting figure in
+        // practice.
+        let report = report_with_requeues();
+        let cpu = report.get_component("cpu");
+
+        assert_eq!(cpu.total_usage(), Usage::new(3600));
+        assert_eq!(cpu.total_requeue_usage(), Usage::new(14400));
+        assert_eq!(cpu.num_requeue_events(), 3);
+        assert_eq!(report.requeue_components(), vec!["cpu".to_string()]);
+        assert!(cpu.is_consistent());
+
+        // the per-state breakdown describes the whole report, so it is not
+        // carried onto a single component - there is no way to apportion it
+        assert!(cpu.requeue_states().is_empty());
+    }
+
+    #[test]
+    fn test_renaming_local_users_moves_their_requeue_figures_with_them() {
+        let mut report = report_with_requeues();
+        let mut renames = HashMap::new();
+        renames.insert("alice".to_string(), "alice2".to_string());
+        report.remap_local_users(&renames);
+
+        assert_eq!(report.requeue_usage("alice2"), Usage::new(7200));
+        assert_eq!(report.requeue_usage("alice"), Usage::default());
+        assert_eq!(report.requeue_events_for_user("alice2"), 2);
+        assert_eq!(report.requeue_wait_seconds_for_user("alice2"), 300);
+        assert_eq!(
+            report.requeue_component_usage("cpu", "alice2"),
+            Usage::new(14400)
+        );
+        assert!(report.is_consistent());
+    }
 
     #[test]
     fn test_usage_arithmetic_saturates_rather_than_wrapping() {

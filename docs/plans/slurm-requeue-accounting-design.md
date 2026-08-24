@@ -5,9 +5,16 @@ SPDX-License-Identifier: CC0-1.0
 
 # Slurm requeue accounting: counting the attempts we never saw
 
-Status: **proposed**. Nothing below is implemented. The measurement in §1 has
-been done on one production account-day, and the JSON fields the design relies
-on have been confirmed present on the production Slurm (§2.4).
+Status: **implemented**, as described below, with the deviations noted in §10.
+The measurement in §1 was done on one production account-day, and the JSON
+fields the design relies on are confirmed present on the production Slurm
+(§2.4).
+
+The contract in §3 is the part that matters: `total_usage()` is byte-for-byte
+what it always was, the previously invisible consumption is carried alongside it
+in new `serde(default)` fields, and nothing deployed has to change to keep
+working. The charging policy can then be settled on evidence, rather than having
+to be settled before the measurement could be fixed.
 
 ## 1. The problem
 
@@ -204,10 +211,6 @@ requeue_reports: HashMap<String, Usage>,
 /// The same, broken down by resource component.
 #[serde(default)]
 requeue_components: HashMap<String, HashMap<String, Usage>>,
-/// Scalar shadow total - equals the sum of `requeue_reports`.
-#[serde(default)]
-requeue_usage: Usage,
-
 /// Number of requeue *events* - an attempt superseded by a later one.
 #[serde(default)]
 num_requeue_events: u64,
@@ -227,7 +230,12 @@ requeue_states: HashMap<String, u64>,
 requeue_state_usage: HashMap<String, Usage>,
 ```
 
-`scale_total` must scale `requeue_reports` and `requeue_usage` alongside
+There is deliberately no stored scalar for the requeue usage total.
+`total_usage()` is computed from its map rather than stored, and
+`total_requeue_usage()` mirrors it - a shadow total that cannot drift beats one
+that has to be checked.
+
+`scale_total` must scale `requeue_reports` alongside
 `reports`, or the subtraction a consumer wants to perform is between two
 different units. `Mul`, `Div`, `MulAssign`, `DivAssign`, the `+=` merge paths
 and `get_component` all need the same treatment - anywhere the existing maps
@@ -394,19 +402,51 @@ substantially on affected projects. Offering it indefinitely means offering a
 number we know to be wrong. It should be presented as a migration window with
 an end, not a standing choice.
 
-## 9. Open questions
+## 9. Resolved questions
 
-1. Should `requeue_states` key on the raw Slurm state string, or on a smaller
-   normalised set (`node_fail` / `preempted` / `requeued` / `cancelled` /
-   `other`)? The latter is friendlier to consumers and hides Slurm version
-   differences; the former loses nothing.
-2. Do we want a distinct-jobs-requeued count as well as the event count?
-   Deferred rather than rejected - it needs the cross-window grouping of §3.1
-   to be meaningful.
-3. Is the wait time of a requeued attempt worth attributing per user, or is
-   the project-level total enough? The schema in §4 includes the per-user map
-   for symmetry; it may not be worth the width.
-4. Given §1.1, is a reconciliation check worth building - comparing our
-   reported usage against the account's `GrpTRESMins` consumption as Slurm
-   sees it, and warning when they diverge? It would have caught this class of
-   bug without anyone having to notice a confused project.
+1. **Per-state keys** (§6) use Slurm's own spelling for the states we know, and
+   bucket anything else as `OTHER`. Keeping the raw string loses nothing for
+   known states, and the allowlist bounds the key space - these keys come from
+   Slurm's JSON, and a map keyed on unbounded external strings is the growth
+   problem of `security-review-2.md` (finding R33). An unknown state is bucketed
+   rather than dropped, so the per-state counts still account for every event.
+2. **A distinct-jobs-requeued count** is not implemented. The event count is
+   additive over any date range; counting affected jobs needs the cross-window
+   grouping ruled out in §3.1. Deferred, not rejected.
+3. **Per-user requeue wait** is implemented, for symmetry with the base figures.
+4. **A reconciliation check against `GrpTRESMins`** is rejected as designed.
+   Slurm's own accounting is reset at the start of each month and a fresh limit
+   sent based on the state of the accounts at that point, and a job already
+   running is allowed to finish rather than being killed when a limit is
+   reached - so an account legitimately runs slightly over. Reproducing that
+   business logic inside `op-slurm`, to decide whether a divergence is real,
+   would put the portal's policy in the wrong place entirely.
+
+   A better shape for the same idea, worth doing separately: have `get_limit`
+   return the account's usage as Slurm sees it alongside the limit, and let the
+   portal - which knows about monthly resets and about its own recorded usage -
+   decide whether the two have diverged. That changes the `Instruction`'s return
+   type, so it is its own piece of work.
+
+## 10. Deviations from the design as built
+
+- **No stored scalar for requeue usage** - see §4.
+- **`get_component` does not carry the per-state maps.** They account for the
+  whole report's events and usage, and there is no way to apportion them to a
+  single component; copying them would leave a component report whose state
+  breakdown claimed more usage than the report itself contained.
+  `is_consistent` therefore checks each map only when it is populated - which is
+  also what makes it tolerate legacy data.
+- **Job-id reuse is handled by chain-splitting, not by the grouping key.** §2.4
+  proposed grouping on `(job_id, submission)`, but that is the key of a
+  *record*, not of a job - grouping on it would put every attempt in a group of
+  its own. Instead the records for one id are ordered by submission time and
+  split wherever the restart count fails to increase, since no single job's
+  attempts can do that. Each resulting chain gets its own base attempt, and the
+  split is logged with the submission times so an operator can see which two
+  jobs shared the id.
+- **`state` became `states`.** `SlurmJob` keeps the whole state set, and the
+  single-state accessor was removed rather than kept alongside it: its only
+  caller was `Display`, and `terminal_state()` is what that wanted.
+- **Node failures are logged at `error`**, naming the node and the states Slurm
+  reported, from the fresh-fetch paths only - see §6.

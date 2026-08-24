@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- **Slurm usage reports missed everything a requeued job consumed before its
+  final attempt.** `op-slurm` called `sacct` without `--duplicates`, which
+  returns only the most recent accounting record for each job id. A requeued job
+  has one record per attempt, each carrying only its own elapsed time, so every
+  attempt before the last was invisible. On a production account measured over a
+  single day this hid about a third of the account's real consumption; jobs whose
+  final attempt was cancelled before it ran were reported as having used nothing
+  at all, because the one record we saw had zero elapsed time and was discarded
+  as a non-consumer.
+
+  This also put our reports at odds with Slurm's own enforcement. `set_limit`
+  configures `GrpTRESMins`, and Slurm counts every attempt against it, so a job
+  could be held for exhausting a limit that our figures said was nowhere near
+  exhausted.
+
+### Added
+
+- **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
+  of superseded attempts separately from the usage it has always reported, so
+  the two can be told apart rather than merged:
+
+  - `total_requeue_usage()` and `total_usage_including_requeues()`, with per-user
+    and per-component breakdowns to match the existing ones;
+  - `num_requeue_events()` - requeue *events*, not jobs requeued, so the figure
+    is additive over any date range - with `requeue_wait_seconds()`,
+    `average_requeue_wait_seconds()` and
+    `average_wait_seconds_including_requeues()`;
+  - `requeue_states()` and `requeue_usage_in_state()`, bucketing events and usage
+    by the terminal state of the superseded attempt, since `NODE_FAIL` (the
+    site lost the work), `PREEMPTED` (site policy) and `CANCELLED` are different
+    arguments about who should pay.
+
+  All of it is exposed through the Python bindings, and every new field is
+  `#[serde(default)]`, so a report from an instance that predates them
+  deserialises as "no requeues seen" and an older peer ignores what it does not
+  know. **`total_usage()` is unchanged**: it still counts only each job's final
+  attempt, which is the record `sacct` used to return. Whether a project should
+  be charged for the superseded attempts is a policy question - a job that
+  checkpoints does real work on every attempt, and an attempt killed by a node
+  failure is not the user's fault - so both figures are reported and the choice
+  is left to the portal. See
+  [docs/plans/slurm-requeue-accounting-design.md](docs/plans/slurm-requeue-accounting-design.md).
+- **Node failures are logged at `error`**, naming the node Slurm blamed, so site
+  monitoring picks them up. A node failure destroys a user's work, and on a
+  requeued job it is the difference between "the project spent this" and "the
+  site lost this".
+
 ## [0.92.0] - 2026-08-21
 
 ### Added

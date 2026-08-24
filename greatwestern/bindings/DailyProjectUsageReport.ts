@@ -18,4 +18,38 @@ num_jobs: bigint,
 /**
  * Scalar total — equals sum of user_wait_seconds when populated.
  */
-total_wait_seconds: bigint, is_complete: boolean, };
+total_wait_seconds: bigint, 
+/**
+ * Usage from attempts superseded by a requeue, per local user.
+ */
+requeue_reports: { [key in string]?: Usage }, 
+/**
+ * The same, broken down by resource component.
+ */
+requeue_components: { [key in string]?: { [key in string]?: Usage } }, 
+/**
+ * Per-user count of requeue *events* (superseded attempts, not jobs).
+ */
+user_requeue_events: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_requeue_events when populated.
+ */
+num_requeue_events: bigint, 
+/**
+ * Per-user queue wait accumulated by superseded attempts.
+ */
+user_requeue_wait_seconds: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_requeue_wait_seconds when populated.
+ */
+requeue_wait_seconds: bigint, 
+/**
+ * Requeue events by the terminal state of the superseded attempt. Sums to
+ * `num_requeue_events`.
+ */
+requeue_states: { [key in string]?: bigint }, 
+/**
+ * Requeue usage by the terminal state of the superseded attempt. Sums to
+ * `total_requeue_usage()`.
+ */
+requeue_state_usage: { [key in string]?: Usage }, is_complete: boolean, };

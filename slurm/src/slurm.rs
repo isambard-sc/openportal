@@ -2533,6 +2533,61 @@ fn get_fraction(used: u64, total: u64) -> f64 {
     }
 }
 
+///
+/// Which attempt of a job an accounting record describes.
+///
+/// Slurm keeps one record per attempt, and a requeued job has several. Default
+/// `sacct` returns only the most recent, which is why the earlier attempts were
+/// invisible to us until `--duplicates` was added. Classifying them keeps the
+/// figure we have always reported (`Base`) apart from the consumption that was
+/// previously missing (`Requeued`), so that both can be reported and the policy
+/// question of what to charge can be settled separately. See
+/// `docs/plans/slurm-requeue-accounting-design.md`.
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Attempt {
+    /// The last attempt of this job within the query window - the record that
+    /// default `sacct` would have returned.
+    Base,
+    /// An attempt superseded by a later one.
+    Requeued,
+}
+
+///
+/// The terminal states we bucket requeue events by, in the order they take
+/// precedence when a record reports several.
+///
+/// `NODE_FAIL` outranks `REQUEUED` deliberately: a node failure that led to a
+/// requeue is reported both ways depending on the record, and "the site lost
+/// this work" is the more useful of the two answers. `PREEMPTED` outranks it
+/// for the same reason - it says the work was given away by policy.
+///
+/// The list also bounds the key space of the per-state maps in
+/// `DailyProjectUsageReport`. Those keys come from Slurm's JSON, and a map keyed
+/// on unbounded peer-supplied strings is the growth problem of
+/// `docs/specifications/security-review-2.md` (finding R33). Anything not listed
+/// here is bucketed as `OTHER` rather than dropped, so the per-state counts
+/// still account for every event.
+const TERMINAL_STATES: [&str; 14] = [
+    "NODE_FAIL",
+    "BOOT_FAIL",
+    "PREEMPTED",
+    "DEADLINE",
+    "OUT_OF_MEMORY",
+    "TIMEOUT",
+    "REQUEUED",
+    "CANCELLED",
+    "REVOKED",
+    "SPECIAL_EXIT",
+    "FAILED",
+    "COMPLETED",
+    "SUSPENDED",
+    "RESIZING",
+];
+
+/// The bucket for a state Slurm reports that `TERMINAL_STATES` does not name.
+const OTHER_TERMINAL_STATE: &str = "OTHER";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlurmJob {
     id: u64,
@@ -2544,8 +2599,24 @@ pub struct SlurmJob {
     original_start_time: chrono::DateTime<chrono::Utc>,
     eligible_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
+    /// When this attempt was submitted. With `id` this is `slurmdbd`'s own
+    /// primary key for the record, so it both orders a job's attempts and keeps
+    /// two unrelated jobs apart if a `slurmctld` reset has reused an id.
+    submission_time: chrono::DateTime<chrono::Utc>,
+    /// How many times this job had been requeued when this attempt ran. Counts
+    /// from the job's own beginning, *not* from the query window, so the lowest
+    /// value among the records returned for a job is not necessarily zero.
+    restart_count: u64,
     duration: u64,
-    state: String,
+    /// Every state Slurm reports for this record. A requeued attempt reports
+    /// something like `["PENDING", "REQUEUED"]`, so keeping only the first
+    /// would record an attempt that ran for hours as merely "PENDING".
+    states: Vec<String>,
+    /// The node Slurm blamed for a `NODE_FAIL`, if it named one.
+    failed_node: String,
+    /// Which attempt of the job this is - set by `get_consumers`, which is the
+    /// only place that can see a job's other attempts.
+    attempt: Attempt,
     qos: String,
     nodes: u64,
     cpus: u64,
@@ -2564,8 +2635,10 @@ impl Display for SlurmJob {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlurmJob {{ id: {}, user: {}, account: {}, cluster: {}, node_info: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, requested_nodes: {}, requested_cpus: {}, requested_gpus: {}, requested_memory: {}, energy: {}, billing: {}, requested_billing: {}, node_fraction: {}, billed_node_seconds: {} }}",
+            "SlurmJob {{ id: {}, attempt: {:?}, restart_count: {}, user: {}, account: {}, cluster: {}, node_info: {}, start: {}, end: {}, duration: {}s, total_duration: {}s state: {}, qos: {}, nodes: {}, cpus: {}, gpus: {}, memory: {}, requested_nodes: {}, requested_cpus: {}, requested_gpus: {}, requested_memory: {}, energy: {}, billing: {}, requested_billing: {}, node_fraction: {}, billed_node_seconds: {} }}",
             self.id(),
+            self.attempt(),
+            self.restart_count(),
             self.user(),
             self.account(),
             self.cluster(),
@@ -2574,7 +2647,7 @@ impl Display for SlurmJob {
             self.end_time(),
             self.duration().num_seconds(),
             self.total_duration().num_seconds(),
-            self.state(),
+            self.terminal_state(),
             self.qos(),
             self.nodes(),
             self.cpus(),
@@ -2776,26 +2849,22 @@ impl SlurmJob {
 
         let duration = duration.num_seconds() as u64;
 
-        let state = match value.get("state") {
+        // Slurm reports `state.current` either as a bare string or as a list -
+        // a requeued attempt is `["PENDING", "REQUEUED"]`. Keep the whole set:
+        // taking only the first element recorded such an attempt as "PENDING",
+        // discarding the one piece of information that says it was requeued.
+        let states = match value.get("state") {
             Some(state) => match state.get("current") {
                 Some(state) => match state.as_str() {
-                    Some(state) => state.to_string(),
+                    Some(state) => vec![state.to_string()],
                     None => match state.as_array() {
                         Some(state) => {
-                            if !state.is_empty() {
-                                match state.first().and_then(|s| s.as_str()) {
-                                    Some(state) => state.to_string(),
-                                    None => {
-                                        tracing::warn!(
-                                            "Could not get state as string from job: {:?}",
-                                            state
-                                        );
-                                        return Err(Error::Call(
-                                            "Could not get state as string from job".to_string(),
-                                        ));
-                                    }
-                                }
-                            } else {
+                            let states: Vec<String> = state
+                                .iter()
+                                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                                .collect();
+
+                            if states.is_empty() {
                                 tracing::warn!(
                                     "Could not get state as string from job: {:?}",
                                     state
@@ -2804,6 +2873,8 @@ impl SlurmJob {
                                     "Could not get state as string from job".to_string(),
                                 ));
                             }
+
+                            states
                         }
                         None => {
                             tracing::warn!("Could not get state as string from job: {:?}", state);
@@ -2823,6 +2894,39 @@ impl SlurmJob {
                 return Err(Error::Call("Could not get state from job".to_string()));
             }
         };
+
+        // `time.submission` orders a job's attempts. It is not fatal for it to
+        // be missing - an older Slurm may not report it - but say so, because
+        // without it the ordering falls back to `restart_cnt` alone and a job-id
+        // reset can no longer be detected.
+        let submission_time = match time.get("submission").and_then(|t| t.as_i64()) {
+            Some(submission) => match chrono::Utc.timestamp_opt(submission, 0).single() {
+                Some(submission) => submission,
+                None => {
+                    tracing::warn!("Could not get submission time as DateTime from job");
+                    eligible_time
+                }
+            },
+            None => {
+                tracing::debug!(
+                    "No time.submission for job - falling back to the eligible time \
+                     for attempt ordering"
+                );
+                eligible_time
+            }
+        };
+
+        // Absent for a job that was never requeued, which is the normal case.
+        let restart_count = value
+            .get("restart_cnt")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0);
+
+        let failed_node = value
+            .get("failed_node")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
 
         let qos = match value.get("qos") {
             Some(qos) => match qos.as_str() {
@@ -3048,8 +3152,14 @@ impl SlurmJob {
             original_start_time: start_time,
             eligible_time,
             end_time,
+            submission_time,
+            restart_count,
             duration,
-            state,
+            states,
+            failed_node,
+            // `get_consumers` reclassifies once it can see the job's other
+            // attempts; a job constructed on its own is its own last attempt.
+            attempt: Attempt::Base,
             qos,
             nodes,
             cpus,
@@ -3071,6 +3181,11 @@ impl SlurmJob {
     /// (i.e. have a duration of 0). If you want these jobs, you
     /// should contruct each job individually
     ///
+    /// With `sacct --duplicates` the response holds one record per *attempt* of
+    /// a requeued job, so each record is also classified as the job's last
+    /// attempt within this window (`Attempt::Base`) or a superseded one
+    /// (`Attempt::Requeued`) - see `classify_attempts`.
+    ///
     pub fn get_consumers(
         value: &serde_json::Value,
         start_time: &chrono::DateTime<chrono::Utc>,
@@ -3089,32 +3204,49 @@ impl SlurmJob {
                 Some(jobs) => {
                     let mut slurm_jobs: Vec<SlurmJob> = Vec::new();
 
+                    // Construct everything first, with no clipping and no
+                    // filtering. The order of these steps is load-bearing:
+                    // classification has to see every record, including the
+                    // zero-duration ones dropped below. A job whose last
+                    // attempt was cancelled before it ran has a zero-duration
+                    // final record, and dropping it first would promote an
+                    // earlier attempt to `Base` - which would move hours of
+                    // previously unreported usage into the figure that is
+                    // supposed to stay unchanged.
                     for job in jobs {
                         match SlurmJob::construct(job, slurm_nodes) {
-                            Ok(mut job) => {
-                                if job.start_time < *start_time {
-                                    job.start_time = *start_time;
-                                } else if job.start_time > *end_time {
-                                    // job was likely cancelled
-                                    job.start_time = *end_time;
-                                }
-
-                                if job.end_time > *end_time || job.end_time < *start_time {
-                                    job.end_time = *end_time;
-                                }
-
-                                if job.duration().num_seconds() > 0 {
-                                    tracing::debug!("Recording job {}", job);
-                                    slurm_jobs.push(job)
-                                }
-                            }
+                            Ok(job) => slurm_jobs.push(job),
                             Err(e) => {
                                 tracing::warn!("Could not construct job from {}: {}", job, e);
                             }
                         }
                     }
 
-                    slurm_jobs
+                    Self::classify_attempts(&mut slurm_jobs);
+
+                    // now clip each record to the query window, and drop the
+                    // ones that consumed nothing within it
+                    let mut consumers: Vec<SlurmJob> = Vec::new();
+
+                    for mut job in slurm_jobs {
+                        if job.start_time < *start_time {
+                            job.start_time = *start_time;
+                        } else if job.start_time > *end_time {
+                            // job was likely cancelled
+                            job.start_time = *end_time;
+                        }
+
+                        if job.end_time > *end_time || job.end_time < *start_time {
+                            job.end_time = *end_time;
+                        }
+
+                        if job.duration().num_seconds() > 0 {
+                            tracing::debug!("Recording job {}", job);
+                            consumers.push(job)
+                        }
+                    }
+
+                    consumers
                 }
                 None => {
                     tracing::warn!("Jobs is not an array: {:?}", jobs);
@@ -3125,6 +3257,97 @@ impl SlurmJob {
         };
 
         Ok(jobs)
+    }
+
+    ///
+    /// Mark each record as the last attempt of its job within this response, or
+    /// as an attempt superseded by a later one.
+    ///
+    /// Records are grouped by job id and ordered by submission time, which with
+    /// the id is `slurmdbd`'s own key for a record. Within a group the restart
+    /// count must increase from one attempt to the next; where it does not, the
+    /// records belong to two different jobs that share an id because
+    /// `slurmctld` was reset, and each gets its own last attempt. Without that
+    /// split the older job's final attempt would be charged to the requeue
+    /// bucket of the newer one.
+    ///
+    fn classify_attempts(jobs: &mut [SlurmJob]) {
+        // job id -> indices of that job's records, in the order they appear
+        let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
+
+        for (index, job) in jobs.iter().enumerate() {
+            groups.entry(job.id()).or_default().push(index);
+        }
+
+        for (id, mut indices) in groups {
+            if indices.len() == 1 {
+                // the common case: one record, so it is its own last attempt
+                continue;
+            }
+
+            indices.sort_by_key(|index| {
+                jobs.get(*index)
+                    .map(|job| (job.submission_time, job.restart_count))
+                    .unwrap_or_default()
+            });
+
+            // split into chains of attempts of the same job
+            let mut chains: Vec<Vec<usize>> = Vec::new();
+            let mut previous_restart: Option<u64> = None;
+
+            for index in indices {
+                let Some(job) = jobs.get(index) else {
+                    continue;
+                };
+
+                let starts_new_chain = match previous_restart {
+                    Some(previous) => job.restart_count <= previous,
+                    None => true,
+                };
+
+                if starts_new_chain {
+                    chains.push(vec![index]);
+                } else if let Some(chain) = chains.last_mut() {
+                    chain.push(index);
+                }
+
+                previous_restart = Some(job.restart_count);
+            }
+
+            if chains.len() > 1 {
+                let submissions: Vec<String> = chains
+                    .iter()
+                    .filter_map(|chain| chain.first())
+                    .filter_map(|index| jobs.get(*index))
+                    .map(|job| job.submission_time().to_rfc3339())
+                    .collect();
+
+                tracing::warn!(
+                    "Job id {} has {} sets of attempts whose restart counts do not form a \
+                     single sequence, first submitted at {}. Treating them as separate jobs \
+                     that share an id, which is what a slurmctld job-id reset looks like.",
+                    id,
+                    chains.len(),
+                    submissions.join(", ")
+                );
+            }
+
+            for chain in chains {
+                let Some((last, superseded)) = chain.split_last() else {
+                    continue;
+                };
+
+                if let Some(job) = jobs.get_mut(*last) {
+                    job.attempt = Attempt::Base;
+                }
+
+                for index in superseded {
+                    if let Some(job) = jobs.get_mut(*index) {
+                        job.attempt = Attempt::Requeued;
+                    }
+                }
+            }
+        }
     }
 
     pub fn id(&self) -> u64 {
@@ -3189,8 +3412,60 @@ impl SlurmJob {
         chrono::Duration::seconds(self.duration as i64)
     }
 
-    pub fn state(&self) -> &str {
-        &self.state
+    /// Every state Slurm reported for this record.
+    pub fn states(&self) -> &[String] {
+        &self.states
+    }
+
+    ///
+    /// The state this attempt ended in, bucketed for reporting.
+    ///
+    /// Picks the highest-precedence entry of `TERMINAL_STATES` present in
+    /// `states()`, so that a node failure is reported as `NODE_FAIL` rather
+    /// than as the `PENDING` that a requeued record leads with. A state Slurm
+    /// reports that we do not know is bucketed as `OTHER` rather than dropped,
+    /// which keeps the per-state counts accounting for every event and keeps
+    /// the key space of the per-state maps bounded.
+    ///
+    pub fn terminal_state(&self) -> &'static str {
+        for candidate in TERMINAL_STATES {
+            if self
+                .states
+                .iter()
+                .any(|state| state.eq_ignore_ascii_case(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        OTHER_TERMINAL_STATE
+    }
+
+    /// When this attempt was submitted.
+    pub fn submission_time(&self) -> &chrono::DateTime<chrono::Utc> {
+        &self.submission_time
+    }
+
+    /// How many times the job had been requeued when this attempt ran.
+    pub fn restart_count(&self) -> u64 {
+        self.restart_count
+    }
+
+    /// Whether this record is the job's last attempt in the query window, or
+    /// one superseded by a requeue.
+    pub fn attempt(&self) -> Attempt {
+        self.attempt
+    }
+
+    /// True if this attempt was superseded by a requeue - i.e. its usage was
+    /// invisible before requeue accounting.
+    pub fn is_requeued_attempt(&self) -> bool {
+        self.attempt == Attempt::Requeued
+    }
+
+    /// The node Slurm blamed for a `NODE_FAIL`, if it named one.
+    pub fn failed_node(&self) -> &str {
+        &self.failed_node
     }
 
     pub fn qos(&self) -> &str {
@@ -3516,6 +3791,336 @@ pub async fn set_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window the fixture in `tests/data/sacct-requeued-jobs.json` covers:
+    /// 2026-03-01T00:00:00Z to 2026-03-02T00:00:00Z.
+    const WINDOW_START: i64 = 1772323200;
+    const WINDOW_END: i64 = 1772409600;
+
+    fn window() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+        (
+            chrono::Utc.timestamp_opt(WINDOW_START, 0).unwrap(),
+            chrono::Utc.timestamp_opt(WINDOW_END, 0).unwrap(),
+        )
+    }
+
+    /// `testnode` is a whole 128-cpu, 128-billing node, so a job allocating all
+    /// of it bills one node-second per second and the expected values below are
+    /// the elapsed times themselves.
+    ///
+    /// The *default* node is deliberately nothing like it. `SlurmNodes::get`
+    /// falls back to the default for a node name it does not know, silently, so
+    /// if the fixture's node names and this map ever drift apart every number
+    /// here changes. Making the fallback wildly different means the tests fail
+    /// rather than quietly checking the wrong arithmetic.
+    fn test_nodes() -> SlurmNodes {
+        let default = SlurmNode::construct(&serde_json::json!({
+            "cpus": 1, "gpus": 0, "mem": 1, "billing": 1
+        }))
+        .unwrap();
+
+        let node = SlurmNode::construct(&serde_json::json!({
+            "cpus": 128, "gpus": 0, "mem": 0, "billing": 128
+        }))
+        .unwrap();
+
+        let mut nodes = SlurmNodes::new(&default);
+        nodes.set("testnode", &node);
+        nodes
+    }
+
+    fn fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/data/sacct-requeued-jobs.json")).unwrap()
+    }
+
+    /// The fixture's records for one job id, in the order `get_consumers`
+    /// returned them.
+    fn records_for(jobs: &[SlurmJob], id: u64) -> Vec<&SlurmJob> {
+        jobs.iter().filter(|job| job.id() == id).collect()
+    }
+
+    fn usage_of(jobs: &[SlurmJob], id: u64, attempt: Attempt) -> u64 {
+        records_for(jobs, id)
+            .iter()
+            .filter(|job| job.attempt() == attempt)
+            .map(|job| job.billed_node_seconds())
+            .sum()
+    }
+
+    fn consumers() -> Vec<SlurmJob> {
+        let (start, end) = window();
+        SlurmJob::get_consumers(&fixture(), &start, &end, &test_nodes()).unwrap()
+    }
+
+    #[test]
+    fn test_every_attempt_of_a_requeued_job_is_returned_and_classified() {
+        // Without `--duplicates` sacct returns one record per job and every
+        // earlier attempt of a requeued job is invisible. With it, each job's
+        // last attempt in the window is `Base` - the record sacct used to
+        // return - and the rest are `Requeued`.
+        let jobs = consumers();
+
+        // job 100 was never requeued: one record, and it is its own last attempt
+        let job_100 = records_for(&jobs, 100);
+        assert_eq!(job_100.len(), 1);
+        assert_eq!(job_100[0].attempt(), Attempt::Base);
+
+        // job 200 was requeued once: the completed attempt is the base one
+        let job_200 = records_for(&jobs, 200);
+        assert_eq!(job_200.len(), 2);
+        assert_eq!(usage_of(&jobs, 200, Attempt::Base), 1800);
+        assert_eq!(usage_of(&jobs, 200, Attempt::Requeued), 3600);
+
+        // job 300 was requeued twice, so two of its three records are superseded
+        let job_300 = records_for(&jobs, 300);
+        assert_eq!(job_300.len(), 3);
+        assert_eq!(
+            job_300
+                .iter()
+                .filter(|job| job.attempt() == Attempt::Requeued)
+                .count(),
+            2
+        );
+        assert_eq!(usage_of(&jobs, 300, Attempt::Base), 300);
+        assert_eq!(usage_of(&jobs, 300, Attempt::Requeued), 2700);
+    }
+
+    #[test]
+    fn test_attempts_are_ordered_rather_than_matched_against_a_zero_restart_count() {
+        // `restart_cnt` counts from the job's own beginning, not from the query
+        // window, so a job whose earlier attempts fell before the window
+        // returns no record with `restart_cnt == 0`. Job 400's records start at
+        // 2. Classifying on `restart_cnt == 0` would leave it with no base
+        // attempt at all and move its whole final run into the requeue bucket.
+        let jobs = consumers();
+        let job_400 = records_for(&jobs, 400);
+
+        assert_eq!(job_400.len(), 2);
+        assert!(job_400.iter().all(|job| job.restart_count() >= 2));
+
+        let base: Vec<&&SlurmJob> = job_400
+            .iter()
+            .filter(|job| job.attempt() == Attempt::Base)
+            .collect();
+
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].restart_count(), 3);
+
+        // submission time is what the ordering keys on - with the job id it is
+        // slurmdbd's own key for a record - and it must agree with the restart
+        // count on a job whose attempts form a single chain
+        let superseded = job_400
+            .iter()
+            .find(|job| job.attempt() == Attempt::Requeued)
+            .unwrap();
+        assert!(superseded.submission_time() < base[0].submission_time());
+        assert_eq!(usage_of(&jobs, 400, Attempt::Base), 600);
+        assert_eq!(usage_of(&jobs, 400, Attempt::Requeued), 1800);
+    }
+
+    #[test]
+    fn test_a_zero_duration_final_attempt_does_not_promote_an_earlier_one() {
+        // The worst case of the original bug. Job 500 ran for two hours, was
+        // requeued, and its final attempt was cancelled before it ran - so the
+        // only record default sacct returned had zero elapsed, was dropped as a
+        // non-consumer, and the job was reported as having used nothing.
+        //
+        // Classification therefore has to happen before the zero-duration
+        // filter: drop that record first and the earlier attempt becomes the
+        // job's last surviving one, which would move two hours of previously
+        // unreported usage into the figure that is supposed to stay unchanged.
+        let jobs = consumers();
+
+        assert_eq!(usage_of(&jobs, 500, Attempt::Base), 0);
+        assert_eq!(usage_of(&jobs, 500, Attempt::Requeued), 7200);
+    }
+
+    #[test]
+    fn test_a_reused_job_id_is_not_treated_as_a_requeue() {
+        // Job 600 is two unrelated jobs that share an id because slurmctld was
+        // reset - both records have `restart_cnt` 0, which no single job's
+        // attempts can. Neither may be classed as a requeue of the other, or
+        // the older job's usage would be charged to the newer one's requeue
+        // bucket.
+        let jobs = consumers();
+        let job_600 = records_for(&jobs, 600);
+
+        assert_eq!(job_600.len(), 2);
+        assert!(job_600.iter().all(|job| job.attempt() == Attempt::Base));
+        assert_eq!(usage_of(&jobs, 600, Attempt::Requeued), 0);
+        assert_eq!(usage_of(&jobs, 600, Attempt::Base), 5400);
+    }
+
+    #[test]
+    fn test_an_attempt_is_clipped_to_the_window_but_keeps_its_real_start() {
+        // Job 700's first attempt began before the window and was requeued
+        // inside it. Its usage is clipped to the part inside, but its original
+        // start stays outside - which is what stops it being counted as an
+        // event in a window it did not start in.
+        let (start, _) = window();
+        let jobs = consumers();
+        let job_700 = records_for(&jobs, 700);
+
+        let superseded: Vec<&&SlurmJob> = job_700
+            .iter()
+            .filter(|job| job.attempt() == Attempt::Requeued)
+            .collect();
+
+        assert_eq!(superseded.len(), 1);
+        // ran for two hours, of which one hour was inside the window
+        assert_eq!(superseded[0].total_duration().num_seconds(), 7200);
+        assert_eq!(superseded[0].billed_node_seconds(), 3600);
+        assert!(superseded[0].original_start_time() < &start);
+        assert_eq!(usage_of(&jobs, 700, Attempt::Base), 1800);
+    }
+
+    #[test]
+    fn test_terminal_state_precedence_and_bucketing() {
+        let jobs = consumers();
+
+        // a requeued attempt leads with PENDING; reporting it as such would
+        // describe an attempt that ran for hours as merely queued
+        let job_400 = records_for(&jobs, 400);
+        let requeued = job_400
+            .iter()
+            .find(|job| job.attempt() == Attempt::Requeued)
+            .unwrap();
+        assert_eq!(requeued.states(), ["PENDING", "REQUEUED"]);
+        assert_eq!(requeued.terminal_state(), "REQUEUED");
+
+        // a node failure is reported as such - the site lost the work
+        let job_300 = records_for(&jobs, 300);
+        assert!(job_300
+            .iter()
+            .filter(|job| job.attempt() == Attempt::Requeued)
+            .all(|job| job.terminal_state() == "NODE_FAIL"));
+
+        // and a state we do not know is bucketed, never dropped, so that the
+        // per-state counts still account for every event
+        let job_800 = records_for(&jobs, 800);
+        let unknown = job_800
+            .iter()
+            .find(|job| job.attempt() == Attempt::Requeued)
+            .unwrap();
+        assert_eq!(unknown.terminal_state(), OTHER_TERMINAL_STATE);
+    }
+
+    #[test]
+    fn test_node_failures_name_the_node_they_lost_the_job_on() {
+        // What turns "the project spent this" into "the site lost this" in a
+        // charging dispute, and what site monitoring alerts on.
+        let jobs = consumers();
+        let job_300 = records_for(&jobs, 300);
+
+        let mut failed: Vec<&str> = job_300
+            .iter()
+            .filter(|job| job.terminal_state() == "NODE_FAIL")
+            .map(|job| job.failed_node())
+            .collect();
+        failed.sort();
+
+        assert_eq!(failed, ["badnode01", "badnode02"]);
+    }
+
+    #[test]
+    fn test_base_usage_equals_what_default_sacct_reported() {
+        // The continuity property the whole design rests on: the base figure is
+        // what we reported before requeue accounting, so no consumer sees a
+        // step change. Simulate default sacct by keeping only the
+        // latest-submitted record for each job id, and check the base usage
+        // matches.
+        //
+        // Job 600 is excluded: it is two jobs sharing an id after a job-id
+        // reset, and default sacct de-duplicated them down to one, losing the
+        // older job's usage entirely. Splitting them is a deliberate
+        // improvement on the old figure, not continuity with it.
+        let (start, end) = window();
+        let nodes = test_nodes();
+        let mut fixture = fixture();
+
+        {
+            let Some(records) = fixture.get_mut("jobs").and_then(|jobs| jobs.as_array_mut()) else {
+                unreachable!("the fixture has a jobs array");
+            };
+
+            records.retain(|record| record.get("job_id").and_then(|id| id.as_u64()) != Some(600));
+        }
+
+        let Some(records) = fixture.get("jobs").and_then(|jobs| jobs.as_array()) else {
+            unreachable!("the fixture has a jobs array");
+        };
+
+        // what we report now
+        let base_usage: u64 = SlurmJob::get_consumers(&fixture, &start, &end, &nodes)
+            .unwrap()
+            .iter()
+            .filter(|job| job.attempt() == Attempt::Base)
+            .map(|job| job.billed_node_seconds())
+            .sum();
+
+        // what default sacct would have handed us: one record per job id, the
+        // most recently submitted
+        let mut latest: HashMap<u64, serde_json::Value> = HashMap::new();
+
+        for record in records.iter() {
+            let id = record.get("job_id").and_then(|id| id.as_u64()).unwrap();
+            let submission = record
+                .get("time")
+                .and_then(|time| time.get("submission"))
+                .and_then(|value| value.as_i64())
+                .unwrap();
+
+            let is_later = latest
+                .get(&id)
+                .and_then(|existing| existing.get("time"))
+                .and_then(|time| time.get("submission"))
+                .and_then(|value| value.as_i64())
+                .is_none_or(|existing| submission > existing);
+
+            if is_later {
+                latest.insert(id, record.clone());
+            }
+        }
+
+        let deduplicated = serde_json::json!({
+            "jobs": latest.into_values().collect::<Vec<serde_json::Value>>()
+        });
+
+        let legacy_usage: u64 = SlurmJob::get_consumers(&deduplicated, &start, &end, &nodes)
+            .unwrap()
+            .iter()
+            .map(|job| job.billed_node_seconds())
+            .sum();
+
+        assert_eq!(base_usage, legacy_usage);
+    }
+
+    #[test]
+    fn test_base_and_requeue_usage_sum_to_the_true_total() {
+        // The other half of the contract: nothing is counted twice and nothing
+        // is dropped, so a client that wants the real figure can add them.
+        let jobs = consumers();
+
+        let base: u64 = jobs
+            .iter()
+            .filter(|job| job.attempt() == Attempt::Base)
+            .map(|job| job.billed_node_seconds())
+            .sum();
+        let requeued: u64 = jobs
+            .iter()
+            .filter(|job| job.attempt() == Attempt::Requeued)
+            .map(|job| job.billed_node_seconds())
+            .sum();
+        let everything: u64 = jobs.iter().map(|job| job.billed_node_seconds()).sum();
+
+        assert_eq!(base, 14400);
+        assert_eq!(requeued, 20700);
+        assert_eq!(base + requeued, everything);
+
+        // and the requeue share is the point of the exercise - it was all
+        // invisible before
+        assert_eq!(everything, 35100);
+    }
 
     #[test]
     fn test_only_accounts_in_the_managed_organization_are_managed() {

@@ -1148,6 +1148,11 @@ fn record_job(
         report.add_expansion(job.user(), wait_seconds, runtime_seconds);
         totals.runtime_seconds = totals.runtime_seconds.saturating_add(runtime_seconds);
 
+        // The cores and GPUs the job actually got, not what it asked for - one
+        // job's worth however long it ran, so the mean describes the shape of
+        // the jobs rather than what the machine was busy with.
+        report.add_job_size(job.user(), job.cpus(), job.gpus());
+
         if job.is_reserved() {
             // counted as `num_jobs` is, so a job spanning several windows is one
             // job in the reservation rather than one per window
@@ -2251,6 +2256,23 @@ mod tests {
     }
 
     #[test]
+    fn test_the_mean_job_size_comes_from_what_slurm_allocated() {
+        // The fixture's jobs each hold a whole 128-core node with no GPUs, so
+        // the mean job size is 128 cores - and it is recorded once per job,
+        // regardless of how many attempts that job took.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(report.num_jobs(), 9);
+        assert_eq!(report.total_allocated_cpus(), 9 * 128);
+        assert_eq!(report.average_cpus_per_job(), 128.0);
+        assert_eq!(report.average_gpus_per_job(), 0.0);
+
+        // job 300 took three attempts and is still one 128-core job
+        assert_eq!(report.average_cpus_per_job_for_user("user_two"), 128.0);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
     fn test_the_expansion_factor_uses_the_whole_job_not_the_windowed_part() {
         // Both halves of the ratio are properties of the job rather than of the
         // window it is reported in, so a job running past midnight must not be
@@ -2265,8 +2287,10 @@ mod tests {
         assert_eq!(report.runtime_seconds_for_user("user_six"), 43200);
         assert_eq!(totals.runtime_seconds, report.total_runtime_seconds());
 
-        // 43200 waited over 43200 run
-        assert!((report.expansion_factor_for_user("user_six") - 1.0).abs() < 1e-9);
+        // it waited as long as it ran, so 86400 of turnaround over 43200 of
+        // runtime - had the runtime been clipped to the four hours inside day
+        // one, the same job would have scored 4.0
+        assert!((report.expansion_factor_for_user("user_six") - 2.0).abs() < 1e-9);
     }
 
     #[test]

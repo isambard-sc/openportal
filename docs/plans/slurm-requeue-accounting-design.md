@@ -526,7 +526,11 @@ That is also where per-instance identity would live, if it is ever wanted.
 
 ## 7.3 Expansion factor
 
-Queue time over runtime, per job. A project whose jobs wait a long time for a
+Turnaround over runtime, per job - `(wait + run) / run`, the classical
+definition. **1.0 is the ideal**, a job that ran the instant it became eligible,
+and the figure rises with every second spent queueing; 2.0 means jobs spent as
+long waiting as running. `0.0` is the no-jobs sentinel rather than a score,
+which cannot be confused with a real value since no job can score below 1.0. A project whose jobs wait a long time for a
 little work is being poorly served, or is doing something odd; a rising figure
 is worth a look, and the particular pattern of a job that queues for hours and
 then exits in seconds, repeatedly, is what a user fighting a job that will not
@@ -554,10 +558,10 @@ jobs waited a long time, which is exactly the case worth chasing. Per-user
 figures then say who. Neither can be reconstructed from the other, so storing
 one would have been a choice about which question to allow.
 
-**The form is `wait / run`, not `(wait + run) / run`.** The two differ by exactly
-one, so nothing is lost, but `sreport` and most of the literature use the second,
-and a figure of 0.27 in one convention is 1.27 in the other. Both the API docs
-and the printed line say which is which.
+**The form is `(wait + run) / run`, matching `sreport` and the literature.** The
+`wait / run` variant differs by exactly one and loses nothing, but a shared
+convention matters more than a marginally more direct expression: a figure
+compared against Slurm's own reporting has to be on Slurm's scale.
 
 **The ratios are accumulated as thousandths, not as floats.** Float addition is
 not associative, so summing the same daily reports in a different order would
@@ -582,6 +586,29 @@ weigh as heavily as a day with four hundred.
 Finally, every scaling operation leaves these figures alone. A credit conversion
 rescales usage; it does not change how many jobs ran, how long they queued, or a
 dimensionless ratio of the two.
+
+## 7.4 Mean job size
+
+The cores and GPUs each job was allocated, summed, so that dividing by the job
+count gives the mean size of a job - many small jobs against a few large ones.
+
+Like the expansion factor this cannot be recovered from usage, and for a sharper
+reason: usage is core-seconds, and the same core-seconds come from one job on a
+hundred cores or a hundred jobs on one core. That is precisely the distinction
+being drawn, so the numerator has to be counted separately.
+
+**Deliberately unweighted by runtime.** Each job contributes once however long it
+ran, because the question is what shape the jobs were. The other question - what
+the machine was actually occupied by - is time-weighted, and is roughly answered
+already by the `cpu` component's usage over the runtime of §7.3. Mixing the two
+would produce a figure that answers neither.
+
+The project-wide mean is a weak statistic on its own: a project running four
+512-core jobs alongside a hundred 2-core jobs reports about 20 cores per job,
+which describes neither population. It is the per-user figures that answer the
+question, and both are exposed. The same is true of the expansion factor, and for
+the same reason - these are distribution questions being asked of a single
+number, so the per-user breakdown is not a refinement but the point.
 
 ## 8. Compatibility and rollout
 

@@ -433,10 +433,13 @@ pub struct DailyProjectUsageReport {
 
     // ---- Expansion factor ---------------------------------------------------
     //
-    // Queue time over runtime, per job, which says how much waiting a project
-    // endured for the work it got. A rising figure is worth looking at: a job
-    // that queues for hours and then exits in seconds, over and over, is what a
-    // user struggling to debug something looks like from the outside.
+    // Turnaround over runtime, per job - `(wait + run) / run`, the classical
+    // definition, which is 1.0 for a job that started the instant it was
+    // eligible and rises with every second spent queueing. It says how much
+    // waiting a project endured for the work it got. A rising figure is worth
+    // looking at: a job that queues for hours and then exits in seconds, over
+    // and over, is what a user struggling to debug something looks like from the
+    // outside.
     //
     // The sum of the per-job *ratios* is kept, not a ratio of sums, because the
     // two answer different questions and fail in opposite directions. The mean
@@ -465,6 +468,31 @@ pub struct DailyProjectUsageReport {
     /// Scalar total — equals sum of user_runtime_seconds when populated.
     #[serde(default)]
     total_runtime_seconds: u64,
+
+    // ---- Job size -----------------------------------------------------------
+    //
+    // The cores and GPUs each job was allocated, summed, so that dividing by the
+    // job count gives the mean size of a job - which says whether a project is
+    // running many small jobs or a few large ones. This cannot be recovered from
+    // usage: usage is core-seconds, and the same core-seconds come from one job
+    // on many cores or many jobs on one core.
+    //
+    // Deliberately *unweighted* - each job counts once regardless of how long it
+    // ran, because the question is about the shape of the jobs rather than about
+    // what the machine was occupied by. The time-weighted answer to the other
+    // question is roughly the `cpu` component's usage over the runtime below.
+    /// Per-user sum of the cores each job was allocated.
+    #[serde(default)]
+    user_allocated_cpus: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_allocated_cpus when populated.
+    #[serde(default)]
+    total_allocated_cpus: u64,
+    /// Per-user sum of the GPUs each job was allocated.
+    #[serde(default)]
+    user_allocated_gpus: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_allocated_gpus when populated.
+    #[serde(default)]
+    total_allocated_gpus: u64,
 
     // ---- Requeue accounting -------------------------------------------------
     //
@@ -586,6 +614,13 @@ impl std::fmt::Display for DailyProjectUsageReport {
                         self.aggregate_expansion_factor()
                     )?;
                 }
+
+                writeln!(
+                    f,
+                    "Mean job size: {:.1} cores, {:.1} gpus",
+                    self.average_cpus_per_job(),
+                    self.average_gpus_per_job()
+                )?;
             }
         }
 
@@ -666,6 +701,13 @@ impl std::fmt::Display for DailyProjectUsageReportHoursDisplay<'_> {
                         report.aggregate_expansion_factor()
                     )?;
                 }
+
+                writeln!(
+                    f,
+                    "Mean job size: {:.1} cores, {:.1} gpus",
+                    report.average_cpus_per_job(),
+                    report.average_gpus_per_job()
+                )?;
             }
         }
 
@@ -772,7 +814,10 @@ impl DailyProjectUsageReport {
             return;
         }
 
+        // `(wait + run) / run` - the classical expansion factor, so a job that
+        // never waited contributes exactly 1.0
         let expansion_milli = wait_seconds
+            .saturating_add(runtime_seconds)
             .saturating_mul(EXPANSION_SCALE)
             .saturating_div(runtime_seconds);
 
@@ -787,6 +832,91 @@ impl DailyProjectUsageReport {
             .entry(user.to_string())
             .or_default() += runtime_seconds;
         self.total_runtime_seconds = self.total_runtime_seconds.saturating_add(runtime_seconds);
+    }
+
+    ///
+    /// Record the size of one job: the cores and GPUs it was allocated.
+    ///
+    /// Called for the same population as `add_jobs`, so that dividing by the job
+    /// count gives a mean over exactly the jobs counted. Each job contributes
+    /// once however long it ran - the question is what shape the jobs were, not
+    /// what the machine was busy with.
+    ///
+    pub fn add_job_size(&mut self, user: &str, cpus: u64, gpus: u64) {
+        *self
+            .user_allocated_cpus
+            .entry(user.to_string())
+            .or_default() += cpus;
+        self.total_allocated_cpus = self.total_allocated_cpus.saturating_add(cpus);
+
+        *self
+            .user_allocated_gpus
+            .entry(user.to_string())
+            .or_default() += gpus;
+        self.total_allocated_gpus = self.total_allocated_gpus.saturating_add(gpus);
+    }
+
+    /// The cores allocated to the jobs counted in this report, summed over jobs.
+    /// Useful mainly as the numerator of `average_cpus_per_job`.
+    pub fn total_allocated_cpus(&self) -> u64 {
+        self.total_allocated_cpus
+    }
+
+    /// The GPUs allocated to the jobs counted in this report, summed over jobs.
+    pub fn total_allocated_gpus(&self) -> u64 {
+        self.total_allocated_gpus
+    }
+
+    ///
+    /// The mean number of cores a job was allocated - many small jobs against a
+    /// few large ones.
+    ///
+    /// Each job counts once regardless of how long it ran. This cannot be got
+    /// from usage: the same core-seconds come from one job on many cores or many
+    /// jobs on one core, which is the distinction being drawn here.
+    ///
+    pub fn average_cpus_per_job(&self) -> f64 {
+        match self.num_jobs {
+            0 => 0.0,
+            n => self.total_allocated_cpus as f64 / n as f64,
+        }
+    }
+
+    /// The mean number of GPUs a job was allocated. Zero for a project that ran
+    /// no GPU work, which is itself worth knowing on a GPU machine.
+    pub fn average_gpus_per_job(&self) -> f64 {
+        match self.num_jobs {
+            0 => 0.0,
+            n => self.total_allocated_gpus as f64 / n as f64,
+        }
+    }
+
+    pub fn average_cpus_per_job_for_user(&self, user: &str) -> f64 {
+        match self.num_jobs_for_user(user) {
+            0 => 0.0,
+            n => {
+                let cpus = self.user_allocated_cpus.get(user).copied().unwrap_or(0);
+                cpus as f64 / n as f64
+            }
+        }
+    }
+
+    pub fn average_gpus_per_job_for_user(&self, user: &str) -> f64 {
+        match self.num_jobs_for_user(user) {
+            0 => 0.0,
+            n => {
+                let gpus = self.user_allocated_gpus.get(user).copied().unwrap_or(0);
+                gpus as f64 / n as f64
+            }
+        }
+    }
+
+    pub fn allocated_cpus_for_user(&self, user: &str) -> u64 {
+        self.user_allocated_cpus.get(user).copied().unwrap_or(0)
+    }
+
+    pub fn allocated_gpus_for_user(&self, user: &str) -> u64 {
+        self.user_allocated_gpus.get(user).copied().unwrap_or(0)
     }
 
     /// Total wall-clock runtime of the jobs counted in this report. This is not
@@ -812,14 +942,16 @@ impl DailyProjectUsageReport {
     }
 
     ///
-    /// The mean expansion factor of the jobs counted in this report: queue time
-    /// over runtime, averaged per job.
+    /// The mean expansion factor of the jobs counted in this report: turnaround
+    /// over runtime, `(wait + run) / run`, averaged per job.
     ///
-    /// Zero would mean nothing ever waited. This is the "wait over run" form, so
-    /// the classical expansion factor - turnaround over runtime, which is never
-    /// below one - is exactly this plus one. Neither form is more correct;
-    /// `sreport` and most of the literature use the classical one, so convert
-    /// before comparing.
+    /// **1.0 is the ideal** - a job that ran the instant it became eligible -
+    /// and the figure rises with every second spent queueing. A value of 2.0
+    /// means jobs spent as long waiting as running. This is the classical
+    /// definition, as used by `sreport` and the literature.
+    ///
+    /// **0.0 means no jobs**, not a perfect score: it is the empty-report
+    /// sentinel, and no real job can score below 1.0.
     ///
     /// Being a mean of ratios, one job that queued for hours and then exited in
     /// seconds moves this a long way. That is deliberate - it is the signature
@@ -834,8 +966,9 @@ impl DailyProjectUsageReport {
         }
     }
 
-    /// The mean expansion factor for one user - which is where a struggling user
-    /// shows up, the project-wide mean having averaged them away.
+    /// The mean expansion factor for one user, on the same 1.0-is-ideal scale -
+    /// which is where a struggling user shows up, the project-wide mean having
+    /// averaged them away.
     pub fn expansion_factor_for_user(&self, user: &str) -> f64 {
         match self.num_jobs_for_user(user) {
             0 => 0.0,
@@ -847,17 +980,20 @@ impl DailyProjectUsageReport {
     }
 
     ///
-    /// Total queue time over total runtime - the whole project treated as one
-    /// job.
+    /// Total turnaround over total runtime - the whole project treated as one
+    /// job. Reads on the same scale as `average_expansion_factor`: 1.0 is
+    /// ideal, 0.0 means no jobs.
     ///
     /// The robust companion to `average_expansion_factor`: no single job can
     /// move it much, which also means it will not show a handful of short jobs
-    /// that waited a long time. Read the two together.
+    /// that waited a long time. Read the two together - a mean far above the
+    /// aggregate says a few short jobs waited a long time, which is usually the
+    /// case worth chasing.
     ///
     pub fn aggregate_expansion_factor(&self) -> f64 {
         match self.total_runtime_seconds {
             0 => 0.0,
-            runtime => self.total_wait_seconds as f64 / runtime as f64,
+            runtime => self.total_wait_seconds.saturating_add(runtime) as f64 / runtime as f64,
         }
     }
 
@@ -907,6 +1043,20 @@ impl DailyProjectUsageReport {
         if !self.user_runtime_seconds.is_empty() {
             let runtime_sum: u64 = self.user_runtime_seconds.values().sum();
             if runtime_sum != self.total_runtime_seconds {
+                return false;
+            }
+        }
+
+        if !self.user_allocated_cpus.is_empty() {
+            let cpu_sum: u64 = self.user_allocated_cpus.values().sum();
+            if cpu_sum != self.total_allocated_cpus {
+                return false;
+            }
+        }
+
+        if !self.user_allocated_gpus.is_empty() {
+            let gpu_sum: u64 = self.user_allocated_gpus.values().sum();
+            if gpu_sum != self.total_allocated_gpus {
                 return false;
             }
         }
@@ -1420,10 +1570,10 @@ impl DailyProjectUsageReport {
     /// `total_requeue_usage()` end up in different units and the sum a client
     /// makes of them is meaningless.
     ///
-    /// Job counts, wait times, runtimes and expansion factors are deliberately
-    /// untouched by every scaling operation on this type. A credit conversion
-    /// rescales usage; it does not change how many jobs ran, how long they
-    /// queued, or a dimensionless ratio of the two.
+    /// Job counts, wait times, runtimes, expansion factors and job sizes are
+    /// deliberately untouched by every scaling operation on this type. A credit
+    /// conversion rescales usage; it does not change how many jobs ran, how long
+    /// they queued, how many cores they held, or a dimensionless ratio.
     fn scale_totals(&mut self, factor: f64) {
         for usage in self.reports.values_mut() {
             *usage *= factor;
@@ -1558,6 +1708,24 @@ impl DailyProjectUsageReport {
             })
             .collect();
 
+        let old_cpus = std::mem::take(&mut self.user_allocated_cpus);
+        self.user_allocated_cpus = old_cpus
+            .into_iter()
+            .map(|(user, cpus)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, cpus)
+            })
+            .collect();
+
+        let old_gpus = std::mem::take(&mut self.user_allocated_gpus);
+        self.user_allocated_gpus = old_gpus
+            .into_iter()
+            .map(|(user, gpus)| {
+                let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                (new_user, gpus)
+            })
+            .collect();
+
         let old_runtimes = std::mem::take(&mut self.user_runtime_seconds);
         self.user_runtime_seconds = old_runtimes
             .into_iter()
@@ -1681,6 +1849,25 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             .total_runtime_seconds
             .saturating_add(other.total_runtime_seconds);
 
+        for (user, cpus) in &other.user_allocated_cpus {
+            *new_report
+                .user_allocated_cpus
+                .entry(user.clone())
+                .or_default() += cpus;
+        }
+        for (user, gpus) in &other.user_allocated_gpus {
+            *new_report
+                .user_allocated_gpus
+                .entry(user.clone())
+                .or_default() += gpus;
+        }
+        new_report.total_allocated_cpus = self
+            .total_allocated_cpus
+            .saturating_add(other.total_allocated_cpus);
+        new_report.total_allocated_gpus = self
+            .total_allocated_gpus
+            .saturating_add(other.total_allocated_gpus);
+
         for (user, usage) in other.requeue_reports {
             new_report.add_requeue_usage(&user, usage);
         }
@@ -1768,6 +1955,19 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
         self.total_runtime_seconds = self
             .total_runtime_seconds
             .saturating_add(other.total_runtime_seconds);
+
+        for (user, cpus) in &other.user_allocated_cpus {
+            *self.user_allocated_cpus.entry(user.clone()).or_default() += cpus;
+        }
+        for (user, gpus) in &other.user_allocated_gpus {
+            *self.user_allocated_gpus.entry(user.clone()).or_default() += gpus;
+        }
+        self.total_allocated_cpus = self
+            .total_allocated_cpus
+            .saturating_add(other.total_allocated_cpus);
+        self.total_allocated_gpus = self
+            .total_allocated_gpus
+            .saturating_add(other.total_allocated_gpus);
 
         for (user, usage) in other.requeue_reports {
             self.add_requeue_usage(&user, usage);
@@ -1929,6 +2129,13 @@ impl std::fmt::Display for ProjectUsageReport {
                             report.aggregate_expansion_factor()
                         )?;
                     }
+
+                    writeln!(
+                        f,
+                        "Mean job size: {:.1} cores, {:.1} gpus",
+                        report.average_cpus_per_job(),
+                        report.average_gpus_per_job()
+                    )?;
                 }
             }
             if report.has_requeues() {
@@ -1984,6 +2191,13 @@ impl std::fmt::Display for ProjectUsageReport {
                         self.aggregate_expansion_factor()
                     )?;
                 }
+
+                writeln!(
+                    f,
+                    "Mean job size: {:.1} cores, {:.1} gpus",
+                    self.average_cpus_per_job(),
+                    self.average_gpus_per_job()
+                )?;
             }
         }
         if self.num_requeue_events() > 0 || !self.total_requeue_usage().is_zero() {
@@ -2085,6 +2299,13 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                             daily.aggregate_expansion_factor()
                         )?;
                     }
+
+                    writeln!(
+                        f,
+                        "Mean job size: {:.1} cores, {:.1} gpus",
+                        daily.average_cpus_per_job(),
+                        daily.average_gpus_per_job()
+                    )?;
                 }
             }
             if daily.has_requeues() {
@@ -2140,6 +2361,13 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                         report.aggregate_expansion_factor()
                     )?;
                 }
+
+                writeln!(
+                    f,
+                    "Mean job size: {:.1} cores, {:.1} gpus",
+                    report.average_cpus_per_job(),
+                    report.average_gpus_per_job()
+                )?;
             }
         }
         if report.num_requeue_events() > 0 || !report.total_requeue_usage().is_zero() {
@@ -2455,6 +2683,73 @@ impl ProjectUsageReport {
         }
     }
 
+    /// The mean number of cores a job was allocated, over every job in this
+    /// report - many small jobs against a few large ones. Computed over all
+    /// jobs, not by averaging each day's average.
+    pub fn average_cpus_per_job(&self) -> f64 {
+        match self.num_jobs() {
+            0 => 0.0,
+            n => {
+                let cpus = self.reports.values().fold(0u64, |total, report| {
+                    total.saturating_add(report.total_allocated_cpus())
+                });
+
+                cpus as f64 / n as f64
+            }
+        }
+    }
+
+    /// The mean number of GPUs a job was allocated, over every job in this
+    /// report.
+    pub fn average_gpus_per_job(&self) -> f64 {
+        match self.num_jobs() {
+            0 => 0.0,
+            n => {
+                let gpus = self.reports.values().fold(0u64, |total, report| {
+                    total.saturating_add(report.total_allocated_gpus())
+                });
+
+                gpus as f64 / n as f64
+            }
+        }
+    }
+
+    /// The mean job size for one local user - which is where an outlier shows
+    /// up, the project-wide mean having averaged them away.
+    pub fn average_cpus_per_job_for_user(&self, user: &str) -> f64 {
+        let jobs = self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.num_jobs_for_user(user))
+        });
+
+        match jobs {
+            0 => 0.0,
+            n => {
+                let cpus = self.reports.values().fold(0u64, |total, report| {
+                    total.saturating_add(report.allocated_cpus_for_user(user))
+                });
+
+                cpus as f64 / n as f64
+            }
+        }
+    }
+
+    pub fn average_gpus_per_job_for_user(&self, user: &str) -> f64 {
+        let jobs = self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.num_jobs_for_user(user))
+        });
+
+        match jobs {
+            0 => 0.0,
+            n => {
+                let gpus = self.reports.values().fold(0u64, |total, report| {
+                    total.saturating_add(report.allocated_gpus_for_user(user))
+                });
+
+                gpus as f64 / n as f64
+            }
+        }
+    }
+
     /// Total wall-clock runtime of every job in this report. Not usage - usage
     /// weights each second by the fraction of a node held.
     pub fn total_runtime_seconds(&self) -> u64 {
@@ -2464,8 +2759,9 @@ impl ProjectUsageReport {
     }
 
     ///
-    /// The mean expansion factor across every job in this report - queue time
-    /// over runtime, averaged per job.
+    /// The mean expansion factor across every job in this report - turnaround
+    /// over runtime, `(wait + run) / run`, averaged per job. 1.0 is ideal and
+    /// 0.0 means no jobs.
     ///
     /// Computed from the summed thousandths and the total job count, not by
     /// averaging each day's average: a day with four jobs would otherwise weigh
@@ -2507,12 +2803,13 @@ impl ProjectUsageReport {
         }
     }
 
-    /// Total queue time over total runtime - the robust companion to
-    /// `average_expansion_factor`, which no single job can move much.
+    /// Total turnaround over total runtime - the robust companion to
+    /// `average_expansion_factor`, which no single job can move much. 1.0 is
+    /// ideal, 0.0 means no jobs.
     pub fn aggregate_expansion_factor(&self) -> f64 {
         match self.total_runtime_seconds() {
             0 => 0.0,
-            runtime => self.total_wait_seconds() as f64 / runtime as f64,
+            runtime => self.total_wait_seconds().saturating_add(runtime) as f64 / runtime as f64,
         }
     }
 
@@ -3896,9 +4193,10 @@ mod tests {
 
     #[test]
     fn test_the_expansion_factor_is_the_mean_of_per_job_ratios() {
-        // Queue time over runtime, per job, averaged. A mean of ratios rather
-        // than a ratio of sums, so that a job which queued for a long time and
-        // then exited quickly shows up instead of being swallowed.
+        // Turnaround over runtime, per job, averaged - the classical form, so a
+        // job that never waited scores exactly 1.0. A mean of ratios rather than
+        // a ratio of sums, so that a job which queued for a long time and then
+        // exited quickly shows up instead of being swallowed.
         let mut report = DailyProjectUsageReport::default();
 
         // an hour's wait for an hour's work
@@ -3914,11 +4212,13 @@ mod tests {
         assert_eq!(report.num_jobs(), 2);
         assert_eq!(report.total_runtime_seconds(), 10800);
 
-        // (1.0 + 0.0) / 2
-        assert!((report.average_expansion_factor() - 0.5).abs() < 1e-9);
+        // the first job doubled its own runtime waiting, the second waited not
+        // at all: (2.0 + 1.0) / 2
+        assert!((report.average_expansion_factor() - 1.5).abs() < 1e-9);
 
-        // 3600 waited over 10800 run - the same jobs, weighted by size
-        assert!((report.aggregate_expansion_factor() - (1.0 / 3.0)).abs() < 1e-9);
+        // 3600 waited plus 10800 run, over 10800 run - the same jobs, weighted
+        // by size
+        assert!((report.aggregate_expansion_factor() - (14400.0 / 10800.0)).abs() < 1e-9);
 
         assert!(report.is_consistent());
     }
@@ -3935,8 +4235,8 @@ mod tests {
             struggling.add_expansion("alice", 7200, 4);
         }
 
-        // 1800 in this form, 1801 in the classical one - either way, loud
-        assert!(struggling.average_expansion_factor() > 1000.0);
+        // 7204 seconds of turnaround for 4 of work: 1801, and loud
+        assert!((struggling.average_expansion_factor() - 1801.0).abs() < 0.01);
 
         // and it survives being averaged with a well-behaved day, which is the
         // reason for preferring the mean of ratios: the aggregate form would
@@ -3954,15 +4254,170 @@ mod tests {
             combined.average_expansion_factor()
         );
         assert!(
-            combined.aggregate_expansion_factor() < 1.0,
-            "while the aggregate form buries it: {}",
+            combined.aggregate_expansion_factor() < 1.5,
+            "while the aggregate form buries it, close to the ideal 1.0: {}",
             combined.aggregate_expansion_factor()
         );
 
         // per user is where you look to find who it was
         assert!(combined.expansion_factor_for_user("alice") > 1000.0);
-        assert!(combined.expansion_factor_for_user("bob") < 1.0);
+        assert!(combined.expansion_factor_for_user("bob") < 1.01);
         assert!(combined.is_consistent());
+    }
+
+    #[test]
+    fn test_mean_job_size_distinguishes_many_small_jobs_from_a_few_large_ones() {
+        // The distinction usage cannot draw. Both of these projects consumed the
+        // same core-seconds; one ran a single wide job and the other ran a
+        // hundred narrow ones.
+        let mut wide = DailyProjectUsageReport::default();
+        wide.add_usage("alice", Usage::new(3600 * 128));
+        wide.add_jobs("alice", 1);
+        wide.add_expansion("alice", 0, 3600);
+        wide.add_job_size("alice", 128, 4);
+
+        let mut narrow = DailyProjectUsageReport::default();
+        for _ in 0..128 {
+            narrow.add_usage("bob", Usage::new(3600));
+            narrow.add_jobs("bob", 1);
+            narrow.add_expansion("bob", 0, 3600);
+            narrow.add_job_size("bob", 1, 0);
+        }
+
+        // indistinguishable by usage...
+        assert_eq!(wide.total_usage(), narrow.total_usage());
+
+        // ...and plainly different by job size
+        assert_eq!(wide.average_cpus_per_job(), 128.0);
+        assert_eq!(wide.average_gpus_per_job(), 4.0);
+        assert_eq!(narrow.average_cpus_per_job(), 1.0);
+        assert_eq!(narrow.average_gpus_per_job(), 0.0);
+
+        assert!(wide.is_consistent());
+        assert!(narrow.is_consistent());
+    }
+
+    #[test]
+    fn test_job_size_is_unweighted_by_runtime() {
+        // Each job counts once however long it ran, because the question is what
+        // shape the jobs were - not what the machine was occupied by, which is
+        // what the usage components already answer.
+        let mut report = DailyProjectUsageReport::default();
+
+        // one enormous job that ran for a minute
+        report.add_jobs("alice", 1);
+        report.add_expansion("alice", 0, 60);
+        report.add_job_size("alice", 512, 16);
+
+        // and one small job that ran for a day
+        report.add_jobs("alice", 1);
+        report.add_expansion("alice", 0, 86400);
+        report.add_job_size("alice", 2, 0);
+
+        // (512 + 2) / 2 - the day-long job does not dominate
+        assert_eq!(report.average_cpus_per_job(), 257.0);
+        assert_eq!(report.average_gpus_per_job(), 8.0);
+    }
+
+    #[test]
+    fn test_mean_job_size_is_per_user_and_per_project_over_every_job() {
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut busy = DailyProjectUsageReport::default();
+        for _ in 0..9 {
+            busy.add_jobs("alice", 1);
+            busy.add_job_size("alice", 4, 0);
+        }
+        busy.add_jobs("bob", 1);
+        busy.add_job_size("bob", 256, 8);
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &busy);
+
+        let mut quiet = DailyProjectUsageReport::default();
+        quiet.add_jobs("alice", 1);
+        quiet.add_job_size("alice", 4, 0);
+        report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet);
+
+        // ten four-core jobs and one 256-core job, over eleven jobs
+        assert_eq!(report.num_jobs(), 11);
+        assert!((report.average_cpus_per_job() - (296.0 / 11.0)).abs() < 1e-9);
+
+        // and per user, which is where the outlier is
+        assert_eq!(report.average_cpus_per_job_for_user("alice"), 4.0);
+        assert_eq!(report.average_cpus_per_job_for_user("bob"), 256.0);
+        assert_eq!(report.average_gpus_per_job_for_user("bob"), 8.0);
+        assert_eq!(report.average_cpus_per_job_for_user("nobody"), 0.0);
+    }
+
+    #[test]
+    fn test_job_sizes_survive_merging_renaming_and_scaling() {
+        let mut day = DailyProjectUsageReport::default();
+        day.add_usage("alice", Usage::new(3600));
+        day.add_jobs("alice", 2);
+        day.add_job_size("alice", 64, 4);
+
+        let mut merged = day.clone();
+        merged += day.clone();
+
+        assert_eq!(merged.total_allocated_cpus(), 128);
+        assert_eq!(merged.total_allocated_gpus(), 8);
+        assert_eq!(merged.num_jobs(), 4);
+        assert_eq!(merged.average_cpus_per_job(), 32.0);
+        assert!(merged.is_consistent());
+
+        // a credit conversion does not change how many cores a job held
+        let scaled = day.clone() * 100.0;
+        assert_eq!(scaled.total_allocated_cpus(), 64);
+        assert_eq!(scaled.average_cpus_per_job(), day.average_cpus_per_job());
+
+        let mut renamed = day.clone();
+        let mut renames = HashMap::new();
+        renames.insert("alice".to_string(), "alice2".to_string());
+        renamed.remap_local_users(&renames);
+
+        assert_eq!(renamed.allocated_cpus_for_user("alice2"), 64);
+        assert_eq!(renamed.allocated_cpus_for_user("alice"), 0);
+        assert_eq!(renamed.average_cpus_per_job_for_user("alice2"), 32.0);
+        assert!(renamed.is_consistent());
+    }
+
+    #[test]
+    fn test_a_report_from_an_instance_without_job_sizes_still_loads() {
+        let legacy = serde_json::json!({
+            "reports": { "alice": { "seconds": 1800 } },
+            "num_jobs": 1,
+            "is_complete": true
+        });
+
+        let report: DailyProjectUsageReport = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(report.total_allocated_cpus(), 0);
+        assert_eq!(report.average_cpus_per_job(), 0.0);
+        assert_eq!(report.average_gpus_per_job(), 0.0);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_a_job_that_never_waited_scores_exactly_one() {
+        // The classical convention: 1.0 is the ideal, not 0.0. Reading it the
+        // other way round would make a perfectly served project look like a
+        // badly served one.
+        let mut report = DailyProjectUsageReport::default();
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 0);
+        report.add_expansion("alice", 0, 3600);
+
+        assert_eq!(report.average_expansion_factor(), 1.0);
+        assert_eq!(report.aggregate_expansion_factor(), 1.0);
+
+        // and a job that waited as long as it ran scores 2.0
+        let mut report = DailyProjectUsageReport::default();
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 3600);
+        report.add_expansion("alice", 3600, 3600);
+
+        assert_eq!(report.average_expansion_factor(), 2.0);
+        assert_eq!(report.aggregate_expansion_factor(), 2.0);
     }
 
     #[test]
@@ -3978,7 +4433,9 @@ mod tests {
         assert_eq!(report.average_expansion_factor(), 0.0);
         assert_eq!(report.aggregate_expansion_factor(), 0.0);
 
-        // and an empty report is 0.0 rather than a NaN
+        // An empty report is 0.0 rather than a NaN. Note that 0.0 is the
+        // no-jobs sentinel and not a score - on the classical scale no real job
+        // can be below 1.0, so the two cannot be confused.
         let empty = DailyProjectUsageReport::default();
         assert_eq!(empty.average_expansion_factor(), 0.0);
         assert_eq!(empty.aggregate_expansion_factor(), 0.0);
@@ -4032,12 +4489,12 @@ mod tests {
         quiet.add_expansion("alice", 3600, 3600);
         report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet);
 
-        // one job in a hundred had an expansion factor of 1, so the mean is 0.01
+        // ninety-nine jobs scored 1.0 and one scored 2.0, so the mean is 1.01
         assert_eq!(report.num_jobs(), 100);
-        assert!((report.average_expansion_factor() - 0.01).abs() < 1e-9);
+        assert!((report.average_expansion_factor() - 1.01).abs() < 1e-9);
 
-        // not 0.5, which is what averaging the two daily means would give
-        assert!(report.average_expansion_factor() < 0.1);
+        // not 1.5, which is what averaging the two daily means would give
+        assert!(report.average_expansion_factor() < 1.1);
     }
 
     #[test]
@@ -4064,7 +4521,7 @@ mod tests {
         project_report.set_report(&Date::parse("2026-03-01").unwrap(), &report);
         project_report.scale_total(0.5);
 
-        assert!((project_report.average_expansion_factor() - 0.5).abs() < 1e-9);
+        assert!((project_report.average_expansion_factor() - 1.5).abs() < 1e-9);
         assert_eq!(project_report.total_runtime_seconds(), 3600);
     }
 

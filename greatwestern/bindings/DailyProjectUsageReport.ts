@@ -37,6 +37,22 @@ user_runtime_seconds: { [key in string]?: bigint },
  */
 total_runtime_seconds: bigint, 
 /**
+ * Per-user sum of the cores each job was allocated.
+ */
+user_allocated_cpus: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_allocated_cpus when populated.
+ */
+total_allocated_cpus: bigint, 
+/**
+ * Per-user sum of the GPUs each job was allocated.
+ */
+user_allocated_gpus: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_allocated_gpus when populated.
+ */
+total_allocated_gpus: bigint, 
+/**
  * Usage from attempts superseded by a requeue, per local user.
  */
 requeue_reports: { [key in string]?: Usage }, 

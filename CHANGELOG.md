@@ -78,13 +78,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `expansion_factor_for_user()` then says who. Both appear in the printed report
   alongside the job count.
 
-  Note the convention: this is `wait / run`, so zero would mean nothing ever
-  waited. The classical expansion factor - turnaround over runtime, never below
-  one - is exactly this plus one, so convert before comparing with `sreport`.
+  The convention is the classical one used by `sreport` and the literature -
+  `(wait + run) / run` - so **1.0 is the ideal** and the figure rises with every
+  second spent queueing. `0.0` means there were no jobs, not a perfect score.
 
   This could not be derived from what was already collected: the denominator has
   to be runtime, and the nearest existing figure is usage, which weights each
   second by the fraction of a node a job held.
+- **Mean job size.** Reports now record the cores and GPUs each job was
+  allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
+  per-user variants) - many small jobs against a few large ones. Usage cannot
+  answer this: the same core-seconds come from one job on a hundred cores or a
+  hundred jobs on one core, which is exactly the distinction being drawn.
+
+  Each job counts once however long it ran, since the question is what shape the
+  jobs were rather than what the machine was occupied by. Note that the
+  project-wide mean describes a mixed population badly - four 512-core jobs
+  beside a hundred 2-core ones average to about 20 - so the per-user figures are
+  the ones to read.
 - **Reservation accounting.** Usage reports now record which Slurm reservation a
   job ran under, so that what a project put into a reservation can be seen at
   all:

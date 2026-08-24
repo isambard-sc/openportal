@@ -3137,12 +3137,13 @@ impl ProjectUsageReport {
         Ok(self.0.total_runtime_seconds())
     }
 
-    /// Mean expansion factor per job: queue time over runtime. Zero would mean
-    /// nothing ever waited.
+    /// Mean expansion factor per job: turnaround over runtime,
+    /// `(wait + run) / run`, the classical definition used by `sreport`.
     ///
-    /// This is the "wait over run" form; the classical expansion factor -
-    /// turnaround over runtime, never below one - is this plus one. Convert
-    /// before comparing with `sreport` or the literature.
+    /// 1.0 is the ideal - a job that ran the instant it became eligible - and
+    /// the figure rises with every second spent queueing; 2.0 means jobs spent
+    /// as long waiting as running. 0.0 means there were no jobs, not a perfect
+    /// score: no real job can score below 1.0.
     ///
     /// Being a mean of ratios, one job that queued for hours and exited in
     /// seconds moves it a long way. That is the point - it is what a user
@@ -3153,8 +3154,9 @@ impl ProjectUsageReport {
         Ok(self.0.average_expansion_factor())
     }
 
-    /// Total queue time over total runtime - the robust companion to
-    /// `average_expansion_factor`.
+    /// Total turnaround over total runtime, on the same 1.0-is-ideal scale -
+    /// the robust companion to `average_expansion_factor`. A mean far above the
+    /// aggregate says a few short jobs waited a long time.
     #[getter]
     fn aggregate_expansion_factor(&self) -> PyResult<f64> {
         Ok(self.0.aggregate_expansion_factor())
@@ -3164,6 +3166,30 @@ impl ProjectUsageReport {
     /// user shows up, the project-wide mean having averaged them away.
     fn expansion_factor_for_user(&self, user: &str) -> PyResult<f64> {
         Ok(self.0.expansion_factor_for_user(user))
+    }
+
+    /// Mean number of cores a job was allocated - many small jobs against a few
+    /// large ones. Each job counts once however long it ran, and this cannot be
+    /// got from usage: the same core-seconds come from one job on many cores or
+    /// many jobs on one core.
+    #[getter]
+    fn average_cpus_per_job(&self) -> PyResult<f64> {
+        Ok(self.0.average_cpus_per_job())
+    }
+
+    /// Mean number of GPUs a job was allocated. Zero for a project that ran no
+    /// GPU work, which is itself worth knowing on a GPU machine.
+    #[getter]
+    fn average_gpus_per_job(&self) -> PyResult<f64> {
+        Ok(self.0.average_gpus_per_job())
+    }
+
+    fn average_cpus_per_job_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.average_cpus_per_job_for_user(user))
+    }
+
+    fn average_gpus_per_job_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.average_gpus_per_job_for_user(user))
     }
 
     /// Usage consumed by job attempts that were superseded by a requeue. Not
@@ -3948,12 +3974,13 @@ impl DailyProjectUsageReport {
         Ok(self.0.total_runtime_seconds())
     }
 
-    /// Mean expansion factor per job: queue time over runtime. Zero would mean
-    /// nothing ever waited.
+    /// Mean expansion factor per job: turnaround over runtime,
+    /// `(wait + run) / run`, the classical definition used by `sreport`.
     ///
-    /// This is the "wait over run" form; the classical expansion factor -
-    /// turnaround over runtime, never below one - is this plus one. Convert
-    /// before comparing with `sreport` or the literature.
+    /// 1.0 is the ideal - a job that ran the instant it became eligible - and
+    /// the figure rises with every second spent queueing; 2.0 means jobs spent
+    /// as long waiting as running. 0.0 means there were no jobs, not a perfect
+    /// score: no real job can score below 1.0.
     ///
     /// Being a mean of ratios, one job that queued for hours and exited in
     /// seconds moves it a long way. That is the point - it is what a user
@@ -3964,8 +3991,9 @@ impl DailyProjectUsageReport {
         Ok(self.0.average_expansion_factor())
     }
 
-    /// Total queue time over total runtime - the robust companion to
-    /// `average_expansion_factor`.
+    /// Total turnaround over total runtime, on the same 1.0-is-ideal scale -
+    /// the robust companion to `average_expansion_factor`. A mean far above the
+    /// aggregate says a few short jobs waited a long time.
     #[getter]
     fn aggregate_expansion_factor(&self) -> PyResult<f64> {
         Ok(self.0.aggregate_expansion_factor())
@@ -3977,8 +4005,45 @@ impl DailyProjectUsageReport {
         Ok(self.0.expansion_factor_for_user(user))
     }
 
+    /// Mean number of cores a job was allocated - many small jobs against a few
+    /// large ones. Each job counts once however long it ran, and this cannot be
+    /// got from usage: the same core-seconds come from one job on many cores or
+    /// many jobs on one core.
+    #[getter]
+    fn average_cpus_per_job(&self) -> PyResult<f64> {
+        Ok(self.0.average_cpus_per_job())
+    }
+
+    /// Mean number of GPUs a job was allocated. Zero for a project that ran no
+    /// GPU work, which is itself worth knowing on a GPU machine.
+    #[getter]
+    fn average_gpus_per_job(&self) -> PyResult<f64> {
+        Ok(self.0.average_gpus_per_job())
+    }
+
+    fn average_cpus_per_job_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.average_cpus_per_job_for_user(user))
+    }
+
+    fn average_gpus_per_job_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.average_gpus_per_job_for_user(user))
+    }
+
     fn runtime_seconds_for_user(&self, user: &str) -> PyResult<u64> {
         Ok(self.0.runtime_seconds_for_user(user))
+    }
+
+    /// The cores allocated to this day's jobs, summed over jobs - the numerator
+    /// of `average_cpus_per_job`.
+    #[getter]
+    fn total_allocated_cpus(&self) -> PyResult<u64> {
+        Ok(self.0.total_allocated_cpus())
+    }
+
+    /// The GPUs allocated to this day's jobs, summed over jobs.
+    #[getter]
+    fn total_allocated_gpus(&self) -> PyResult<u64> {
+        Ok(self.0.total_allocated_gpus())
     }
 
     /// Usage this user consumed on attempts superseded by a requeue.

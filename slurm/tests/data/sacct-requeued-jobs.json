@@ -44,7 +44,15 @@
       "        day-two window, which is where the requeue must be counted - the",
       "        attempt's own start is on day one. Spans the second window,",
       "        2026-03-02T00:00:00Z (1772409600) to 2026-03-03T00:00:00Z",
-      "        (1772496000)."
+      "        (1772496000).",
+      "",
+      "Reservations. Records carry the reservation they ran under, in both of the",
+      "shapes Slurm has been seen to report - a bare name and an object with a name",
+      "and an id - since which one arrives depends on the version. Jobs 100 and 200",
+      "ran inside 'maintenance_test'; job 300 inside 'gpu_bench' (and its two",
+      "superseded attempts held its nodes just as the successful one did); every",
+      "other job ran outside any reservation, which is how Slurm reports almost",
+      "everything."
     ]
   },
   "jobs": [
@@ -105,7 +113,8 @@
             "count": 128
           }
         ]
-      }
+      },
+      "reservation": "maintenance_test"
     },
     {
       "job_id": 200,
@@ -164,6 +173,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 7,
+        "name": "maintenance_test"
       }
     },
     {
@@ -223,6 +236,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 7,
+        "name": "maintenance_test"
       }
     },
     {
@@ -282,6 +299,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 9,
+        "name": " gpu_bench "
       }
     },
     {
@@ -341,6 +362,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 9,
+        "name": " gpu_bench "
       }
     },
     {
@@ -400,6 +425,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 9,
+        "name": " gpu_bench "
       }
     },
     {
@@ -934,6 +963,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 0,
+        "name": ""
       }
     },
     {
@@ -993,6 +1026,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 0,
+        "name": ""
       }
     },
     {

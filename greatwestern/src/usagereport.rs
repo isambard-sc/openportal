@@ -469,6 +469,27 @@ pub struct DailyProjectUsageReport {
     #[serde(default)]
     requeue_state_usage: HashMap<String, Usage>,
 
+    // ---- Reservations ------------------------------------------------------
+    //
+    // Which reservation a job ran under, so that a reservation's occupancy can
+    // be seen at all. Jobs outside a reservation - almost all of them - are not
+    // recorded here, so `total_usage_including_requeues()` minus the reservation
+    // total is the unreserved usage.
+    //
+    // These figures deliberately count *every* attempt, superseded ones
+    // included: a requeued attempt held the reservation's nodes exactly as its
+    // replacement did, and for occupancy that is what matters. The superseded
+    // share is carried separately so the two can still be told apart.
+    /// Reservation name → local user → usage consumed inside it.
+    #[serde(default)]
+    reservation_reports: HashMap<String, HashMap<String, Usage>>,
+    /// Reservation name → the part of the above from superseded attempts.
+    #[serde(default)]
+    reservation_requeue_usage: HashMap<String, Usage>,
+    /// Reservation name → jobs that started inside it, counted as `num_jobs` is.
+    #[serde(default)]
+    reservation_jobs: HashMap<String, u64>,
+
     is_complete: bool,
 }
 
@@ -742,6 +763,22 @@ impl DailyProjectUsageReport {
         if !self.requeue_state_usage.is_empty() {
             let state_usage: Usage = self.requeue_state_usage.values().cloned().sum();
             if state_usage != self.total_requeue_usage() {
+                return false;
+            }
+        }
+
+        // Reservations account for a subset of the day's consumption, not all of
+        // it, so this is a bound rather than an equality - but usage inside
+        // reservations exceeding everything consumed would mean a record had
+        // been counted twice.
+        if self.total_reservation_usage().seconds()
+            > self.total_usage_including_requeues().seconds()
+        {
+            return false;
+        }
+
+        for (reservation, requeued) in &self.reservation_requeue_usage {
+            if requeued.seconds() > self.reservation_usage(reservation).seconds() {
                 return false;
             }
         }
@@ -1061,6 +1098,136 @@ impl DailyProjectUsageReport {
         }
     }
 
+    // ---- Reservations ------------------------------------------------------
+
+    /// Record usage consumed inside a reservation. Called for every attempt,
+    /// superseded ones included - see the field comments.
+    pub fn add_reservation_usage(&mut self, reservation: &str, local_user: &str, usage: Usage) {
+        if reservation.is_empty() || usage.is_zero() {
+            return;
+        }
+
+        let reports = self
+            .reservation_reports
+            .entry(reservation.to_string())
+            .or_default();
+
+        *reports.entry(local_user.to_string()).or_default() += usage;
+    }
+
+    /// Record the part of a reservation's usage that came from an attempt later
+    /// superseded by a requeue. This is a subset of `add_reservation_usage`, not
+    /// an addition to it, so both are called for the same record.
+    pub fn add_reservation_requeue_usage(&mut self, reservation: &str, usage: Usage) {
+        if reservation.is_empty() || usage.is_zero() {
+            return;
+        }
+
+        *self
+            .reservation_requeue_usage
+            .entry(reservation.to_string())
+            .or_default() += usage;
+    }
+
+    pub fn add_reservation_jobs(&mut self, reservation: &str, count: u64) {
+        if reservation.is_empty() {
+            return;
+        }
+
+        *self
+            .reservation_jobs
+            .entry(reservation.to_string())
+            .or_default() += count;
+    }
+
+    /// The reservations any of this day's jobs ran under, sorted by name.
+    pub fn reservations(&self) -> Vec<String> {
+        let mut reservations: Vec<String> = self
+            .reservation_reports
+            .keys()
+            .chain(self.reservation_jobs.keys())
+            .cloned()
+            .collect();
+
+        reservations.sort();
+        reservations.dedup();
+        reservations
+    }
+
+    pub fn has_reservations(&self) -> bool {
+        !self.reservation_reports.is_empty() || !self.reservation_jobs.is_empty()
+    }
+
+    /// Usage consumed inside `reservation`, counting every attempt.
+    pub fn reservation_usage(&self, reservation: &str) -> Usage {
+        match self.reservation_reports.get(reservation) {
+            Some(reports) => reports.values().cloned().sum(),
+            None => Usage::default(),
+        }
+    }
+
+    pub fn reservation_usage_for_user(&self, reservation: &str, local_user: &str) -> Usage {
+        self.reservation_reports
+            .get(reservation)
+            .and_then(|reports| reports.get(local_user))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The part of `reservation_usage` that was discarded by a requeue.
+    pub fn reservation_requeue_usage(&self, reservation: &str) -> Usage {
+        self.reservation_requeue_usage
+            .get(reservation)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn reservation_jobs(&self, reservation: &str) -> u64 {
+        self.reservation_jobs.get(reservation).copied().unwrap_or(0)
+    }
+
+    pub fn reservation_users(&self, reservation: &str) -> Vec<String> {
+        let mut users: Vec<String> = match self.reservation_reports.get(reservation) {
+            Some(reports) => reports.keys().cloned().collect(),
+            None => Vec::new(),
+        };
+
+        users.sort();
+        users
+    }
+
+    /// Usage consumed inside any reservation, counting every attempt.
+    pub fn total_reservation_usage(&self) -> Usage {
+        self.reservation_reports
+            .values()
+            .map(|reports| reports.values().cloned().sum::<Usage>())
+            .sum()
+    }
+
+    /// Usage consumed outside any reservation. Counts every attempt, so it is
+    /// the complement of `total_reservation_usage` within
+    /// `total_usage_including_requeues`.
+    pub fn usage_outside_reservations(&self) -> Usage {
+        self.total_usage_including_requeues() - self.total_reservation_usage()
+    }
+
+    /// Jobs, usage and discarded share per reservation, busiest first.
+    pub fn reservation_summary(&self) -> Vec<(String, u64, Usage, Usage)> {
+        let mut summary: Vec<(String, u64, Usage, Usage)> = self
+            .reservations()
+            .into_iter()
+            .map(|reservation| {
+                let jobs = self.reservation_jobs(&reservation);
+                let usage = self.reservation_usage(&reservation);
+                let requeued = self.reservation_requeue_usage(&reservation);
+                (reservation, jobs, usage, requeued)
+            })
+            .collect();
+
+        summary.sort_by(|a, b| b.2.seconds().cmp(&a.2.seconds()).then(a.0.cmp(&b.0)));
+        summary
+    }
+
     /// Scale the usage totals - base and requeue together. The two must always
     /// be scaled by the same factor, or `total_usage()` and
     /// `total_requeue_usage()` end up in different units and the sum a client
@@ -1073,6 +1240,14 @@ impl DailyProjectUsageReport {
             *usage *= factor;
         }
         for usage in self.requeue_state_usage.values_mut() {
+            *usage *= factor;
+        }
+        for reports in self.reservation_reports.values_mut() {
+            for usage in reports.values_mut() {
+                *usage *= factor;
+            }
+        }
+        for usage in self.reservation_requeue_usage.values_mut() {
             *usage *= factor;
         }
     }
@@ -1103,6 +1278,14 @@ impl DailyProjectUsageReport {
             *usage /= divisor;
         }
         for usage in self.requeue_state_usage.values_mut() {
+            *usage /= divisor;
+        }
+        for reports in self.reservation_reports.values_mut() {
+            for usage in reports.values_mut() {
+                *usage /= divisor;
+            }
+        }
+        for usage in self.reservation_requeue_usage.values_mut() {
             *usage /= divisor;
         }
     }
@@ -1210,6 +1393,21 @@ impl DailyProjectUsageReport {
             })
             .collect();
 
+        let old_reservations = std::mem::take(&mut self.reservation_reports);
+        self.reservation_reports = old_reservations
+            .into_iter()
+            .map(|(reservation, user_map)| {
+                let new_user_map = user_map
+                    .into_iter()
+                    .map(|(user, usage)| {
+                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                        (new_user, usage)
+                    })
+                    .collect();
+                (reservation, new_user_map)
+            })
+            .collect();
+
         let old_requeue_waits = std::mem::take(&mut self.user_requeue_wait_seconds);
         self.user_requeue_wait_seconds = old_requeue_waits
             .into_iter()
@@ -1287,6 +1485,18 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             .requeue_wait_seconds
             .saturating_add(other.requeue_wait_seconds);
 
+        for (reservation, reports) in other.reservation_reports {
+            for (user, usage) in reports {
+                new_report.add_reservation_usage(&reservation, &user, usage);
+            }
+        }
+        for (reservation, usage) in other.reservation_requeue_usage {
+            new_report.add_reservation_requeue_usage(&reservation, usage);
+        }
+        for (reservation, count) in &other.reservation_jobs {
+            new_report.add_reservation_jobs(reservation, *count);
+        }
+
         new_report.is_complete = false; // combine reports are never complete
 
         new_report
@@ -1346,6 +1556,18 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
         self.requeue_wait_seconds = self
             .requeue_wait_seconds
             .saturating_add(other.requeue_wait_seconds);
+
+        for (reservation, reports) in other.reservation_reports {
+            for (user, usage) in reports {
+                self.add_reservation_usage(&reservation, &user, usage);
+            }
+        }
+        for (reservation, usage) in other.reservation_requeue_usage {
+            self.add_reservation_requeue_usage(&reservation, usage);
+        }
+        for (reservation, count) in &other.reservation_jobs {
+            self.add_reservation_jobs(reservation, *count);
+        }
 
         self.is_complete = false; // combine reports are never complete
     }
@@ -1472,6 +1694,18 @@ impl std::fmt::Display for ProjectUsageReport {
                     Usage::new(report.average_requeue_wait_seconds())
                 )?;
             }
+            if report.has_reservations() {
+                for (reservation, jobs, usage, _) in report.reservation_summary() {
+                    writeln!(
+                        f,
+                        "Reservation {}: {} | {} {}",
+                        reservation,
+                        usage,
+                        jobs,
+                        if jobs == 1 { "job" } else { "jobs" }
+                    )?;
+                }
+            }
             writeln!(f, "Daily total: {}", report.total_usage())?;
             writeln!(f, "----------------------------------------")?;
         }
@@ -1504,6 +1738,14 @@ impl std::fmt::Display for ProjectUsageReport {
                 },
                 self.total_requeue_usage(),
                 Usage::new(self.average_requeue_wait_seconds())
+            )?;
+        }
+        if self.has_reservations() {
+            writeln!(
+                f,
+                "In reservations: {} across {}",
+                self.total_reservation_usage(),
+                self.reservations().join(", ")
             )?;
         }
 
@@ -1590,6 +1832,18 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                     Usage::new(daily.average_requeue_wait_seconds()).in_hours()
                 )?;
             }
+            if daily.has_reservations() {
+                for (reservation, jobs, usage, _) in daily.reservation_summary() {
+                    writeln!(
+                        f,
+                        "Reservation {}: {} | {} {}",
+                        reservation,
+                        usage.in_hours(),
+                        jobs,
+                        if jobs == 1 { "job" } else { "jobs" }
+                    )?;
+                }
+            }
             writeln!(f, "Daily total: {}", daily.total_usage().in_hours())?;
             writeln!(f, "----------------------------------------")?;
         }
@@ -1622,6 +1876,14 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                 },
                 report.total_requeue_usage().in_hours(),
                 Usage::new(report.average_requeue_wait_seconds()).in_hours()
+            )?;
+        }
+        if report.has_reservations() {
+            writeln!(
+                f,
+                "In reservations: {} across {}",
+                report.total_reservation_usage().in_hours(),
+                report.reservations().join(", ")
             )?;
         }
 
@@ -1782,6 +2044,14 @@ impl ProjectUsageReport {
                 *usage *= factor;
             }
             for usage in report.requeue_state_usage.values_mut() {
+                *usage *= factor;
+            }
+            for reports in report.reservation_reports.values_mut() {
+                for usage in reports.values_mut() {
+                    *usage *= factor;
+                }
+            }
+            for usage in report.reservation_requeue_usage.values_mut() {
                 *usage *= factor;
             }
         }
@@ -1980,6 +2250,241 @@ impl ProjectUsageReport {
     /// True if anything about a requeue was recorded for any day.
     pub fn has_requeues(&self) -> bool {
         self.reports.values().any(|report| report.has_requeues())
+    }
+
+    // ---- Reservations ------------------------------------------------------
+
+    /// True if any of this project's jobs ran inside a reservation.
+    pub fn has_reservations(&self) -> bool {
+        self.reports
+            .values()
+            .any(|report| report.has_reservations())
+    }
+
+    /// The reservations this project's jobs ran under, sorted by name.
+    pub fn reservations(&self) -> Vec<String> {
+        let mut reservations: Vec<String> = self
+            .reports
+            .values()
+            .flat_map(|report| report.reservations())
+            .collect();
+
+        reservations.sort();
+        reservations.dedup();
+        reservations
+    }
+
+    /// Usage this project consumed inside `reservation`, counting every attempt.
+    pub fn reservation_usage(&self, reservation: &str) -> Usage {
+        self.reports
+            .values()
+            .map(|report| report.reservation_usage(reservation))
+            .sum()
+    }
+
+    /// The part of `reservation_usage` that was discarded by a requeue.
+    pub fn reservation_requeue_usage(&self, reservation: &str) -> Usage {
+        self.reports
+            .values()
+            .map(|report| report.reservation_requeue_usage(reservation))
+            .sum()
+    }
+
+    pub fn reservation_jobs(&self, reservation: &str) -> u64 {
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.reservation_jobs(reservation))
+        })
+    }
+
+    /// Usage consumed inside any reservation, counting every attempt.
+    pub fn total_reservation_usage(&self) -> Usage {
+        self.reports
+            .values()
+            .map(|report| report.total_reservation_usage())
+            .sum()
+    }
+
+    /// Usage consumed outside any reservation.
+    pub fn usage_outside_reservations(&self) -> Usage {
+        self.total_usage_including_requeues() - self.total_reservation_usage()
+    }
+
+    /// Jobs, usage and discarded share per reservation, busiest first.
+    pub fn reservation_summary(&self) -> Vec<(String, u64, Usage, Usage)> {
+        let mut summary: Vec<(String, u64, Usage, Usage)> = self
+            .reservations()
+            .into_iter()
+            .map(|reservation| {
+                let jobs = self.reservation_jobs(&reservation);
+                let usage = self.reservation_usage(&reservation);
+                let requeued = self.reservation_requeue_usage(&reservation);
+                (reservation, jobs, usage, requeued)
+            })
+            .collect();
+
+        summary.sort_by(|a, b| b.2.seconds().cmp(&a.2.seconds()).then(a.0.cmp(&b.0)));
+        summary
+    }
+
+    ///
+    /// A readable summary of what this project ran inside reservations.
+    ///
+    /// This answers "what did this project put into each reservation", which is
+    /// the half of reservation utilisation a usage report can answer. The other
+    /// half - what the reservation *held* - is a property of the reservation
+    /// rather than of any project, and no per-project report can supply it: a
+    /// reservation may be shared by several projects, and its capacity comes
+    /// from its node count and duration, which the job records do not carry. So
+    /// the shares below are shares of this project's own consumption, and are
+    /// deliberately not called utilisation.
+    ///
+    pub fn reservation_report(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::new();
+        let rule = "=".repeat(64);
+
+        // `write!` to a String cannot fail, so the results are deliberately
+        // discarded rather than unwrapped - `unwrap` is denied in this crate.
+        let _ = writeln!(out, "Reservation summary for {}", self.project());
+        let _ = writeln!(out, "{}", rule);
+
+        if !self.has_reservations() {
+            let _ = writeln!(out, "No jobs ran inside a reservation.");
+            let _ = writeln!(out, "{}", rule);
+            return out;
+        }
+
+        let truth = self.total_usage_including_requeues();
+        let reserved = self.total_reservation_usage();
+
+        let percent = |part: &Usage| match truth.seconds() {
+            0 => 0.0,
+            total => 100.0 * part.seconds() as f64 / total as f64,
+        };
+
+        let _ = writeln!(
+            out,
+            "Consumed inside reservations  : {:>14}  ({:.1}% of this project)",
+            reserved.in_hours().to_string(),
+            percent(&reserved)
+        );
+        let _ = writeln!(
+            out,
+            "Consumed outside reservations : {:>14}",
+            self.usage_outside_reservations().in_hours().to_string()
+        );
+        let _ = writeln!(
+            out,
+            "True consumption              : {:>14}",
+            truth.in_hours().to_string()
+        );
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "By reservation:");
+
+        for (reservation, jobs, usage, requeued) in self.reservation_summary() {
+            let _ = writeln!(
+                out,
+                "  {:<24} {:>5} {:<5} {:>14}  ({:.1}%)",
+                reservation,
+                jobs,
+                if jobs == 1 { "job" } else { "jobs" },
+                usage.in_hours().to_string(),
+                percent(&usage)
+            );
+
+            if !requeued.is_zero() {
+                let _ = writeln!(
+                    out,
+                    "  {:<24} {:>5} {:<5} {:>14}   of which discarded by requeues",
+                    "",
+                    "",
+                    "",
+                    requeued.in_hours().to_string()
+                );
+            }
+        }
+
+        // ---- per day, then per user within each reservation
+        let _ = writeln!(out);
+        let _ = writeln!(out, "By day:");
+
+        for date in self.dates() {
+            let Some(report) = self.reports.get(&date) else {
+                continue;
+            };
+
+            if !report.has_reservations() {
+                continue;
+            }
+
+            for (reservation, jobs, usage, _) in report.reservation_summary() {
+                let _ = writeln!(
+                    out,
+                    "  {:<12} {:<24} {:>5} {:<5} {:>14}",
+                    date.to_string(),
+                    reservation,
+                    jobs,
+                    if jobs == 1 { "job" } else { "jobs" },
+                    usage.in_hours().to_string()
+                );
+            }
+        }
+
+        let mut local_to_portal = HashMap::new();
+
+        for (user, local_user) in &self.users {
+            local_to_portal.insert(local_user.clone(), user.clone());
+        }
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "By user:");
+
+        for reservation in self.reservations() {
+            let mut users: Vec<String> = self
+                .reports
+                .values()
+                .flat_map(|report| report.reservation_users(&reservation))
+                .collect();
+
+            users.sort();
+            users.dedup();
+
+            for user in users {
+                let usage: Usage = self
+                    .reports
+                    .values()
+                    .map(|report| report.reservation_usage_for_user(&reservation, &user))
+                    .sum();
+
+                let label = match local_to_portal.get(&user) {
+                    Some(portal_user) => portal_user.to_string(),
+                    None => format!("{} - unknown", user),
+                };
+
+                let _ = writeln!(
+                    out,
+                    "  {:<24} {:<24} {:>14}",
+                    reservation,
+                    label,
+                    usage.in_hours().to_string()
+                );
+            }
+        }
+
+        let _ = writeln!(out, "{}", rule);
+        let _ = writeln!(
+            out,
+            "Shares are of this project's own consumption. What each reservation held -"
+        );
+        let _ = writeln!(
+            out,
+            "and so how fully it was used - is a property of the reservation, not of any"
+        );
+        let _ = writeln!(out, "one project, and is not available from these records.");
+
+        out
     }
 
     /// Requeue events and usage per interrupting state, worst first - see
@@ -2745,6 +3250,57 @@ impl UsageReport {
         self.reports.values().any(|report| report.has_requeues())
     }
 
+    /// True if any project's jobs ran inside a reservation.
+    pub fn has_reservations(&self) -> bool {
+        self.reports
+            .values()
+            .any(|report| report.has_reservations())
+    }
+
+    /// Usage consumed inside any reservation, across every project.
+    pub fn total_reservation_usage(&self) -> Usage {
+        self.reports
+            .values()
+            .map(|report| report.total_reservation_usage())
+            .sum()
+    }
+
+    ///
+    /// A readable reservation summary for every project that ran inside one.
+    ///
+    /// Note what this is not: a reservation's own utilisation. A reservation is
+    /// usually shared between projects, so even summed over a portal these are
+    /// the shares each project contributed, not how full the reservation was -
+    /// see `ProjectUsageReport::reservation_report`.
+    ///
+    pub fn reservation_report(&self) -> String {
+        use std::fmt::Write;
+
+        let mut projects: Vec<&ProjectIdentifier> = self.reports.keys().collect();
+        projects.sort_by_cached_key(|project| project.to_string());
+
+        let mut out = String::new();
+
+        for project in projects {
+            let Some(report) = self.reports.get(project) else {
+                continue;
+            };
+
+            if !report.has_reservations() {
+                continue;
+            }
+
+            // `write!` to a String cannot fail
+            let _ = write!(out, "{}", report.reservation_report());
+        }
+
+        if out.is_empty() {
+            let _ = writeln!(out, "No jobs ran inside a reservation for any project.");
+        }
+
+        out
+    }
+
     /// A readable requeue summary for every project that has one - see
     /// `ProjectUsageReport::requeue_report`. Projects with no requeues are left
     /// out rather than listed as empty, since on a real portal they are the
@@ -3012,6 +3568,160 @@ mod tests {
         report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet_day);
 
         report
+    }
+
+    /// A day with usage inside two reservations and some outside them.
+    fn report_with_reservations() -> DailyProjectUsageReport {
+        let mut report = report_with_requeues();
+
+        // of alice's 1800 reported and 7200 discarded seconds, some ran inside
+        // `bench`; bob's 600 ran inside `maint`
+        report.add_reservation_usage("bench", "alice", Usage::new(1200));
+        report.add_reservation_usage("bench", "alice", Usage::new(4800));
+        report.add_reservation_requeue_usage("bench", Usage::new(4800));
+        report.add_reservation_jobs("bench", 1);
+
+        report.add_reservation_usage("maint", "bob", Usage::new(600));
+        report.add_reservation_jobs("maint", 1);
+
+        report
+    }
+
+    #[test]
+    fn test_reservation_usage_is_a_subset_of_consumption_not_a_partition_of_it() {
+        // Most jobs run outside a reservation, so these figures account for part
+        // of a day rather than all of it - and they count superseded attempts,
+        // so the part they account for is of the true total, not the reported
+        // one.
+        let report = report_with_reservations();
+
+        assert_eq!(report.reservation_usage("bench"), Usage::new(6000));
+        assert_eq!(report.reservation_requeue_usage("bench"), Usage::new(4800));
+        assert_eq!(report.reservation_usage("maint"), Usage::new(600));
+        assert_eq!(report.total_reservation_usage(), Usage::new(6600));
+
+        assert_eq!(
+            report.total_reservation_usage() + report.usage_outside_reservations(),
+            report.total_usage_including_requeues()
+        );
+
+        assert_eq!(
+            report.reservation_usage_for_user("bench", "alice"),
+            Usage::new(6000)
+        );
+        assert_eq!(report.reservation_users("bench"), vec!["alice".to_string()]);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_a_report_claiming_more_reservation_usage_than_it_consumed_is_inconsistent() {
+        // The one invariant available: reservations account for a subset, so
+        // usage inside them exceeding everything consumed means a record was
+        // counted twice.
+        let mut report = DailyProjectUsageReport::default();
+        report.add_usage("alice", Usage::new(600));
+        report.add_reservation_usage("bench", "alice", Usage::new(6000));
+
+        assert!(!report.is_consistent());
+
+        // and a discarded share larger than the reservation's own usage
+        let mut report = DailyProjectUsageReport::default();
+        report.add_usage("alice", Usage::new(6000));
+        report.add_reservation_usage("bench", "alice", Usage::new(600));
+        report.add_reservation_requeue_usage("bench", Usage::new(6000));
+
+        assert!(!report.is_consistent());
+    }
+
+    #[test]
+    fn test_reservation_figures_survive_merging_scaling_and_renaming() {
+        let mut merged = report_with_reservations();
+        merged += report_with_reservations();
+
+        assert_eq!(merged.reservation_usage("bench"), Usage::new(12000));
+        assert_eq!(merged.reservation_requeue_usage("bench"), Usage::new(9600));
+        assert_eq!(merged.reservation_jobs("bench"), 2);
+        assert!(merged.is_consistent());
+
+        // scaled with the totals, never apart from them - a client converts to
+        // credits and then compares the two
+        let doubled = report_with_reservations() * 2.0;
+        assert_eq!(doubled.reservation_usage("bench"), Usage::new(12000));
+        assert_eq!(doubled.total_usage(), Usage::new(4800));
+
+        let mut renamed = report_with_reservations();
+        let mut renames = HashMap::new();
+        renames.insert("alice".to_string(), "alice2".to_string());
+        renamed.remap_local_users(&renames);
+
+        assert_eq!(
+            renamed.reservation_usage_for_user("bench", "alice2"),
+            Usage::new(6000)
+        );
+        assert_eq!(
+            renamed.reservation_usage_for_user("bench", "alice"),
+            Usage::default()
+        );
+        // the reservation itself is not a user and keeps its name
+        assert_eq!(renamed.reservation_usage("bench"), Usage::new(6000));
+    }
+
+    #[test]
+    fn test_a_report_from_an_instance_without_reservations_still_loads() {
+        let legacy = serde_json::json!({
+            "reports": { "alice": { "seconds": 1800 } },
+            "num_jobs": 1,
+            "is_complete": true
+        });
+
+        let report: DailyProjectUsageReport = serde_json::from_value(legacy).unwrap();
+
+        assert!(!report.has_reservations());
+        assert_eq!(report.total_reservation_usage(), Usage::default());
+        assert_eq!(report.usage_outside_reservations(), Usage::new(1800));
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_the_reservation_report_says_what_went_in_and_not_how_full_it_was() {
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+        report.set_report(
+            &Date::parse("2026-03-01").unwrap(),
+            &report_with_reservations(),
+        );
+
+        let dump = report.reservation_report();
+
+        assert!(dump.contains("Consumed inside reservations"));
+        assert!(dump.contains("Consumed outside reservations"));
+
+        // busiest first
+        assert!(dump.find("bench") < dump.find("maint"), "{}", dump);
+
+        // the discarded share is called out, since it went into the reservation
+        // but is not in the usage we report
+        assert!(dump.contains("discarded by requeues"), "{}", dump);
+
+        // and the report is explicit about the question it cannot answer, so
+        // nobody reads these shares as utilisation
+        assert!(
+            dump.contains("is a property of the reservation"),
+            "the report must not be mistaken for utilisation: {}",
+            dump
+        );
+    }
+
+    #[test]
+    fn test_the_reservation_report_is_one_line_when_nothing_was_reserved() {
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &report_with_requeues());
+
+        assert!(!report.has_reservations());
+        assert!(report
+            .reservation_report()
+            .contains("No jobs ran inside a reservation"));
     }
 
     #[test]

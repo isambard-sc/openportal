@@ -463,6 +463,57 @@ listing dropped any day whose `total_usage()` was zero, which is exactly what
 such a day has - none of the usage we *report* - while still having plenty to
 say.
 
+## 7.2 Reservations, and the half of utilisation we cannot supply
+
+Job records carry the reservation a job ran under - `reservation` in the same
+`sacct` response requeue accounting already fetches, so capturing it costs
+nothing - and reports now record usage and job counts per reservation, with a
+`reservation_report()` dump alongside the requeue one.
+
+Two decisions worth writing down.
+
+**Reservation figures count every attempt, superseded ones included.** A
+requeued attempt held the reservation's nodes exactly as its replacement did,
+and for occupancy that is the whole point. This makes reservation usage a subset
+of `total_usage_including_requeues()` rather than of `total_usage()`, which is
+the opposite of the split everything else in this design follows - so the
+discarded share is recorded per reservation as well, and the two can be
+separated by anyone who wants the other convention.
+
+**These are not utilisation figures, and are deliberately not called that.**
+Utilisation is work done over capacity held, and a per-project usage report
+cannot supply the denominator:
+
+- a reservation's capacity is its node count multiplied by its duration, and the
+  job records carry neither;
+- a reservation is normally shared between projects, so no single project's
+  report can see the whole numerator either.
+
+What the reports give is the numerator, per project. The shares they print are
+shares of that project's own consumption, and both the API docs and the printed
+report say so, because "64.5%" next to a reservation name invites exactly the
+wrong reading.
+
+Supplying the denominator is a separate piece of work, and it is a question
+about the *cluster* rather than about a project, so it does not belong on a
+usage report at all. Three ways it could be answered, in increasing order of
+effort:
+
+1. **`sreport reservation utilization`** already computes this, cluster-wide,
+   and is the obvious thing to shell out to. It answers the question directly
+   and needs no arithmetic of ours, but it is a new command in the runner's
+   vocabulary and its output is a report rather than a data structure.
+2. **`scontrol show reservation` / the reservation table in `slurmdbd`** gives
+   the definitions - nodes, start, end - from which capacity can be computed and
+   compared against the per-project numerators we now have. More work, but it
+   yields a figure we can attribute across projects rather than only a total.
+3. **A new instruction** carrying reservation definitions to the portal, letting
+   it do the arithmetic against its own records. The most flexible and the most
+   work.
+
+Whichever is chosen, it wants a decision about whose question it is - the
+portal's or the provider's - before any of it is built.
+
 ## 8. Compatibility and rollout
 
 Nothing on the wire breaks. Every new field is `#[serde(default)]`, so an

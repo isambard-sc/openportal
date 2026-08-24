@@ -1111,6 +1111,14 @@ fn record_job(
         totals.requeue_events = totals.requeue_events.saturating_add(1);
         totals.requeue_wait_seconds = totals.requeue_wait_seconds.saturating_add(wait_seconds);
 
+        // A superseded attempt occupied the reservation's nodes exactly as its
+        // replacement did, so it counts towards what the reservation held. The
+        // discarded share is recorded alongside it so the two can be separated.
+        if job.is_reserved() {
+            report.add_reservation_usage(job.reservation(), job.user(), Usage::new(usage));
+            report.add_reservation_requeue_usage(job.reservation(), Usage::new(usage));
+        }
+
         return;
     }
 
@@ -1122,11 +1130,21 @@ fn record_job(
     report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
     report.add_component_usage("billing", job.user(), Usage::new(job.billing_seconds()));
 
+    if job.is_reserved() {
+        report.add_reservation_usage(job.reservation(), job.user(), Usage::new(usage));
+    }
+
     if started_in_window {
         report.add_jobs(job.user(), 1);
         report.add_wait_seconds(job.user(), wait_seconds);
         totals.num_jobs = totals.num_jobs.saturating_add(1);
         totals.wait_seconds = totals.wait_seconds.saturating_add(wait_seconds);
+
+        if job.is_reserved() {
+            // counted as `num_jobs` is, so a job spanning several windows is one
+            // job in the reservation rather than one per window
+            report.add_reservation_jobs(job.reservation(), 1);
+        }
     }
 }
 
@@ -2210,6 +2228,79 @@ mod tests {
         assert_eq!(
             report.average_wait_seconds_including_requeues(),
             (66480 + 21000) / 9
+        );
+    }
+
+    #[test]
+    fn test_reservation_usage_counts_every_attempt_that_held_the_nodes() {
+        // A reservation's occupancy is physical: a superseded attempt held its
+        // nodes exactly as the replacement did, so both count towards what went
+        // into the reservation. The discarded share is carried alongside so the
+        // two can still be separated.
+        let (report, _) = report_for(day_one());
+
+        // job 300 ran in gpu_bench: 300s completed, plus 1800s and 900s of node
+        // failures that occupied the reservation before it
+        assert_eq!(report.reservation_usage("gpu_bench"), Usage::new(3000));
+        assert_eq!(
+            report.reservation_requeue_usage("gpu_bench"),
+            Usage::new(2700)
+        );
+
+        // jobs 100 and 200 ran in maintenance_test: 3600 + 1800 completed, plus
+        // 3600 preempted
+        assert_eq!(
+            report.reservation_usage("maintenance_test"),
+            Usage::new(9000)
+        );
+        assert_eq!(
+            report.reservation_requeue_usage("maintenance_test"),
+            Usage::new(3600)
+        );
+
+        assert_eq!(report.reservations(), vec!["gpu_bench", "maintenance_test"]);
+        assert!(report.has_reservations());
+    }
+
+    #[test]
+    fn test_reservation_jobs_are_counted_like_jobs_not_like_records() {
+        let (report, _) = report_for(day_one());
+
+        // job 300's three records are one job, in the window it started in
+        assert_eq!(report.reservation_jobs("gpu_bench"), 1);
+        // jobs 100 and 200
+        assert_eq!(report.reservation_jobs("maintenance_test"), 2);
+    }
+
+    #[test]
+    fn test_reserved_and_unreserved_usage_partition_the_days_consumption() {
+        // Reservation usage is a subset of everything consumed, so the two
+        // complement each other within the true total rather than within the
+        // reported one - the reservation figures count superseded attempts.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(report.total_reservation_usage(), Usage::new(12000));
+        assert_eq!(
+            report.total_reservation_usage() + report.usage_outside_reservations(),
+            report.total_usage_including_requeues()
+        );
+
+        // a reservation cannot hold more than the day consumed
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_a_day_with_no_reservations_records_none() {
+        // Day two holds only job 900, which ran outside any reservation - the
+        // overwhelmingly common case.
+        let (report, _) = report_for(day_two());
+
+        assert!(!report.has_reservations());
+        assert!(report.reservations().is_empty());
+        assert_eq!(report.total_reservation_usage(), Usage::default());
+        assert_eq!(
+            report.usage_outside_reservations(),
+            report.total_usage_including_requeues()
         );
     }
 

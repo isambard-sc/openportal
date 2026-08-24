@@ -62,6 +62,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   failure is not the user's fault - so both figures are reported and the choice
   is left to the portal. See
   [docs/plans/slurm-requeue-accounting-design.md](docs/plans/slurm-requeue-accounting-design.md).
+- **Reservation accounting.** Usage reports now record which Slurm reservation a
+  job ran under, so that what a project put into a reservation can be seen at
+  all:
+
+  - `reservations()`, `reservation_usage()`, `reservation_jobs()`,
+    `total_reservation_usage()` and `usage_outside_reservations()` on a daily,
+    project or portal report, with `reservation_summary()` giving jobs, usage and
+    discarded share per reservation, busiest first;
+  - `reservation_report()` - a readable dump by reservation, day and user;
+  - the per-day printout names each reservation the day's jobs ran in.
+
+  These figures count **every** attempt, superseded ones included: a requeued
+  attempt held the reservation's nodes exactly as its replacement did, and for
+  occupancy that is what matters. The discarded share is carried separately so
+  the two can still be told apart. Reservation usage is therefore a subset of
+  `total_usage_including_requeues()`, not of `total_usage()`.
+
+  What this does **not** give is a reservation's utilisation. What a reservation
+  held - its node count and duration, and so how fully it was used - is a
+  property of the reservation rather than of any one project, and is not in the
+  job records; a reservation shared between projects cannot be assessed from any
+  single project's report at all. The shares reported are shares of the
+  project's own consumption, and the report says so.
 - **Node failures are logged at `error`**, naming the node Slurm blamed, so site
   monitoring picks them up. A node failure destroys a user's work, and on a
   requeued job it is the difference between "the project spent this" and "the

@@ -52,4 +52,16 @@ requeue_states: { [key in string]?: bigint },
  * Requeue usage by the terminal state of the superseded attempt. Sums to
  * `total_requeue_usage()`.
  */
-requeue_state_usage: { [key in string]?: Usage }, is_complete: boolean, };
+requeue_state_usage: { [key in string]?: Usage }, 
+/**
+ * Reservation name → local user → usage consumed inside it.
+ */
+reservation_reports: { [key in string]?: { [key in string]?: Usage } }, 
+/**
+ * Reservation name → the part of the above from superseded attempts.
+ */
+reservation_requeue_usage: { [key in string]?: Usage }, 
+/**
+ * Reservation name → jobs that started inside it, counted as `num_jobs` is.
+ */
+reservation_jobs: { [key in string]?: bigint }, is_complete: boolean, };

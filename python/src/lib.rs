@@ -2905,6 +2905,24 @@ impl UsageReport {
         Ok(self.0.requeue_report())
     }
 
+    /// True if any project's jobs ran inside a reservation.
+    #[getter]
+    fn has_reservations(&self) -> PyResult<bool> {
+        Ok(self.0.has_reservations())
+    }
+
+    /// Usage consumed inside any reservation, across every project.
+    #[getter]
+    fn total_reservation_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_reservation_usage().into())
+    }
+
+    /// A readable reservation summary for every project that ran inside one.
+    /// Print it.
+    fn reservation_report(&self) -> PyResult<String> {
+        Ok(self.0.reservation_report())
+    }
+
     fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> PyResult<()> {
         self.0
             .remap_portal(&new_portal.0)
@@ -3188,6 +3206,68 @@ impl ProjectUsageReport {
     /// day and by user. Print it.
     fn requeue_report(&self) -> PyResult<String> {
         Ok(self.0.requeue_report())
+    }
+
+    /// True if any of this project's jobs ran inside a reservation.
+    #[getter]
+    fn has_reservations(&self) -> PyResult<bool> {
+        Ok(self.0.has_reservations())
+    }
+
+    /// The reservations this project's jobs ran under.
+    #[getter]
+    fn reservations(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.reservations())
+    }
+
+    /// Usage consumed inside `reservation`, counting every attempt - a
+    /// superseded attempt held the reservation's nodes exactly as its
+    /// replacement did.
+    fn reservation_usage(&self, reservation: &str) -> PyResult<Usage> {
+        Ok(self.0.reservation_usage(reservation).into())
+    }
+
+    /// The part of `reservation_usage` that was discarded by a requeue.
+    fn reservation_requeue_usage(&self, reservation: &str) -> PyResult<Usage> {
+        Ok(self.0.reservation_requeue_usage(reservation).into())
+    }
+
+    fn reservation_jobs(&self, reservation: &str) -> PyResult<u64> {
+        Ok(self.0.reservation_jobs(reservation))
+    }
+
+    /// Usage consumed inside any reservation.
+    #[getter]
+    fn total_reservation_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_reservation_usage().into())
+    }
+
+    /// Usage consumed outside any reservation.
+    #[getter]
+    fn usage_outside_reservations(&self) -> PyResult<Usage> {
+        Ok(self.0.usage_outside_reservations().into())
+    }
+
+    /// Jobs, usage and discarded share per reservation, busiest first, as a list
+    /// of `(reservation, jobs, usage, requeued)` tuples.
+    #[getter]
+    fn reservation_summary(&self) -> PyResult<Vec<(String, u64, Usage, Usage)>> {
+        Ok(self
+            .0
+            .reservation_summary()
+            .into_iter()
+            .map(|(name, jobs, usage, requeued)| (name, jobs, usage.into(), requeued.into()))
+            .collect())
+    }
+
+    /// A readable summary of what this project ran inside reservations, by
+    /// reservation, day and user. Print it.
+    ///
+    /// Note what it is not: a reservation's utilisation. What a reservation
+    /// *held* is a property of the reservation, not of any one project - a
+    /// reservation is usually shared - and the job records do not carry it.
+    fn reservation_report(&self) -> PyResult<String> {
+        Ok(self.0.reservation_report())
     }
 
     #[getter]
@@ -3906,6 +3986,58 @@ impl DailyProjectUsageReport {
     #[getter]
     fn has_requeues(&self) -> PyResult<bool> {
         Ok(self.0.has_requeues())
+    }
+
+    /// True if any of this day's jobs ran inside a reservation.
+    #[getter]
+    fn has_reservations(&self) -> PyResult<bool> {
+        Ok(self.0.has_reservations())
+    }
+
+    #[getter]
+    fn reservations(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.reservations())
+    }
+
+    fn reservation_usage(&self, reservation: &str) -> PyResult<Usage> {
+        Ok(self.0.reservation_usage(reservation).into())
+    }
+
+    fn reservation_usage_for_user(&self, reservation: &str, user: &str) -> PyResult<Usage> {
+        Ok(self.0.reservation_usage_for_user(reservation, user).into())
+    }
+
+    fn reservation_requeue_usage(&self, reservation: &str) -> PyResult<Usage> {
+        Ok(self.0.reservation_requeue_usage(reservation).into())
+    }
+
+    fn reservation_jobs(&self, reservation: &str) -> PyResult<u64> {
+        Ok(self.0.reservation_jobs(reservation))
+    }
+
+    fn reservation_users(&self, reservation: &str) -> PyResult<Vec<String>> {
+        Ok(self.0.reservation_users(reservation))
+    }
+
+    #[getter]
+    fn total_reservation_usage(&self) -> PyResult<Usage> {
+        Ok(self.0.total_reservation_usage().into())
+    }
+
+    #[getter]
+    fn usage_outside_reservations(&self) -> PyResult<Usage> {
+        Ok(self.0.usage_outside_reservations().into())
+    }
+
+    /// Jobs, usage and discarded share per reservation, busiest first.
+    #[getter]
+    fn reservation_summary(&self) -> PyResult<Vec<(String, u64, Usage, Usage)>> {
+        Ok(self
+            .0
+            .reservation_summary()
+            .into_iter()
+            .map(|(name, jobs, usage, requeued)| (name, jobs, usage.into(), requeued.into()))
+            .collect())
     }
 
     /// The local users who lost work to a requeue on this day.

@@ -1720,6 +1720,36 @@ pub fn clean_user_name(user: &str) -> Result<String, Error> {
         .to_ascii_lowercase())
 }
 
+/// The longest reservation name we will carry. Names are operator-created, so a
+/// real one is short; the cap is here because the name becomes a map key in a
+/// report that travels between agents, and an unbounded key taken from an
+/// external source is the growth problem of
+/// `docs/specifications/security-review-2.md` (finding R33).
+const MAX_RESERVATION_NAME: usize = 64;
+
+///
+/// Tidy a reservation name from Slurm for use as a report key.
+///
+/// Unlike an account or user name this is not looked up anywhere or used to
+/// build a path - it is only ever a label - so the name is preserved as Slurm
+/// spells it rather than lowercased. Control characters are dropped, because the
+/// value ends up in log lines and printed reports, and the result is truncated
+/// to `MAX_RESERVATION_NAME`.
+///
+/// Returns an empty string for a job that ran outside any reservation, which is
+/// how Slurm reports the overwhelming majority of jobs.
+///
+pub fn clean_reservation_name(reservation: &str) -> String {
+    let cleaned: String = reservation
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_RESERVATION_NAME)
+        .collect();
+
+    cleaned.trim().to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlurmAccount {
     name: String,
@@ -2614,6 +2644,8 @@ pub struct SlurmJob {
     states: Vec<String>,
     /// The node Slurm blamed for a `NODE_FAIL`, if it named one.
     failed_node: String,
+    /// The reservation this attempt ran under, empty if it ran outside one.
+    reservation: String,
     /// Which attempt of the job this is - set by `get_consumers`, which is the
     /// only place that can see a job's other attempts.
     attempt: Attempt,
@@ -2928,6 +2960,21 @@ impl SlurmJob {
             .unwrap_or_default()
             .to_string();
 
+        // Slurm has reported this both as a bare name and as an object carrying
+        // a name and an id, depending on version, so accept either. A job
+        // outside any reservation is the normal case and is not an error - it
+        // comes through as an empty name.
+        let reservation = match value.get("reservation") {
+            Some(reservation) => match reservation.as_str() {
+                Some(name) => clean_reservation_name(name),
+                None => match reservation.get("name").and_then(|n| n.as_str()) {
+                    Some(name) => clean_reservation_name(name),
+                    None => String::new(),
+                },
+            },
+            None => String::new(),
+        };
+
         let qos = match value.get("qos") {
             Some(qos) => match qos.as_str() {
                 Some(qos) => qos.to_string(),
@@ -3157,6 +3204,7 @@ impl SlurmJob {
             duration,
             states,
             failed_node,
+            reservation,
             // `get_consumers` reclassifies once it can see the job's other
             // attempts; a job constructed on its own is its own last attempt.
             attempt: Attempt::Base,
@@ -3476,6 +3524,17 @@ impl SlurmJob {
     /// The node Slurm blamed for a `NODE_FAIL`, if it named one.
     pub fn failed_node(&self) -> &str {
         &self.failed_node
+    }
+
+    /// The reservation this attempt ran under, or an empty string if it ran
+    /// outside any reservation.
+    pub fn reservation(&self) -> &str {
+        &self.reservation
+    }
+
+    /// True if this attempt ran inside a reservation.
+    pub fn is_reserved(&self) -> bool {
+        !self.reservation.is_empty()
     }
 
     pub fn qos(&self) -> &str {
@@ -4110,6 +4169,60 @@ mod tests {
         failed.sort();
 
         assert_eq!(failed, ["badnode01", "badnode02"]);
+    }
+
+    #[test]
+    fn test_the_reservation_a_job_ran_under_is_captured_in_either_shape() {
+        // Slurm reports this as a bare name in some versions and as an object
+        // carrying a name and an id in others, so both are accepted. A job
+        // outside any reservation - almost every job - is not an error, and
+        // arrives either as an absent field or as an object with an empty name.
+        let jobs = consumers();
+
+        let job_100 = records_for(&jobs, 100);
+        assert_eq!(job_100[0].reservation(), "maintenance_test");
+        assert!(job_100[0].is_reserved());
+
+        let job_200 = records_for(&jobs, 200);
+        assert!(job_200
+            .iter()
+            .all(|job| job.reservation() == "maintenance_test"));
+
+        // whitespace is trimmed - the name becomes a report key and a label
+        let job_300 = records_for(&jobs, 300);
+        assert!(job_300.iter().all(|job| job.reservation() == "gpu_bench"));
+
+        // an empty name and an absent field both mean "no reservation"
+        let job_800 = records_for(&jobs, 800);
+        assert_eq!(job_800[0].reservation(), "");
+        assert!(!job_800[0].is_reserved());
+
+        let job_600 = records_for(&jobs, 600);
+        assert!(job_600.iter().all(|job| !job.is_reserved()));
+    }
+
+    #[test]
+    fn test_a_reservation_name_is_cleaned_before_it_becomes_a_key() {
+        // The name arrives from Slurm and ends up as a map key in a report that
+        // travels between agents, and in log lines and printouts.
+        assert_eq!(clean_reservation_name("  gpu_bench  "), "gpu_bench");
+        assert_eq!(clean_reservation_name(""), "");
+        assert_eq!(clean_reservation_name("   "), "");
+
+        // control characters would corrupt a printed report
+        assert_eq!(clean_reservation_name("gpu\nbench\t"), "gpubench");
+
+        // unlike an account name it is not lowercased - it is only ever a
+        // label, never looked up, so Slurm's own spelling is kept
+        assert_eq!(clean_reservation_name("GPU_Bench"), "GPU_Bench");
+
+        // and it cannot grow without bound
+        let long = "r".repeat(MAX_RESERVATION_NAME * 2);
+        assert_eq!(
+            clean_reservation_name(&long).len(),
+            MAX_RESERVATION_NAME,
+            "a reservation name must be capped"
+        );
     }
 
     #[test]

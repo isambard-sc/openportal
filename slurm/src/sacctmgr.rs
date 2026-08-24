@@ -1060,8 +1060,12 @@ fn record_job(
     totals: &mut ReportTotals,
 ) {
     let usage = job.billed_node_seconds();
-    let started_in_window = job.original_start_time() >= window_start;
     let wait_seconds = job.wait_time().num_seconds().max(0) as u64;
+
+    // A record that is still running when the window ends reappears in the next
+    // window, so counting a *job* needs this guard or a long job is counted
+    // once per window it touches.
+    let started_in_window = job.original_start_time() >= window_start;
 
     if job.is_requeued_attempt() {
         let state = job.terminal_state();
@@ -1079,12 +1083,33 @@ fn record_job(
             Usage::new(job.billing_seconds()),
         );
 
-        if started_in_window {
-            report.add_requeue_events(job.user(), state, 1);
-            report.add_requeue_wait_seconds(job.user(), wait_seconds);
-            totals.requeue_events = totals.requeue_events.saturating_add(1);
-            totals.requeue_wait_seconds = totals.requeue_wait_seconds.saturating_add(wait_seconds);
-        }
+        // A requeue event needs no such guard, and applying one is actively
+        // wrong: a superseded attempt is classified `Requeued` in *at most one*
+        // window, so counting every one of them counts each event exactly once.
+        //
+        // Why at most one. A record is only returned for windows it overlaps,
+        // so it can be seen at all only up to the window holding its end. It is
+        // only classified `Requeued` when a later attempt is in the same
+        // response, and a later attempt cannot start before this one ended - so
+        // the window must also reach the successor's start, which is at or
+        // after this record's end. The two conditions meet in exactly one
+        // window: the one holding the end, which is the moment of the requeue.
+        //
+        // Requiring the record to have *started* in that window as well asked
+        // for something almost no real requeue can satisfy. The attempts that
+        // get requeued are the long ones - a job near its wall-clock limit -
+        // so the requeue lands on the day after the attempt began, and the two
+        // conditions could not both hold. The count came out as very nearly
+        // zero while the usage it was counting was correct.
+        //
+        // The one case still missed is a requeue within seconds of a window
+        // boundary, where the successor is submitted on the far side of it and
+        // the two records never appear in one response. The count is a lower
+        // bound to that extent; nothing is ever counted twice.
+        report.add_requeue_events(job.user(), state, 1);
+        report.add_requeue_wait_seconds(job.user(), wait_seconds);
+        totals.requeue_events = totals.requeue_events.saturating_add(1);
+        totals.requeue_wait_seconds = totals.requeue_wait_seconds.saturating_add(wait_seconds);
 
         return;
     }
@@ -2035,5 +2060,169 @@ pub async fn cancel_pending_project_jobs(
             // Don't fail the whole operation if scancel fails - log the error and continue
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slurm::test_fixture::*;
+    use crate::slurm::Attempt;
+
+    /// Build a daily report the way `get_hourly_report` and `get_daily_report`
+    /// do, over the records `sacct` would return for one window.
+    fn report_for(
+        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+    ) -> (DailyProjectUsageReport, ReportTotals) {
+        let (start, _) = window;
+        let mut report = DailyProjectUsageReport::default();
+        let mut totals = ReportTotals::default();
+
+        for job in consumers_for(window) {
+            record_job(&mut report, &job, &start, &mut totals);
+        }
+
+        (report, totals)
+    }
+
+    #[test]
+    fn test_a_requeue_is_counted_on_the_day_it_happened_not_the_day_it_started() {
+        // The regression this test exists for. A requeue event was only counted
+        // if the superseded attempt had also *started* inside the window, a
+        // guard copied from the job count without noticing that the two need
+        // opposite treatment. The attempts that get requeued are the long ones,
+        // so the requeue almost always falls on the day after the attempt
+        // began, and the guard could almost never be satisfied: on real data
+        // the event count came out as 1 where there were several, while the
+        // usage those events accounted for was correct throughout.
+        //
+        // Job 900 is that shape - an attempt running past midnight, requeued on
+        // day two, replaced by an attempt that never ran.
+        let (day_one_report, _) = report_for(day_one());
+        let (day_two_report, _) = report_for(day_two());
+
+        // day one cannot see the requeue: the successor does not exist yet, so
+        // the attempt is still the job's last one, and its usage is reported as
+        // ordinary usage - exactly as default sacct reported it
+        assert_eq!(day_one_report.requeue_events_for_user("user_six"), 0);
+        assert_eq!(day_one_report.requeue_usage("user_six"), Usage::default());
+        assert_eq!(day_one_report.usage("user_six"), Usage::new(14400));
+
+        // day two sees it, and counts it, even though the attempt started the
+        // day before
+        assert_eq!(day_two_report.requeue_events_for_user("user_six"), 1);
+        assert_eq!(day_two_report.requeue_usage("user_six"), Usage::new(28800));
+
+        // counted once across the two days, not twice and not never
+        assert_eq!(
+            day_one_report.requeue_events_for_user("user_six")
+                + day_two_report.requeue_events_for_user("user_six"),
+            1
+        );
+    }
+
+    #[test]
+    fn test_a_job_is_counted_once_however_many_windows_it_spans() {
+        // The other half of the asymmetry: a job *does* need the guard the
+        // requeue count must not have. Job 900's attempt is the job's last one
+        // on day one and a superseded one on day two, and it must be counted as
+        // a job exactly once - on the day it started.
+        let (day_one_report, _) = report_for(day_one());
+        let (day_two_report, _) = report_for(day_two());
+
+        assert_eq!(day_one_report.num_jobs_for_user("user_six"), 1);
+        assert_eq!(day_two_report.num_jobs_for_user("user_six"), 0);
+    }
+
+    #[test]
+    fn test_the_days_report_splits_usage_without_losing_or_repeating_any() {
+        let (report, totals) = report_for(day_one());
+
+        // what we have always reported, unchanged by requeue accounting
+        assert_eq!(report.total_usage(), Usage::new(28800));
+        assert_eq!(report.num_jobs(), 9);
+
+        // and what was invisible before
+        assert_eq!(report.total_requeue_usage(), Usage::new(20700));
+        assert_eq!(report.num_requeue_events(), 7);
+        assert_eq!(
+            report.total_usage_including_requeues(),
+            Usage::new(28800 + 20700)
+        );
+
+        // the shadow counters agree with the report's own totals, and the
+        // report agrees with itself
+        assert_eq!(totals.usage, report.total_usage().seconds());
+        assert_eq!(totals.requeue_usage, report.total_requeue_usage().seconds());
+        assert_eq!(totals.requeue_events, report.num_requeue_events());
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_requeue_events_are_attributed_to_the_state_that_interrupted_them() {
+        // Which state did the interrupting is the difference between "the
+        // project spent this" and "the site lost this", so it has to survive
+        // into the report rather than being flattened into one requeue total.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(
+            report.requeue_states(),
+            vec![
+                ("NODE_FAIL".to_string(), 2),
+                ("OTHER".to_string(), 1),
+                ("PREEMPTED".to_string(), 1),
+                ("REQUEUED".to_string(), 3),
+            ]
+        );
+
+        // the per-state maps account for every event and every second
+        assert_eq!(
+            report
+                .requeue_states()
+                .iter()
+                .map(|(_, count)| count)
+                .sum::<u64>(),
+            report.num_requeue_events()
+        );
+        assert_eq!(
+            report
+                .requeue_states()
+                .iter()
+                .map(|(state, _)| report.requeue_usage_in_state(state))
+                .sum::<Usage>(),
+            report.total_requeue_usage()
+        );
+    }
+
+    #[test]
+    fn test_the_three_wait_figures_are_each_exact() {
+        // A client can ask for the wait excluding requeues (what it always
+        // got), the wait per requeue, or the total wait per job including every
+        // attempt - and none of the three double counts, because a record is
+        // either a job's last attempt in a window or a superseded one.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(report.total_wait_seconds(), 66480);
+        assert_eq!(report.requeue_wait_seconds(), 21000);
+
+        assert_eq!(report.average_wait_seconds(), 66480 / 9);
+        assert_eq!(report.average_requeue_wait_seconds(), 21000 / 7);
+        assert_eq!(
+            report.average_wait_seconds_including_requeues(),
+            (66480 + 21000) / 9
+        );
+    }
+
+    #[test]
+    fn test_a_zero_duration_final_attempt_leaves_the_base_figure_alone() {
+        // Job 500 ran for two hours, was requeued, and its replacement was
+        // cancelled before it ran. Default sacct returned only that
+        // zero-elapsed replacement, so the job was reported as having consumed
+        // nothing - and it still is, in the figure that has to stay unchanged.
+        // All of it is in the requeue figure instead.
+        let jobs = consumers_for(day_one());
+
+        assert_eq!(usage_of(&jobs, 500, Attempt::Base), 0);
+        assert_eq!(usage_of(&jobs, 500, Attempt::Requeued), 7200);
     }
 }

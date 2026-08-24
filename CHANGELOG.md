@@ -32,7 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - `total_requeue_usage()` and `total_usage_including_requeues()`, with per-user
     and per-component breakdowns to match the existing ones;
   - `num_requeue_events()` - requeue *events*, not jobs requeued, so the figure
-    is additive over any date range - with `requeue_wait_seconds()`,
+    is additive over any date range; counted in the single window where the
+    requeue happened, which is not in general the window the interrupted attempt
+    started in - with `requeue_wait_seconds()`,
     `average_requeue_wait_seconds()` and
     `average_wait_seconds_including_requeues()`;
   - `requeue_states()` and `requeue_usage_in_state()`, bucketing events and usage

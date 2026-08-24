@@ -880,9 +880,10 @@ impl DailyProjectUsageReport {
     }
 
     /// Record usage against the terminal state of a superseded attempt. Kept
-    /// separate from `add_requeue_events` because usage is counted for every
-    /// superseded attempt overlapping the window, whereas events are counted
-    /// only for those that *started* in it - see `add_jobs`.
+    /// separate from `add_requeue_events` because a superseded attempt spanning
+    /// a window boundary has its usage counted in each window it overlaps - the
+    /// part consumed there - while the requeue itself happened at one instant
+    /// and is counted once.
     pub fn add_requeue_state_usage(&mut self, state: &str, usage: Usage) {
         if usage.is_zero() {
             return;
@@ -914,9 +915,13 @@ impl DailyProjectUsageReport {
         self.user_requeue_events.get(user).copied().unwrap_or(0)
     }
 
-    /// Queue wait accumulated by superseded attempts. This measures
-    /// `eligible -> start`, so the begin-time hold Slurm imposes after a
-    /// requeue is excluded - Slurm advances `eligible` past it.
+    /// Queue wait that was discarded by a requeue: the time each superseded
+    /// attempt spent queueing before it ran, only for that run to be thrown
+    /// away. A requeue costs a project both the compute it had done and the
+    /// waiting it had already served, and this is the second of the two.
+    ///
+    /// Measured as `eligible -> start`, so the begin-time hold Slurm imposes
+    /// after a requeue is excluded - Slurm advances `eligible` past it.
     pub fn requeue_wait_seconds(&self) -> u64 {
         self.requeue_wait_seconds
     }
@@ -937,6 +942,11 @@ impl DailyProjectUsageReport {
     }
 
     /// Mean total queue wait per job, counting the waits of every attempt.
+    ///
+    /// The two terms do not overlap and neither double counts: a record is
+    /// either a job's last attempt in a window or a superseded one, the last
+    /// attempt's wait is counted in the window it started in, and a superseded
+    /// attempt's wait is counted in the single window that holds its requeue.
     pub fn average_wait_seconds_including_requeues(&self) -> u64 {
         match self.num_jobs {
             0 => 0,

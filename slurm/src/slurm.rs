@@ -3384,8 +3384,18 @@ impl SlurmJob {
 
     /// The time the job spent waiting in the queue before it started running.
     /// Clamped to zero if eligible_time is after start_time (handles bogus Slurm timestamps).
+    ///
+    /// Measured from the *unclipped* start: how long an attempt queued is a
+    /// property of the attempt, not of the window it is being reported in.
+    /// Using the clipped start would report an attempt that began before the
+    /// window as having waited until the window opened. That never showed for a
+    /// job count, which only counts attempts that started inside the window, so
+    /// for those the two starts are the same - but a requeue is counted in the
+    /// window where it happened, which is not where the attempt began.
     pub fn wait_time(&self) -> chrono::Duration {
-        let wait = self.start_time.signed_duration_since(self.eligible_time());
+        let wait = self
+            .original_start_time
+            .signed_duration_since(self.eligible_time());
         if wait.num_seconds() < 0 {
             chrono::Duration::seconds(0)
         } else {
@@ -3788,19 +3798,40 @@ pub async fn set_limit(
     sacctmgr::set_limit(project, limit, expires).await
 }
 
+///
+/// Fixture records shared by the tests in this crate.
+///
+/// Lives here rather than in `mod tests` because the accumulation the reports
+/// are built with is in `sacctmgr`, and it has to be tested against the same
+/// records that `get_consumers` produces - the interesting cases are the ones
+/// where the two disagree about what a record means.
+///
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_fixture {
     use super::*;
 
-    /// The window the fixture in `tests/data/sacct-requeued-jobs.json` covers:
-    /// 2026-03-01T00:00:00Z to 2026-03-02T00:00:00Z.
-    const WINDOW_START: i64 = 1772323200;
-    const WINDOW_END: i64 = 1772409600;
+    /// The two consecutive daily windows the fixture in
+    /// `tests/data/sacct-requeued-jobs.json` covers: 2026-03-01, and 2026-03-02
+    /// for the job that spans midnight.
+    const DAY_ONE_START: i64 = 1772323200;
+    const DAY_TWO_START: i64 = 1772409600;
+    const DAY_THREE_START: i64 = 1772496000;
 
-    fn window() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    pub fn window() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+        day_one()
+    }
+
+    pub fn day_one() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
         (
-            chrono::Utc.timestamp_opt(WINDOW_START, 0).unwrap(),
-            chrono::Utc.timestamp_opt(WINDOW_END, 0).unwrap(),
+            chrono::Utc.timestamp_opt(DAY_ONE_START, 0).unwrap(),
+            chrono::Utc.timestamp_opt(DAY_TWO_START, 0).unwrap(),
+        )
+    }
+
+    pub fn day_two() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+        (
+            chrono::Utc.timestamp_opt(DAY_TWO_START, 0).unwrap(),
+            chrono::Utc.timestamp_opt(DAY_THREE_START, 0).unwrap(),
         )
     }
 
@@ -3813,7 +3844,7 @@ mod tests {
     /// if the fixture's node names and this map ever drift apart every number
     /// here changes. Making the fallback wildly different means the tests fail
     /// rather than quietly checking the wrong arithmetic.
-    fn test_nodes() -> SlurmNodes {
+    pub fn test_nodes() -> SlurmNodes {
         let default = SlurmNode::construct(&serde_json::json!({
             "cpus": 1, "gpus": 0, "mem": 1, "billing": 1
         }))
@@ -3829,17 +3860,17 @@ mod tests {
         nodes
     }
 
-    fn fixture() -> serde_json::Value {
+    pub fn fixture() -> serde_json::Value {
         serde_json::from_str(include_str!("../tests/data/sacct-requeued-jobs.json")).unwrap()
     }
 
     /// The fixture's records for one job id, in the order `get_consumers`
     /// returned them.
-    fn records_for(jobs: &[SlurmJob], id: u64) -> Vec<&SlurmJob> {
+    pub fn records_for(jobs: &[SlurmJob], id: u64) -> Vec<&SlurmJob> {
         jobs.iter().filter(|job| job.id() == id).collect()
     }
 
-    fn usage_of(jobs: &[SlurmJob], id: u64, attempt: Attempt) -> u64 {
+    pub fn usage_of(jobs: &[SlurmJob], id: u64, attempt: Attempt) -> u64 {
         records_for(jobs, id)
             .iter()
             .filter(|job| job.attempt() == attempt)
@@ -3847,9 +3878,68 @@ mod tests {
             .sum()
     }
 
+    ///
+    /// The fixture records `sacct` would return for a query over this window.
+    ///
+    /// `--starttime`/`--endtime` select the records that *overlap* the window,
+    /// which is what decides whether a job's other attempts are visible at all -
+    /// and therefore whether a superseded attempt can be recognised as one. The
+    /// fixture holds every record for every window, so a test that skipped this
+    /// filter would hand `get_consumers` attempts the real query could not have
+    /// seen, and would not be testing the case that matters.
+    ///
+    /// A record that never started is placed by its submission time, as `sacct`
+    /// places it - its `start` is zero, which is not a time it existed at.
+    ///
+    pub fn records_in_window(
+        start_time: &chrono::DateTime<chrono::Utc>,
+        end_time: &chrono::DateTime<chrono::Utc>,
+    ) -> serde_json::Value {
+        let mut fixture = fixture();
+
+        let Some(records) = fixture.get_mut("jobs").and_then(|jobs| jobs.as_array_mut()) else {
+            unreachable!("the fixture has a jobs array");
+        };
+
+        records.retain(|record| {
+            let at = |key: &str| {
+                record
+                    .get("time")
+                    .and_then(|time| time.get(key))
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(0)
+            };
+
+            let began = at("start").max(at("submission"));
+            let ended = at("end");
+
+            began < end_time.timestamp() && ended > start_time.timestamp()
+        });
+
+        fixture
+    }
+
+    pub fn consumers_for(
+        window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+    ) -> Vec<SlurmJob> {
+        let (start, end) = window;
+        SlurmJob::get_consumers(
+            &records_in_window(&start, &end),
+            &start,
+            &end,
+            &test_nodes(),
+        )
+        .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixture::*;
+    use super::*;
+
     fn consumers() -> Vec<SlurmJob> {
-        let (start, end) = window();
-        SlurmJob::get_consumers(&fixture(), &start, &end, &test_nodes()).unwrap()
+        consumers_for(day_one())
     }
 
     #[test]
@@ -4023,6 +4113,57 @@ mod tests {
     }
 
     #[test]
+    fn test_a_requeue_across_midnight_is_counted_once_on_the_day_it_happened() {
+        // The shape almost every real requeue has, and the case the first
+        // version of the event count got wrong. Job 900's attempt starts on day
+        // one, runs past midnight, and is requeued on day two; the attempt that
+        // replaces it never runs, so it has zero elapsed.
+        //
+        // On day one the successor does not exist yet, so the attempt is the
+        // job's last one and is classified `Base` - there is nothing to say it
+        // will later be requeued. Only on day two are both records in the same
+        // response, and only there can the requeue be seen. Its *start*,
+        // though, is on day one, so requiring the record to have started in the
+        // window meant this requeue - and nearly every other one, since the
+        // attempts that get requeued are the long ones - was never counted at
+        // all, while its usage was being reported correctly all along.
+        let day_one_jobs = consumers_for(day_one());
+        let day_two_jobs = consumers_for(day_two());
+
+        let day_one_records = records_for(&day_one_jobs, 900);
+        assert_eq!(day_one_records.len(), 1);
+        assert_eq!(day_one_records[0].attempt(), Attempt::Base);
+
+        // on day two the successor is visible, so the attempt is recognised as
+        // superseded - and its start is on the day before
+        let day_two_records = records_for(&day_two_jobs, 900);
+        assert_eq!(day_two_records.len(), 1); // the zero-elapsed successor is not a consumer
+        assert_eq!(day_two_records[0].attempt(), Attempt::Requeued);
+        assert!(day_two_records[0].original_start_time() < &day_two().0);
+
+        // exactly one window sees the requeue, so counting every superseded
+        // record counts the event once - no guard needed, and no double count
+        let requeues_seen = |jobs: &[SlurmJob]| {
+            jobs.iter()
+                .filter(|job| job.id() == 900 && job.attempt() == Attempt::Requeued)
+                .count()
+        };
+
+        assert_eq!(requeues_seen(&day_one_jobs), 0);
+        assert_eq!(requeues_seen(&day_two_jobs), 1);
+
+        // and the usage is split across the two days without being lost or
+        // counted twice: twelve hours of it, four on day one and eight on day two
+        assert_eq!(usage_of(&day_one_jobs, 900, Attempt::Base), 14400);
+        assert_eq!(usage_of(&day_two_jobs, 900, Attempt::Requeued), 28800);
+        assert_eq!(
+            usage_of(&day_one_jobs, 900, Attempt::Base)
+                + usage_of(&day_two_jobs, 900, Attempt::Requeued),
+            43200
+        );
+    }
+
+    #[test]
     fn test_base_usage_equals_what_default_sacct_reported() {
         // The continuity property the whole design rests on: the base figure is
         // what we reported before requeue accounting, so no consumer sees a
@@ -4036,7 +4177,7 @@ mod tests {
         // improvement on the old figure, not continuity with it.
         let (start, end) = window();
         let nodes = test_nodes();
-        let mut fixture = fixture();
+        let mut fixture = records_in_window(&start, &end);
 
         {
             let Some(records) = fixture.get_mut("jobs").and_then(|jobs| jobs.as_array_mut()) else {
@@ -4113,13 +4254,13 @@ mod tests {
             .sum();
         let everything: u64 = jobs.iter().map(|job| job.billed_node_seconds()).sum();
 
-        assert_eq!(base, 14400);
+        assert_eq!(base, 28800);
         assert_eq!(requeued, 20700);
         assert_eq!(base + requeued, everything);
 
         // and the requeue share is the point of the exercise - it was all
         // invisible before
-        assert_eq!(everything, 35100);
+        assert_eq!(everything, 49500);
     }
 
     #[test]

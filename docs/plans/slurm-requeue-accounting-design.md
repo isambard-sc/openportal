@@ -251,6 +251,10 @@ are walked, the new ones must be walked too.
   needs cross-window grouping and reintroduces the problem of §3.1, whereas an
   event count is additive over any range. Name it so nobody reads it as a job
   count.
+- **An event is counted for every superseded record, with no condition on where
+  the attempt started.** This is the opposite of the job count above, and
+  getting it wrong is the one mistake this design has already made in
+  production - see §4.2.
 - `total_wait_seconds` keeps its meaning - the queue wait of `base` records
   only - so the existing mean-wait figure is untouched.
 
@@ -262,7 +266,7 @@ Three wait figures then fall out for consumers:
 | mean wait per requeue | `requeue_wait_seconds / num_requeue_events` |
 | mean total wait per job, including requeues | `(total_wait_seconds + requeue_wait_seconds) / num_jobs` |
 
-A note on the middle row, correcting an earlier reading of this. Slurm imposes
+A note on the middle row. Slurm imposes
 a begin-time hold after a requeue, but it advances `eligible` past that hold,
 and `wait_time()` measures `eligible -> start`. So the hold is *excluded* from
 requeue wait, and the figure is genuine time spent waiting to be scheduled.
@@ -270,6 +274,48 @@ The hold itself - `submission -> eligible`, a couple of minutes on the sampled
 job - is not captured by any field in this design. That seems right: it is a
 policy delay rather than contention, and conflating the two would make the
 requeue wait figure less useful, not more.
+
+### 4.2 Why a requeue event needs no window guard, and why one broke it
+
+A job's count needs a window guard. A record that is still running when the
+window closes is returned again for the next window, so without
+`started_in_window` a long job would be counted once per window it touched.
+
+A requeue event needs the opposite treatment, and the first version of this
+design applied the guard to both. The result was a count of 1 where there were
+several, on the same data whose requeue *usage* was correct - the figures
+disagreed with each other because they were being gated on different things.
+
+A superseded record is classified `Requeued` in **at most one** window, so
+counting every one of them counts each event exactly once:
+
+- a record is only returned for windows it overlaps, so it can be seen at all
+  only up to the window holding its end;
+- it is only classified `Requeued` when a later attempt is in the same
+  response, and a later attempt cannot start before this one ended - so the
+  window must also reach the successor's start, at or after this record's end;
+- the two conditions meet in exactly one window: the one holding the end, which
+  is the instant of the requeue.
+
+Requiring the record to have started in that window as well asked for something
+almost no real requeue can satisfy. The attempts that get requeued are the long
+ones - a job near its wall-clock limit - so the requeue lands on the day *after*
+the attempt began and the two conditions cannot both hold. The usage was right
+throughout, because usage is attributed per window to the part consumed in it;
+only the event count fell in the gap.
+
+The one case still missed is a requeue within seconds of a window boundary,
+where the successor is submitted on the far side and the two records never
+appear in one response. The count is a lower bound to that extent, and never
+counts anything twice.
+
+This is also why `wait_time()` measures from the *unclipped* start. How long an
+attempt queued is a property of the attempt, not of the window it is reported
+in. With the guard in place the distinction never showed - a counted attempt had
+started inside the window, so its clipped and real starts were identical - but a
+requeue is counted in the window where it happened, which is not where the
+attempt began, and the clipped start would have reported it as having waited
+until the window opened.
 
 ## 5. Where the code changes
 
@@ -367,13 +413,24 @@ Cases the fixture set should cover:
   the requeue bucket and the base figure is zero (§5.2);
 - attempts with each terminal state we intend to key on (§6);
 - an attempt spanning the window boundary, to pin the clipping arithmetic;
-- a job array and a heterogeneous job, neither of which is covered today.
+- a job array and a heterogeneous job, neither of which is covered today;
+- **an attempt spanning midnight whose replacement never runs** - the shape
+  almost every real requeue has, and the one that caught §4.2. It has to be
+  checked over two consecutive windows, with the records filtered by overlap as
+  `sacct` would filter them, or the case disappears: the whole point is that
+  day one cannot see the successor and day two cannot see the start.
 
 Assertions worth making explicit, since they are the contract of §3:
 `base + requeue` equals the sum over all records; `base` alone equals what the
 same fixture yields with the duplicate records removed (a direct test of
 continuity); each job contributes exactly one to `num_jobs`; the state maps sum
 to the flat requeue totals.
+
+A test that hands `get_consumers` every record in the fixture is not testing
+much. Whether a superseded attempt can be *recognised* as one depends entirely
+on which of a job's other attempts the query returned, so the tests filter the
+fixture by overlap with the window first, exactly as `--starttime`/`--endtime`
+would.
 
 **Anonymisation, one trap.** `nodes` is a string looked up in `SlurmNodes`,
 and a miss falls back silently to a default node - which changes
@@ -448,5 +505,11 @@ an end, not a standing choice.
 - **`state` became `states`.** `SlurmJob` keeps the whole state set, and the
   single-state accessor was removed rather than kept alongside it: its only
   caller was `Display`, and `terminal_state()` is what that wanted.
+- **The requeue event count is not gated on the window** - see §4.2. The first
+  version was, which made it near-useless in production while the usage it
+  counted was correct. Fixed after testing on real data, with the regression
+  test sitting on the accumulation function where the mistake was rather than on
+  the classification, which was never wrong.
+- **`wait_time()` measures from the unclipped start** - see §4.2.
 - **Node failures are logged at `error`**, naming the node and the states Slurm
   reported, from the fresh-fetch paths only - see §6.

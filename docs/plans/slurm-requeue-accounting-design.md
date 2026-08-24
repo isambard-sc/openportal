@@ -610,6 +610,16 @@ question, and both are exposed. The same is true of the expansion factor, and fo
 the same reason - these are distribution questions being asked of a single
 number, so the per-user breakdown is not a refinement but the point.
 
+Which is why `expansion_factor_report()` leads with the per-user table rather
+than the totals, and shows each day underneath so that a change over time is
+visible - when the trouble started being about as useful as who caused it. It
+also names which end of the distribution did the waiting, comparing the two
+expansion figures as **excesses over 1.0** rather than as raw values: on this
+scale 1.0 means "waited not at all", so all the signal is in the part above it,
+and a ratio of the raw values calls 1.02 and 1.97 similar when one project waited
+fifty times as much as the other. When both excesses are small it says nothing at
+all, because then there is nothing to explain.
+
 ## 8. Compatibility and rollout
 
 Nothing on the wire breaks. Every new field is `#[serde(default)]`, so an

@@ -997,6 +997,15 @@ impl DailyProjectUsageReport {
         }
     }
 
+    /// The local users who ran jobs counted in this report. Taken from the job
+    /// counts rather than the usage map, since it is the job count that every
+    /// per-job average divides by.
+    pub fn job_users(&self) -> Vec<String> {
+        let mut users: Vec<String> = self.user_job_counts.keys().cloned().collect();
+        users.sort();
+        users
+    }
+
     pub fn num_jobs_for_user(&self, user: &str) -> u64 {
         self.user_job_counts.get(user).copied().unwrap_or(0)
     }
@@ -2750,6 +2759,39 @@ impl ProjectUsageReport {
         }
     }
 
+    /// The local users who ran jobs on any day in this report.
+    pub fn job_users(&self) -> Vec<String> {
+        let mut users: Vec<String> = self
+            .reports
+            .values()
+            .flat_map(|report| report.job_users())
+            .collect();
+
+        users.sort();
+        users.dedup();
+        users
+    }
+
+    pub fn num_jobs_for_user(&self, user: &str) -> u64 {
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.num_jobs_for_user(user))
+        })
+    }
+
+    pub fn wait_seconds_for_user(&self, user: &str) -> u64 {
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.wait_seconds_for_user(user))
+        })
+    }
+
+    /// The mean queue wait per job for one local user, over every day.
+    pub fn average_wait_seconds_for_user(&self, user: &str) -> u64 {
+        match self.num_jobs_for_user(user) {
+            0 => 0,
+            n => self.wait_seconds_for_user(user) / n,
+        }
+    }
+
     /// Total wall-clock runtime of every job in this report. Not usage - usage
     /// weights each second by the fraction of a node held.
     pub fn total_runtime_seconds(&self) -> u64 {
@@ -2960,6 +3002,193 @@ impl ProjectUsageReport {
 
         summary.sort_by(|a, b| b.2.seconds().cmp(&a.2.seconds()).then(a.0.cmp(&b.0)));
         summary
+    }
+
+    ///
+    /// A readable summary of how well this project's jobs were served, and what
+    /// shape they were.
+    ///
+    /// Both of these are distribution questions being asked of a single number,
+    /// so the per-user table is the point of the report rather than a refinement
+    /// of it: a project-wide mean job size of twenty cores can be four
+    /// 512-core jobs beside a hundred 2-core ones, describing neither.
+    ///
+    pub fn expansion_factor_report(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::new();
+        let rule = "=".repeat(72);
+
+        // `write!` to a String cannot fail, so the results are deliberately
+        // discarded rather than unwrapped - `unwrap` is denied in this crate.
+        let _ = writeln!(out, "Expansion factor and job size for {}", self.project());
+        let _ = writeln!(out, "{}", rule);
+
+        if self.num_jobs() == 0 {
+            let _ = writeln!(out, "No jobs recorded.");
+            let _ = writeln!(out, "{}", rule);
+            return out;
+        }
+
+        let mean = self.average_expansion_factor();
+        let aggregate = self.aggregate_expansion_factor();
+
+        let _ = writeln!(
+            out,
+            "{} jobs | mean expansion factor {:.2} | overall {:.2}",
+            self.num_jobs(),
+            mean,
+            aggregate
+        );
+        let _ = writeln!(
+            out,
+            "Mean wait {} | mean job size {:.1} cores, {:.1} gpus",
+            Usage::new(self.average_wait_seconds()).in_hours(),
+            self.average_cpus_per_job(),
+            self.average_gpus_per_job()
+        );
+        // The mean is the sum of per-job ratios over the job count, so it is
+        // exactly "how many times its own runtime the average job took to turn
+        // around" - worth spelling out, because a bare ratio invites being read
+        // as a percentage.
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "The average job took {:.2} times its own runtime to turn around; 1.00 would",
+            mean
+        );
+        let _ = writeln!(out, "mean it ran the moment it became eligible.");
+
+        // The gap between the two forms is the most useful thing in the report:
+        // they are moved by opposite ends of the job-size distribution.
+        //
+        // Compared as excesses over 1.0, not as raw values. On this scale 1.0 is
+        // "waited not at all", so all the signal is in the part above it -
+        // comparing 1.02 against 1.97 as a ratio says they are similar when one
+        // project waited fifty times as much as the other. Nothing is said at
+        // all when both excesses are small, because then there is nothing to
+        // explain.
+        let mean_excess = (mean - 1.0).max(0.0);
+        let aggregate_excess = (aggregate - 1.0).max(0.0);
+        let worth_explaining = mean_excess.max(aggregate_excess) > 0.25;
+
+        if worth_explaining && mean_excess > aggregate_excess * 2.0 {
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "The mean is well above the overall figure, so some *short* jobs waited a"
+            );
+            let _ = writeln!(
+                out,
+                "long time - a pattern worth chasing, and often a user fighting a job that"
+            );
+            let _ = writeln!(out, "will not run. The per-user table below says who.");
+        } else if worth_explaining && aggregate_excess > mean_excess * 2.0 {
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "The overall figure is well above the mean, so the waiting fell on the"
+            );
+            let _ = writeln!(
+                out,
+                "*long* jobs - which is usually queue contention rather than anything wrong."
+            );
+        }
+
+        // ---- per user, worst-served first
+        let mut local_to_portal = HashMap::new();
+
+        for (user, local_user) in &self.users {
+            local_to_portal.insert(local_user.clone(), user.clone());
+        }
+
+        let mut users: Vec<(String, u64, f64, f64, f64, u64)> = self
+            .job_users()
+            .into_iter()
+            .map(|user| {
+                let jobs = self.num_jobs_for_user(&user);
+                let expansion = self.expansion_factor_for_user(&user);
+                let cpus = self.average_cpus_per_job_for_user(&user);
+                let gpus = self.average_gpus_per_job_for_user(&user);
+                let wait = self.average_wait_seconds_for_user(&user);
+                (user, jobs, expansion, cpus, gpus, wait)
+            })
+            .collect();
+
+        users.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  {:<28} {:>6} {:>10} {:>8} {:>7} {:>14}",
+            "user", "jobs", "expansion", "cores", "gpus", "mean wait"
+        );
+
+        for (user, jobs, expansion, cpus, gpus, wait) in users {
+            let label = match local_to_portal.get(&user) {
+                Some(portal_user) => portal_user.to_string(),
+                None => format!("{} - unknown", user),
+            };
+
+            let _ = writeln!(
+                out,
+                "  {:<28} {:>6} {:>10.2} {:>8.1} {:>7.1} {:>14}",
+                label,
+                jobs,
+                expansion,
+                cpus,
+                gpus,
+                Usage::new(wait).in_hours().to_string()
+            );
+        }
+
+        // ---- per day, so a change over time is visible
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  {:<28} {:>6} {:>10} {:>8} {:>7}",
+            "day", "jobs", "expansion", "cores", "gpus"
+        );
+
+        for date in self.dates() {
+            let Some(report) = self.reports.get(&date) else {
+                continue;
+            };
+
+            if report.num_jobs() == 0 {
+                continue;
+            }
+
+            let _ = writeln!(
+                out,
+                "  {:<28} {:>6} {:>10.2} {:>8.1} {:>7.1}",
+                date.to_string(),
+                report.num_jobs(),
+                report.average_expansion_factor(),
+                report.average_cpus_per_job(),
+                report.average_gpus_per_job()
+            );
+        }
+
+        let _ = writeln!(out, "{}", rule);
+        let _ = writeln!(
+            out,
+            "Expansion factor is turnaround over runtime, so 1.00 is ideal and higher is"
+        );
+        let _ = writeln!(
+            out,
+            "worse. Job sizes count each job once however long it ran, so they describe"
+        );
+        let _ = writeln!(
+            out,
+            "the shape of the jobs, not what the machine was busy with."
+        );
+
+        out
     }
 
     ///
@@ -3902,6 +4131,38 @@ impl UsageReport {
     }
 
     ///
+    ///
+    /// A readable expansion-factor and job-size summary for every project that
+    /// ran any jobs - see `ProjectUsageReport::expansion_factor_report`.
+    ///
+    pub fn expansion_factor_report(&self) -> String {
+        use std::fmt::Write;
+
+        let mut projects: Vec<&ProjectIdentifier> = self.reports.keys().collect();
+        projects.sort_by_cached_key(|project| project.to_string());
+
+        let mut out = String::new();
+
+        for project in projects {
+            let Some(report) = self.reports.get(project) else {
+                continue;
+            };
+
+            if report.num_jobs() == 0 {
+                continue;
+            }
+
+            // `write!` to a String cannot fail
+            let _ = write!(out, "{}", report.expansion_factor_report());
+        }
+
+        if out.is_empty() {
+            let _ = writeln!(out, "No jobs recorded for any project.");
+        }
+
+        out
+    }
+
     /// A readable reservation summary for every project that ran inside one.
     ///
     /// Note what this is not: a reservation's own utilisation. A reservation is
@@ -4263,6 +4524,189 @@ mod tests {
         assert!(combined.expansion_factor_for_user("alice") > 1000.0);
         assert!(combined.expansion_factor_for_user("bob") < 1.01);
         assert!(combined.is_consistent());
+    }
+
+    /// A project with three users of deliberately different habits: one running
+    /// a few large jobs and well served, one running many small ones, and one
+    /// fighting a job that will not run.
+    fn project_report_with_mixed_habits() -> ProjectUsageReport {
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut day = DailyProjectUsageReport::default();
+
+        for _ in 0..4 {
+            day.add_usage("alice", Usage::new(3600 * 128));
+            day.add_jobs("alice", 1);
+            day.add_wait_seconds("alice", 900);
+            day.add_expansion("alice", 900, 7200);
+            day.add_job_size("alice", 512, 16);
+        }
+
+        for _ in 0..120 {
+            day.add_usage("carol", Usage::new(600));
+            day.add_jobs("carol", 1);
+            day.add_wait_seconds("carol", 300);
+            day.add_expansion("carol", 300, 600);
+            day.add_job_size("carol", 2, 0);
+        }
+
+        for _ in 0..6 {
+            day.add_usage("bob", Usage::new(30));
+            day.add_jobs("bob", 1);
+            day.add_wait_seconds("bob", 9000);
+            day.add_expansion("bob", 9000, 30);
+            day.add_job_size("bob", 64, 4);
+        }
+
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        report
+    }
+
+    #[test]
+    fn test_the_expansion_report_names_the_user_who_is_struggling() {
+        // The per-user table is the point of the report: the project-wide mean
+        // job size here is about 20 cores, which describes none of these three.
+        let report = project_report_with_mixed_habits();
+        let dump = report.expansion_factor_report();
+
+        // worst-served first, so the user in trouble is the first row
+        let user_rows: Vec<&str> = dump
+            .lines()
+            .skip_while(|line| !line.contains("expansion"))
+            .filter(|line| line.starts_with("  ") && !line.contains("expansion"))
+            .collect();
+
+        let Some(worst) = user_rows.first() else {
+            unreachable!("no per-user rows in:\n{}", dump);
+        };
+
+        assert!(worst.contains("bob"), "bob should be first: {}", worst);
+        assert!(worst.contains("301.00"), "{}", worst);
+
+        // and every user appears with their own job shape
+        assert!(dump.contains("512.0"), "alice's job size: {}", dump);
+        assert!(
+            dump.contains("180") || dump.contains("120"),
+            "carol's jobs: {}",
+            dump
+        );
+    }
+
+    #[test]
+    fn test_the_expansion_report_explains_which_end_of_the_distribution_waited() {
+        // The gap between the two forms is the most useful thing in the report,
+        // so it is spelled out rather than left to be spotted.
+        let struggling = project_report_with_mixed_habits();
+        let dump = struggling.expansion_factor_report();
+
+        assert!(
+            dump.contains("some *short* jobs waited a"),
+            "a mean far above the aggregate should be called out: {}",
+            dump
+        );
+
+        // the opposite case: one long job that waited, and nothing else
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut contended = ProjectUsageReport::new(&project);
+        let mut day = DailyProjectUsageReport::default();
+
+        day.add_jobs("alice", 1);
+        day.add_wait_seconds("alice", 86400);
+        day.add_expansion("alice", 86400, 86400);
+        day.add_job_size("alice", 128, 0);
+
+        for _ in 0..50 {
+            day.add_jobs("carol", 1);
+            day.add_wait_seconds("carol", 0);
+            day.add_expansion("carol", 0, 60);
+            day.add_job_size("carol", 1, 0);
+        }
+
+        contended.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        let dump = contended.expansion_factor_report();
+
+        assert!(
+            dump.contains("*long* jobs"),
+            "an aggregate far above the mean should be called out: {}",
+            dump
+        );
+    }
+
+    #[test]
+    fn test_the_expansion_report_says_nothing_when_there_is_nothing_to_explain() {
+        // A well-served project gets the figures and no commentary. The
+        // comparison is between the excesses over 1.0, not the raw values: on
+        // this scale 1.0 means "waited not at all", so 1.02 against 1.04 is a
+        // doubling of nothing and must not be announced as a pattern.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+        let mut day = DailyProjectUsageReport::default();
+
+        for _ in 0..20 {
+            day.add_jobs("alice", 1);
+            day.add_wait_seconds("alice", 30);
+            day.add_expansion("alice", 30, 3600);
+            day.add_job_size("alice", 128, 0);
+        }
+
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+        let dump = report.expansion_factor_report();
+
+        assert!(!dump.contains("*short* jobs"), "{}", dump);
+        assert!(!dump.contains("*long* jobs"), "{}", dump);
+
+        // but the figures themselves are still there
+        assert!(dump.contains("20 jobs"), "{}", dump);
+        assert!(dump.contains("128.0"), "{}", dump);
+    }
+
+    #[test]
+    fn test_the_expansion_report_is_one_line_when_no_jobs_ran() {
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let report = ProjectUsageReport::new(&project);
+
+        assert!(report
+            .expansion_factor_report()
+            .contains("No jobs recorded"));
+        assert!(!report
+            .expansion_factor_report()
+            .contains("expansion factor 0"));
+    }
+
+    #[test]
+    fn test_the_expansion_report_shows_each_day_so_a_change_is_visible() {
+        // When the trouble started is as useful as who caused it.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut quiet = DailyProjectUsageReport::default();
+        quiet.add_jobs("alice", 1);
+        quiet.add_expansion("alice", 0, 3600);
+        quiet.add_job_size("alice", 128, 0);
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &quiet);
+
+        let mut bad = DailyProjectUsageReport::default();
+        bad.add_jobs("alice", 1);
+        bad.add_wait_seconds("alice", 36000);
+        bad.add_expansion("alice", 36000, 60);
+        bad.add_job_size("alice", 128, 0);
+        report.set_report(&Date::parse("2026-03-02").unwrap(), &bad);
+
+        let dump = report.expansion_factor_report();
+
+        assert!(dump.contains("2026-03-01"), "{}", dump);
+        assert!(dump.contains("2026-03-02"), "{}", dump);
+
+        // the quiet day is 1.00 and the bad one is not
+        let day_rows: Vec<&str> = dump
+            .lines()
+            .filter(|line| line.trim_start().starts_with("2026-03-"))
+            .collect();
+
+        assert_eq!(day_rows.len(), 2);
+        assert!(day_rows[0].contains("1.00"), "{}", day_rows[0]);
+        assert!(day_rows[1].contains("601.00"), "{}", day_rows[1]);
     }
 
     #[test]

@@ -2917,6 +2917,12 @@ impl UsageReport {
         Ok(self.0.total_reservation_usage().into())
     }
 
+    /// A readable expansion-factor and job-size summary for every project that
+    /// ran any jobs. Print it.
+    fn expansion_factor_report(&self) -> PyResult<String> {
+        Ok(self.0.expansion_factor_report())
+    }
+
     /// A readable reservation summary for every project that ran inside one.
     /// Print it.
     fn reservation_report(&self) -> PyResult<String> {
@@ -3320,6 +3326,18 @@ impl ProjectUsageReport {
             .into_iter()
             .map(|(name, jobs, usage, requeued)| (name, jobs, usage.into(), requeued.into()))
             .collect())
+    }
+
+    /// A readable summary of how well this project's jobs were served and what
+    /// shape they were - expansion factor and job size, by user and by day.
+    /// Print it.
+    ///
+    /// Both are distribution questions being asked of a single number, so the
+    /// per-user table is the point of the report rather than a refinement of it:
+    /// a project-wide mean job size of twenty cores can be four 512-core jobs
+    /// beside a hundred 2-core ones, describing neither.
+    fn expansion_factor_report(&self) -> PyResult<String> {
+        Ok(self.0.expansion_factor_report())
     }
 
     /// A readable summary of what this project ran inside reservations, by

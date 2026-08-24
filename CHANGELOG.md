@@ -96,6 +96,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   project-wide mean describes a mixed population badly - four 512-core jobs
   beside a hundred 2-core ones average to about 20 - so the per-user figures are
   the ones to read.
+- **`expansion_factor_report()`** on a project or portal report - a readable
+  summary of how well a project's jobs were served and what shape they were, by
+  user and by day. The per-user table is the point of it rather than a
+  refinement: both figures are distribution questions being asked of a single
+  number, and a project-wide mean job size of twenty cores can be four 512-core
+  jobs beside a hundred 2-core ones, describing neither.
+
+  It also names which end of the distribution did the waiting, since the gap
+  between the two expansion figures is the most useful thing in the report - a
+  mean far above the overall figure means short jobs waited a long time, and the
+  other way round means the waiting fell on the long ones and is probably just
+  contention. Nothing is said when both are close to the ideal.
 - **Reservation accounting.** Usage reports now record which Slurm reservation a
   job ran under, so that what a project put into a reservation can be seen at
   all:

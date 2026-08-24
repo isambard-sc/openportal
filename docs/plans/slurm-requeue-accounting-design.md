@@ -441,6 +441,28 @@ plausible. Fields that must survive anonymisation intact: `job_id`,
 `restart_cnt`, all of `time`, `state`, `tres.allocated`, `tres.requested`,
 `qos`, `cluster`. `user` and `account` can be renamed freely.
 
+## 7.1 Reporting it to a human
+
+The figures are only useful if someone can read them, and the first thing asked
+of them in practice was "how many requeues, on which day, and what interrupted
+them" - which the flat totals could not answer at a glance.
+
+`ProjectUsageReport::requeue_report()` (and the same on `UsageReport`, for every
+project that has any) returns a plain-text summary: the reported, discarded and
+true totals with the discarded share as a percentage, the event count and the
+queue wait it threw away, then breakdowns by interrupting state, by day and by
+user. Everything in it is in hours - `Usage`'s own formatting rescales itself
+per value, which is right for a single figure and unreadable in a column.
+
+Two smaller things belong with it. The per-day printout of a project report now
+carries its own requeue line: the daily line existed on
+`DailyProjectUsageReport`'s own `Display`, but a project report renders its days
+itself, so it never appeared where anyone was reading it. And a day whose
+consumption was entirely discarded by requeues is no longer skipped: the daily
+listing dropped any day whose `total_usage()` was zero, which is exactly what
+such a day has - none of the usage we *report* - while still having plenty to
+say.
+
 ## 8. Compatibility and rollout
 
 Nothing on the wire breaks. Every new field is `#[serde(default)]`, so an

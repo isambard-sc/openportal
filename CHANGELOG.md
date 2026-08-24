@@ -42,6 +42,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
     site lost the work), `PREEMPTED` (site policy) and `CANCELLED` are different
     arguments about who should pay.
 
+  - `requeue_report()` on a project or portal report - a readable dump of what
+    was reported, what was discarded, what Slurm considers the true total, and
+    the breakdown by interrupting state, by day and by user. A project with no
+    requeues gets a single line saying so rather than a page of zeroes.
+
+  The per-day printout now carries its own requeue line, and a day whose
+  consumption was *entirely* discarded by requeues is no longer skipped as
+  having no usage - it has none of the usage we report, which is precisely why
+  it is worth showing.
+
   All of it is exposed through the Python bindings, and every new field is
   `#[serde(default)]`, so a report from an instance that predates them
   deserialises as "no requeues seen" and an older peer ignores what it does not

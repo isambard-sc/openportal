@@ -2894,6 +2894,17 @@ impl UsageReport {
         Ok(self.0.num_requeue_events())
     }
 
+    /// True if anything about a requeue was recorded for any project.
+    #[getter]
+    fn has_requeues(&self) -> PyResult<bool> {
+        Ok(self.0.has_requeues())
+    }
+
+    /// A readable requeue summary for every project that has requeues. Print it.
+    fn requeue_report(&self) -> PyResult<String> {
+        Ok(self.0.requeue_report())
+    }
+
     fn remap_portal(&mut self, new_portal: &PortalIdentifier) -> PyResult<()> {
         self.0
             .remap_portal(&new_portal.0)
@@ -3151,6 +3162,32 @@ impl ProjectUsageReport {
     /// Requeue usage attributable to superseded attempts that ended in `state`.
     fn requeue_usage_in_state(&self, state: &str) -> PyResult<Usage> {
         Ok(self.0.requeue_usage_in_state(state).into())
+    }
+
+    /// Requeue events and usage per interrupting state, worst first, as a list
+    /// of `(state, events, usage)` tuples.
+    #[getter]
+    fn requeue_state_summary(&self) -> PyResult<Vec<(String, u64, Usage)>> {
+        Ok(self
+            .0
+            .requeue_state_summary()
+            .into_iter()
+            .map(|(state, events, usage)| (state, events, usage.into()))
+            .collect())
+    }
+
+    /// True if anything about a requeue was recorded for any day.
+    #[getter]
+    fn has_requeues(&self) -> PyResult<bool> {
+        Ok(self.0.has_requeues())
+    }
+
+    /// A readable summary of everything this report knows about requeues:
+    /// what was reported, what was discarded, what Slurm considers the true
+    /// total, and which states did the interrupting - broken down by state, by
+    /// day and by user. Print it.
+    fn requeue_report(&self) -> PyResult<String> {
+        Ok(self.0.requeue_report())
     }
 
     #[getter]
@@ -3851,6 +3888,30 @@ impl DailyProjectUsageReport {
 
     fn requeue_usage_in_state(&self, state: &str) -> PyResult<Usage> {
         Ok(self.0.requeue_usage_in_state(state).into())
+    }
+
+    /// Requeue events and usage per interrupting state, worst first, as a list
+    /// of `(state, events, usage)` tuples.
+    #[getter]
+    fn requeue_state_summary(&self) -> PyResult<Vec<(String, u64, Usage)>> {
+        Ok(self
+            .0
+            .requeue_state_summary()
+            .into_iter()
+            .map(|(state, events, usage)| (state, events, usage.into()))
+            .collect())
+    }
+
+    /// True if anything about a requeue was recorded for this day.
+    #[getter]
+    fn has_requeues(&self) -> PyResult<bool> {
+        Ok(self.0.has_requeues())
+    }
+
+    /// The local users who lost work to a requeue on this day.
+    #[getter]
+    fn requeue_users(&self) -> PyResult<Vec<String>> {
+        Ok(self.0.requeue_users())
     }
 
     /// The components for which requeue usage was recorded.

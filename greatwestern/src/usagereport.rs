@@ -983,6 +983,63 @@ impl DailyProjectUsageReport {
             .unwrap_or_default()
     }
 
+    /// True if anything about a requeue was recorded for this day.
+    pub fn has_requeues(&self) -> bool {
+        self.num_requeue_events > 0 || !self.total_requeue_usage().is_zero()
+    }
+
+    /// The local users who lost work to a requeue, or whose jobs were requeued.
+    ///
+    /// The two are not the same set: a superseded attempt's usage is recorded in
+    /// every window it overlaps, while the requeue itself is recorded in the one
+    /// window where it happened, so a user can appear in one map and not the
+    /// other. Both are included.
+    pub fn requeue_users(&self) -> Vec<String> {
+        let mut users: Vec<String> = self
+            .requeue_reports
+            .keys()
+            .chain(self.user_requeue_events.keys())
+            .cloned()
+            .collect();
+
+        users.sort();
+        users.dedup();
+        users
+    }
+
+    ///
+    /// Requeue events and usage per interrupting state, worst first.
+    ///
+    /// The counts and the usage come from different rules - see
+    /// `add_requeue_state_usage` - so a state can appear with usage but no
+    /// events, or the other way round. Every state named by either is listed.
+    ///
+    pub fn requeue_state_summary(&self) -> Vec<(String, u64, Usage)> {
+        let mut states: Vec<String> = self
+            .requeue_states
+            .keys()
+            .chain(self.requeue_state_usage.keys())
+            .cloned()
+            .collect();
+
+        states.sort();
+        states.dedup();
+
+        let mut summary: Vec<(String, u64, Usage)> = states
+            .into_iter()
+            .map(|state| {
+                let events = self.requeue_events_in_state(&state);
+                let usage = self.requeue_usage_in_state(&state);
+                (state, events, usage)
+            })
+            .collect();
+
+        // worst first, by usage, with the state name breaking ties so the
+        // ordering is stable
+        summary.sort_by(|a, b| b.2.seconds().cmp(&a.2.seconds()).then(a.0.cmp(&b.0)));
+        summary
+    }
+
     pub fn requeue_components(&self) -> Vec<String> {
         let mut components = self.requeue_components.keys().cloned().collect::<Vec<_>>();
         components.sort();
@@ -1356,8 +1413,9 @@ impl std::fmt::Display for ProjectUsageReport {
         for date in dates {
             let report = self.reports.get(date).cloned().unwrap_or_default();
 
-            if report.total_usage() == Usage::default() {
-                // skip days with no usage
+            if report.total_usage() == Usage::default() && !report.has_requeues() {
+                // skip days with no usage - but a day whose whole consumption
+                // was discarded by requeues has plenty to say
                 continue;
             }
 
@@ -1399,6 +1457,20 @@ impl std::fmt::Display for ProjectUsageReport {
                         writeln!(f, "Number of jobs: {}", n)?;
                     }
                 }
+            }
+            if report.has_requeues() {
+                writeln!(
+                    f,
+                    "Requeued: {} {} | {} | Average requeue wait: {}",
+                    report.num_requeue_events(),
+                    if report.num_requeue_events() == 1 {
+                        "event"
+                    } else {
+                        "events"
+                    },
+                    report.total_requeue_usage(),
+                    Usage::new(report.average_requeue_wait_seconds())
+                )?;
             }
             writeln!(f, "Daily total: {}", report.total_usage())?;
             writeln!(f, "----------------------------------------")?;
@@ -1460,7 +1532,8 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
         for date in dates {
             let daily = report.reports.get(date).cloned().unwrap_or_default();
 
-            if daily.total_usage() == Usage::default() {
+            if daily.total_usage() == Usage::default() && !daily.has_requeues() {
+                // see the note in the `Display` impl above
                 continue;
             }
 
@@ -1502,6 +1575,20 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                         writeln!(f, "Number of jobs: {}", n)?;
                     }
                 }
+            }
+            if daily.has_requeues() {
+                writeln!(
+                    f,
+                    "Requeued: {} {} | {} | Average requeue wait: {}",
+                    daily.num_requeue_events(),
+                    if daily.num_requeue_events() == 1 {
+                        "event"
+                    } else {
+                        "events"
+                    },
+                    daily.total_requeue_usage().in_hours(),
+                    Usage::new(daily.average_requeue_wait_seconds()).in_hours()
+                )?;
             }
             writeln!(f, "Daily total: {}", daily.total_usage().in_hours())?;
             writeln!(f, "----------------------------------------")?;
@@ -1890,6 +1977,197 @@ impl ProjectUsageReport {
             .sum()
     }
 
+    /// True if anything about a requeue was recorded for any day.
+    pub fn has_requeues(&self) -> bool {
+        self.reports.values().any(|report| report.has_requeues())
+    }
+
+    /// Requeue events and usage per interrupting state, worst first - see
+    /// `DailyProjectUsageReport::requeue_state_summary`.
+    pub fn requeue_state_summary(&self) -> Vec<(String, u64, Usage)> {
+        let mut events: HashMap<String, u64> = HashMap::new();
+        let mut usage: HashMap<String, Usage> = HashMap::new();
+
+        for report in self.reports.values() {
+            for (state, state_events, state_usage) in report.requeue_state_summary() {
+                *events.entry(state.clone()).or_default() += state_events;
+                *usage.entry(state).or_default() += state_usage;
+            }
+        }
+
+        let mut summary: Vec<(String, u64, Usage)> = events
+            .keys()
+            .chain(usage.keys())
+            .cloned()
+            .collect::<std::collections::BTreeSet<String>>()
+            .into_iter()
+            .map(|state| {
+                let state_events = events.get(&state).copied().unwrap_or(0);
+                let state_usage = usage.get(&state).cloned().unwrap_or_default();
+                (state, state_events, state_usage)
+            })
+            .collect();
+
+        summary.sort_by(|a, b| b.2.seconds().cmp(&a.2.seconds()).then(a.0.cmp(&b.0)));
+        summary
+    }
+
+    ///
+    /// A readable summary of everything this report knows about requeues.
+    ///
+    /// The figures a charging decision needs, in one place: what was reported,
+    /// what was discarded, what Slurm thinks the true total is, and - because
+    /// this is usually the question that matters - which states did the
+    /// interrupting, since work lost to a node failure is the site's doing and
+    /// work lost to preemption is the site's policy.
+    ///
+    /// Everything is in hours, so the columns are comparable at a glance.
+    /// `Usage`'s own formatting rescales itself per value, which is right for a
+    /// single figure and unreadable in a table.
+    ///
+    pub fn requeue_report(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::new();
+        let rule = "=".repeat(64);
+
+        // `write!` to a String cannot fail, so the results are deliberately
+        // discarded rather than unwrapped - `unwrap` is denied in this crate.
+        let _ = writeln!(out, "Requeue summary for {}", self.project());
+        let _ = writeln!(out, "{}", rule);
+
+        if !self.has_requeues() {
+            let _ = writeln!(out, "No requeued jobs recorded.");
+            let _ = writeln!(out, "{}", rule);
+            return out;
+        }
+
+        let reported = self.total_usage();
+        let discarded = self.total_requeue_usage();
+        let truth = self.total_usage_including_requeues();
+
+        let percent = |part: &Usage| match truth.seconds() {
+            0 => 0.0,
+            total => 100.0 * part.seconds() as f64 / total as f64,
+        };
+
+        let _ = writeln!(
+            out,
+            "Reported usage (final attempt of each job) : {:>14}",
+            reported.in_hours().to_string()
+        );
+        let _ = writeln!(
+            out,
+            "Discarded by requeues                      : {:>14}  ({:.1}%)",
+            discarded.in_hours().to_string(),
+            percent(&discarded)
+        );
+        let _ = writeln!(
+            out,
+            "True consumption (Slurm's view)            : {:>14}",
+            truth.in_hours().to_string()
+        );
+        let _ = writeln!(out);
+
+        let events = self.num_requeue_events();
+        let _ = writeln!(
+            out,
+            "{} requeue {} | queue wait discarded: {} in total, {} per requeue",
+            events,
+            if events == 1 { "event" } else { "events" },
+            Usage::new(self.requeue_wait_seconds()).in_hours(),
+            Usage::new(self.average_requeue_wait_seconds()).in_hours()
+        );
+
+        // ---- by interrupting state
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Work was interrupted by:");
+
+        for (state, state_events, state_usage) in self.requeue_state_summary() {
+            let _ = writeln!(
+                out,
+                "  {:<16} {:>4} {:<7} {:>14}  ({:.1}%)",
+                state,
+                state_events,
+                if state_events == 1 { "event" } else { "events" },
+                state_usage.in_hours().to_string(),
+                percent(&state_usage)
+            );
+        }
+
+        // ---- by day
+        let _ = writeln!(out);
+        let _ = writeln!(out, "By day:");
+
+        for date in self.dates() {
+            let Some(report) = self.reports.get(&date) else {
+                continue;
+            };
+
+            if !report.has_requeues() {
+                continue;
+            }
+
+            let day_events = report.num_requeue_events();
+            let _ = writeln!(
+                out,
+                "  {:<16} {:>4} {:<7} {:>14}  (reported {})",
+                date.to_string(),
+                day_events,
+                if day_events == 1 { "event" } else { "events" },
+                report.total_requeue_usage().in_hours().to_string(),
+                report.total_usage().in_hours()
+            );
+        }
+
+        // ---- by user, labelled with the portal identifier where we have one
+        let mut local_to_portal = HashMap::new();
+
+        for (user, local_user) in &self.users {
+            local_to_portal.insert(local_user.clone(), user.clone());
+        }
+
+        let mut users: Vec<String> = Vec::new();
+
+        for report in self.reports.values() {
+            users.extend(report.requeue_users());
+        }
+
+        users.sort();
+        users.dedup();
+
+        let _ = writeln!(out);
+        let _ = writeln!(out, "By user:");
+
+        for user in users {
+            let mut user_events = 0u64;
+            let mut user_usage = Usage::default();
+
+            for report in self.reports.values() {
+                user_events = user_events.saturating_add(report.requeue_events_for_user(&user));
+                user_usage += report.requeue_usage(&user);
+            }
+
+            let label = match local_to_portal.get(&user) {
+                Some(portal_user) => portal_user.to_string(),
+                None => format!("{} - unknown", user),
+            };
+
+            let _ = writeln!(
+                out,
+                "  {:<24} {:>4} {:<7} {:>14}",
+                label,
+                user_events,
+                if user_events == 1 { "event" } else { "events" },
+                user_usage.in_hours().to_string()
+            );
+        }
+
+        let _ = writeln!(out, "{}", rule);
+
+        out
+    }
+
     /// Returns a display adapter that formats all usage values in hours only.
     pub fn in_hours(&self) -> ProjectUsageReportHoursDisplay<'_> {
         ProjectUsageReportHoursDisplay(self)
@@ -1903,7 +2181,10 @@ impl ProjectUsageReport {
             .into_iter()
             .filter_map(|date| {
                 let report = self.reports.get(date)?;
-                if with_usage_only && report.total_usage() == Usage::default() {
+                if with_usage_only
+                    && report.total_usage() == Usage::default()
+                    && !report.has_requeues()
+                {
                     return None;
                 }
                 Some(report.clone())
@@ -2459,6 +2740,43 @@ impl UsageReport {
         })
     }
 
+    /// True if anything about a requeue was recorded for any project.
+    pub fn has_requeues(&self) -> bool {
+        self.reports.values().any(|report| report.has_requeues())
+    }
+
+    /// A readable requeue summary for every project that has one - see
+    /// `ProjectUsageReport::requeue_report`. Projects with no requeues are left
+    /// out rather than listed as empty, since on a real portal they are the
+    /// overwhelming majority.
+    pub fn requeue_report(&self) -> String {
+        use std::fmt::Write;
+
+        let mut projects: Vec<&ProjectIdentifier> = self.reports.keys().collect();
+        projects.sort_by_cached_key(|project| project.to_string());
+
+        let mut out = String::new();
+
+        for project in projects {
+            let Some(report) = self.reports.get(project) else {
+                continue;
+            };
+
+            if !report.has_requeues() {
+                continue;
+            }
+
+            // `write!` to a String cannot fail
+            let _ = write!(out, "{}", report.requeue_report());
+        }
+
+        if out.is_empty() {
+            let _ = writeln!(out, "No requeued jobs recorded for any project.");
+        }
+
+        out
+    }
+
     /// Remap all projects in this report to a new portal.
     ///
     /// Updates `self.portal` and remaps every contained `ProjectUsageReport`
@@ -2679,6 +2997,142 @@ mod tests {
         report.add_requeue_wait_seconds("bob", 120);
 
         report
+    }
+
+    /// A two-day project report: one day with requeues, one without.
+    fn project_report_with_requeues() -> ProjectUsageReport {
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &report_with_requeues());
+
+        let mut quiet_day = DailyProjectUsageReport::default();
+        quiet_day.add_usage("alice", Usage::new(3600));
+        quiet_day.add_jobs("alice", 1);
+        report.set_report(&Date::parse("2026-03-02").unwrap(), &quiet_day);
+
+        report
+    }
+
+    #[test]
+    fn test_the_requeue_report_says_what_was_lost_and_what_did_the_interrupting() {
+        let report = project_report_with_requeues();
+        let dump = report.requeue_report();
+
+        // the three figures a charging decision turns on
+        assert!(dump.contains("Reported usage (final attempt of each job)"));
+        assert!(dump.contains("Discarded by requeues"));
+        assert!(dump.contains("True consumption (Slurm's view)"));
+
+        // 8100 of 6000 + 8100 seconds discarded
+        assert!(
+            dump.contains("57.4%"),
+            "expected the discarded share: {}",
+            dump
+        );
+
+        // the breakdown that separates the site's fault from the project's
+        let by_state = dump
+            .lines()
+            .skip_while(|line| !line.starts_with("Work was interrupted by:"))
+            .take(3)
+            .collect::<Vec<&str>>()
+            .join("\n");
+
+        assert!(by_state.contains("NODE_FAIL"), "{}", by_state);
+        assert!(by_state.contains("PREEMPTED"), "{}", by_state);
+
+        // worst first, so NODE_FAIL's 7200 seconds outrank PREEMPTED's 900
+        let node_fail = dump.find("NODE_FAIL");
+        let preempted = dump.find("PREEMPTED");
+        assert!(
+            node_fail < preempted,
+            "worst state should come first: {}",
+            dump
+        );
+
+        // per day, and only the days that had any
+        assert!(dump.contains("2026-03-01"), "{}", dump);
+        assert!(
+            !dump.contains("2026-03-02"),
+            "quiet days are not listed: {}",
+            dump
+        );
+
+        // per user, with the events attributed to each
+        assert!(dump.contains("alice"), "{}", dump);
+        assert!(dump.contains("bob"), "{}", dump);
+    }
+
+    #[test]
+    fn test_the_requeue_report_is_a_single_line_when_there_is_nothing_to_say() {
+        // The overwhelmingly common case, and it should not print a page of
+        // zeroes to say so.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut day = DailyProjectUsageReport::default();
+        day.add_usage("alice", Usage::new(3600));
+        day.add_jobs("alice", 1);
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+
+        assert!(!report.has_requeues());
+        assert!(report
+            .requeue_report()
+            .contains("No requeued jobs recorded"));
+        assert!(!report.requeue_report().contains("By day"));
+    }
+
+    #[test]
+    fn test_a_day_whose_whole_consumption_was_requeued_is_still_shown() {
+        // A day can consist entirely of attempts that were later requeued - the
+        // usage is real and the day has plenty to say, but it has no *reported*
+        // usage, and the daily listing used to drop anything with a zero total.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut day = DailyProjectUsageReport::default();
+        day.add_requeue_usage("alice", Usage::new(7200));
+        day.add_requeue_state_usage("NODE_FAIL", Usage::new(7200));
+        day.add_requeue_events("alice", "NODE_FAIL", 1);
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &day);
+
+        assert_eq!(report.total_usage(), Usage::default());
+        assert_eq!(report.total_requeue_usage(), Usage::new(7200));
+
+        // it survives the daily listing, the printout and the requeue report
+        assert_eq!(report.daily_reports(true).len(), 1);
+        assert!(report.to_string().contains("2026-03-01"));
+        assert!(report.requeue_report().contains("2026-03-01"));
+    }
+
+    #[test]
+    fn test_the_daily_printout_reports_requeues_per_day() {
+        // The per-day requeue line existed on a daily report's own `Display`,
+        // but a project report renders its days itself, so it never appeared
+        // where anyone was reading it.
+        let printed = project_report_with_requeues().to_string();
+
+        let day_line = printed
+            .lines()
+            .skip_while(|line| !line.starts_with("2026-03-01"))
+            .take_while(|line| !line.starts_with("----"))
+            .find(|line| line.starts_with("Requeued:"));
+
+        let Some(day_line) = day_line else {
+            unreachable!("no per-day requeue line in:\n{}", printed);
+        };
+
+        assert!(day_line.contains("3 events"), "{}", day_line);
+
+        // and the quiet day says nothing about requeues
+        let quiet: Vec<&str> = printed
+            .lines()
+            .skip_while(|line| !line.starts_with("2026-03-02"))
+            .take_while(|line| !line.starts_with("----"))
+            .collect();
+
+        assert!(!quiet.iter().any(|line| line.starts_with("Requeued:")));
     }
 
     #[test]

@@ -79,6 +79,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   the two can still be told apart. Reservation usage is therefore a subset of
   `total_usage_including_requeues()`, not of `total_usage()`.
 
+  Reports key on the reservation's **name**, not its id. Slurm gives every
+  instance of a reservation its own id, so a recurring or on-demand reservation
+  is one name across many ids - a single production account-day showed
+  `interactive` under seventeen of them - and keying on the name both merges the
+  instances and keeps the key space bounded.
+
   What this does **not** give is a reservation's utilisation. What a reservation
   held - its node count and duration, and so how fully it was used - is a
   property of the reservation rather than of any one project, and is not in the

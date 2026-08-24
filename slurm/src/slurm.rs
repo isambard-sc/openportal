@@ -2960,10 +2960,19 @@ impl SlurmJob {
             .unwrap_or_default()
             .to_string();
 
-        // Slurm has reported this both as a bare name and as an object carrying
-        // a name and an id, depending on version, so accept either. A job
-        // outside any reservation is the normal case and is not an error - it
-        // comes through as an empty name.
+        // Slurm reports this as an object carrying a name and an id, and as a
+        // bare name in some versions, so accept either. A job outside any
+        // reservation is the normal case and is not an error - it comes through
+        // as an absent field, or as an id of 0 with an empty name.
+        //
+        // The id is deliberately discarded. Slurm gives every *instance* of a
+        // reservation its own id, so a recurring or on-demand reservation is one
+        // name across many ids - a single production account-day showed
+        // `interactive` under seventeen of them. Keying on the name merges the
+        // instances, which is both the figure anyone asking about a reservation
+        // means and the only one whose key space stays bounded. Per-instance
+        // detail belongs with the reservation metadata a future `add_reservation`
+        // instruction would carry, not with a usage record.
         let reservation = match value.get("reservation") {
             Some(reservation) => match reservation.as_str() {
                 Some(name) => clean_reservation_name(name),
@@ -4199,6 +4208,21 @@ mod tests {
 
         let job_600 = records_for(&jobs, 600);
         assert!(job_600.iter().all(|job| !job.is_reserved()));
+    }
+
+    #[test]
+    fn test_instances_of_one_named_reservation_are_not_separate_reservations() {
+        // Slurm gives each instance of a reservation its own id, so a recurring
+        // or on-demand reservation arrives as one name under many ids. Job 400's
+        // two attempts ran under two instances of `interactive`, and they must
+        // land in one bucket: the id is not part of the identity a report keys
+        // on, or a name like that would accumulate a fresh key every time it was
+        // recreated.
+        let jobs = consumers();
+        let job_400 = records_for(&jobs, 400);
+
+        assert_eq!(job_400.len(), 2);
+        assert!(job_400.iter().all(|job| job.reservation() == "interactive"));
     }
 
     #[test]

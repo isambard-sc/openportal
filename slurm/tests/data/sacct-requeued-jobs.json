@@ -52,7 +52,13 @@
       "ran inside 'maintenance_test'; job 300 inside 'gpu_bench' (and its two",
       "superseded attempts held its nodes just as the successful one did); every",
       "other job ran outside any reservation, which is how Slurm reports almost",
-      "everything."
+      "everything.",
+      "",
+      "Job 400's two records carry the same reservation name with different ids.",
+      "Slurm gives each *instance* of a reservation its own id, so a recurring or",
+      "on-demand reservation appears as one name across many ids - on a production",
+      "cluster a single account-day showed 'interactive' under seventeen of them.",
+      "Reports key on the name, so the instances merge; see the design note."
     ]
   },
   "jobs": [
@@ -489,6 +495,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 595,
+        "name": "interactive"
       }
     },
     {
@@ -548,6 +558,10 @@
             "count": 128
           }
         ]
+      },
+      "reservation": {
+        "id": 597,
+        "name": "interactive"
       }
     },
     {

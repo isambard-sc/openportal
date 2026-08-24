@@ -470,7 +470,25 @@ Job records carry the reservation a job ran under - `reservation` in the same
 nothing - and reports now record usage and job counts per reservation, with a
 `reservation_report()` dump alongside the requeue one.
 
-Two decisions worth writing down.
+Three decisions worth writing down.
+
+**Reports key on the reservation's name, not its id.** Slurm reports the
+reservation as `{"id": N, "name": "..."}` - a job outside one has id 0 and an
+empty name - and it gives every *instance* of a reservation its own id. A
+recurring or on-demand reservation is therefore one name across many ids: a
+single production account-day showed `interactive` under seventeen of them.
+Keying on the name merges the instances, which is both the figure anyone asking
+about a named reservation means and the only one whose key space stays bounded -
+keying on the id would mint a fresh key every time a reservation was recreated,
+in a map that travels between agents.
+
+The consequence to be aware of when reading the output: a name like
+`interactive`, if a site creates one per user on demand, is a family of
+short-lived reservations rather than a block of capacity someone booked, and its
+row means something quite different from a row for a named benchmarking or
+maintenance window. The reports cannot tell the two apart, because nothing in a
+job record can. Per-instance detail belongs with the reservation metadata a
+future `add_reservation` instruction would carry.
 
 **Reservation figures count every attempt, superseded ones included.** A
 requeued attempt held the reservation's nodes exactly as its replacement did,
@@ -494,25 +512,17 @@ shares of that project's own consumption, and both the API docs and the printed
 report say so, because "64.5%" next to a reservation name invites exactly the
 wrong reading.
 
-Supplying the denominator is a separate piece of work, and it is a question
-about the *cluster* rather than about a project, so it does not belong on a
-usage report at all. Three ways it could be answered, in increasing order of
-effort:
+Supplying the denominator is deliberately out of scope here, and not because it
+is hard: it is a question about the *cluster* rather than about a project, and it
+is answered above OpenPortal, by combining these per-project numerators across
+every project. Nothing in `op-slurm` needs to know a reservation's capacity.
 
-1. **`sreport reservation utilization`** already computes this, cluster-wide,
-   and is the obvious thing to shell out to. It answers the question directly
-   and needs no arithmetic of ours, but it is a new command in the runner's
-   vocabulary and its output is a report rather than a data structure.
-2. **`scontrol show reservation` / the reservation table in `slurmdbd`** gives
-   the definitions - nodes, start, end - from which capacity can be computed and
-   compared against the per-project numerators we now have. More work, but it
-   yields a figure we can attribute across projects rather than only a total.
-3. **A new instruction** carrying reservation definitions to the portal, letting
-   it do the arithmetic against its own records. The most flexible and the most
-   work.
-
-Whichever is chosen, it wants a decision about whose question it is - the
-portal's or the provider's - before any of it is built.
+The natural time to revisit it is when OpenPortal grows instructions for
+managing reservations - `add_reservation`, assigning projects to a reservation -
+since a portal that creates a reservation already knows what it booked, and
+instructions to read back a reservation's definition and the projects entitled to
+use it belong in that vocabulary rather than being bolted onto a usage report.
+That is also where per-instance identity would live, if it is ever wanted.
 
 ## 8. Compatibility and rollout
 

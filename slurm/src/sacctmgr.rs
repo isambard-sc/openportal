@@ -2258,7 +2258,19 @@ mod tests {
             Usage::new(3600)
         );
 
-        assert_eq!(report.reservations(), vec!["gpu_bench", "maintenance_test"]);
+        // job 400's two attempts ran under two *instances* of `interactive`,
+        // which is one reservation as far as a report is concerned: 1800s
+        // discarded plus the 600s that finished
+        assert_eq!(report.reservation_usage("interactive"), Usage::new(2400));
+        assert_eq!(
+            report.reservation_requeue_usage("interactive"),
+            Usage::new(1800)
+        );
+
+        assert_eq!(
+            report.reservations(),
+            vec!["gpu_bench", "interactive", "maintenance_test"]
+        );
         assert!(report.has_reservations());
     }
 
@@ -2270,6 +2282,10 @@ mod tests {
         assert_eq!(report.reservation_jobs("gpu_bench"), 1);
         // jobs 100 and 200
         assert_eq!(report.reservation_jobs("maintenance_test"), 2);
+
+        // job 400 is one job however many reservation instances its attempts
+        // ran under
+        assert_eq!(report.reservation_jobs("interactive"), 1);
     }
 
     #[test]
@@ -2279,7 +2295,7 @@ mod tests {
         // reported one - the reservation figures count superseded attempts.
         let (report, _) = report_for(day_one());
 
-        assert_eq!(report.total_reservation_usage(), Usage::new(12000));
+        assert_eq!(report.total_reservation_usage(), Usage::new(14400));
         assert_eq!(
             report.total_reservation_usage() + report.usage_outside_reservations(),
             report.total_usage_including_requeues()

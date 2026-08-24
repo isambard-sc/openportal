@@ -629,6 +629,15 @@ there is no persisted state to migrate - a restart is sufficient, though note
 that a long-running process holding days already marked complete will keep the
 old values for those days until it restarts.
 
+One thing compatibility does *not* cover on its own: a report that predates a
+statistic has no data for it, and every one of these figures uses zero as its
+"not recorded" value. For usage that is harmless - nothing consumed nothing - but
+an expansion factor of 0.00 reads as better than perfect on a scale whose floor
+is 1.00, and a mean job size of 0.0 cores says jobs ran on no cores. So the
+printed output omits a line it has no data for, `expansion_factor_report()` says
+outright that the report predates those statistics, and a per-day or per-user row
+missing them shows a dash. A number is only printed where a number was measured.
+
 The figure a consumer sees for `reports` does not change, by construction.
 That is the point of §3: no flag day, and the policy decision about what to
 charge can be taken on evidence, afterwards, with both numbers in hand.

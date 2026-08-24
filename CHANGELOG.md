@@ -137,6 +137,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   job records; a reservation shared between projects cannot be assessed from any
   single project's report at all. The shares reported are shares of the
   project's own consumption, and the report says so.
+- Reports that predate any of these statistics print a dash, or omit the line,
+  rather than showing a zero. Zero is the "not recorded" value for all of them,
+  and on a scale whose ideal is 1.00 an expansion factor of 0.00 would read as
+  better than perfect; a mean job size of 0.0 cores would say jobs ran on no
+  cores. A number is only printed where a number was measured.
 - **Node failures are logged at `error`**, naming the node Slurm blamed, so site
   monitoring picks them up. A node failure destroys a user's work, and on a
   requeued job it is the difference between "the project spent this" and "the

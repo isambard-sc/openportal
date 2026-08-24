@@ -615,12 +615,18 @@ impl std::fmt::Display for DailyProjectUsageReport {
                     )?;
                 }
 
-                writeln!(
-                    f,
-                    "Mean job size: {:.1} cores, {:.1} gpus",
-                    self.average_cpus_per_job(),
-                    self.average_gpus_per_job()
-                )?;
+                // A real job always holds at least one core, so no cores across
+                // some jobs means the figure was never recorded - a report from
+                // before job sizes were. Saying "0.0 cores" would state a
+                // falsehood rather than admit a gap.
+                if self.average_cpus_per_job() > 0.0 {
+                    writeln!(
+                        f,
+                        "Mean job size: {:.1} cores, {:.1} gpus",
+                        self.average_cpus_per_job(),
+                        self.average_gpus_per_job()
+                    )?;
+                }
             }
         }
 
@@ -702,12 +708,18 @@ impl std::fmt::Display for DailyProjectUsageReportHoursDisplay<'_> {
                     )?;
                 }
 
-                writeln!(
-                    f,
-                    "Mean job size: {:.1} cores, {:.1} gpus",
-                    report.average_cpus_per_job(),
-                    report.average_gpus_per_job()
-                )?;
+                // A real job always holds at least one core, so no cores across
+                // some jobs means the figure was never recorded - a report from
+                // before job sizes were. Saying "0.0 cores" would state a
+                // falsehood rather than admit a gap.
+                if report.average_cpus_per_job() > 0.0 {
+                    writeln!(
+                        f,
+                        "Mean job size: {:.1} cores, {:.1} gpus",
+                        report.average_cpus_per_job(),
+                        report.average_gpus_per_job()
+                    )?;
+                }
             }
         }
 
@@ -2139,12 +2151,18 @@ impl std::fmt::Display for ProjectUsageReport {
                         )?;
                     }
 
-                    writeln!(
-                        f,
-                        "Mean job size: {:.1} cores, {:.1} gpus",
-                        report.average_cpus_per_job(),
-                        report.average_gpus_per_job()
-                    )?;
+                    // A real job always holds at least one core, so no cores across
+                    // some jobs means the figure was never recorded - a report from
+                    // before job sizes were. Saying "0.0 cores" would state a
+                    // falsehood rather than admit a gap.
+                    if report.average_cpus_per_job() > 0.0 {
+                        writeln!(
+                            f,
+                            "Mean job size: {:.1} cores, {:.1} gpus",
+                            report.average_cpus_per_job(),
+                            report.average_gpus_per_job()
+                        )?;
+                    }
                 }
             }
             if report.has_requeues() {
@@ -2201,12 +2219,18 @@ impl std::fmt::Display for ProjectUsageReport {
                     )?;
                 }
 
-                writeln!(
-                    f,
-                    "Mean job size: {:.1} cores, {:.1} gpus",
-                    self.average_cpus_per_job(),
-                    self.average_gpus_per_job()
-                )?;
+                // A real job always holds at least one core, so no cores across
+                // some jobs means the figure was never recorded - a report from
+                // before job sizes were. Saying "0.0 cores" would state a
+                // falsehood rather than admit a gap.
+                if self.average_cpus_per_job() > 0.0 {
+                    writeln!(
+                        f,
+                        "Mean job size: {:.1} cores, {:.1} gpus",
+                        self.average_cpus_per_job(),
+                        self.average_gpus_per_job()
+                    )?;
+                }
             }
         }
         if self.num_requeue_events() > 0 || !self.total_requeue_usage().is_zero() {
@@ -2309,12 +2333,18 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                         )?;
                     }
 
-                    writeln!(
-                        f,
-                        "Mean job size: {:.1} cores, {:.1} gpus",
-                        daily.average_cpus_per_job(),
-                        daily.average_gpus_per_job()
-                    )?;
+                    // A real job always holds at least one core, so no cores across
+                    // some jobs means the figure was never recorded - a report from
+                    // before job sizes were. Saying "0.0 cores" would state a
+                    // falsehood rather than admit a gap.
+                    if daily.average_cpus_per_job() > 0.0 {
+                        writeln!(
+                            f,
+                            "Mean job size: {:.1} cores, {:.1} gpus",
+                            daily.average_cpus_per_job(),
+                            daily.average_gpus_per_job()
+                        )?;
+                    }
                 }
             }
             if daily.has_requeues() {
@@ -2371,12 +2401,18 @@ impl std::fmt::Display for ProjectUsageReportHoursDisplay<'_> {
                     )?;
                 }
 
-                writeln!(
-                    f,
-                    "Mean job size: {:.1} cores, {:.1} gpus",
-                    report.average_cpus_per_job(),
-                    report.average_gpus_per_job()
-                )?;
+                // A real job always holds at least one core, so no cores across
+                // some jobs means the figure was never recorded - a report from
+                // before job sizes were. Saying "0.0 cores" would state a
+                // falsehood rather than admit a gap.
+                if report.average_cpus_per_job() > 0.0 {
+                    writeln!(
+                        f,
+                        "Mean job size: {:.1} cores, {:.1} gpus",
+                        report.average_cpus_per_job(),
+                        report.average_gpus_per_job()
+                    )?;
+                }
             }
         }
         if report.num_requeue_events() > 0 || !report.total_requeue_usage().is_zero() {
@@ -3030,6 +3066,27 @@ impl ProjectUsageReport {
             return out;
         }
 
+        // A report that predates these statistics has jobs but no runtime, so
+        // every figure below would come out as 0.00 - which on this scale reads
+        // as "turned around instantly", the opposite of the truth. Say what is
+        // actually the case instead.
+        if self.total_runtime_seconds() == 0 {
+            let _ = writeln!(
+                out,
+                "{} jobs | mean wait {}",
+                self.num_jobs(),
+                Usage::new(self.average_wait_seconds()).in_hours()
+            );
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "No expansion factor or job size recorded - this report was produced before"
+            );
+            let _ = writeln!(out, "those statistics were collected.");
+            let _ = writeln!(out, "{}", rule);
+            return out;
+        }
+
         let mean = self.average_expansion_factor();
         let aggregate = self.aggregate_expansion_factor();
 
@@ -3121,6 +3178,15 @@ impl ProjectUsageReport {
                 .then(a.0.cmp(&b.0))
         });
 
+        // Merging a legacy day with a recent one can leave a row with no
+        // expansion or size data. Zero is this scale's "not recorded" sentinel,
+        // so show it as one rather than as a score of nought. A GPU count of
+        // zero is a real answer and is printed as it is.
+        let or_dash = |value: f64, places: usize| match value > 0.0 {
+            true => format!("{:.*}", places, value),
+            false => "-".to_string(),
+        };
+
         let _ = writeln!(out);
         let _ = writeln!(
             out,
@@ -3136,12 +3202,12 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<28} {:>6} {:>10.2} {:>8.1} {:>7.1} {:>14}",
+                "  {:<28} {:>6} {:>10} {:>8} {:>7} {:>14}",
                 label,
                 jobs,
-                expansion,
-                cpus,
-                gpus,
+                or_dash(expansion, 2),
+                or_dash(cpus, 1),
+                format!("{:.1}", gpus),
                 Usage::new(wait).in_hours().to_string()
             );
         }
@@ -3165,12 +3231,12 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<28} {:>6} {:>10.2} {:>8.1} {:>7.1}",
+                "  {:<28} {:>6} {:>10} {:>8} {:>7}",
                 date.to_string(),
                 report.num_jobs(),
-                report.average_expansion_factor(),
-                report.average_cpus_per_job(),
-                report.average_gpus_per_job()
+                or_dash(report.average_expansion_factor(), 2),
+                or_dash(report.average_cpus_per_job(), 1),
+                format!("{:.1}", report.average_gpus_per_job())
             );
         }
 
@@ -4450,6 +4516,167 @@ mod tests {
         report.add_requeue_wait_seconds("bob", 120);
 
         report
+    }
+
+    #[test]
+    fn test_a_report_from_the_previous_release_still_reads_correctly() {
+        // Exactly what release 0.92.0 serialised - the fields it had, and none
+        // of the ones added since. Every new figure has to read as "not
+        // recorded" rather than as a value, and nothing it used to say may have
+        // changed.
+        let legacy = serde_json::json!({
+            "project": "proj.portal",
+            "users": { "alice.proj.portal": "alice" },
+            "reports": {
+                "2026-03-01": {
+                    "reports": { "alice": { "seconds": 7200 } },
+                    "components": {
+                        "cpu": { "alice": { "seconds": 921600 } },
+                        "gpu": { "alice": { "seconds": 28800 } }
+                    },
+                    "user_job_counts": { "alice": 4 },
+                    "user_wait_seconds": { "alice": 3600 },
+                    "num_jobs": 4,
+                    "total_wait_seconds": 3600,
+                    "is_complete": true
+                }
+            }
+        });
+
+        let report: ProjectUsageReport = serde_json::from_value(legacy).unwrap();
+
+        // everything it used to say, unchanged
+        assert_eq!(report.total_usage(), Usage::new(7200));
+        assert_eq!(report.num_jobs(), 4);
+        assert_eq!(report.total_wait_seconds(), 3600);
+        assert_eq!(report.average_wait_seconds(), 900);
+        assert_eq!(
+            report.components(),
+            vec!["cpu".to_string(), "gpu".to_string()]
+        );
+        assert_eq!(
+            report.get_component("cpu").total_usage(),
+            Usage::new(921600)
+        );
+
+        // every new figure reads as "nothing recorded"
+        assert_eq!(report.total_requeue_usage(), Usage::default());
+        assert_eq!(report.total_usage_including_requeues(), Usage::new(7200));
+        assert_eq!(report.num_requeue_events(), 0);
+        assert!(!report.has_requeues());
+        assert!(!report.has_reservations());
+        assert_eq!(report.usage_outside_reservations(), Usage::new(7200));
+        assert_eq!(report.total_runtime_seconds(), 0);
+        assert_eq!(report.average_expansion_factor(), 0.0);
+        assert_eq!(report.average_cpus_per_job(), 0.0);
+
+        // and the printed output must not turn those absences into claims. A
+        // legacy report's jobs did not run on zero cores, and they did not turn
+        // around instantly - on the classical scale 0.00 would read as better
+        // than perfect.
+        let printed = report.to_string();
+        assert!(!printed.contains("Mean job size"), "{}", printed);
+        assert!(!printed.contains("Expansion factor"), "{}", printed);
+
+        let dump = report.expansion_factor_report();
+        assert!(
+            dump.contains("No expansion factor or job size recorded"),
+            "{}",
+            dump
+        );
+        assert!(!dump.contains("0.00"), "{}", dump);
+
+        // the other quick reports say so in words rather than printing zeroes
+        assert!(report.requeue_report().contains("No requeued jobs"));
+        assert!(report.reservation_report().contains("No jobs ran inside"));
+    }
+
+    #[test]
+    fn test_what_we_emit_now_still_loads_into_a_reader_that_knows_only_the_old_fields() {
+        // The other direction: an older peer deserialising one of our reports
+        // ignores what it does not know, so nothing on the wire had to change.
+        #[derive(serde::Deserialize)]
+        struct OldDaily {
+            reports: HashMap<String, Usage>,
+            #[serde(default)]
+            num_jobs: u64,
+            #[serde(default)]
+            total_wait_seconds: u64,
+            is_complete: bool,
+        }
+
+        let mut modern = DailyProjectUsageReport::default();
+        modern.add_usage("alice", Usage::new(3600));
+        modern.add_jobs("alice", 1);
+        modern.add_wait_seconds("alice", 60);
+        modern.add_expansion("alice", 60, 3600);
+        modern.add_job_size("alice", 128, 4);
+        modern.add_requeue_usage("alice", Usage::new(600));
+        modern.add_requeue_events("alice", "NODE_FAIL", 1);
+        modern.add_reservation_usage("bench", "alice", Usage::new(1200));
+        modern.set_complete();
+
+        let old: OldDaily = serde_json::from_str(&serde_json::to_string(&modern).unwrap()).unwrap();
+
+        assert_eq!(old.num_jobs, 1);
+        assert_eq!(old.total_wait_seconds, 60);
+        assert_eq!(
+            old.reports.get("alice").cloned().unwrap_or_default(),
+            Usage::new(3600)
+        );
+        assert!(old.is_complete);
+    }
+
+    #[test]
+    fn test_a_day_with_no_size_data_shows_a_dash_not_a_zero() {
+        // Merging a legacy day with a recent one leaves rows with no expansion
+        // or size data, and zero is the sentinel for that - not a score.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut legacy_day = DailyProjectUsageReport::default();
+        legacy_day.add_usage("alice", Usage::new(3600));
+        legacy_day.add_jobs("alice", 1);
+        legacy_day.add_wait_seconds("alice", 60);
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &legacy_day);
+
+        let mut modern_day = DailyProjectUsageReport::default();
+        modern_day.add_usage("bob", Usage::new(3600));
+        modern_day.add_jobs("bob", 1);
+        modern_day.add_wait_seconds("bob", 60);
+        modern_day.add_expansion("bob", 60, 3600);
+        modern_day.add_job_size("bob", 128, 0);
+        report.set_report(&Date::parse("2026-03-02").unwrap(), &modern_day);
+
+        let dump = report.expansion_factor_report();
+
+        let legacy_row = dump
+            .lines()
+            .find(|line| line.trim_start().starts_with("2026-03-01"));
+        let Some(legacy_row) = legacy_row else {
+            unreachable!("no row for the legacy day in:\n{}", dump);
+        };
+
+        assert!(
+            legacy_row.contains('-'),
+            "the legacy day should show a dash: {}",
+            legacy_row
+        );
+        assert!(
+            !legacy_row.contains("0.00"),
+            "and not a zero: {}",
+            legacy_row
+        );
+
+        // while the modern day shows its real figures
+        let modern_row = dump
+            .lines()
+            .find(|line| line.trim_start().starts_with("2026-03-02"));
+        let Some(modern_row) = modern_row else {
+            unreachable!("no row for the modern day in:\n{}", dump);
+        };
+        assert!(modern_row.contains("1.02"), "{}", modern_row);
+        assert!(modern_row.contains("128.0"), "{}", modern_row);
     }
 
     #[test]

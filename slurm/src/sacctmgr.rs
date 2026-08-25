@@ -1039,6 +1039,10 @@ struct ReportTotals {
     requeue_usage: u64,
     requeue_events: u64,
     requeue_wait_seconds: u64,
+    /// Set when a record counted as a job in this window had not finished when
+    /// we asked, so its runtime is not yet final. Such a window must not be
+    /// frozen - see `record_job`.
+    saw_unfinished_job: bool,
 }
 
 ///
@@ -1145,11 +1149,28 @@ fn record_job(
         // The expansion factor is queue time over runtime, so it uses the job's
         // whole runtime rather than the part that fell inside this window - the
         // ratio is a property of the job, like the wait it is divided into.
+        //
+        // Which is why a record that has not finished contributes neither. Its
+        // `elapsed` is the time it has been running so far, and unlike usage -
+        // which this window records its own share of and the next window
+        // records the rest - the runtime and the ratio are recorded once, here,
+        // and never revisited. Recording them from a job three hours into a
+        // thirty-hour run would freeze a runtime of three hours and an
+        // expansion factor an order of magnitude too high. The job is still
+        // counted, and still contributes its wait, which is already final; the
+        // caller declines to cache a window that reaches this branch, so on a
+        // later pass the record has finished and the real figures are recorded
+        // then.
         let runtime_seconds = job.total_duration().num_seconds().max(0) as u64;
-        report.add_expansion(job.user(), wait_seconds, runtime_seconds);
-        totals.runtime_seconds = totals.runtime_seconds.saturating_add(runtime_seconds);
-        if runtime_seconds > 0 {
-            totals.expansion_jobs = totals.expansion_jobs.saturating_add(1);
+
+        if job.has_ended() {
+            report.add_expansion(job.user(), wait_seconds, runtime_seconds);
+            totals.runtime_seconds = totals.runtime_seconds.saturating_add(runtime_seconds);
+            if runtime_seconds > 0 {
+                totals.expansion_jobs = totals.expansion_jobs.saturating_add(1);
+            }
+        } else {
+            totals.saw_unfinished_job = true;
         }
 
         // The cores and GPUs the job actually got, not what it asked for - one
@@ -1305,6 +1326,100 @@ fn check_counter_consistency(
     consistent
 }
 
+///
+/// How long a day may stay provisional because a job that started in it has not
+/// finished, in days.
+///
+/// A day holding an unfinished job is not cached, so that it is re-read and the
+/// job's real runtime recorded once it ends. A record `slurmdbd` never closes
+/// would otherwise keep that day being re-queried for ever, so past this age
+/// the day is completed with what is known and the gap is logged. Comfortably
+/// longer than any cluster's wall-clock limit.
+///
+const PROVISIONAL_DAY_LIMIT_DAYS: i64 = 30;
+
+///
+/// Mark a day complete and cache it, if it is finished and adds up.
+///
+/// Four things stop a day being frozen, and the first three are bugs: its usage
+/// disagreeing with what we counted, its counters disagreeing with its own
+/// totals, and the day not being over yet. The fourth is not a bug at all - a
+/// job that started in this day is still running, so its runtime and expansion
+/// factor are not yet knowable, and caching now would freeze a partial answer
+/// that nothing would ever revisit. Leaving the day uncached costs one `sacct`
+/// query per pass until the job ends; freezing it costs a wrong figure for as
+/// long as the cache is kept.
+///
+async fn complete_and_cache_if_final(
+    daily_report: &mut DailyProjectUsageReport,
+    totals: &ReportTotals,
+    counters_agree: bool,
+    project: &ProjectMapping,
+    day: &greatwestern::grammar::Date,
+    now: &chrono::DateTime<Utc>,
+) {
+    if daily_report.total_usage().seconds() != totals.usage {
+        // this points to some error when generating the values...
+        tracing::error!(
+            "Total usage in daily report does not match total usage calculated manually: {} != {}",
+            daily_report.total_usage().seconds(),
+            totals.usage
+        );
+        return;
+    }
+
+    if !counters_agree {
+        // `check_counter_consistency` has already said which of them disagreed
+        tracing::error!(
+            "Not caching the report for project {} on {}: its counters do not agree with \
+             its totals.",
+            project.project(),
+            day
+        );
+        return;
+    }
+
+    let day_end = day.day().end_time().and_utc();
+
+    if day_end >= *now {
+        // the day is not over yet
+        return;
+    }
+
+    if totals.saw_unfinished_job {
+        let age = now.signed_duration_since(day_end);
+
+        if age < chrono::Duration::days(PROVISIONAL_DAY_LIMIT_DAYS) {
+            tracing::debug!(
+                "Not completing the report for project {} on {}: a job that started that \
+                 day had not finished when we asked, so its runtime is not yet known. \
+                 The day will be re-read.",
+                project.project(),
+                day
+            );
+            return;
+        }
+
+        tracing::warn!(
+            "Completing the report for project {} on {} even though a job that started \
+             that day has still not finished after {} days. Its runtime and expansion \
+             factor are not included; its usage is.",
+            project.project(),
+            day,
+            age.num_days()
+        );
+    }
+
+    daily_report.set_complete();
+
+    match cache::set_report(project.project(), day, daily_report).await {
+        Ok(_) => (),
+        Err(e) => {
+            tracing::error!("Could not cache report for {}: {}", day, e);
+        }
+    }
+}
+
 async fn get_hourly_report(
     expires: &chrono::DateTime<Utc>,
     project: &ProjectMapping,
@@ -1398,8 +1513,17 @@ async fn get_hourly_report(
             hour
         );
 
-        // cache this hourly report if it is in the past
-        if hour.end_time().and_utc() < now {
+        // An hour is cached as the records themselves, so an unfinished record
+        // would be frozen here with the runtime it had reached at this moment
+        // and replayed with that figure for ever - the day-level guard below
+        // cannot undo that, because it would be re-reading the cache rather
+        // than Slurm. The hour is left uncached until the job it holds ends.
+        let hour_has_unfinished_job = jobs
+            .iter()
+            .any(|job| job.original_start_time() >= &start_time && !job.has_ended());
+
+        // cache this hourly report if it is in the past and final
+        if hour.end_time().and_utc() < now && !hour_has_unfinished_job {
             match cache::set_hourly_report(project.project(), &hour, &jobs).await {
                 Ok(_) => (),
                 Err(e) => {
@@ -1429,36 +1553,15 @@ async fn get_hourly_report(
     // runtime consistency check: local shadow counters must match the report's scalar totals
     let counters_agree = check_counter_consistency(&daily_report, &totals, project, day);
 
-    // check that the total usage in the daily report matches the total usage calculated manually
-    if daily_report.total_usage().seconds() != totals.usage {
-        // it doesn't - we don't want to mark this as complete or cache it, because
-        // this points to some error when generating the values...
-        tracing::error!(
-            "Total usage in daily report does not match total usage calculated manually: {} != {}",
-            daily_report.total_usage().seconds(),
-            totals.usage
-        );
-    } else if !counters_agree {
-        // the counters disagree with the report they built, so the report is
-        // not fit to be frozen - `check_counter_consistency` has already said
-        // which of them disagreed
-        tracing::error!(
-            "Not caching the report for project {} on {}: its counters do not \
-             agree with its totals.",
-            project.project(),
-            day
-        );
-    } else if day.day().end_time().and_utc() < now {
-        // we can set this day as completed if it is in the past
-        daily_report.set_complete();
-
-        match cache::set_report(project.project(), day, &daily_report).await {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("Could not cache report for {}: {}", day, e);
-            }
-        }
-    }
+    complete_and_cache_if_final(
+        &mut daily_report,
+        &totals,
+        counters_agree,
+        project,
+        day,
+        &now,
+    )
+    .await;
 
     Ok(daily_report)
 }
@@ -1563,36 +1666,16 @@ async fn get_daily_report(
             // runtime consistency check
             let counters_agree = check_counter_consistency(&daily_report, &totals, project, day);
 
-            // check that the total usage in the daily report matches the total usage calculated manually
-            if daily_report.total_usage().seconds() != totals.usage {
-                // it doesn't - we don't want to mark this as complete or cache it, because
-                // this points to some error when generating the values...
-                tracing::error!(
-                    "Total usage in daily report does not match total usage calculated manually: {} != {}",
-                    daily_report.total_usage().seconds(),
-                    totals.usage
-                );
-            } else if !counters_agree {
-                // the counters disagree with the report they built, so the report is
-                // not fit to be frozen - `check_counter_consistency` has already said
-                // which of them disagreed
-                tracing::error!(
-                    "Not caching the report for project {} on {}: its counters do not \
-                     agree with its totals.",
-                    project.project(),
-                    day
-                );
-            } else if day.day().end_time().and_utc() < now {
-                // we can set this day as completed if it is in the past
-                daily_report.set_complete();
+            complete_and_cache_if_final(
+                &mut daily_report,
+                &totals,
+                counters_agree,
+                project,
+                day,
+                &now,
+            )
+            .await;
 
-                match cache::set_report(project.project(), day, &daily_report).await {
-                    Ok(_) => (),
-                    Err(e) => {
-                        tracing::error!("Could not cache report for {}: {}", day, e);
-                    }
-                }
-            }
             Ok(daily_report)
         }
         Err(Error::Timeout(_)) => {
@@ -2181,6 +2264,129 @@ mod tests {
         }
 
         (report, totals)
+    }
+
+    ///
+    /// The fixture's record for one job, on its own, optionally still running.
+    ///
+    /// `sacct` reports a running record with no end time at all and an
+    /// `elapsed` that is the runtime *so far* - a figure that grows every time
+    /// the record is read. The fixture has no such record, because a fixture
+    /// of finished jobs cannot have one: whether a record has ended is a
+    /// question about the moment it was read, not about its contents.
+    ///
+    fn one_job(id: u64, running_for: Option<i64>) -> serde_json::Value {
+        // Through the window filter first, so this is what the real query would
+        // have returned - a job's other attempts being visible or not is what
+        // decides whether an attempt is classified as superseded. Only then is
+        // the record made to look like one still running, because a record with
+        // no end time would not survive a filter written for finished ones.
+        let (start, end) = day_one();
+        let mut fixture = records_in_window(&start, &end);
+
+        let Some(records) = fixture.get_mut("jobs").and_then(|jobs| jobs.as_array_mut()) else {
+            unreachable!("the fixture has a jobs array");
+        };
+
+        records.retain(|record| record.get("job_id").and_then(|i| i.as_u64()) == Some(id));
+
+        if let Some(elapsed) = running_for {
+            let Some(record) = records.first_mut() else {
+                unreachable!("the fixture has a record for this job");
+            };
+
+            record["time"]["end"] = serde_json::json!(0);
+            record["time"]["elapsed"] = serde_json::json!(elapsed);
+            record["state"]["current"] = serde_json::json!(["RUNNING"]);
+        }
+
+        fixture
+    }
+
+    /// Build a day-one report over exactly the records given.
+    fn report_over(records: &serde_json::Value) -> (DailyProjectUsageReport, ReportTotals) {
+        let (start, end) = day_one();
+        let mut report = DailyProjectUsageReport::default();
+        let mut totals = ReportTotals::default();
+
+        let Ok(jobs) = SlurmJob::get_consumers(records, &start, &end, &test_nodes()) else {
+            unreachable!("the fixture parses");
+        };
+
+        for job in &jobs {
+            record_job(&mut report, job, &start, &mut totals);
+        }
+
+        (report, totals)
+    }
+
+    #[test]
+    fn test_a_job_still_running_when_the_window_closes_contributes_no_runtime() {
+        // The runtime and the expansion factor are recorded once, in the window
+        // the job started in, and never revisited - so recording them from a
+        // record that has not finished freezes whatever `elapsed` had reached
+        // at that moment. Job 100 ran for an hour; caught half an hour in, it
+        // used to be written down as a half-hour job that had waited an hour,
+        // giving an expansion factor of 3.00 against a true 2.00. The longer
+        // the job, the worse the error: a job caught an hour into a thirty-hour
+        // run is out by more than an order of magnitude.
+        let (report, totals) = report_over(&one_job(100, Some(1800)));
+
+        // it is still a job, and its wait is already final
+        assert_eq!(report.num_jobs(), 1);
+        assert_eq!(report.total_wait_seconds(), 3600);
+
+        // but nothing is claimed about how long it ran
+        assert_eq!(report.expansion_jobs(), 0);
+        assert_eq!(report.total_runtime_seconds(), 0);
+        assert_eq!(report.average_expansion_factor(), 0.0);
+        assert_eq!(report.average_runtime_seconds(), 0);
+
+        // and the window is marked as one that must not be frozen
+        assert!(totals.saw_unfinished_job);
+
+        // the usage is recorded as it always was: the job did hold those nodes
+        // from its start to the end of the window, whatever it does next
+        assert_eq!(report.total_usage(), Usage::new(79200));
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_the_same_job_records_its_real_runtime_once_it_has_finished() {
+        // The other side of it: read again after the job ends - which is what
+        // declining to cache the window buys - and the true figures are the
+        // ones that get written down.
+        let (report, totals) = report_over(&one_job(100, None));
+
+        assert_eq!(report.num_jobs(), 1);
+        assert_eq!(report.expansion_jobs(), 1);
+        assert_eq!(report.total_runtime_seconds(), 3600);
+        assert_eq!(report.total_wait_seconds(), 3600);
+        assert_eq!(report.average_expansion_factor(), 2.0);
+        assert_eq!(report.aggregate_expansion_factor(), 2.0);
+
+        assert!(!totals.saw_unfinished_job);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_an_attempt_that_ends_after_the_window_has_still_ended() {
+        // "Finished" is a question about the moment we read the record, not
+        // about whether it finished inside the window being reported on. Job
+        // 900's attempt starts on day one and ends on day two, and its elapsed
+        // time is final either way - so day one records its full runtime and
+        // stays completable. Asking whether it ended *inside* the window would
+        // call every attempt spanning midnight unfinished and stop the day it
+        // began in from ever being cached.
+        let (report, totals) = report_over(&one_job(900, None));
+
+        assert_eq!(report.num_jobs(), 1);
+        assert_eq!(report.expansion_jobs(), 1);
+        assert_eq!(report.total_runtime_seconds(), 43200);
+        assert!(!totals.saw_unfinished_job);
+
+        // day one still only bills the part of it that fell inside day one
+        assert_eq!(report.total_usage(), Usage::new(14400));
     }
 
     #[test]

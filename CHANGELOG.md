@@ -8,6 +8,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **A job still running when its window closed had its runtime and expansion
+  factor frozen at a partial value.** Both are recorded once, in the window the
+  job started in, from the `elapsed` time `sacct` reports - which for a running
+  record is the runtime *so far*. A day is completed and cached as soon as it is
+  in the past, so a job that started at 23:00 and ran for thirty hours was
+  written down as having run for an hour, with an expansion factor nearly thirty
+  times too high, and nothing ever revisited it. On the hourly fallback path
+  every job longer than an hour was affected. A record that has not finished now
+  contributes no runtime and no ratio, and a window holding one is not
+  completed or cached until the job ends, so the real figures are recorded on a
+  later pass. Usage was never affected: each window records its own share.
+
+  Because the two populations can now differ, the runtime and expansion means
+  are averaged over `expansion_jobs()` - the jobs that contributed a runtime -
+  rather than over `num_jobs()`.
+
+- **A component report lost every per-job statistic.** `get_component` carried a
+  day's job counts and wait times but not its expansion factors, runtimes or job
+  sizes, so asking for `"gpu"` gave a report with a non-zero job count beside an
+  expansion factor of 0.00 - which on that scale means "no jobs at all".
+
+- **A rename that merged two local accounts dropped one of them.** Every
+  per-user map was rebuilt with `collect()`, which keeps whichever colliding
+  entry came last, so consolidating two local usernames into one silently lost
+  one user's usage, jobs and waits - and which one depended on hash order.
+
+- **Scaling a `ProjectUsageReport` left its requeue and reservation figures
+  behind**, so `total_usage_including_requeues()` afterwards added two different
+  units together. `*=` and `/=` on a `DailyProjectUsageReport` also left the
+  component breakdowns unscaled while `*` and `/` scaled them.
+
+- **A day whose counters disagreed with its own totals was still cached.** The
+  check only logged, so the bad figures were then served from cache with nothing
+  downstream able to tell.
+
+- **Counters could abort the process rather than saturate.** The scalar totals
+  in a usage report saturate deliberately, but the per-user maps beside them
+  used a bare `+=`; with `overflow-checks` on and `panic = "abort"`, a
+  peer-supplied report could have killed the process before the scalar clamped.
+
+- **A reservation's requeued share could exceed the reservation's own usage
+  after scaling.** It was keyed by reservation while the usage it is a subset of
+  was keyed by reservation and user, and truncation to whole seconds is not
+  distributive over a sum, so a report that had merely been converted into
+  credits could fail its own consistency check.
+
 - **Slurm usage reports missed everything a requeued job consumed before its
   final attempt.** `op-slurm` called `sacct` without `--duplicates`, which
   returns only the most recent accounting record for each job id. A requeued job

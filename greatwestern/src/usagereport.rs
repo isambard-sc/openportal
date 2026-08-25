@@ -970,7 +970,13 @@ impl DailyProjectUsageReport {
     ///
     pub fn expansion_jobs(&self) -> u64 {
         match self.num_expansion_jobs {
-            0 => self.num_jobs,
+            // Sums but no count is a report written before the count existed,
+            // and there the two populations were the same by construction. No
+            // sums either is a report that genuinely recorded no runtime - the
+            // whole day still running - and it must not borrow a denominator:
+            // averaging nothing over a job count would report a project that
+            // turned everything around instantly.
+            0 if self.total_expansion_milli > 0 || self.total_runtime_seconds > 0 => self.num_jobs,
             counted => counted,
         }
     }
@@ -978,7 +984,11 @@ impl DailyProjectUsageReport {
     /// `expansion_jobs` for one local user.
     pub fn expansion_jobs_for_user(&self, user: &str) -> u64 {
         match self.user_expansion_jobs.get(user).copied().unwrap_or(0) {
-            0 => self.num_jobs_for_user(user),
+            0 if self.expansion_milli_for_user(user) > 0
+                || self.runtime_seconds_for_user(user) > 0 =>
+            {
+                self.num_jobs_for_user(user)
+            }
             counted => counted,
         }
     }

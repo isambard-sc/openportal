@@ -2618,6 +2618,11 @@ const TERMINAL_STATES: [&str; 14] = [
 /// The bucket for a state Slurm reports that `TERMINAL_STATES` does not name.
 const OTHER_TERMINAL_STATE: &str = "OTHER";
 
+/// See `SlurmJob::has_ended`.
+fn finished_by_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlurmJob {
     id: u64,
@@ -2649,6 +2654,13 @@ pub struct SlurmJob {
     /// Which attempt of the job this is - set by `get_consumers`, which is the
     /// only place that can see a job's other attempts.
     attempt: Attempt,
+    /// Whether this record had finished when we asked - set by `get_consumers`,
+    /// which sees the unclipped end time. Defaults to true when reading a
+    /// cached record written before this was recorded: those were treated as
+    /// finished, and inventing a different answer for them now would change
+    /// figures that have already been reported.
+    #[serde(default = "finished_by_default")]
+    has_ended: bool,
     qos: String,
     nodes: u64,
     cpus: u64,
@@ -3217,6 +3229,8 @@ impl SlurmJob {
             // `get_consumers` reclassifies once it can see the job's other
             // attempts; a job constructed on its own is its own last attempt.
             attempt: Attempt::Base,
+            // and decides this too, from the end time before it is clipped
+            has_ended: false,
             qos,
             nodes,
             cpus,
@@ -3285,7 +3299,23 @@ impl SlurmJob {
                     // ones that consumed nothing within it
                     let mut consumers: Vec<SlurmJob> = Vec::new();
 
+                    // `now`, not the window's end. The question is whether this
+                    // record's elapsed time is final, which it is as soon as
+                    // the record has ended - even if it ended after the window
+                    // we are reporting on, as an attempt spanning midnight
+                    // does. Asking whether it ended *inside* the window would
+                    // call every such attempt unfinished and stop the day it
+                    // began in ever being completed.
+                    let now = chrono::Utc::now();
+
                     for mut job in slurm_jobs {
+                        // Before clipping, while the real end time is still
+                        // here. A record still running has no end time at all -
+                        // Slurm reports zero - and some versions report the
+                        // projected end instead, which is in the future; both
+                        // are caught by this.
+                        job.has_ended = job.end_time.timestamp() > 0 && job.end_time <= now;
+
                         if job.start_time < *start_time {
                             job.start_time = *start_time;
                         } else if job.start_time > *end_time {
@@ -3528,6 +3558,22 @@ impl SlurmJob {
     /// invisible before requeue accounting.
     pub fn is_requeued_attempt(&self) -> bool {
         self.attempt == Attempt::Requeued
+    }
+
+    ///
+    /// True if this record had finished by the time we asked `sacct` for it, so
+    /// that its elapsed time is the job's whole runtime rather than the runtime
+    /// so far.
+    ///
+    /// `sacct` reports `elapsed` for a running record as the time it has been
+    /// running, which is a moving figure, and reports the record again in the
+    /// next window with a larger one. Usage copes with that - each window
+    /// records the part consumed inside it - but the runtime and the expansion
+    /// factor are recorded once, in the window the job started in, so recording
+    /// them from a record that is still running freezes a partial answer.
+    ///
+    pub fn has_ended(&self) -> bool {
+        self.has_ended
     }
 
     /// The node Slurm blamed for a `NODE_FAIL`, if it named one.
@@ -4178,6 +4224,41 @@ mod tests {
         failed.sort();
 
         assert_eq!(failed, ["badnode01", "badnode02"]);
+    }
+
+    #[test]
+    fn test_a_cached_record_from_before_this_field_reads_as_finished() {
+        // Hourly reports are cached as the records themselves, so an upgrade
+        // reads back records written without `has_ended`. Those were all
+        // treated as finished, and their runtimes have already been reported;
+        // defaulting to "not finished" would drop them out of every expansion
+        // figure on the next read and change numbers that have been given out.
+        let job = consumers_for(day_one())
+            .into_iter()
+            .find(|job| job.id() == 100)
+            .expect("job 100 is in day one");
+
+        assert!(job.has_ended());
+
+        let Ok(serialised) = serde_json::to_string(&job) else {
+            unreachable!("a SlurmJob serialises");
+        };
+
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&serialised) else {
+            unreachable!("what we just wrote is JSON");
+        };
+
+        let Some(object) = value.as_object_mut() else {
+            unreachable!("a SlurmJob is an object");
+        };
+
+        assert!(object.remove("has_ended").is_some());
+
+        let Ok(cached) = serde_json::from_value::<SlurmJob>(value) else {
+            unreachable!("an older cached record still reads");
+        };
+
+        assert!(cached.has_ended());
     }
 
     #[test]

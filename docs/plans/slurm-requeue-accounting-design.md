@@ -646,6 +646,13 @@ question, and both are exposed. The same is true of the expansion factor, and fo
 the same reason - these are distribution questions being asked of a single
 number, so the per-user breakdown is not a refinement but the point.
 
+A wait also means nothing without a runtime beside it, so the report's tables
+carry both: nine hours of queueing for a job that runs for a day is a busy
+queue, and nine hours for a job that runs for thirty seconds is somebody
+fighting a job that will not start. The expansion factor already separates those
+two - the real fixture has one user at 2.91 and another at 1004 - but the two
+columns are what make the figure legible rather than mysterious.
+
 Which is why `expansion_factor_report()` leads with the per-user table rather
 than the totals, and shows each day underneath so that a change over time is
 visible - when the trouble started being about as useful as who caused it. It

@@ -103,6 +103,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   number, and a project-wide mean job size of twenty cores can be four 512-core
   jobs beside a hundred 2-core ones, describing neither.
 
+  The per-user and per-day tables carry the mean runtime beside the mean wait,
+  because a wait means nothing on its own: nine hours of queueing for a job that
+  runs for a day is a busy queue, and nine hours for a job that runs for thirty
+  seconds is somebody fighting a job that will not start. Both columns are in
+  hours, said once in the header rather than on every row.
+
   It also names which end of the distribution did the waiting, since the gap
   between the two expansion figures is the most useful thing in the report - a
   mean far above the overall figure means short jobs waited a long time, and the

@@ -3143,6 +3143,18 @@ impl ProjectUsageReport {
         Ok(self.0.total_runtime_seconds())
     }
 
+    /// The mean runtime of a job, in seconds - the figure that gives a wait its
+    /// meaning. Eleven hours of queueing says one thing beside a job that runs
+    /// for a day and quite another beside one that runs for five minutes.
+    #[getter]
+    fn average_runtime_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.average_runtime_seconds())
+    }
+
+    fn average_runtime_seconds_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.average_runtime_seconds_for_user(user))
+    }
+
     /// Mean expansion factor per job: turnaround over runtime,
     /// `(wait + run) / run`, the classical definition used by `sreport`.
     ///
@@ -3990,6 +4002,18 @@ impl DailyProjectUsageReport {
     #[getter]
     fn total_runtime_seconds(&self) -> PyResult<u64> {
         Ok(self.0.total_runtime_seconds())
+    }
+
+    /// The mean runtime of a job, in seconds - the figure that gives a wait its
+    /// meaning. Eleven hours of queueing says one thing beside a job that runs
+    /// for a day and quite another beside one that runs for five minutes.
+    #[getter]
+    fn average_runtime_seconds(&self) -> PyResult<u64> {
+        Ok(self.0.average_runtime_seconds())
+    }
+
+    fn average_runtime_seconds_for_user(&self, user: &str) -> PyResult<u64> {
+        Ok(self.0.average_runtime_seconds_for_user(user))
     }
 
     /// Mean expansion factor per job: turnaround over runtime,

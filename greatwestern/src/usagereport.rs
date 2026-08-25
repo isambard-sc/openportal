@@ -972,6 +972,23 @@ impl DailyProjectUsageReport {
         self.user_runtime_seconds.get(user).copied().unwrap_or(0)
     }
 
+    /// The mean runtime of a job in this report. The figure that makes a wait
+    /// mean something: eleven hours of queueing says one thing beside a job that
+    /// runs for a day and quite another beside one that runs for five minutes.
+    pub fn average_runtime_seconds(&self) -> u64 {
+        match self.num_jobs {
+            0 => 0,
+            n => self.total_runtime_seconds / n,
+        }
+    }
+
+    pub fn average_runtime_seconds_for_user(&self, user: &str) -> u64 {
+        match self.num_jobs_for_user(user) {
+            0 => 0,
+            n => self.runtime_seconds_for_user(user) / n,
+        }
+    }
+
     ///
     /// The mean expansion factor of the jobs counted in this report: turnaround
     /// over runtime, `(wait + run) / run`, averaged per job.
@@ -2850,6 +2867,28 @@ impl ProjectUsageReport {
         }
     }
 
+    pub fn runtime_seconds_for_user(&self, user: &str) -> u64 {
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.runtime_seconds_for_user(user))
+        })
+    }
+
+    /// The mean runtime of a job in this report - the figure that makes a wait
+    /// mean something. See `DailyProjectUsageReport::average_runtime_seconds`.
+    pub fn average_runtime_seconds(&self) -> u64 {
+        match self.num_jobs() {
+            0 => 0,
+            n => self.total_runtime_seconds() / n,
+        }
+    }
+
+    pub fn average_runtime_seconds_for_user(&self, user: &str) -> u64 {
+        match self.num_jobs_for_user(user) {
+            0 => 0,
+            n => self.runtime_seconds_for_user(user) / n,
+        }
+    }
+
     /// Total wall-clock runtime of every job in this report. Not usage - usage
     /// weights each second by the fraction of a node held.
     pub fn total_runtime_seconds(&self) -> u64 {
@@ -3075,7 +3114,7 @@ impl ProjectUsageReport {
         use std::fmt::Write;
 
         let mut out = String::new();
-        let rule = "=".repeat(72);
+        let rule = "=".repeat(80);
 
         // `write!` to a String cannot fail, so the results are deliberately
         // discarded rather than unwrapped - `unwrap` is denied in this crate.
@@ -3121,8 +3160,13 @@ impl ProjectUsageReport {
         );
         let _ = writeln!(
             out,
-            "Mean wait {} | mean job size {:.1} cores, {:.1} gpus",
+            "Mean wait {} | mean runtime {}",
             Usage::new(self.average_wait_seconds()).in_hours(),
+            Usage::new(self.average_runtime_seconds()).in_hours()
+        );
+        let _ = writeln!(
+            out,
+            "Mean job size {:.1} cores, {:.1} gpus",
             self.average_cpus_per_job(),
             self.average_gpus_per_job()
         );
@@ -3181,7 +3225,7 @@ impl ProjectUsageReport {
             local_to_portal.insert(local_user.clone(), user.clone());
         }
 
-        let mut users: Vec<(String, u64, f64, f64, f64, u64)> = self
+        let mut users: Vec<(String, u64, f64, f64, f64, u64, u64)> = self
             .job_users()
             .into_iter()
             .map(|user| {
@@ -3190,7 +3234,8 @@ impl ProjectUsageReport {
                 let cpus = self.average_cpus_per_job_for_user(&user);
                 let gpus = self.average_gpus_per_job_for_user(&user);
                 let wait = self.average_wait_seconds_for_user(&user);
-                (user, jobs, expansion, cpus, gpus, wait)
+                let runtime = self.average_runtime_seconds_for_user(&user);
+                (user, jobs, expansion, cpus, gpus, wait, runtime)
             })
             .collect();
 
@@ -3209,14 +3254,23 @@ impl ProjectUsageReport {
             false => "-".to_string(),
         };
 
+        // The wait and runtime columns are hours, said once in the header rather
+        // than on every row: a column of "11.608 hours" is two thirds
+        // punctuation and pushes the table past any sensible width, and these
+        // two are read against each other rather than in isolation.
+        let hours = |seconds: u64| match seconds > 0 {
+            true => format!("{:.3}", Usage::new(seconds).hours()),
+            false => "-".to_string(),
+        };
+
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "  {:<28} {:>6} {:>10} {:>8} {:>7} {:>14}",
-            "user", "jobs", "expansion", "cores", "gpus", "mean wait"
+            "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
+            "user", "jobs", "expansion", "run (h)", "wait (h)", "cores", "gpus"
         );
 
-        for (user, jobs, expansion, cpus, gpus, wait) in users {
+        for (user, jobs, expansion, cpus, gpus, wait, runtime) in users {
             let label = match local_to_portal.get(&user) {
                 Some(portal_user) => portal_user.to_string(),
                 None => format!("{} - unknown", user),
@@ -3224,13 +3278,14 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<28} {:>6} {:>10} {:>8} {:>7} {:>14}",
+                "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
                 label,
                 jobs,
                 or_dash(expansion, 2),
+                hours(runtime),
+                hours(wait),
                 or_dash(cpus, 1),
-                format!("{:.1}", gpus),
-                Usage::new(wait).in_hours().to_string()
+                format!("{:.1}", gpus)
             );
         }
 
@@ -3238,8 +3293,8 @@ impl ProjectUsageReport {
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "  {:<28} {:>6} {:>10} {:>8} {:>7}",
-            "day", "jobs", "expansion", "cores", "gpus"
+            "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
+            "day", "jobs", "expansion", "run (h)", "wait (h)", "cores", "gpus"
         );
 
         for date in self.dates() {
@@ -3253,10 +3308,12 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<28} {:>6} {:>10} {:>8} {:>7}",
+                "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
                 date.to_string(),
                 report.num_jobs(),
                 or_dash(report.average_expansion_factor(), 2),
+                hours(report.average_runtime_seconds()),
+                hours(report.average_wait_seconds()),
                 or_dash(report.average_cpus_per_job(), 1),
                 format!("{:.1}", report.average_gpus_per_job())
             );
@@ -3269,12 +3326,21 @@ impl ProjectUsageReport {
         );
         let _ = writeln!(
             out,
-            "worse. Job sizes count each job once however long it ran, so they describe"
+            "worse - and it is the runtime column that says how much a wait cost: nine"
         );
         let _ = writeln!(
             out,
-            "the shape of the jobs, not what the machine was busy with."
+            "hours of queueing means one thing beside a job that runs for a day and quite"
         );
+        let _ = writeln!(
+            out,
+            "another beside one that runs for thirty seconds. Job sizes count each job"
+        );
+        let _ = writeln!(
+            out,
+            "once however long it ran, so they describe the shape of the jobs rather than"
+        );
+        let _ = writeln!(out, "what the machine was busy with.");
 
         out
     }
@@ -4880,11 +4946,11 @@ mod tests {
         // should say which end of the distribution waited
         assert!(expansion.contains("*short* jobs"), "{}", expansion);
         // and the worst-served user is named first
-        // "mean wait" in lower case appears only in the column header, so the
-        // row after it is the worst-served user
+        // "wait (h)" appears only in a column header, so the row after the first
+        // one is the worst-served user
         let first_row = expansion
             .lines()
-            .skip_while(|line| !line.contains("mean wait"))
+            .skip_while(|line| !line.contains("wait (h)"))
             .nth(1);
         let Some(first_row) = first_row else {
             unreachable!("no user rows in:\n{}", expansion);
@@ -5245,6 +5311,107 @@ mod tests {
             "carol's jobs: {}",
             dump
         );
+    }
+
+    #[test]
+    fn test_the_user_table_shows_the_runtime_that_gives_a_wait_its_meaning() {
+        // A wait says nothing on its own. In this real month two users look
+        // similar on wait alone and are telling completely different stories:
+        // one queued 27.7 hours for a job that ran 17.6 hours, which is a busy
+        // queue; the other queued 9.5 hours for a job that ran 32 seconds,
+        // which is somebody fighting a job that will not start. The expansion
+        // factor already separates them - 2.91 against 1004 - and the runtime
+        // column is what makes that legible rather than mysterious.
+        let report = real_month();
+
+        assert_eq!(
+            report.average_runtime_seconds_for_user("user3.project"),
+            63_308
+        );
+        assert_eq!(
+            report.average_wait_seconds_for_user("user3.project"),
+            99_652
+        );
+
+        assert_eq!(report.average_runtime_seconds_for_user("user6.project"), 34);
+        assert_eq!(
+            report.average_wait_seconds_for_user("user6.project"),
+            34_109
+        );
+
+        // the whole project, for the headline
+        assert_eq!(report.average_runtime_seconds(), 5_788);
+        assert_eq!(report.average_wait_seconds(), 14_809);
+
+        let dump = report.expansion_factor_report();
+
+        // both columns are labelled once, in hours, rather than on every row
+        assert!(dump.contains("run (h)"), "{}", dump);
+        assert!(dump.contains("wait (h)"), "{}", dump);
+        assert!(dump.contains("mean runtime"), "{}", dump);
+
+        // and the two rows above are there to be compared
+        let row_for = |user: &str| {
+            dump.lines()
+                .find(|line| line.starts_with(&format!("  {}", user)))
+                .map(|line| line.to_string())
+        };
+
+        let Some(patient) = row_for("user3.project") else {
+            unreachable!("no row for user3 in:\n{}", dump);
+        };
+        let Some(struggling) = row_for("user6.project") else {
+            unreachable!("no row for user6 in:\n{}", dump);
+        };
+
+        assert!(
+            patient.contains("17.586") && patient.contains("27.681"),
+            "{}",
+            patient
+        );
+        assert!(
+            struggling.contains("0.009") && struggling.contains("9.475"),
+            "{}",
+            struggling
+        );
+    }
+
+    #[test]
+    fn test_a_user_with_no_runtime_recorded_shows_a_dash_for_it() {
+        // A legacy day carries wait and job counts but no runtime, and zero is
+        // the sentinel for "not recorded" - a mean runtime of 0.000 hours would
+        // read as a job that took no time at all.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+
+        let mut legacy = DailyProjectUsageReport::default();
+        legacy.add_usage("alice", Usage::new(3600));
+        legacy.add_jobs("alice", 1);
+        legacy.add_wait_seconds("alice", 7200);
+        report.set_report(&Date::parse("2026-03-01").unwrap(), &legacy);
+
+        let mut modern = DailyProjectUsageReport::default();
+        modern.add_usage("bob", Usage::new(3600));
+        modern.add_jobs("bob", 1);
+        modern.add_wait_seconds("bob", 1800);
+        modern.add_expansion("bob", 1800, 3600);
+        modern.add_job_size("bob", 128, 0);
+        report.set_report(&Date::parse("2026-03-02").unwrap(), &modern);
+
+        let dump = report.expansion_factor_report();
+
+        let row = dump
+            .lines()
+            .find(|line| line.starts_with("  alice"))
+            .map(|line| line.to_string());
+        let Some(row) = row else {
+            unreachable!("no row for alice in:\n{}", dump);
+        };
+
+        // the wait it does know is shown; the runtime it does not is a dash
+        assert!(row.contains("2.000"), "the wait is known: {}", row);
+        assert!(row.contains('-'), "the runtime is not: {}", row);
+        assert!(!row.contains("0.000"), "and is not shown as zero: {}", row);
     }
 
     #[test]

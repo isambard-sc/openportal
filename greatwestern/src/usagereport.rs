@@ -3277,9 +3277,15 @@ impl ProjectUsageReport {
             })
             .collect();
 
+        // Sorted on the *overall* figure, not the mean. The mean is the outlier
+        // detector - one freak job moves it a long way - so ranking on it puts
+        // whoever had the single strangest job at the top, which is not the same
+        // question as who was worst served. The mean breaks ties, and the name
+        // after that, so the order is stable.
         users.sort_by(|a, b| {
-            b.2.partial_cmp(&a.2)
+            b.7.partial_cmp(&a.7)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
                 .then(a.0.cmp(&b.0))
         });
 
@@ -3302,16 +3308,17 @@ impl ProjectUsageReport {
         };
 
         // The two expansion columns sit together because it is the gap between
-        // them that an operator is looking for. `mean` is the mean of the
-        // per-job ratios and `overall` is the whole user treated as one job: a
-        // mean far above the overall figure means a few of their jobs queued a
-        // long time and then exited almost at once, and the two figures agreeing
-        // means the user simply waits. Neither says that on its own.
+        // them that an operator is looking for. `overall` is the whole user
+        // treated as one job - how badly they were served, all told - and `mean`
+        // is the mean of the per-job ratios, which one freak job can dominate.
+        // A mean far above the overall figure means a few of their jobs queued a
+        // long time and then exited almost at once; the two agreeing means the
+        // user simply waits. Neither says that on its own.
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
-            "user", "jobs", "mean", "overall", "run (h)", "wait (h)", "cores", "gpus"
+            "  {:<24} {:>5} {:>8} {:>9} {:>8} {:>8} {:>7} {:>5}",
+            "user", "jobs", "overall", "mean", "run (h)", "wait (h)", "cores", "gpus"
         );
 
         for (user, jobs, expansion, cpus, gpus, wait, runtime, aggregate) in users {
@@ -3322,11 +3329,11 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
+                "  {:<24} {:>5} {:>8} {:>9} {:>8} {:>8} {:>7} {:>5}",
                 label,
                 jobs,
-                or_dash(expansion, 2),
                 or_dash(aggregate, 2),
+                or_dash(expansion, 2),
                 hours(runtime),
                 hours(wait),
                 or_dash(cpus, 1),
@@ -3338,8 +3345,8 @@ impl ProjectUsageReport {
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
-            "day", "jobs", "mean", "overall", "run (h)", "wait (h)", "cores", "gpus"
+            "  {:<24} {:>5} {:>8} {:>9} {:>8} {:>8} {:>7} {:>5}",
+            "day", "jobs", "overall", "mean", "run (h)", "wait (h)", "cores", "gpus"
         );
 
         for date in self.dates() {
@@ -3353,11 +3360,11 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
+                "  {:<24} {:>5} {:>8} {:>9} {:>8} {:>8} {:>7} {:>5}",
                 date.to_string(),
                 report.num_jobs(),
-                or_dash(report.average_expansion_factor(), 2),
                 or_dash(report.aggregate_expansion_factor(), 2),
+                or_dash(report.average_expansion_factor(), 2),
                 hours(report.average_runtime_seconds()),
                 hours(report.average_wait_seconds()),
                 or_dash(report.average_cpus_per_job(), 1),
@@ -3372,29 +3379,32 @@ impl ProjectUsageReport {
         );
         let _ = writeln!(
             out,
-            "worse. Read the two columns together: `mean` averages the per-job ratios and"
+            "worse. Rows are ordered by `overall`, which treats the whole row as one job"
         );
         let _ = writeln!(
             out,
-            "`overall` treats the whole row as one job, so a mean far above the overall"
+            "and is the better measure of how badly someone was served. `mean` averages"
         );
         let _ = writeln!(
             out,
-            "figure means a few jobs queued for a long time and then exited almost at"
+            "the per-job ratios, so a mean far above the overall figure means a few jobs"
         );
         let _ = writeln!(
             out,
-            "once - the runtime column is where that shows. The two agreeing means the"
+            "queued a long time and then exited almost at once - the runtime column is"
         );
         let _ = writeln!(
             out,
-            "waiting was spread across the work. Job sizes count each job once however"
+            "where that shows. The two agreeing means the waiting was spread across the"
         );
         let _ = writeln!(
             out,
-            "long it ran, so they describe the shape of the jobs rather than what the"
+            "work. Job sizes count each job once however long it ran, so they describe"
         );
-        let _ = writeln!(out, "machine was busy with.");
+        let _ = writeln!(
+            out,
+            "the shape of the jobs rather than what the machine was busy with."
+        );
 
         out
     }
@@ -4999,9 +5009,12 @@ mod tests {
         // the mean is far above the overall figure on this month, so the report
         // should say which end of the distribution waited
         assert!(expansion.contains("*short* jobs"), "{}", expansion);
-        // and the worst-served user is named first
-        // "wait (h)" appears only in a column header, so the row after the first
-        // one is the worst-served user
+        // The worst-served user is named first, ranked on the overall figure
+        // rather than the mean - "wait (h)" appears only in a column header, so
+        // the row after the first one is theirs. That is user6, who queued nine
+        // and a half hours for a job that ran thirty-four seconds, and not user1,
+        // whose enormous *mean* comes from a single freak job among ninety-two
+        // and whose overall figure is an unremarkable 3.49.
         let first_row = expansion
             .lines()
             .skip_while(|line| !line.contains("wait (h)"))
@@ -5009,7 +5022,7 @@ mod tests {
         let Some(first_row) = first_row else {
             unreachable!("no user rows in:\n{}", expansion);
         };
-        assert!(first_row.contains("user1.project"), "{}", first_row);
+        assert!(first_row.contains("user6.project"), "{}", first_row);
     }
 
     #[test]

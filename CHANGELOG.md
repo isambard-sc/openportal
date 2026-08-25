@@ -103,14 +103,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   number, and a project-wide mean job size of twenty cores can be four 512-core
   jobs beside a hundred 2-core ones, describing neither.
 
-  Each row carries **two** expansion figures side by side - `mean`, the mean of
-  the per-job ratios, and `overall`, the row treated as one job - because one
+  Each row carries **two** expansion figures side by side - `overall`, the row
+  treated as one job, and `mean`, the mean of the per-job ratios - because one
   figure cannot tell "a few jobs queued for a long time and then exited almost at
   once" apart from "this user simply waits", and that is the distinction an
   operator is scanning for. A mean far above the overall figure is the first;
   the two agreeing is the second; and a mean *below* it means the waiting fell on
   the long jobs instead. `aggregate_expansion_factor_for_user()` exposes the
-  second figure directly.
+  overall figure directly.
+
+  Rows are ordered by `overall`, which is the better measure of how badly someone
+  was served: the mean is an outlier detector, so ranking on it puts whoever had
+  the single strangest job at the top rather than whoever waited most.
 
   The per-user and per-day tables carry the mean runtime beside the mean wait,
   because a wait means nothing on its own: nine hours of queueing for a job that

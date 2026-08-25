@@ -661,6 +661,13 @@ Reporting only the aggregate would have hidden the three-day, one-second job
 completely, which is the thing worth finding; reporting only the mean leaves an
 operator unable to tell whether a large number matters.
 
+The rows are ordered by the aggregate, and the aggregate column comes first,
+because that is the figure that answers "who was worst served". Ranking on the
+mean instead put the user with one freak job at the top - on this fixture that
+is a user whose overall figure is an unremarkable 3.49, above one who genuinely
+queued nine and a half hours for a job that ran thirty-four seconds. The mean
+earns its place in the row next to it, not in the ordering.
+
 A wait also means nothing without a runtime beside it, so the report's tables
 carry both: nine hours of queueing for a job that runs for a day is a busy
 queue, and nine hours for a job that runs for thirty seconds is somebody

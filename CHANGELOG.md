@@ -18,50 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   at all, because the one record we saw had zero elapsed time and was discarded
   as a non-consumer.
 
-  This also put our reports at odds with Slurm's own enforcement. `set_limit`
-  configures `GrpTRESMins`, and Slurm counts every attempt against it, so a job
-  could be held for exhausting a limit that our figures said was nowhere near
-  exhausted.
-
 ### Added
 
 - **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
   of superseded attempts separately from the usage it has always reported, so
   the two can be told apart rather than merged:
 
-  - `total_requeue_usage()` and `total_usage_including_requeues()`, with per-user
-    and per-component breakdowns to match the existing ones;
-  - `num_requeue_events()` - requeue *events*, not jobs requeued, so the figure
-    is additive over any date range; counted in the single window where the
-    requeue happened, which is not in general the window the interrupted attempt
-    started in - with `requeue_wait_seconds()`,
-    `average_requeue_wait_seconds()` and
-    `average_wait_seconds_including_requeues()`;
-  - `requeue_states()` and `requeue_usage_in_state()`, bucketing events and usage
-    by the terminal state of the superseded attempt, since `NODE_FAIL` (the
-    site lost the work), `PREEMPTED` (site policy) and `CANCELLED` are different
-    arguments about who should pay.
-
-  - `requeue_report()` on a project or portal report - a readable dump of what
-    was reported, what was discarded, what Slurm considers the true total, and
-    the breakdown by interrupting state, by day and by user. A project with no
-    requeues gets a single line saying so rather than a page of zeroes.
-
-  The per-day printout now carries its own requeue line, and a day whose
-  consumption was *entirely* discarded by requeues is no longer skipped as
-  having no usage - it has none of the usage we report, which is precisely why
-  it is worth showing.
-
-  All of it is exposed through the Python bindings, and every new field is
-  `#[serde(default)]`, so a report from an instance that predates them
-  deserialises as "no requeues seen" and an older peer ignores what it does not
-  know. **`total_usage()` is unchanged**: it still counts only each job's final
-  attempt, which is the record `sacct` used to return. Whether a project should
-  be charged for the superseded attempts is a policy question - a job that
-  checkpoints does real work on every attempt, and an attempt killed by a node
-  failure is not the user's fault - so both figures are reported and the choice
-  is left to the portal. See
-  [docs/plans/slurm-requeue-accounting-design.md](docs/plans/slurm-requeue-accounting-design.md).
 - **Expansion factor.** Usage reports now record each project's total wall-clock
   runtime and the expansion factor of its jobs - queue time over runtime - so
   that a project waiting a long time for a little work can be spotted. The
@@ -69,113 +31,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   repeatedly, is what a user fighting a job that will not run looks like from
   the outside.
 
-  Two forms are reported, because they fail in opposite directions:
-  `average_expansion_factor` is the mean of the per-job ratios, which one short
-  job that waited a long time moves a long way, and
-  `aggregate_expansion_factor` is total wait over total runtime, which no single
-  job moves much. The divergence between them is itself the signal - a mean far
-  above the aggregate means a few short jobs waited forever - and
-  `expansion_factor_for_user()` then says who. Both appear in the printed report
-  alongside the job count.
-
-  The convention is the classical one used by `sreport` and the literature -
-  `(wait + run) / run` - so **1.0 is the ideal** and the figure rises with every
-  second spent queueing. `0.0` means there were no jobs, not a perfect score.
-
-  This could not be derived from what was already collected: the denominator has
-  to be runtime, and the nearest existing figure is usage, which weights each
-  second by the fraction of a node a job held.
 - **Mean job size.** Reports now record the cores and GPUs each job was
   allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
   per-user variants) - many small jobs against a few large ones. Usage cannot
   answer this: the same core-seconds come from one job on a hundred cores or a
   hundred jobs on one core, which is exactly the distinction being drawn.
-
-  Each job counts once however long it ran, since the question is what shape the
-  jobs were rather than what the machine was occupied by. Note that the
-  project-wide mean describes a mixed population badly - four 512-core jobs
-  beside a hundred 2-core ones average to about 20 - so the per-user figures are
-  the ones to read.
-- **`expansion_factor_report()`** on a project or portal report - a readable
-  summary of how well a project's jobs were served and what shape they were, by
-  user and by day. The per-user table is the point of it rather than a
-  refinement: both figures are distribution questions being asked of a single
-  number, and a project-wide mean job size of twenty cores can be four 512-core
-  jobs beside a hundred 2-core ones, describing neither.
-
-  Each row carries **two** expansion figures side by side - `overall`, the row
-  treated as one job, and `mean`, the mean of the per-job ratios - because one
-  figure cannot tell "a few jobs queued for a long time and then exited almost at
-  once" apart from "this user simply waits", and that is the distinction an
-  operator is scanning for. A mean far above the overall figure is the first;
-  the two agreeing is the second; and a mean *below* it means the waiting fell on
-  the long jobs instead. `aggregate_expansion_factor_for_user()` exposes the
-  overall figure directly.
-
-  Rows are ordered by `overall`, which is the better measure of how badly someone
-  was served: the mean is an outlier detector, so ranking on it puts whoever had
-  the single strangest job at the top rather than whoever waited most.
-
-  The per-user and per-day tables carry the mean runtime beside the mean wait,
-  because a wait means nothing on its own: nine hours of queueing for a job that
-  runs for a day is a busy queue, and nine hours for a job that runs for thirty
-  seconds is somebody fighting a job that will not start. Both columns are in
-  hours, said once in the header rather than on every row.
-
-  It also names which end of the distribution did the waiting, since the gap
-  between the two expansion figures is the most useful thing in the report - a
-  mean far above the overall figure means short jobs waited a long time, and the
-  other way round means the waiting fell on the long ones and is probably just
-  contention. Nothing is said when both are close to the ideal.
-- **Reservation accounting.** Usage reports now record which Slurm reservation a
-  job ran under, so that what a project put into a reservation can be seen at
-  all:
-
-  - `reservations()`, `reservation_usage()`, `reservation_jobs()`,
-    `total_reservation_usage()` and `usage_outside_reservations()` on a daily,
-    project or portal report, with `reservation_summary()` giving jobs, usage and
-    discarded share per reservation, busiest first;
-  - `reservation_report()` - a readable dump by reservation, day and user;
-  - the per-day printout names each reservation the day's jobs ran in.
-
-  These figures count **every** attempt, superseded ones included: a requeued
-  attempt held the reservation's nodes exactly as its replacement did, and for
-  occupancy that is what matters. The discarded share is carried separately so
-  the two can still be told apart. Reservation usage is therefore a subset of
-  `total_usage_including_requeues()`, not of `total_usage()`.
-
-  Reports key on the reservation's **name**, not its id. Slurm gives every
-  instance of a reservation its own id, so a recurring or on-demand reservation
-  is one name across many ids - a single production account-day showed
-  `interactive` under seventeen of them - and keying on the name both merges the
-  instances and keeps the key space bounded.
-
-  What this does **not** give is a reservation's utilisation. What a reservation
-  held - its node count and duration, and so how fully it was used - is a
-  property of the reservation rather than of any one project, and is not in the
-  job records; a reservation shared between projects cannot be assessed from any
-  single project's report at all. The shares reported are shares of the
-  project's own consumption, and the report says so.
-- **Usage reports only write what they have to say.** Every counter and map
-  added by the work above is omitted from the JSON when it is empty or zero,
-  rather than written as `{}` or `0`, and read back through the `serde(default)`
-  that each already carried. A day on which nothing was requeued and nothing ran
-  in a reservation no longer carries eight empty objects saying so.
-
-  Three fields are still always written - a daily report's `reports` and
-  `is_complete`, and a project report's `users` - because release 0.92.0 has no
-  `serde(default)` on those and omitting them would make a peer of that version
-  fail outright. They now carry one, so a later release can stop writing them
-  once no 0.92.0 agents remain.
-- Reports that predate any of these statistics print a dash, or omit the line,
-  rather than showing a zero. Zero is the "not recorded" value for all of them,
-  and on a scale whose ideal is 1.00 an expansion factor of 0.00 would read as
-  better than perfect; a mean job size of 0.0 cores would say jobs ran on no
-  cores. A number is only printed where a number was measured.
-- **Node failures are logged at `error`**, naming the node Slurm blamed, so site
-  monitoring picks them up. A node failure destroys a user's work, and on a
-  requeued job it is the difference between "the project spent this" and "the
-  site lost this".
 
 ## [0.92.0] - 2026-08-21
 

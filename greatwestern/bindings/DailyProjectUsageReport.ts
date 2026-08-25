@@ -91,9 +91,10 @@ requeue_state_usage: { [key in string]?: Usage },
  */
 reservation_reports: { [key in string]?: { [key in string]?: Usage } }, 
 /**
- * Reservation name → the part of the above from superseded attempts.
+ * Reservation name → local user → the part of the above from superseded
+ * attempts.
  */
-reservation_requeue_usage: { [key in string]?: Usage }, 
+reservation_requeue_usage: { [key in string]?: { [key in string]?: Usage } }, 
 /**
  * Reservation name → jobs that started inside it, counted as `num_jobs` is.
  */

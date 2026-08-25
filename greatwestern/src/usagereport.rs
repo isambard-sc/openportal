@@ -593,9 +593,17 @@ pub struct DailyProjectUsageReport {
     /// Reservation name → local user → usage consumed inside it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     reservation_reports: HashMap<String, HashMap<String, Usage>>,
-    /// Reservation name → the part of the above from superseded attempts.
+    // Keyed by user as well as by reservation, exactly as `reservation_reports`
+    // is, so that the subset relationship between the two holds entry by entry
+    // rather than only in total. Scaling floors each entry independently, and
+    // flooring is not distributive over a sum: a figure summed from many
+    // entries can land below one summed from few. Keeping the keys identical
+    // means the same divisor floors both sides of every comparison the same
+    // way, and the subset can never overtake the set it belongs to.
+    /// Reservation name → local user → the part of the above from superseded
+    /// attempts.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    reservation_requeue_usage: HashMap<String, Usage>,
+    reservation_requeue_usage: HashMap<String, HashMap<String, Usage>>,
     /// Reservation name → jobs that started inside it, counted as `num_jobs` is.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     reservation_jobs: HashMap<String, u64>,
@@ -1152,6 +1160,20 @@ impl DailyProjectUsageReport {
         true
     }
 
+    /// How many distinct local users hold usage in any reservation. Only ever
+    /// used as the truncation bound in `is_consistent` above.
+    fn reservation_holders(&self) -> u64 {
+        let mut holders: Vec<&String> = self
+            .reservation_reports
+            .values()
+            .flat_map(|reports| reports.keys())
+            .collect();
+
+        holders.sort();
+        holders.dedup();
+        holders.len() as u64
+    }
+
     /// The same check for the requeue counters.
     ///
     /// Each map is checked only when it is populated. Absent maps are not a
@@ -1196,15 +1218,34 @@ impl DailyProjectUsageReport {
         // it, so this is a bound rather than an equality - but usage inside
         // reservations exceeding everything consumed would mean a record had
         // been counted twice.
+        //
+        // The one second of slack per user is truncation, not tolerance for a
+        // bad report. A reservation figure holds a user's base and requeued
+        // usage together, while the totals hold them apart; dividing the report
+        // floors the two halves separately, so their sum can land a second
+        // below the reservation figure that was floored once. One second per
+        // user holding a reservation is the most that can cost, and it is
+        // nowhere near enough to hide a record that was genuinely counted
+        // twice.
         if self.total_reservation_usage().seconds()
-            > self.total_usage_including_requeues().seconds()
+            > self
+                .total_usage_including_requeues()
+                .seconds()
+                .saturating_add(self.reservation_holders())
         {
             return false;
         }
 
-        for (reservation, requeued) in &self.reservation_requeue_usage {
-            if requeued.seconds() > self.reservation_usage(reservation).seconds() {
-                return false;
+        // Entry by entry, because both maps are keyed the same way: a
+        // reservation's requeued share cannot exceed what that same user held
+        // in that same reservation. Comparing only the totals would let a
+        // surplus for one user hide under a deficit for another.
+        for (reservation, reports) in &self.reservation_requeue_usage {
+            for (user, requeued) in reports {
+                if requeued.seconds() > self.reservation_usage_for_user(reservation, user).seconds()
+                {
+                    return false;
+                }
             }
         }
 
@@ -1560,15 +1601,22 @@ impl DailyProjectUsageReport {
     /// Record the part of a reservation's usage that came from an attempt later
     /// superseded by a requeue. This is a subset of `add_reservation_usage`, not
     /// an addition to it, so both are called for the same record.
-    pub fn add_reservation_requeue_usage(&mut self, reservation: &str, usage: Usage) {
+    pub fn add_reservation_requeue_usage(
+        &mut self,
+        reservation: &str,
+        local_user: &str,
+        usage: Usage,
+    ) {
         if reservation.is_empty() || usage.is_zero() {
             return;
         }
 
-        *self
+        let reports = self
             .reservation_requeue_usage
             .entry(reservation.to_string())
-            .or_default() += usage;
+            .or_default();
+
+        *reports.entry(local_user.to_string()).or_default() += usage;
     }
 
     pub fn add_reservation_jobs(&mut self, reservation: &str, count: u64) {
@@ -1615,8 +1663,17 @@ impl DailyProjectUsageReport {
 
     /// The part of `reservation_usage` that was discarded by a requeue.
     pub fn reservation_requeue_usage(&self, reservation: &str) -> Usage {
+        match self.reservation_requeue_usage.get(reservation) {
+            Some(reports) => reports.values().cloned().sum(),
+            None => Usage::default(),
+        }
+    }
+
+    /// The same for one local user inside that reservation.
+    pub fn reservation_requeue_usage_for_user(&self, reservation: &str, local_user: &str) -> Usage {
         self.reservation_requeue_usage
             .get(reservation)
+            .and_then(|reports| reports.get(local_user))
             .cloned()
             .unwrap_or_default()
     }
@@ -1691,8 +1748,10 @@ impl DailyProjectUsageReport {
                 *usage *= factor;
             }
         }
-        for usage in self.reservation_requeue_usage.values_mut() {
-            *usage *= factor;
+        for reports in self.reservation_requeue_usage.values_mut() {
+            for usage in reports.values_mut() {
+                *usage *= factor;
+            }
         }
     }
 
@@ -1729,8 +1788,10 @@ impl DailyProjectUsageReport {
                 *usage /= divisor;
             }
         }
-        for usage in self.reservation_requeue_usage.values_mut() {
-            *usage /= divisor;
+        for reports in self.reservation_requeue_usage.values_mut() {
+            for usage in reports.values_mut() {
+                *usage /= divisor;
+            }
         }
     }
 
@@ -1873,6 +1934,21 @@ impl DailyProjectUsageReport {
             })
             .collect();
 
+        let old_reservation_requeues = std::mem::take(&mut self.reservation_requeue_usage);
+        self.reservation_requeue_usage = old_reservation_requeues
+            .into_iter()
+            .map(|(reservation, user_map)| {
+                let new_user_map = user_map
+                    .into_iter()
+                    .map(|(user, usage)| {
+                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
+                        (new_user, usage)
+                    })
+                    .collect();
+                (reservation, new_user_map)
+            })
+            .collect();
+
         let old_reservations = std::mem::take(&mut self.reservation_reports);
         self.reservation_reports = old_reservations
             .into_iter()
@@ -1987,8 +2063,10 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
                 new_report.add_reservation_usage(&reservation, &user, usage);
             }
         }
-        for (reservation, usage) in other.reservation_requeue_usage {
-            new_report.add_reservation_requeue_usage(&reservation, usage);
+        for (reservation, reports) in other.reservation_requeue_usage {
+            for (user, usage) in reports {
+                new_report.add_reservation_requeue_usage(&reservation, &user, usage);
+            }
         }
         for (reservation, count) in &other.reservation_jobs {
             new_report.add_reservation_jobs(reservation, *count);
@@ -2082,8 +2160,10 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
                 self.add_reservation_usage(&reservation, &user, usage);
             }
         }
-        for (reservation, usage) in other.reservation_requeue_usage {
-            self.add_reservation_requeue_usage(&reservation, usage);
+        for (reservation, reports) in other.reservation_requeue_usage {
+            for (user, usage) in reports {
+                self.add_reservation_requeue_usage(&reservation, &user, usage);
+            }
         }
         for (reservation, count) in &other.reservation_jobs {
             self.add_reservation_jobs(reservation, *count);
@@ -2662,8 +2742,10 @@ impl ProjectUsageReport {
                     *usage *= factor;
                 }
             }
-            for usage in report.reservation_requeue_usage.values_mut() {
-                *usage *= factor;
+            for reports in report.reservation_requeue_usage.values_mut() {
+                for usage in reports.values_mut() {
+                    *usage *= factor;
+                }
             }
         }
     }
@@ -5964,7 +6046,7 @@ mod tests {
         // `bench`; bob's 600 ran inside `maint`
         report.add_reservation_usage("bench", "alice", Usage::new(1200));
         report.add_reservation_usage("bench", "alice", Usage::new(4800));
-        report.add_reservation_requeue_usage("bench", Usage::new(4800));
+        report.add_reservation_requeue_usage("bench", "alice", Usage::new(4800));
         report.add_reservation_jobs("bench", 1);
 
         report.add_reservation_usage("maint", "bob", Usage::new(600));
@@ -6000,6 +6082,56 @@ mod tests {
     }
 
     #[test]
+    fn test_dividing_a_report_does_not_break_the_reservation_invariant() {
+        // `Usage` truncates to whole seconds, and truncation is not
+        // distributive over a sum: floor(1/2) + floor(1/2) is 0, while
+        // floor(2/2) is 1. The discarded share used to be keyed by reservation
+        // alone while the reservation's own usage was keyed by reservation and
+        // user, so dividing a report floored one side into more pieces than the
+        // other and the subset came out larger than the set - a report that had
+        // simply been converted into credits then failed its own consistency
+        // check. Both maps are now keyed the same way, so the same divisor
+        // floors both sides identically.
+        let mut report = DailyProjectUsageReport::default();
+
+        report.add_usage("alice", Usage::new(1));
+        report.add_usage("bob", Usage::new(1));
+        report.add_requeue_usage("alice", Usage::new(1));
+        report.add_requeue_usage("bob", Usage::new(1));
+
+        report.add_reservation_usage("bench", "alice", Usage::new(1));
+        report.add_reservation_usage("bench", "bob", Usage::new(1));
+        report.add_reservation_requeue_usage("bench", "alice", Usage::new(1));
+        report.add_reservation_requeue_usage("bench", "bob", Usage::new(1));
+
+        assert!(report.is_consistent());
+
+        // every divisor that splits these entries awkwardly, not just one
+        for divisor in [2.0, 3.0, 7.0, 1000.0] {
+            let divided = report.clone() / divisor;
+            assert!(
+                divided.is_consistent(),
+                "dividing by {} broke the invariant",
+                divisor
+            );
+            assert!(
+                divided.reservation_requeue_usage("bench").seconds()
+                    <= divided.reservation_usage("bench").seconds()
+            );
+        }
+
+        // and scaling up, which truncates too
+        for factor in [1.5, 2.5, 0.3] {
+            let scaled = report.clone() * factor;
+            assert!(
+                scaled.is_consistent(),
+                "scaling by {} broke the invariant",
+                factor
+            );
+        }
+    }
+
+    #[test]
     fn test_a_report_claiming_more_reservation_usage_than_it_consumed_is_inconsistent() {
         // The one invariant available: reservations account for a subset, so
         // usage inside them exceeding everything consumed means a record was
@@ -6014,7 +6146,7 @@ mod tests {
         let mut report = DailyProjectUsageReport::default();
         report.add_usage("alice", Usage::new(6000));
         report.add_reservation_usage("bench", "alice", Usage::new(600));
-        report.add_reservation_requeue_usage("bench", Usage::new(6000));
+        report.add_reservation_requeue_usage("bench", "alice", Usage::new(6000));
 
         assert!(!report.is_consistent());
     }

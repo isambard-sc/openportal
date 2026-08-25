@@ -1117,7 +1117,7 @@ fn record_job(
         // discarded share is recorded alongside it so the two can be separated.
         if job.is_reserved() {
             report.add_reservation_usage(job.reservation(), job.user(), Usage::new(usage));
-            report.add_reservation_requeue_usage(job.reservation(), Usage::new(usage));
+            report.add_reservation_requeue_usage(job.reservation(), job.user(), Usage::new(usage));
         }
 
         return;

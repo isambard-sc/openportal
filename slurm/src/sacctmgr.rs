@@ -1204,16 +1204,27 @@ fn report_node_failures(jobs: &[SlurmJob], project: &ProjectMapping) {
 }
 
 ///
-/// Warn if the report disagrees with what we counted while building it. A
-/// mismatch means a bug in the accumulation above, not bad data from Slurm.
+/// Warn if the report disagrees with what we counted while building it, and
+/// return whether it agreed. A mismatch means a bug in the accumulation above,
+/// not bad data from Slurm.
+///
+/// The answer is used to decide whether the day may be cached. A report that
+/// does not add up must not be frozen: the caller would serve the bad figures
+/// from cache for as long as they are kept, and the next reader would have no
+/// way to tell. This is the same treatment the usage mismatch has always had -
+/// there is no reason for the job counts, the waits or the requeue figures to
+/// be held to a lower standard than the usage beside them.
 ///
 fn check_counter_consistency(
     report: &DailyProjectUsageReport,
     totals: &ReportTotals,
     project: &ProjectMapping,
     day: &greatwestern::grammar::Date,
-) {
+) -> bool {
+    let mut consistent = true;
+
     if report.total_runtime_seconds() != totals.runtime_seconds {
+        consistent = false;
         tracing::warn!(
             "Runtime inconsistency for project {} on {}: local counter ({}s) differs from \
              report total ({}s). This may indicate a bug.",
@@ -1225,6 +1236,7 @@ fn check_counter_consistency(
     }
 
     if report.num_jobs() != totals.num_jobs || report.total_wait_seconds() != totals.wait_seconds {
+        consistent = false;
         tracing::warn!(
             "Job count/wait time inconsistency for project {} on {}: \
              local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
@@ -1242,6 +1254,7 @@ fn check_counter_consistency(
         || report.requeue_wait_seconds() != totals.requeue_wait_seconds
         || report.total_requeue_usage().seconds() != totals.requeue_usage
     {
+        consistent = false;
         tracing::warn!(
             "Requeue accounting inconsistency for project {} on {}: \
              local counters ({} events, {}s wait, {}s usage) differ from report totals \
@@ -1260,6 +1273,7 @@ fn check_counter_consistency(
     // the per-state maps must account for every event and every second of
     // requeue usage - an unrecognised Slurm state is bucketed, never dropped
     if !report.is_consistent() {
+        consistent = false;
         tracing::warn!(
             "Report for project {} on {} is internally inconsistent - its per-user or \
              per-state maps do not sum to its own totals. This may indicate a bug.",
@@ -1267,6 +1281,8 @@ fn check_counter_consistency(
             day
         );
     }
+
+    consistent
 }
 
 async fn get_hourly_report(
@@ -1391,7 +1407,7 @@ async fn get_hourly_report(
     );
 
     // runtime consistency check: local shadow counters must match the report's scalar totals
-    check_counter_consistency(&daily_report, &totals, project, day);
+    let counters_agree = check_counter_consistency(&daily_report, &totals, project, day);
 
     // check that the total usage in the daily report matches the total usage calculated manually
     if daily_report.total_usage().seconds() != totals.usage {
@@ -1401,6 +1417,16 @@ async fn get_hourly_report(
             "Total usage in daily report does not match total usage calculated manually: {} != {}",
             daily_report.total_usage().seconds(),
             totals.usage
+        );
+    } else if !counters_agree {
+        // the counters disagree with the report they built, so the report is
+        // not fit to be frozen - `check_counter_consistency` has already said
+        // which of them disagreed
+        tracing::error!(
+            "Not caching the report for project {} on {}: its counters do not \
+             agree with its totals.",
+            project.project(),
+            day
         );
     } else if day.day().end_time().and_utc() < now {
         // we can set this day as completed if it is in the past
@@ -1515,7 +1541,7 @@ async fn get_daily_report(
             }
 
             // runtime consistency check
-            check_counter_consistency(&daily_report, &totals, project, day);
+            let counters_agree = check_counter_consistency(&daily_report, &totals, project, day);
 
             // check that the total usage in the daily report matches the total usage calculated manually
             if daily_report.total_usage().seconds() != totals.usage {
@@ -1525,6 +1551,16 @@ async fn get_daily_report(
                     "Total usage in daily report does not match total usage calculated manually: {} != {}",
                     daily_report.total_usage().seconds(),
                     totals.usage
+                );
+            } else if !counters_agree {
+                // the counters disagree with the report they built, so the report is
+                // not fit to be frozen - `check_counter_consistency` has already said
+                // which of them disagreed
+                tracing::error!(
+                    "Not caching the report for project {} on {}: its counters do not \
+                     agree with its totals.",
+                    project.project(),
+                    day
                 );
             } else if day.day().end_time().and_utc() < now {
                 // we can set this day as completed if it is in the past

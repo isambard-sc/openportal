@@ -434,6 +434,56 @@ fn accumulate(counters: &mut HashMap<String, u64>, key: &str, value: u64) {
     *counter = counter.saturating_add(value);
 }
 
+///
+/// Remap the user keys of a counter map, merging where two old names map onto
+/// one new one.
+///
+/// `into_iter().map(...).collect()` reads as the obvious way to do this and is
+/// wrong: a `HashMap` built that way keeps whichever colliding entry came last
+/// and drops the rest, silently losing a user's jobs when two local accounts
+/// are consolidated into one.
+///
+fn remap_counters(
+    counters: HashMap<String, u64>,
+    string_map: &HashMap<String, String>,
+) -> HashMap<String, u64> {
+    let mut remapped: HashMap<String, u64> = HashMap::new();
+
+    for (user, count) in counters {
+        let user = string_map.get(&user).cloned().unwrap_or(user);
+        accumulate(&mut remapped, &user, count);
+    }
+
+    remapped
+}
+
+/// `remap_counters` for a map of `Usage`.
+fn remap_usages(
+    usages: HashMap<String, Usage>,
+    string_map: &HashMap<String, String>,
+) -> HashMap<String, Usage> {
+    let mut remapped: HashMap<String, Usage> = HashMap::new();
+
+    for (user, usage) in usages {
+        let user = string_map.get(&user).cloned().unwrap_or(user);
+        *remapped.entry(user).or_default() += usage;
+    }
+
+    remapped
+}
+
+/// `remap_usages` for a map keyed by component or reservation first, whose
+/// inner maps are keyed by user.
+fn remap_nested_usages(
+    nested: HashMap<String, HashMap<String, Usage>>,
+    string_map: &HashMap<String, String>,
+) -> HashMap<String, HashMap<String, Usage>> {
+    nested
+        .into_iter()
+        .map(|(outer, usages)| (outer, remap_usages(usages, string_map)))
+        .collect()
+}
+
 /// Total a map of counters, saturating. `Iterator::sum` panics on overflow
 /// under `overflow-checks`, which would turn the consistency checks below from
 /// something that reports a bad report into something that dies on one.
@@ -1819,159 +1869,47 @@ impl DailyProjectUsageReport {
 
     /// Remap local username strings using a pre-built old → new map.
     /// Any username not present in `string_map` is left unchanged.
+    ///
+    /// Two old names can map onto one new one - that is what a rename that
+    /// consolidates two local accounts looks like - so every map here is merged
+    /// rather than rebuilt with `collect`, which keeps whichever entry the
+    /// iterator happened to yield last and silently drops the other.
     pub(crate) fn remap_local_users(&mut self, string_map: &HashMap<String, String>) {
-        let old_reports = std::mem::take(&mut self.reports);
-        self.reports = old_reports
-            .into_iter()
-            .map(|(user, usage)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, usage)
-            })
-            .collect();
+        self.reports = remap_usages(std::mem::take(&mut self.reports), string_map);
+        self.components = remap_nested_usages(std::mem::take(&mut self.components), string_map);
 
-        let old_components = std::mem::take(&mut self.components);
-        self.components = old_components
-            .into_iter()
-            .map(|(component, user_map)| {
-                let new_user_map = user_map
-                    .into_iter()
-                    .map(|(user, usage)| {
-                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                        (new_user, usage)
-                    })
-                    .collect();
-                (component, new_user_map)
-            })
-            .collect();
-
-        let old_counts = std::mem::take(&mut self.user_job_counts);
-        self.user_job_counts = old_counts
-            .into_iter()
-            .map(|(user, count)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, count)
-            })
-            .collect();
-
-        let old_waits = std::mem::take(&mut self.user_wait_seconds);
-        self.user_wait_seconds = old_waits
-            .into_iter()
-            .map(|(user, secs)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, secs)
-            })
-            .collect();
-
-        let old_expansion = std::mem::take(&mut self.user_expansion_milli);
-        self.user_expansion_milli = old_expansion
-            .into_iter()
-            .map(|(user, milli)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, milli)
-            })
-            .collect();
-
-        let old_cpus = std::mem::take(&mut self.user_allocated_cpus);
-        self.user_allocated_cpus = old_cpus
-            .into_iter()
-            .map(|(user, cpus)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, cpus)
-            })
-            .collect();
-
-        let old_gpus = std::mem::take(&mut self.user_allocated_gpus);
-        self.user_allocated_gpus = old_gpus
-            .into_iter()
-            .map(|(user, gpus)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, gpus)
-            })
-            .collect();
-
-        let old_runtimes = std::mem::take(&mut self.user_runtime_seconds);
-        self.user_runtime_seconds = old_runtimes
-            .into_iter()
-            .map(|(user, secs)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, secs)
-            })
-            .collect();
+        self.user_job_counts =
+            remap_counters(std::mem::take(&mut self.user_job_counts), string_map);
+        self.user_wait_seconds =
+            remap_counters(std::mem::take(&mut self.user_wait_seconds), string_map);
+        self.user_expansion_milli =
+            remap_counters(std::mem::take(&mut self.user_expansion_milli), string_map);
+        self.user_runtime_seconds =
+            remap_counters(std::mem::take(&mut self.user_runtime_seconds), string_map);
+        self.user_allocated_cpus =
+            remap_counters(std::mem::take(&mut self.user_allocated_cpus), string_map);
+        self.user_allocated_gpus =
+            remap_counters(std::mem::take(&mut self.user_allocated_gpus), string_map);
 
         // The requeue maps are keyed the same way and need the same treatment.
         // `requeue_states` and `requeue_state_usage` are keyed by Slurm state
         // rather than by user, so they are deliberately left alone.
-        let old_requeue = std::mem::take(&mut self.requeue_reports);
-        self.requeue_reports = old_requeue
-            .into_iter()
-            .map(|(user, usage)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, usage)
-            })
-            .collect();
+        self.requeue_reports = remap_usages(std::mem::take(&mut self.requeue_reports), string_map);
+        self.requeue_components =
+            remap_nested_usages(std::mem::take(&mut self.requeue_components), string_map);
+        self.user_requeue_events =
+            remap_counters(std::mem::take(&mut self.user_requeue_events), string_map);
+        self.user_requeue_wait_seconds = remap_counters(
+            std::mem::take(&mut self.user_requeue_wait_seconds),
+            string_map,
+        );
 
-        let old_requeue_components = std::mem::take(&mut self.requeue_components);
-        self.requeue_components = old_requeue_components
-            .into_iter()
-            .map(|(component, user_map)| {
-                let new_user_map = user_map
-                    .into_iter()
-                    .map(|(user, usage)| {
-                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                        (new_user, usage)
-                    })
-                    .collect();
-                (component, new_user_map)
-            })
-            .collect();
-
-        let old_requeue_events = std::mem::take(&mut self.user_requeue_events);
-        self.user_requeue_events = old_requeue_events
-            .into_iter()
-            .map(|(user, count)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, count)
-            })
-            .collect();
-
-        let old_reservation_requeues = std::mem::take(&mut self.reservation_requeue_usage);
-        self.reservation_requeue_usage = old_reservation_requeues
-            .into_iter()
-            .map(|(reservation, user_map)| {
-                let new_user_map = user_map
-                    .into_iter()
-                    .map(|(user, usage)| {
-                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                        (new_user, usage)
-                    })
-                    .collect();
-                (reservation, new_user_map)
-            })
-            .collect();
-
-        let old_reservations = std::mem::take(&mut self.reservation_reports);
-        self.reservation_reports = old_reservations
-            .into_iter()
-            .map(|(reservation, user_map)| {
-                let new_user_map = user_map
-                    .into_iter()
-                    .map(|(user, usage)| {
-                        let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                        (new_user, usage)
-                    })
-                    .collect();
-                (reservation, new_user_map)
-            })
-            .collect();
-
-        let old_requeue_waits = std::mem::take(&mut self.user_requeue_wait_seconds);
-        self.user_requeue_wait_seconds = old_requeue_waits
-            .into_iter()
-            .map(|(user, secs)| {
-                let new_user = string_map.get(&user).cloned().unwrap_or(user);
-                (new_user, secs)
-            })
-            .collect();
+        self.reservation_reports =
+            remap_nested_usages(std::mem::take(&mut self.reservation_reports), string_map);
+        self.reservation_requeue_usage = remap_nested_usages(
+            std::mem::take(&mut self.reservation_requeue_usage),
+            string_map,
+        );
     }
 }
 
@@ -2195,15 +2133,24 @@ impl std::ops::Div<f64> for DailyProjectUsageReport {
     }
 }
 
+// `*=` scales the component breakdowns alongside the totals, exactly as `*`
+// does. It did not, and neither did `/=`, so `report *= 2.0` doubled a day's
+// usage while leaving the breakdown of that usage at its old value - the parts
+// no longer summed to the whole, and which of the two a caller saw depended on
+// whether it had written `a = a * f` or `a *= f`. Anything that genuinely wants
+// to scale only the totals has `ProjectUsageReport::scale_total`, which says so
+// in its name.
 impl std::ops::MulAssign<f64> for DailyProjectUsageReport {
     fn mul_assign(&mut self, rhs: f64) {
         self.scale_totals(rhs);
+        self.scale_components(rhs);
     }
 }
 
 impl std::ops::DivAssign<f64> for DailyProjectUsageReport {
     fn div_assign(&mut self, rhs: f64) {
         self.divide_totals(rhs);
+        self.divide_components(rhs);
     }
 }
 
@@ -2640,21 +2587,20 @@ impl std::ops::AddAssign<ProjectUsageReport> for ProjectUsageReport {
     }
 }
 
+// Scaling a project's report is scaling each of its days, so these delegate
+// rather than reaching into a day's fields themselves. They used to reach in,
+// and reached only `reports` and `components` - so a project report scaled with
+// `*` kept its requeue and reservation figures at their old values while the
+// usage beside them moved, leaving `total_usage_including_requeues` adding two
+// different units together. `DailyProjectUsageReport`'s own operators have
+// always scaled base and requeue together, and now there is only one copy of
+// that decision.
 impl std::ops::Mul<f64> for ProjectUsageReport {
     type Output = Self;
 
     fn mul(self, rhs: f64) -> Self {
         let mut new_report = self.clone();
-        for report in new_report.reports.values_mut() {
-            for usage in report.reports.values_mut() {
-                *usage *= rhs;
-            }
-            for component_reports in report.components.values_mut() {
-                for usage in component_reports.values_mut() {
-                    *usage *= rhs;
-                }
-            }
-        }
+        new_report *= rhs;
         new_report
     }
 }
@@ -2664,16 +2610,7 @@ impl std::ops::Div<f64> for ProjectUsageReport {
 
     fn div(self, rhs: f64) -> Self {
         let mut new_report = self.clone();
-        for report in new_report.reports.values_mut() {
-            for usage in report.reports.values_mut() {
-                *usage /= rhs;
-            }
-            for component_reports in report.components.values_mut() {
-                for usage in component_reports.values_mut() {
-                    *usage /= rhs;
-                }
-            }
-        }
+        new_report /= rhs;
         new_report
     }
 }
@@ -2681,14 +2618,7 @@ impl std::ops::Div<f64> for ProjectUsageReport {
 impl std::ops::MulAssign<f64> for ProjectUsageReport {
     fn mul_assign(&mut self, rhs: f64) {
         for report in self.reports.values_mut() {
-            for usage in report.reports.values_mut() {
-                *usage *= rhs;
-            }
-            for component_reports in report.components.values_mut() {
-                for usage in component_reports.values_mut() {
-                    *usage *= rhs;
-                }
-            }
+            *report *= rhs;
         }
     }
 }
@@ -2696,14 +2626,7 @@ impl std::ops::MulAssign<f64> for ProjectUsageReport {
 impl std::ops::DivAssign<f64> for ProjectUsageReport {
     fn div_assign(&mut self, rhs: f64) {
         for report in self.reports.values_mut() {
-            for usage in report.reports.values_mut() {
-                *usage /= rhs;
-            }
-            for component_reports in report.components.values_mut() {
-                for usage in component_reports.values_mut() {
-                    *usage /= rhs;
-                }
-            }
+            *report /= rhs;
         }
     }
 }
@@ -6433,8 +6356,8 @@ mod tests {
         assert_eq!(halved.total_usage(), Usage::new(1200));
         assert_eq!(halved.total_requeue_usage(), Usage::new(4050));
 
-        // `*=` scales the totals but not the component breakdowns, as it always
-        // has - the base and requeue totals still move together
+        // `*=` scales the components alongside the totals, as `*` does, and the
+        // base and requeue totals move together
         let mut in_place = report.clone();
         in_place *= 3.0;
         assert_eq!(in_place.total_usage(), Usage::new(7200));
@@ -6449,6 +6372,63 @@ mod tests {
 
         assert_eq!(project_report.total_usage(), Usage::new(1200));
         assert_eq!(project_report.total_requeue_usage(), Usage::new(4050));
+    }
+
+    #[test]
+    fn test_scaling_a_project_report_moves_every_figure_it_holds() {
+        // The project-level operators reached into a day's `reports` and
+        // `components` and nothing else, so `project * 2.0` doubled the usage
+        // while leaving the requeue and reservation figures where they were -
+        // and `total_usage_including_requeues` then added two different units
+        // together. They delegate to the day's own operators now.
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut report = ProjectUsageReport::new(&project);
+        report.set_report(
+            &Date::parse("2026-03-01").unwrap(),
+            &report_with_reservations(),
+        );
+
+        let base = report.total_usage();
+        let requeued = report.total_requeue_usage();
+        let reserved = report.reservation_usage("bench");
+        let reserved_requeue = report.reservation_requeue_usage("bench");
+
+        assert!(!requeued.is_zero() && !reserved.is_zero() && !reserved_requeue.is_zero());
+
+        let doubled = report.clone() * 2.0;
+
+        assert_eq!(doubled.total_usage(), base * 2.0);
+        assert_eq!(doubled.total_requeue_usage(), requeued * 2.0);
+        assert_eq!(doubled.reservation_usage("bench"), reserved * 2.0);
+        assert_eq!(
+            doubled.reservation_requeue_usage("bench"),
+            reserved_requeue * 2.0
+        );
+
+        // `*` and `*=` must agree, and so must `/` and `/=`
+        let mut in_place = report.clone();
+        in_place *= 2.0;
+        assert_eq!(in_place.total_usage(), doubled.total_usage());
+        assert_eq!(
+            in_place.total_requeue_usage(),
+            doubled.total_requeue_usage()
+        );
+
+        let halved = report.clone() / 2.0;
+        let mut halved_in_place = report.clone();
+        halved_in_place /= 2.0;
+        assert_eq!(halved.total_usage(), halved_in_place.total_usage());
+        assert_eq!(
+            halved.total_requeue_usage(),
+            halved_in_place.total_requeue_usage()
+        );
+
+        // and the day it holds is still internally consistent afterwards
+        for scaled in [doubled, halved] {
+            for day in scaled.daily_reports(false) {
+                assert!(day.is_consistent());
+            }
+        }
     }
 
     #[test]
@@ -6567,6 +6547,62 @@ mod tests {
             report.requeue_component_usage("cpu", "alice2"),
             Usage::new(14400)
         );
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_renaming_two_locals_onto_one_adds_them_rather_than_dropping_one() {
+        // Consolidating two local accounts into one is a rename whose map is
+        // not injective. Every map was rebuilt with `collect`, which keeps
+        // whichever colliding entry the iterator yielded last - so one of the
+        // two users' jobs, usage and waits simply vanished, and which one
+        // depended on `HashMap` iteration order.
+        let mut report = DailyProjectUsageReport::default();
+
+        for user in ["alice", "alice_old"] {
+            report.add_usage(user, Usage::new(600));
+            report.add_component_usage("cpu", user, Usage::new(1200));
+            report.add_jobs(user, 2);
+            report.add_wait_seconds(user, 300);
+            report.add_expansion(user, 300, 600);
+            report.add_job_size(user, 32, 1);
+            report.add_requeue_usage(user, Usage::new(60));
+            report.add_requeue_events(user, "NODE_FAIL", 1);
+            report.add_requeue_wait_seconds(user, 30);
+            report.add_reservation_usage("bench", user, Usage::new(120));
+            report.add_reservation_requeue_usage("bench", user, Usage::new(60));
+        }
+
+        let before_usage = report.total_usage();
+        let before_jobs = report.num_jobs();
+
+        let mut renames = HashMap::new();
+        renames.insert("alice_old".to_string(), "alice".to_string());
+        report.remap_local_users(&renames);
+
+        assert_eq!(report.job_users(), vec!["alice".to_string()]);
+        assert_eq!(report.usage("alice"), before_usage);
+        assert_eq!(report.num_jobs_for_user("alice"), before_jobs);
+        assert_eq!(report.wait_seconds_for_user("alice"), 600);
+        assert_eq!(report.runtime_seconds_for_user("alice"), 1200);
+        assert_eq!(report.allocated_cpus_for_user("alice"), 64);
+        assert_eq!(report.allocated_gpus_for_user("alice"), 2);
+        assert_eq!(report.requeue_usage("alice"), Usage::new(120));
+        assert_eq!(report.requeue_events_for_user("alice"), 2);
+        assert_eq!(report.requeue_wait_seconds_for_user("alice"), 60);
+        assert_eq!(
+            report.reservation_usage_for_user("bench", "alice"),
+            Usage::new(240)
+        );
+        assert_eq!(
+            report.reservation_requeue_usage_for_user("bench", "alice"),
+            Usage::new(120)
+        );
+
+        // nothing left behind under the old name, and the scalars still agree
+        // with the maps they were merged into
+        assert_eq!(report.usage("alice_old"), Usage::default());
+        assert_eq!(report.num_jobs_for_user("alice_old"), 0);
         assert!(report.is_consistent());
     }
 

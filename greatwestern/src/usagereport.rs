@@ -418,6 +418,31 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+///
+/// Add `value` to a keyed counter, saturating rather than wrapping.
+///
+/// Every counter in these reports is fed either from a peer's report or from a
+/// Slurm record, and release builds set `overflow-checks = true` alongside
+/// `panic = "abort"` - so a bare `+=` on one of these is a remote process kill.
+/// The scalar totals beside these maps have always saturated; going through
+/// this keeps the pair of them from disagreeing about what a huge value means,
+/// which is the difference between a report that clamps and a report that
+/// fails `is_consistent`.
+///
+fn accumulate(counters: &mut HashMap<String, u64>, key: &str, value: u64) {
+    let counter = counters.entry(key.to_string()).or_default();
+    *counter = counter.saturating_add(value);
+}
+
+/// Total a map of counters, saturating. `Iterator::sum` panics on overflow
+/// under `overflow-checks`, which would turn the consistency checks below from
+/// something that reports a bad report into something that dies on one.
+fn sum_counters(counters: &HashMap<String, u64>) -> u64 {
+    counters
+        .values()
+        .fold(0u64, |total, count| total.saturating_add(*count))
+}
+
 /// Expansion factors are accumulated as thousandths, so that summing them is
 /// exact and order-independent - see the field comments in
 /// [`DailyProjectUsageReport`].
@@ -816,14 +841,14 @@ impl DailyProjectUsageReport {
     /// Add jobs attributed to a specific user. Updates both the per-user map
     /// and the scalar total so both are always consistent.
     pub fn add_jobs(&mut self, user: &str, count: u64) {
-        *self.user_job_counts.entry(user.to_string()).or_default() += count;
-        self.num_jobs += count;
+        accumulate(&mut self.user_job_counts, user, count);
+        self.num_jobs = self.num_jobs.saturating_add(count);
     }
 
     /// Add wait seconds attributed to a specific user. Updates both the
     /// per-user map and the scalar total.
     pub fn add_wait_seconds(&mut self, user: &str, seconds: u64) {
-        *self.user_wait_seconds.entry(user.to_string()).or_default() += seconds;
+        accumulate(&mut self.user_wait_seconds, user, seconds);
         self.total_wait_seconds = self.total_wait_seconds.saturating_add(seconds);
     }
 
@@ -852,16 +877,10 @@ impl DailyProjectUsageReport {
             .saturating_mul(EXPANSION_SCALE)
             .saturating_div(runtime_seconds);
 
-        *self
-            .user_expansion_milli
-            .entry(user.to_string())
-            .or_default() += expansion_milli;
+        accumulate(&mut self.user_expansion_milli, user, expansion_milli);
         self.total_expansion_milli = self.total_expansion_milli.saturating_add(expansion_milli);
 
-        *self
-            .user_runtime_seconds
-            .entry(user.to_string())
-            .or_default() += runtime_seconds;
+        accumulate(&mut self.user_runtime_seconds, user, runtime_seconds);
         self.total_runtime_seconds = self.total_runtime_seconds.saturating_add(runtime_seconds);
     }
 
@@ -874,16 +893,10 @@ impl DailyProjectUsageReport {
     /// what the machine was busy with.
     ///
     pub fn add_job_size(&mut self, user: &str, cpus: u64, gpus: u64) {
-        *self
-            .user_allocated_cpus
-            .entry(user.to_string())
-            .or_default() += cpus;
+        accumulate(&mut self.user_allocated_cpus, user, cpus);
         self.total_allocated_cpus = self.total_allocated_cpus.saturating_add(cpus);
 
-        *self
-            .user_allocated_gpus
-            .entry(user.to_string())
-            .or_default() += gpus;
+        accumulate(&mut self.user_allocated_gpus, user, gpus);
         self.total_allocated_gpus = self.total_allocated_gpus.saturating_add(gpus);
     }
 
@@ -1098,8 +1111,8 @@ impl DailyProjectUsageReport {
         if self.user_job_counts.is_empty() && self.user_wait_seconds.is_empty() {
             return true; // legacy data — no maps to check against
         }
-        let jobs_sum: u64 = self.user_job_counts.values().sum();
-        let wait_sum: u64 = self.user_wait_seconds.values().sum();
+        let jobs_sum = sum_counters(&self.user_job_counts);
+        let wait_sum = sum_counters(&self.user_wait_seconds);
 
         if jobs_sum != self.num_jobs || wait_sum != self.total_wait_seconds {
             return false;
@@ -1109,28 +1122,28 @@ impl DailyProjectUsageReport {
         // than tolerances - which is the point of accumulating thousandths
         // instead of floats.
         if !self.user_expansion_milli.is_empty() {
-            let expansion_sum: u64 = self.user_expansion_milli.values().sum();
+            let expansion_sum = sum_counters(&self.user_expansion_milli);
             if expansion_sum != self.total_expansion_milli {
                 return false;
             }
         }
 
         if !self.user_runtime_seconds.is_empty() {
-            let runtime_sum: u64 = self.user_runtime_seconds.values().sum();
+            let runtime_sum = sum_counters(&self.user_runtime_seconds);
             if runtime_sum != self.total_runtime_seconds {
                 return false;
             }
         }
 
         if !self.user_allocated_cpus.is_empty() {
-            let cpu_sum: u64 = self.user_allocated_cpus.values().sum();
+            let cpu_sum = sum_counters(&self.user_allocated_cpus);
             if cpu_sum != self.total_allocated_cpus {
                 return false;
             }
         }
 
         if !self.user_allocated_gpus.is_empty() {
-            let gpu_sum: u64 = self.user_allocated_gpus.values().sum();
+            let gpu_sum = sum_counters(&self.user_allocated_gpus);
             if gpu_sum != self.total_allocated_gpus {
                 return false;
             }
@@ -1152,21 +1165,21 @@ impl DailyProjectUsageReport {
     /// has to be bucketed rather than dropped.
     fn requeues_are_consistent(&self) -> bool {
         if !self.user_requeue_events.is_empty() {
-            let event_sum: u64 = self.user_requeue_events.values().sum();
+            let event_sum = sum_counters(&self.user_requeue_events);
             if event_sum != self.num_requeue_events {
                 return false;
             }
         }
 
         if !self.user_requeue_wait_seconds.is_empty() {
-            let wait_sum: u64 = self.user_requeue_wait_seconds.values().sum();
+            let wait_sum = sum_counters(&self.user_requeue_wait_seconds);
             if wait_sum != self.requeue_wait_seconds {
                 return false;
             }
         }
 
         if !self.requeue_states.is_empty() {
-            let state_sum: u64 = self.requeue_states.values().sum();
+            let state_sum = sum_counters(&self.requeue_states);
             if state_sum != self.num_requeue_events {
                 return false;
             }
@@ -1343,12 +1356,9 @@ impl DailyProjectUsageReport {
     /// ended in `state`. The scalar total, the per-user map and the per-state
     /// map are updated together so they cannot drift apart.
     pub fn add_requeue_events(&mut self, user: &str, state: &str, count: u64) {
-        *self
-            .user_requeue_events
-            .entry(user.to_string())
-            .or_default() += count;
+        accumulate(&mut self.user_requeue_events, user, count);
         self.num_requeue_events = self.num_requeue_events.saturating_add(count);
-        *self.requeue_states.entry(state.to_string()).or_default() += count;
+        accumulate(&mut self.requeue_states, state, count);
     }
 
     /// Record usage against the terminal state of a superseded attempt. Kept
@@ -1368,10 +1378,7 @@ impl DailyProjectUsageReport {
     }
 
     pub fn add_requeue_wait_seconds(&mut self, user: &str, seconds: u64) {
-        *self
-            .user_requeue_wait_seconds
-            .entry(user.to_string())
-            .or_default() += seconds;
+        accumulate(&mut self.user_requeue_wait_seconds, user, seconds);
         self.requeue_wait_seconds = self.requeue_wait_seconds.saturating_add(seconds);
     }
 
@@ -1569,10 +1576,7 @@ impl DailyProjectUsageReport {
             return;
         }
 
-        *self
-            .reservation_jobs
-            .entry(reservation.to_string())
-            .or_default() += count;
+        accumulate(&mut self.reservation_jobs, reservation, count);
     }
 
     /// The reservations any of this day's jobs ran under, sorted by name.
@@ -1913,13 +1917,10 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
         }
 
         for (user, count) in &other.user_job_counts {
-            *new_report.user_job_counts.entry(user.clone()).or_default() += count;
+            accumulate(&mut new_report.user_job_counts, user, *count);
         }
         for (user, secs) in &other.user_wait_seconds {
-            *new_report
-                .user_wait_seconds
-                .entry(user.clone())
-                .or_default() += secs;
+            accumulate(&mut new_report.user_wait_seconds, user, *secs);
         }
         // Saturating: these totals are summed from peer-supplied reports, and
         // `overflow-checks` is on in release, so a bare `+` is a process kill.
@@ -1929,16 +1930,10 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             .saturating_add(other.total_wait_seconds);
 
         for (user, milli) in &other.user_expansion_milli {
-            *new_report
-                .user_expansion_milli
-                .entry(user.clone())
-                .or_default() += milli;
+            accumulate(&mut new_report.user_expansion_milli, user, *milli);
         }
         for (user, secs) in &other.user_runtime_seconds {
-            *new_report
-                .user_runtime_seconds
-                .entry(user.clone())
-                .or_default() += secs;
+            accumulate(&mut new_report.user_runtime_seconds, user, *secs);
         }
         new_report.total_expansion_milli = self
             .total_expansion_milli
@@ -1948,16 +1943,10 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             .saturating_add(other.total_runtime_seconds);
 
         for (user, cpus) in &other.user_allocated_cpus {
-            *new_report
-                .user_allocated_cpus
-                .entry(user.clone())
-                .or_default() += cpus;
+            accumulate(&mut new_report.user_allocated_cpus, user, *cpus);
         }
         for (user, gpus) in &other.user_allocated_gpus {
-            *new_report
-                .user_allocated_gpus
-                .entry(user.clone())
-                .or_default() += gpus;
+            accumulate(&mut new_report.user_allocated_gpus, user, *gpus);
         }
         new_report.total_allocated_cpus = self
             .total_allocated_cpus
@@ -1975,19 +1964,13 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
             }
         }
         for (user, count) in &other.user_requeue_events {
-            *new_report
-                .user_requeue_events
-                .entry(user.clone())
-                .or_default() += count;
+            accumulate(&mut new_report.user_requeue_events, user, *count);
         }
         for (user, secs) in &other.user_requeue_wait_seconds {
-            *new_report
-                .user_requeue_wait_seconds
-                .entry(user.clone())
-                .or_default() += secs;
+            accumulate(&mut new_report.user_requeue_wait_seconds, user, *secs);
         }
         for (state, count) in &other.requeue_states {
-            *new_report.requeue_states.entry(state.clone()).or_default() += count;
+            accumulate(&mut new_report.requeue_states, state, *count);
         }
         for (state, usage) in other.requeue_state_usage {
             new_report.add_requeue_state_usage(&state, usage);
@@ -2031,10 +2014,10 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
         }
 
         for (user, count) in &other.user_job_counts {
-            *self.user_job_counts.entry(user.clone()).or_default() += count;
+            accumulate(&mut self.user_job_counts, user, *count);
         }
         for (user, secs) in &other.user_wait_seconds {
-            *self.user_wait_seconds.entry(user.clone()).or_default() += secs;
+            accumulate(&mut self.user_wait_seconds, user, *secs);
         }
         self.num_jobs = self.num_jobs.saturating_add(other.num_jobs);
         self.total_wait_seconds = self
@@ -2042,10 +2025,10 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             .saturating_add(other.total_wait_seconds);
 
         for (user, milli) in &other.user_expansion_milli {
-            *self.user_expansion_milli.entry(user.clone()).or_default() += milli;
+            accumulate(&mut self.user_expansion_milli, user, *milli);
         }
         for (user, secs) in &other.user_runtime_seconds {
-            *self.user_runtime_seconds.entry(user.clone()).or_default() += secs;
+            accumulate(&mut self.user_runtime_seconds, user, *secs);
         }
         self.total_expansion_milli = self
             .total_expansion_milli
@@ -2055,10 +2038,10 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             .saturating_add(other.total_runtime_seconds);
 
         for (user, cpus) in &other.user_allocated_cpus {
-            *self.user_allocated_cpus.entry(user.clone()).or_default() += cpus;
+            accumulate(&mut self.user_allocated_cpus, user, *cpus);
         }
         for (user, gpus) in &other.user_allocated_gpus {
-            *self.user_allocated_gpus.entry(user.clone()).or_default() += gpus;
+            accumulate(&mut self.user_allocated_gpus, user, *gpus);
         }
         self.total_allocated_cpus = self
             .total_allocated_cpus
@@ -2076,16 +2059,13 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
             }
         }
         for (user, count) in &other.user_requeue_events {
-            *self.user_requeue_events.entry(user.clone()).or_default() += count;
+            accumulate(&mut self.user_requeue_events, user, *count);
         }
         for (user, secs) in &other.user_requeue_wait_seconds {
-            *self
-                .user_requeue_wait_seconds
-                .entry(user.clone())
-                .or_default() += secs;
+            accumulate(&mut self.user_requeue_wait_seconds, user, *secs);
         }
         for (state, count) in &other.requeue_states {
-            *self.requeue_states.entry(state.clone()).or_default() += count;
+            accumulate(&mut self.requeue_states, state, *count);
         }
         for (state, usage) in other.requeue_state_usage {
             self.add_requeue_state_usage(&state, usage);
@@ -2793,11 +2773,15 @@ impl ProjectUsageReport {
     }
 
     pub fn num_jobs(&self) -> u64 {
-        self.reports.values().map(|r| r.num_jobs()).sum()
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.num_jobs())
+        })
     }
 
     pub fn total_wait_seconds(&self) -> u64 {
-        self.reports.values().map(|r| r.total_wait_seconds()).sum()
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.total_wait_seconds())
+        })
     }
 
     pub fn average_wait_seconds(&self) -> u64 {
@@ -3064,7 +3048,7 @@ impl ProjectUsageReport {
 
         for report in self.reports.values() {
             for (state, count) in report.requeue_states() {
-                *totals.entry(state).or_default() += count;
+                accumulate(&mut totals, &state, count);
             }
         }
 
@@ -3601,7 +3585,7 @@ impl ProjectUsageReport {
 
         for report in self.reports.values() {
             for (state, state_events, state_usage) in report.requeue_state_summary() {
-                *events.entry(state.clone()).or_default() += state_events;
+                accumulate(&mut events, &state, state_events);
                 *usage.entry(state).or_default() += state_usage;
             }
         }
@@ -6452,6 +6436,52 @@ mod tests {
             Usage::new(14400)
         );
         assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_the_job_counters_saturate_rather_than_wrapping() {
+        // The scalar totals have always saturated, and said so - but every
+        // per-user counter beside them used a bare `+=`, so the map would abort
+        // long before the scalar it is supposed to agree with ever clamped.
+        // These values arrive in a peer's report, and release builds set
+        // `overflow-checks = true` with `panic = "abort"`.
+        let mut report = DailyProjectUsageReport::default();
+
+        report.add_jobs("alice", u64::MAX);
+        report.add_jobs("alice", 10);
+        report.add_wait_seconds("alice", u64::MAX);
+        report.add_wait_seconds("alice", 10);
+        report.add_expansion("alice", u64::MAX, u64::MAX);
+        report.add_expansion("alice", u64::MAX, u64::MAX);
+        report.add_job_size("alice", u64::MAX, u64::MAX);
+        report.add_job_size("alice", 10, 10);
+        report.add_requeue_events("alice", "NODE_FAIL", u64::MAX);
+        report.add_requeue_events("alice", "NODE_FAIL", 10);
+        report.add_requeue_wait_seconds("alice", u64::MAX);
+        report.add_requeue_wait_seconds("alice", 10);
+        report.add_reservation_jobs("maintenance", u64::MAX);
+        report.add_reservation_jobs("maintenance", 10);
+
+        assert_eq!(report.num_jobs_for_user("alice"), u64::MAX);
+        assert_eq!(report.wait_seconds_for_user("alice"), u64::MAX);
+        assert_eq!(report.allocated_cpus_for_user("alice"), u64::MAX);
+        assert_eq!(report.allocated_gpus_for_user("alice"), u64::MAX);
+        assert_eq!(report.requeue_events_for_user("alice"), u64::MAX);
+        assert_eq!(report.requeue_wait_seconds_for_user("alice"), u64::MAX);
+        assert_eq!(report.reservation_jobs("maintenance"), u64::MAX);
+
+        // and the same on the merge path, where two saturated reports meet
+        let merged = report.clone() + report.clone();
+        assert_eq!(merged.num_jobs_for_user("alice"), u64::MAX);
+        assert_eq!(merged.num_jobs(), u64::MAX);
+
+        let mut assigned = report.clone();
+        assigned += report;
+        assert_eq!(assigned.requeue_events_for_user("alice"), u64::MAX);
+
+        // and the consistency check reports on a saturated report rather than
+        // dying while summing it
+        let _ = assigned.is_consistent();
     }
 
     #[test]

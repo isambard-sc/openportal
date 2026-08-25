@@ -3027,10 +3027,10 @@ impl SlurmJob {
             }
         };
 
-        let mut nodes = 0;
-        let mut cpus = 0;
-        let mut memory = 0;
-        let mut gpus = 0;
+        let mut nodes: u64 = 0;
+        let mut cpus: u64 = 0;
+        let mut memory: u64 = 0;
+        let mut gpus: u64 = 0;
         let mut energy: u64 = 0;
         let mut billing: u64 = 0;
 
@@ -3087,17 +3087,17 @@ impl SlurmJob {
             };
 
             match tres_type {
-                "cpu" => cpus += count,
-                "mem" => memory += count,
+                "cpu" => cpus = cpus.saturating_add(count),
+                "mem" => memory = memory.saturating_add(count),
                 "gres" => match name {
-                    "gpu" => gpus += count,
+                    "gpu" => gpus = gpus.saturating_add(count),
                     _ => {
                         tracing::warn!("Unknown gres name: {}", name);
                     }
                 },
-                "node" => nodes += count,
-                "energy" => energy += count,
-                "billing" => billing += count,
+                "node" => nodes = nodes.saturating_add(count),
+                "energy" => energy = energy.saturating_add(count),
+                "billing" => billing = billing.saturating_add(count),
                 _ => {
                     tracing::warn!("Unknown tres type: {}", tres_type);
                 }
@@ -3123,10 +3123,10 @@ impl SlurmJob {
             }
         };
 
-        let mut requested_nodes = 0;
-        let mut requested_cpus = 0;
-        let mut requested_memory = 0;
-        let mut requested_gpus = 0;
+        let mut requested_nodes: u64 = 0;
+        let mut requested_cpus: u64 = 0;
+        let mut requested_memory: u64 = 0;
+        let mut requested_gpus: u64 = 0;
         let mut requested_billing: u64 = 0;
 
         for tres in requested {
@@ -3182,16 +3182,16 @@ impl SlurmJob {
             };
 
             match tres_type {
-                "cpu" => requested_cpus += count,
-                "mem" => requested_memory += count,
+                "cpu" => requested_cpus = requested_cpus.saturating_add(count),
+                "mem" => requested_memory = requested_memory.saturating_add(count),
                 "gres" => match name {
-                    "gpu" => requested_gpus += count,
+                    "gpu" => requested_gpus = requested_gpus.saturating_add(count),
                     _ => {
                         tracing::warn!("Unknown gres name: {}", name);
                     }
                 },
-                "node" => requested_nodes += count,
-                "billing" => requested_billing += count,
+                "node" => requested_nodes = requested_nodes.saturating_add(count),
+                "billing" => requested_billing = requested_billing.saturating_add(count),
                 _ => {
                     tracing::warn!("Unknown tres type: {}", tres_type);
                 }

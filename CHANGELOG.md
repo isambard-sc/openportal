@@ -137,6 +137,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   job records; a reservation shared between projects cannot be assessed from any
   single project's report at all. The shares reported are shares of the
   project's own consumption, and the report says so.
+- **Usage reports only write what they have to say.** Every counter and map
+  added by the work above is omitted from the JSON when it is empty or zero,
+  rather than written as `{}` or `0`, and read back through the `serde(default)`
+  that each already carried. A day on which nothing was requeued and nothing ran
+  in a reservation no longer carries eight empty objects saying so.
+
+  Three fields are still always written - a daily report's `reports` and
+  `is_complete`, and a project report's `users` - because release 0.92.0 has no
+  `serde(default)` on those and omitting them would make a peer of that version
+  fail outright. They now carry one, so a later release can stop writing them
+  once no 0.92.0 agents remain.
 - Reports that predate any of these statistics print a dash, or omit the line,
   rather than showing a zero. Zero is the "not recorded" value for all of them,
   and on a scale whose ideal is 1.00 an expansion factor of 0.00 would read as

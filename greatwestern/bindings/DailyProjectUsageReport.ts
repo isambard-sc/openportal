@@ -97,4 +97,8 @@ reservation_requeue_usage: { [key in string]?: Usage },
 /**
  * Reservation name → jobs that started inside it, counted as `num_jobs` is.
  */
-reservation_jobs: { [key in string]?: bigint }, is_complete: boolean, };
+reservation_jobs: { [key in string]?: bigint }, 
+/**
+ * See the note on `reports` above - written even when false, for now.
+ */
+is_complete: boolean, };

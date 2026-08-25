@@ -432,6 +432,42 @@ on which of a job's other attempts the query returned, so the tests filter the
 fixture by overlap with the window first, exactly as `--starttime`/`--endtime`
 would.
 
+### 7.5 A real month, as a fixture
+
+Synthetic fixtures can only check that the arithmetic agrees with itself.
+`greatwestern/tests/data/project-usage-report.json` is a real month of one
+project's usage as `op-slurm` produced it, with the project and usernames
+anonymised and nothing else touched: 24 days, 357 jobs, eight users of very
+different habits, requeues in both states, an `interactive` reservation on some
+days and not others, and one day still incomplete.
+
+What it is worth testing against, beyond the totals:
+
+- **Every day is internally consistent** - the per-user maps sum to the scalars,
+  the per-state maps account for every requeue event and second, no reservation
+  claims more than the day consumed. Real data satisfying the invariants is
+  worth more than any number of hand-built cases that were written to.
+- **Splitting the month into days and summing them back** reproduces every
+  total, every component breakdown and every derived ratio. This is not an
+  abstract property: it is exactly what `op-slurm` does to build a month.
+- **A date range and its complement partition every total.**
+- **The project mean is not the mean of the daily means** - on this month the
+  two expansion figures differ by more than two hundred, which is the case for
+  computing a project figure over every job rather than over every day.
+- **Scaling a month agrees with scaling its days**, to the second. Not because
+  `Usage` does not truncate - it does, and thirty-two seconds vanish from this
+  month when it is halved - but because usage is only ever stored per user per
+  day, so both paths scale the same stored values and nothing coarser exists to
+  lose a fraction of. That is what makes a monthly invoice reconcilable against
+  a daily breakdown, and it is worth a test because it would stop being true the
+  moment a total were stored rather than derived.
+
+Two things that are *not* properties, both found by asserting them and being
+wrong: re-serialising a report is not byte-identical, because these are
+`HashMap`s and serde emits their keys in whatever order the map iterates - the
+document is stable, the bytes are not; and halving a total then doubling it does
+not recover it, for the truncation reason above.
+
 **Anonymisation, one trap.** `nodes` is a string looked up in `SlurmNodes`,
 and a miss falls back silently to a default node - which changes
 `node_fraction` and therefore every usage number derived from it. Rewritten

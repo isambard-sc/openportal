@@ -406,6 +406,18 @@ impl UserUsageReport {
     }
 }
 
+/// Whether a counter is zero, for `skip_serializing_if`.
+///
+/// A report only states what it has to say: an empty map or a zero counter is
+/// left out of the JSON entirely rather than written as `{}` or `0`, and read
+/// back by the `serde(default)` on every one of these fields. It keeps a report
+/// carrying one day of one project's work legible, and it is what lets a reader
+/// that predates a statistic behave identically to one that has simply not seen
+/// it - see `docs/plans/slurm-requeue-accounting-design.md`.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 /// Expansion factors are accumulated as thousandths, so that summing them is
 /// exact and order-independent - see the field comments in
 /// [`DailyProjectUsageReport`].
@@ -414,21 +426,26 @@ const EXPANSION_SCALE: u64 = 1000;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DailyProjectUsageReport {
-    reports: HashMap<String, Usage>,
+    // Still written even when empty, unlike every field below: release 0.92.0
+    // has no `serde(default)` on `reports` or `is_complete`, so omitting them
+    // would make a peer of that version fail outright rather than read a
+    // default. The `default` here lets a *later* release stop writing them.
     #[serde(default)]
+    reports: HashMap<String, Usage>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     components: HashMap<String, HashMap<String, Usage>>,
     /// Per-user job counts. Empty when reading data from older instances.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_job_counts: HashMap<String, u64>,
     /// Per-user wait seconds. Empty when reading data from older instances.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_wait_seconds: HashMap<String, u64>,
     /// Scalar total — equals sum of user_job_counts when populated, otherwise
     /// carries the value from older instances that lack per-user maps.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     num_jobs: u64,
     /// Scalar total — equals sum of user_wait_seconds when populated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     total_wait_seconds: u64,
 
     // ---- Expansion factor ---------------------------------------------------
@@ -456,17 +473,17 @@ pub struct DailyProjectUsageReport {
     // checks would then fail for no reason. Thousandths of an expansion factor
     // is far finer than anyone reads.
     /// Per-user sum of per-job expansion factors, in thousandths.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_expansion_milli: HashMap<String, u64>,
     /// Scalar total — equals sum of user_expansion_milli when populated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     total_expansion_milli: u64,
     /// Per-user total wall-clock runtime, in seconds. Not the same as usage,
     /// which is weighted by the fraction of a node a job held.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_runtime_seconds: HashMap<String, u64>,
     /// Scalar total — equals sum of user_runtime_seconds when populated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     total_runtime_seconds: u64,
 
     // ---- Job size -----------------------------------------------------------
@@ -482,16 +499,16 @@ pub struct DailyProjectUsageReport {
     // what the machine was occupied by. The time-weighted answer to the other
     // question is roughly the `cpu` component's usage over the runtime below.
     /// Per-user sum of the cores each job was allocated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_allocated_cpus: HashMap<String, u64>,
     /// Scalar total — equals sum of user_allocated_cpus when populated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     total_allocated_cpus: u64,
     /// Per-user sum of the GPUs each job was allocated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_allocated_gpus: HashMap<String, u64>,
     /// Scalar total — equals sum of user_allocated_gpus when populated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     total_allocated_gpus: u64,
 
     // ---- Requeue accounting -------------------------------------------------
@@ -511,30 +528,30 @@ pub struct DailyProjectUsageReport {
     // All are `serde(default)`, so a report from an instance that predates them
     // deserialises as "no requeues seen" rather than failing.
     /// Usage from attempts superseded by a requeue, per local user.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     requeue_reports: HashMap<String, Usage>,
     /// The same, broken down by resource component.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     requeue_components: HashMap<String, HashMap<String, Usage>>,
     /// Per-user count of requeue *events* (superseded attempts, not jobs).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_requeue_events: HashMap<String, u64>,
     /// Scalar total — equals sum of user_requeue_events when populated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     num_requeue_events: u64,
     /// Per-user queue wait accumulated by superseded attempts.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_requeue_wait_seconds: HashMap<String, u64>,
     /// Scalar total — equals sum of user_requeue_wait_seconds when populated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     requeue_wait_seconds: u64,
     /// Requeue events by the terminal state of the superseded attempt. Sums to
     /// `num_requeue_events`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     requeue_states: HashMap<String, u64>,
     /// Requeue usage by the terminal state of the superseded attempt. Sums to
     /// `total_requeue_usage()`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     requeue_state_usage: HashMap<String, Usage>,
 
     // ---- Reservations ------------------------------------------------------
@@ -549,15 +566,17 @@ pub struct DailyProjectUsageReport {
     // replacement did, and for occupancy that is what matters. The superseded
     // share is carried separately so the two can still be told apart.
     /// Reservation name → local user → usage consumed inside it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     reservation_reports: HashMap<String, HashMap<String, Usage>>,
     /// Reservation name → the part of the above from superseded attempts.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     reservation_requeue_usage: HashMap<String, Usage>,
     /// Reservation name → jobs that started inside it, counted as `num_jobs` is.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     reservation_jobs: HashMap<String, u64>,
 
+    /// See the note on `reports` above - written even when false, for now.
+    #[serde(default)]
     is_complete: bool,
 }
 
@@ -2077,6 +2096,9 @@ pub struct ProjectUsageReport {
     project: ProjectIdentifier,
     #[ts(as = "HashMap<String, DailyProjectUsageReport>")]
     reports: HashMap<Date, DailyProjectUsageReport>,
+    /// See the note on `DailyProjectUsageReport::reports` - written even when
+    /// empty, because release 0.92.0 cannot read a report without it.
+    #[serde(default)]
     #[ts(as = "HashMap<String, String>")]
     users: HashMap<UserIdentifier, String>,
 }
@@ -4516,6 +4538,358 @@ mod tests {
         report.add_requeue_wait_seconds("bob", 120);
 
         report
+    }
+
+    ///
+    /// A real month of one project's usage, as `op-slurm` produced it, with the
+    /// project and usernames anonymised and nothing else touched.
+    ///
+    /// Synthetic reports can only check that the arithmetic agrees with itself.
+    /// This one checks it against numbers a cluster actually generated - 24
+    /// days, 357 jobs, eight users of very different habits, requeues in both
+    /// states, an `interactive` reservation appearing on some days and not
+    /// others, and one day whose reports are still incomplete.
+    ///
+    fn real_month() -> ProjectUsageReport {
+        ProjectUsageReport::from_json(include_str!("../tests/data/project-usage-report.json"))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_a_real_month_of_data_is_internally_consistent() {
+        let report = real_month();
+
+        assert_eq!(report.dates().len(), 24);
+
+        // every day's per-user maps sum to its own scalars, its per-state maps
+        // account for every requeue event and second, and no reservation claims
+        // more than the day consumed
+        for date in report.dates() {
+            let daily = report.get_report(&date);
+            assert!(
+                daily.daily_reports(false).iter().all(|d| d.is_consistent()),
+                "inconsistent report for {}",
+                date
+            );
+        }
+
+        // and the month's totals are what the days add up to
+        assert_eq!(report.total_usage(), Usage::new(13_390_528));
+        assert_eq!(report.total_requeue_usage(), Usage::new(5_547_234));
+        assert_eq!(
+            report.total_usage_including_requeues(),
+            Usage::new(13_390_528 + 5_547_234)
+        );
+        assert_eq!(report.num_jobs(), 357);
+        assert_eq!(report.total_wait_seconds(), 5_287_100);
+        assert_eq!(report.num_requeue_events(), 12);
+        assert_eq!(report.requeue_wait_seconds(), 932_011);
+        assert_eq!(report.total_runtime_seconds(), 2_066_571);
+        assert_eq!(report.total_reservation_usage(), Usage::new(254_220));
+        assert_eq!(report.reservation_jobs("interactive"), 82);
+
+        // requeues in both states, worst first
+        assert_eq!(
+            report.requeue_state_summary(),
+            vec![
+                ("REQUEUED".to_string(), 9, Usage::new(4_366_354)),
+                ("NODE_FAIL".to_string(), 3, Usage::new(1_180_880)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_splitting_a_month_into_days_and_recombining_gives_the_same_totals() {
+        // Every figure in a report has to be additive over days, or a monthly
+        // report and the same month summed from its days would disagree - and
+        // `op-slurm` builds a month exactly by summing days.
+        let report = real_month();
+
+        let mut recombined = DailyProjectUsageReport::default();
+
+        for date in report.dates() {
+            let daily = report.get_report(&date);
+            for day in daily.daily_reports(false) {
+                recombined += day;
+            }
+        }
+
+        assert_eq!(recombined.total_usage(), report.total_usage());
+        assert_eq!(
+            recombined.total_requeue_usage(),
+            report.total_requeue_usage()
+        );
+        assert_eq!(recombined.num_jobs(), report.num_jobs());
+        assert_eq!(recombined.total_wait_seconds(), report.total_wait_seconds());
+        assert_eq!(recombined.num_requeue_events(), report.num_requeue_events());
+        assert_eq!(
+            recombined.requeue_wait_seconds(),
+            report.requeue_wait_seconds()
+        );
+        assert_eq!(
+            recombined.total_runtime_seconds(),
+            report.total_runtime_seconds()
+        );
+        assert_eq!(
+            recombined.total_reservation_usage(),
+            report.total_reservation_usage()
+        );
+        assert_eq!(recombined.reservation_jobs("interactive"), 82);
+        assert_eq!(
+            recombined.requeue_state_summary(),
+            report.requeue_state_summary()
+        );
+
+        // the component breakdowns too
+        for component in ["cpu", "gpu", "memory", "billing"] {
+            assert_eq!(
+                recombined.total_requeue_component_usage(component),
+                report.get_component(component).total_requeue_usage(),
+                "component {} disagrees",
+                component
+            );
+        }
+
+        // and the recombined day is still internally consistent
+        assert!(recombined.is_consistent());
+    }
+
+    #[test]
+    fn test_the_derived_ratios_survive_recombination() {
+        // The ratios are the part that could plausibly not survive, since each
+        // is a quotient of two sums - so they have to be computed from the sums
+        // rather than from other ratios.
+        let report = real_month();
+
+        let mut recombined = DailyProjectUsageReport::default();
+        for date in report.dates() {
+            for day in report.get_report(&date).daily_reports(false) {
+                recombined += day;
+            }
+        }
+
+        assert_eq!(
+            recombined.average_expansion_factor(),
+            report.average_expansion_factor()
+        );
+        assert_eq!(
+            recombined.aggregate_expansion_factor(),
+            report.aggregate_expansion_factor()
+        );
+        assert_eq!(
+            recombined.average_cpus_per_job(),
+            report.average_cpus_per_job()
+        );
+        assert_eq!(
+            recombined.average_gpus_per_job(),
+            report.average_gpus_per_job()
+        );
+        assert_eq!(
+            recombined.average_requeue_wait_seconds(),
+            report.average_requeue_wait_seconds()
+        );
+
+        // the real figures, for the record: jobs on this cluster waited a great
+        // deal longer than they ran
+        assert!((report.average_expansion_factor() - 2_150.719_031).abs() < 1e-5);
+        assert!((report.aggregate_expansion_factor() - 3.558_393).abs() < 1e-5);
+        assert!((report.average_cpus_per_job() - 1_062.655_462).abs() < 1e-5);
+
+        // and per user, which is where the answer actually is
+        assert!((report.expansion_factor_for_user("user1.project") - 7_290.137).abs() < 0.01);
+        assert!((report.expansion_factor_for_user("user8.project") - 1.002).abs() < 0.01);
+        assert_eq!(report.num_jobs_for_user("user2.project"), 214);
+    }
+
+    #[test]
+    fn test_a_project_mean_is_not_the_mean_of_daily_means() {
+        // Real data proving why the project figure is computed over every job
+        // rather than by averaging each day's average: on this month the two
+        // differ by more than two hundred.
+        let report = real_month();
+
+        let daily_means: Vec<f64> = report
+            .dates()
+            .iter()
+            .flat_map(|date| report.get_report(date).daily_reports(false))
+            .filter(|day| day.num_jobs() > 0)
+            .map(|day| day.average_expansion_factor())
+            .collect();
+
+        let mean_of_means = daily_means.iter().sum::<f64>() / daily_means.len() as f64;
+
+        assert!((mean_of_means - 1_945.591_234).abs() < 1e-5);
+        assert!(
+            (report.average_expansion_factor() - mean_of_means).abs() > 200.0,
+            "the two must differ, or the test proves nothing"
+        );
+    }
+
+    #[test]
+    fn test_filtering_a_month_into_halves_partitions_every_total() {
+        // The same additivity from the other direction - a date range carved out
+        // of a report and its complement have to add back up to it.
+        let report = real_month();
+
+        let first = report.filter(&DateRange::parse("2026-08-01:2026-08-12").unwrap());
+        let second = report.filter(&DateRange::parse("2026-08-13:2026-08-24").unwrap());
+
+        assert_eq!(first.dates().len(), 12);
+        assert_eq!(second.dates().len(), 12);
+
+        assert_eq!(
+            first.total_usage() + second.total_usage(),
+            report.total_usage()
+        );
+        assert_eq!(
+            first.total_requeue_usage() + second.total_requeue_usage(),
+            report.total_requeue_usage()
+        );
+        assert_eq!(first.num_jobs() + second.num_jobs(), report.num_jobs());
+        assert_eq!(
+            first.num_requeue_events() + second.num_requeue_events(),
+            report.num_requeue_events()
+        );
+        assert_eq!(
+            first.total_runtime_seconds() + second.total_runtime_seconds(),
+            report.total_runtime_seconds()
+        );
+        assert_eq!(
+            first.total_reservation_usage() + second.total_reservation_usage(),
+            report.total_reservation_usage()
+        );
+
+        // every requeue in this month happened in the first half, and every
+        // reservation figure is split across both - so neither half is trivial
+        assert_eq!(first.num_requeue_events(), 12);
+        assert!(first.has_reservations() && second.has_reservations());
+    }
+
+    #[test]
+    fn test_the_real_month_round_trips_through_the_minimal_json() {
+        // A report only writes what it has to say, so most days omit most
+        // fields. Reading one back has to give exactly what was written.
+        let report = real_month();
+        let json = report.to_json().unwrap();
+
+        // the empty maps this month is full of are not written at all
+        assert!(
+            !json.contains("\"reservation_jobs\":{}"),
+            "empty maps remain"
+        );
+        assert!(!json.contains("\"requeue_states\":{}"), "empty maps remain");
+        assert!(
+            !json.contains("\"requeue_wait_seconds\":0"),
+            "zero counters remain"
+        );
+
+        let reparsed = ProjectUsageReport::from_json(&json).unwrap();
+
+        assert_eq!(reparsed.total_usage(), report.total_usage());
+        assert_eq!(reparsed.total_requeue_usage(), report.total_requeue_usage());
+        assert_eq!(reparsed.num_jobs(), report.num_jobs());
+        assert_eq!(reparsed.total_wait_seconds(), report.total_wait_seconds());
+        assert_eq!(reparsed.num_requeue_events(), report.num_requeue_events());
+        assert_eq!(
+            reparsed.total_runtime_seconds(),
+            report.total_runtime_seconds()
+        );
+        assert_eq!(
+            reparsed.total_reservation_usage(),
+            report.total_reservation_usage()
+        );
+        assert_eq!(
+            reparsed.average_expansion_factor(),
+            report.average_expansion_factor()
+        );
+        assert_eq!(
+            reparsed.average_cpus_per_job(),
+            report.average_cpus_per_job()
+        );
+        assert_eq!(
+            reparsed.requeue_state_summary(),
+            report.requeue_state_summary()
+        );
+        assert_eq!(reparsed.dates(), report.dates());
+
+        // and writing it again gives the same document - compared as JSON rather
+        // than as bytes, because these are `HashMap`s and serde emits their keys
+        // in whatever order the map iterates
+        let first: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let again: serde_json::Value = serde_json::from_str(&reparsed.to_json().unwrap()).unwrap();
+
+        assert_eq!(first, again);
+    }
+
+    #[test]
+    fn test_scaling_a_month_agrees_with_scaling_its_days() {
+        // `Usage` truncates to whole seconds, so scaling and summing are not in
+        // general interchangeable - but they are here, and for a reason worth
+        // recording: usage is only ever *stored* per user per day, and both
+        // paths scale those same stored values. Nothing is scaled after being
+        // summed, so there is no coarser value to lose a fraction of.
+        //
+        // A caller converting a month to credits and a caller converting each
+        // day therefore agree to the second, which is what makes a monthly
+        // invoice reconcilable against a daily breakdown.
+        let report = real_month();
+
+        let mut scaled_whole = report.clone();
+        scaled_whole.scale_total(0.5);
+
+        let mut scaled_days = DailyProjectUsageReport::default();
+        for date in report.dates() {
+            for day in report.get_report(&date).daily_reports(false) {
+                scaled_days += day / 2.0;
+            }
+        }
+
+        assert_eq!(
+            scaled_whole.total_usage().seconds(),
+            scaled_days.total_usage().seconds()
+        );
+
+        // Halving really did something, so the equality above is not vacuous.
+        // Doubling does not recover the original: each odd per-user-day value
+        // lost half a second, thirty-two of them across this month. That is the
+        // truncation - it just falls in the same place either way round.
+        let halved = scaled_whole.total_usage().seconds();
+        assert!(halved * 2 <= report.total_usage().seconds());
+        assert!(
+            report.total_usage().seconds() - halved * 2 < 100,
+            "the loss is bounded by one second per stored value"
+        );
+    }
+
+    #[test]
+    fn test_the_quick_reports_read_sensibly_over_real_data() {
+        let report = real_month();
+
+        let requeues = report.requeue_report();
+        assert!(requeues.contains("NODE_FAIL"), "{}", requeues);
+        assert!(requeues.contains("REQUEUED"), "{}", requeues);
+        assert!(requeues.contains("12 requeue events"), "{}", requeues);
+
+        let reservations = report.reservation_report();
+        assert!(reservations.contains("interactive"), "{}", reservations);
+        assert!(reservations.contains("82 jobs"), "{}", reservations);
+
+        let expansion = report.expansion_factor_report();
+        assert!(expansion.contains("357 jobs"), "{}", expansion);
+        // the mean is far above the overall figure on this month, so the report
+        // should say which end of the distribution waited
+        assert!(expansion.contains("*short* jobs"), "{}", expansion);
+        // and the worst-served user is named first
+        // "mean wait" in lower case appears only in the column header, so the
+        // row after it is the worst-served user
+        let first_row = expansion
+            .lines()
+            .skip_while(|line| !line.contains("mean wait"))
+            .nth(1);
+        let Some(first_row) = first_row else {
+            unreachable!("no user rows in:\n{}", expansion);
+        };
+        assert!(first_row.contains("user1.project"), "{}", first_row);
     }
 
     #[test]

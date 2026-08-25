@@ -18,4 +18,87 @@ num_jobs: bigint,
 /**
  * Scalar total — equals sum of user_wait_seconds when populated.
  */
-total_wait_seconds: bigint, is_complete: boolean, };
+total_wait_seconds: bigint, 
+/**
+ * Per-user sum of per-job expansion factors, in thousandths.
+ */
+user_expansion_milli: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_expansion_milli when populated.
+ */
+total_expansion_milli: bigint, 
+/**
+ * Per-user total wall-clock runtime, in seconds. Not the same as usage,
+ * which is weighted by the fraction of a node a job held.
+ */
+user_runtime_seconds: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_runtime_seconds when populated.
+ */
+total_runtime_seconds: bigint, 
+/**
+ * Per-user sum of the cores each job was allocated.
+ */
+user_allocated_cpus: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_allocated_cpus when populated.
+ */
+total_allocated_cpus: bigint, 
+/**
+ * Per-user sum of the GPUs each job was allocated.
+ */
+user_allocated_gpus: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_allocated_gpus when populated.
+ */
+total_allocated_gpus: bigint, 
+/**
+ * Usage from attempts superseded by a requeue, per local user.
+ */
+requeue_reports: { [key in string]?: Usage }, 
+/**
+ * The same, broken down by resource component.
+ */
+requeue_components: { [key in string]?: { [key in string]?: Usage } }, 
+/**
+ * Per-user count of requeue *events* (superseded attempts, not jobs).
+ */
+user_requeue_events: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_requeue_events when populated.
+ */
+num_requeue_events: bigint, 
+/**
+ * Per-user queue wait accumulated by superseded attempts.
+ */
+user_requeue_wait_seconds: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_requeue_wait_seconds when populated.
+ */
+requeue_wait_seconds: bigint, 
+/**
+ * Requeue events by the terminal state of the superseded attempt. Sums to
+ * `num_requeue_events`.
+ */
+requeue_states: { [key in string]?: bigint }, 
+/**
+ * Requeue usage by the terminal state of the superseded attempt. Sums to
+ * `total_requeue_usage()`.
+ */
+requeue_state_usage: { [key in string]?: Usage }, 
+/**
+ * Reservation name → local user → usage consumed inside it.
+ */
+reservation_reports: { [key in string]?: { [key in string]?: Usage } }, 
+/**
+ * Reservation name → the part of the above from superseded attempts.
+ */
+reservation_requeue_usage: { [key in string]?: Usage }, 
+/**
+ * Reservation name → jobs that started inside it, counted as `num_jobs` is.
+ */
+reservation_jobs: { [key in string]?: bigint }, 
+/**
+ * See the note on `reports` above - written even when false, for now.
+ */
+is_complete: boolean, };

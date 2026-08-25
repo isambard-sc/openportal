@@ -1,0 +1,2858 @@
+{
+  "project": "test.portal",
+  "reports": {
+    "2026-08-01": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 283488768
+          },
+          "user2.project": {
+            "seconds": 19440
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 283488768
+          },
+          "user2.project": {
+            "seconds": 19440
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 3937344
+          },
+          "user2.project": {
+            "seconds": 270
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 451566108672
+          },
+          "user2.project": {
+            "seconds": 138240
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 19,
+      "num_requeue_events": 2,
+      "reports": {
+        "user1.project": {
+          "seconds": 984336
+        },
+        "user2.project": {
+          "seconds": 72
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 75310848
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 75310848
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 1045984
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 119961812992
+          }
+        }
+      },
+      "requeue_reports": {
+        "user1.project": {
+          "seconds": 261496
+        }
+      },
+      "requeue_state_usage": {
+        "REQUEUED": {
+          "seconds": 261496
+        }
+      },
+      "requeue_states": {
+        "REQUEUED": 2
+      },
+      "requeue_wait_seconds": 142272,
+      "reservation_jobs": {},
+      "reservation_reports": {},
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 26352,
+      "total_allocated_gpus": 366,
+      "total_expansion_milli": 806796,
+      "total_runtime_seconds": 73758,
+      "total_wait_seconds": 470378,
+      "user_allocated_cpus": {
+        "user1.project": 25344,
+        "user2.project": 1008
+      },
+      "user_allocated_gpus": {
+        "user1.project": 352,
+        "user2.project": 14
+      },
+      "user_expansion_milli": {
+        "user1.project": 248167,
+        "user2.project": 558629
+      },
+      "user_job_counts": {
+        "user1.project": 5,
+        "user2.project": 14
+      },
+      "user_requeue_events": {
+        "user1.project": 2
+      },
+      "user_requeue_wait_seconds": {
+        "user1.project": 142272
+      },
+      "user_runtime_seconds": {
+        "user1.project": 73488,
+        "user2.project": 270
+      },
+      "user_wait_seconds": {
+        "user1.project": 457982,
+        "user2.project": 12396
+      }
+    },
+    "2026-08-02": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 18616320
+          },
+          "user3.project": {
+            "seconds": 10476864
+          },
+          "user2.project": {
+            "seconds": 18504
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 18616320
+          },
+          "user3.project": {
+            "seconds": 10476864
+          },
+          "user2.project": {
+            "seconds": 18504
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 258560
+          },
+          "user3.project": {
+            "seconds": 145512
+          },
+          "user2.project": {
+            "seconds": 257
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 29653729280
+          },
+          "user3.project": {
+            "seconds": 16688480256
+          },
+          "user2.project": {
+            "seconds": 131584
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 17,
+      "num_requeue_events": 1,
+      "reports": {
+        "user1.project": {
+          "seconds": 64640
+        },
+        "user3.project": {
+          "seconds": 36378
+        },
+        "user2.project": {
+          "seconds": 68
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 77981184
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 77981184
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 1083072
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 124215361536
+          }
+        }
+      },
+      "requeue_reports": {
+        "user1.project": {
+          "seconds": 270768
+        }
+      },
+      "requeue_state_usage": {
+        "NODE_FAIL": {
+          "seconds": 270768
+        }
+      },
+      "requeue_states": {
+        "NODE_FAIL": 1
+      },
+      "requeue_wait_seconds": 112592,
+      "reservation_jobs": {},
+      "reservation_reports": {},
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 9576,
+      "total_allocated_gpus": 133,
+      "total_expansion_milli": 812219,
+      "total_runtime_seconds": 181785,
+      "total_wait_seconds": 473112,
+      "user_allocated_cpus": {
+        "user1.project": 6912,
+        "user3.project": 1728,
+        "user2.project": 936
+      },
+      "user_allocated_gpus": {
+        "user1.project": 96,
+        "user3.project": 24,
+        "user2.project": 13
+      },
+      "user_expansion_milli": {
+        "user1.project": 11802,
+        "user3.project": 3129,
+        "user2.project": 797288
+      },
+      "user_job_counts": {
+        "user1.project": 3,
+        "user3.project": 1,
+        "user2.project": 13
+      },
+      "user_requeue_events": {
+        "user1.project": 1
+      },
+      "user_requeue_wait_seconds": {
+        "user1.project": 112592
+      },
+      "user_runtime_seconds": {
+        "user1.project": 95313,
+        "user3.project": 86215,
+        "user2.project": 257
+      },
+      "user_wait_seconds": {
+        "user1.project": 271509,
+        "user3.project": 183553,
+        "user2.project": 18050
+      }
+    },
+    "2026-08-03": {
+      "components": {
+        "billing": {
+          "user4.project": {
+            "seconds": 774360
+          },
+          "user1.project": {
+            "seconds": 323471160
+          },
+          "user2.project": {
+            "seconds": 22824
+          }
+        },
+        "cpu": {
+          "user4.project": {
+            "seconds": 774360
+          },
+          "user1.project": {
+            "seconds": 318153456
+          },
+          "user2.project": {
+            "seconds": 22824
+          }
+        },
+        "gpu": {
+          "user4.project": {
+            "seconds": 10755
+          },
+          "user1.project": {
+            "seconds": 4418798
+          },
+          "user2.project": {
+            "seconds": 317
+          }
+        },
+        "memory": {
+          "user4.project": {
+            "seconds": 1236825000
+          },
+          "user1.project": {
+            "seconds": 506789688848
+          },
+          "user2.project": {
+            "seconds": 162304
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 30,
+      "num_requeue_events": 1,
+      "reports": {
+        "user4.project": {
+          "seconds": 2692
+        },
+        "user1.project": {
+          "seconds": 1107338
+        },
+        "user2.project": {
+          "seconds": 85
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user3.project": {
+            "seconds": 138502656
+          }
+        },
+        "cpu": {
+          "user3.project": {
+            "seconds": 138502656
+          }
+        },
+        "gpu": {
+          "user3.project": {
+            "seconds": 1923648
+          }
+        },
+        "memory": {
+          "user3.project": {
+            "seconds": 220619341824
+          }
+        }
+      },
+      "requeue_reports": {
+        "user3.project": {
+          "seconds": 480912
+        }
+      },
+      "requeue_state_usage": {
+        "REQUEUED": {
+          "seconds": 480912
+        }
+      },
+      "requeue_states": {
+        "REQUEUED": 1
+      },
+      "requeue_wait_seconds": 183553,
+      "reservation_jobs": {
+        "interactive": 1
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user1.project": {
+            "seconds": 7914
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 45432,
+      "total_allocated_gpus": 631,
+      "total_expansion_milli": 2563207,
+      "total_runtime_seconds": 129857,
+      "total_wait_seconds": 709234,
+      "user_allocated_cpus": {
+        "user4.project": 504,
+        "user1.project": 43920,
+        "user2.project": 1008
+      },
+      "user_allocated_gpus": {
+        "user4.project": 7,
+        "user1.project": 610,
+        "user2.project": 14
+      },
+      "user_expansion_milli": {
+        "user4.project": 9868,
+        "user1.project": 2035505,
+        "user2.project": 517834
+      },
+      "user_job_counts": {
+        "user4.project": 7,
+        "user1.project": 9,
+        "user2.project": 14
+      },
+      "user_requeue_events": {
+        "user3.project": 1
+      },
+      "user_requeue_wait_seconds": {
+        "user3.project": 183553
+      },
+      "user_runtime_seconds": {
+        "user4.project": 10755,
+        "user1.project": 118785,
+        "user2.project": 317
+      },
+      "user_wait_seconds": {
+        "user4.project": 3620,
+        "user1.project": 696365,
+        "user2.project": 9249
+      }
+    },
+    "2026-08-04": {
+      "components": {
+        "billing": {
+          "user4.project": {
+            "seconds": 163224
+          },
+          "user1.project": {
+            "seconds": 509551740
+          },
+          "user5.project": {
+            "seconds": 759888
+          },
+          "user6.project": {
+            "seconds": 9792
+          },
+          "user3.project": {
+            "seconds": 46224000
+          },
+          "user2.project": {
+            "seconds": 14256
+          }
+        },
+        "cpu": {
+          "user4.project": {
+            "seconds": 163224
+          },
+          "user1.project": {
+            "seconds": 500314680
+          },
+          "user5.project": {
+            "seconds": 221616
+          },
+          "user6.project": {
+            "seconds": 9792
+          },
+          "user3.project": {
+            "seconds": 46224000
+          },
+          "user2.project": {
+            "seconds": 14256
+          }
+        },
+        "gpu": {
+          "user4.project": {
+            "seconds": 2267
+          },
+          "user1.project": {
+            "seconds": 6948815
+          },
+          "user5.project": {
+            "seconds": 2607
+          },
+          "user6.project": {
+            "seconds": 136
+          },
+          "user3.project": {
+            "seconds": 642000
+          },
+          "user2.project": {
+            "seconds": 198
+          }
+        },
+        "memory": {
+          "user4.project": {
+            "seconds": 260705000
+          },
+          "user1.project": {
+            "seconds": 796957131080
+          },
+          "user5.project": {
+            "seconds": 360726528
+          },
+          "user6.project": {
+            "seconds": 15597568
+          },
+          "user3.project": {
+            "seconds": 73629696000
+          },
+          "user2.project": {
+            "seconds": 101376
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 28,
+      "num_requeue_events": 1,
+      "reports": {
+        "user4.project": {
+          "seconds": 567
+        },
+        "user1.project": {
+          "seconds": 1741788
+        },
+        "user5.project": {
+          "seconds": 1038
+        },
+        "user6.project": {
+          "seconds": 34
+        },
+        "user3.project": {
+          "seconds": 160500
+        },
+        "user2.project": {
+          "seconds": 53
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 247163904
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 247163904
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 3432832
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 393704636416
+          }
+        }
+      },
+      "requeue_reports": {
+        "user1.project": {
+          "seconds": 858208
+        }
+      },
+      "requeue_state_usage": {
+        "NODE_FAIL": {
+          "seconds": 858208
+        }
+      },
+      "requeue_states": {
+        "NODE_FAIL": 1
+      },
+      "requeue_wait_seconds": 135810,
+      "reservation_jobs": {
+        "interactive": 9
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user1.project": {
+            "seconds": 13748
+          },
+          "user5.project": {
+            "seconds": 802
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 47304,
+      "total_allocated_gpus": 656,
+      "total_expansion_milli": 92581320,
+      "total_runtime_seconds": 411368,
+      "total_wait_seconds": 609529,
+      "user_allocated_cpus": {
+        "user4.project": 72,
+        "user1.project": 43416,
+        "user5.project": 1296,
+        "user6.project": 288,
+        "user3.project": 1728,
+        "user2.project": 504
+      },
+      "user_allocated_gpus": {
+        "user4.project": 1,
+        "user1.project": 603,
+        "user5.project": 17,
+        "user6.project": 4,
+        "user3.project": 24,
+        "user2.project": 7
+      },
+      "user_expansion_milli": {
+        "user4.project": 1059,
+        "user1.project": 90882457,
+        "user5.project": 62247,
+        "user6.project": 1004205,
+        "user3.project": 1762,
+        "user2.project": 629590
+      },
+      "user_job_counts": {
+        "user4.project": 1,
+        "user1.project": 13,
+        "user5.project": 5,
+        "user6.project": 1,
+        "user3.project": 1,
+        "user2.project": 7
+      },
+      "user_requeue_events": {
+        "user1.project": 1
+      },
+      "user_requeue_wait_seconds": {
+        "user1.project": 135810
+      },
+      "user_runtime_seconds": {
+        "user4.project": 2267,
+        "user1.project": 321649,
+        "user5.project": 1005,
+        "user6.project": 34,
+        "user3.project": 86215,
+        "user2.project": 198
+      },
+      "user_wait_seconds": {
+        "user4.project": 136,
+        "user1.project": 462275,
+        "user5.project": 26895,
+        "user6.project": 34109,
+        "user3.project": 65741,
+        "user2.project": 20373
+      }
+    },
+    "2026-08-05": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 602197920
+          },
+          "user5.project": {
+            "seconds": 969408
+          },
+          "user2.project": {
+            "seconds": 4464
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 591293376
+          },
+          "user5.project": {
+            "seconds": 215424
+          },
+          "user2.project": {
+            "seconds": 4464
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 8212408
+          },
+          "user5.project": {
+            "seconds": 2992
+          },
+          "user2.project": {
+            "seconds": 62
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 941878149568
+          },
+          "user5.project": {
+            "seconds": 343146496
+          },
+          "user2.project": {
+            "seconds": 31744
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 17,
+      "num_requeue_events": 3,
+      "reports": {
+        "user1.project": {
+          "seconds": 2058511
+        },
+        "user5.project": {
+          "seconds": 1123
+        },
+        "user2.project": {
+          "seconds": 17
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 662064768
+          },
+          "user3.project": {
+            "seconds": 102755520
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 662064768
+          },
+          "user3.project": {
+            "seconds": 102755520
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 9195344
+          },
+          "user3.project": {
+            "seconds": 1427160
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 1054595612672
+          },
+          "user3.project": {
+            "seconds": 163678126080
+          }
+        }
+      },
+      "requeue_reports": {
+        "user1.project": {
+          "seconds": 2298836
+        },
+        "user3.project": {
+          "seconds": 356790
+        }
+      },
+      "requeue_state_usage": {
+        "REQUEUED": {
+          "seconds": 2655626
+        }
+      },
+      "requeue_states": {
+        "REQUEUED": 3
+      },
+      "requeue_wait_seconds": 186828,
+      "reservation_jobs": {
+        "interactive": 7
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user1.project": {
+            "seconds": 16227
+          },
+          "user5.project": {
+            "seconds": 1123
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 30456,
+      "total_allocated_gpus": 423,
+      "total_expansion_milli": 273283378,
+      "total_runtime_seconds": 50260,
+      "total_wait_seconds": 469934,
+      "user_allocated_cpus": {
+        "user1.project": 28512,
+        "user5.project": 1728,
+        "user2.project": 216
+      },
+      "user_allocated_gpus": {
+        "user1.project": 396,
+        "user5.project": 24,
+        "user2.project": 3
+      },
+      "user_expansion_milli": {
+        "user1.project": 269303044,
+        "user5.project": 6739,
+        "user2.project": 3973595
+      },
+      "user_job_counts": {
+        "user1.project": 8,
+        "user5.project": 6,
+        "user2.project": 3
+      },
+      "user_requeue_events": {
+        "user1.project": 2,
+        "user3.project": 1
+      },
+      "user_requeue_wait_seconds": {
+        "user1.project": 121087,
+        "user3.project": 65741
+      },
+      "user_runtime_seconds": {
+        "user1.project": 49450,
+        "user5.project": 748,
+        "user2.project": 62
+      },
+      "user_wait_seconds": {
+        "user1.project": 391340,
+        "user5.project": 33,
+        "user2.project": 78561
+      }
+    },
+    "2026-08-06": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 4608
+          },
+          "user1.project": {
+            "seconds": 352646496
+          },
+          "user3.project": {
+            "seconds": 30229632
+          },
+          "user2.project": {
+            "seconds": 6825960
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 4608
+          },
+          "user1.project": {
+            "seconds": 352646496
+          },
+          "user3.project": {
+            "seconds": 30229632
+          },
+          "user2.project": {
+            "seconds": 1520352
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 64
+          },
+          "user1.project": {
+            "seconds": 4897868
+          },
+          "user3.project": {
+            "seconds": 419856
+          },
+          "user2.project": {
+            "seconds": 18087
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 7340032
+          },
+          "user1.project": {
+            "seconds": 561726685184
+          },
+          "user3.project": {
+            "seconds": 48152444928
+          },
+          "user2.project": {
+            "seconds": 2519550968
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 30,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 16
+        },
+        "user1.project": {
+          "seconds": 1224467
+        },
+        "user3.project": {
+          "seconds": 104964
+        },
+        "user2.project": {
+          "seconds": 7914
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 11
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user2.project": {
+            "seconds": 7898
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 76968,
+      "total_allocated_gpus": 1065,
+      "total_expansion_milli": 246895270,
+      "total_runtime_seconds": 207974,
+      "total_wait_seconds": 805925,
+      "user_allocated_cpus": {
+        "user7.project": 4608,
+        "user1.project": 67104,
+        "user3.project": 1728,
+        "user2.project": 3528
+      },
+      "user_allocated_gpus": {
+        "user7.project": 64,
+        "user1.project": 932,
+        "user3.project": 24,
+        "user2.project": 45
+      },
+      "user_expansion_milli": {
+        "user7.project": 31866000,
+        "user1.project": 210398392,
+        "user3.project": 3838,
+        "user2.project": 4627040
+      },
+      "user_job_counts": {
+        "user7.project": 1,
+        "user1.project": 14,
+        "user3.project": 1,
+        "user2.project": 14
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 1,
+        "user1.project": 184112,
+        "user3.project": 17494,
+        "user2.project": 6367
+      },
+      "user_wait_seconds": {
+        "user7.project": 31865,
+        "user1.project": 636732,
+        "user3.project": 49662,
+        "user2.project": 87666
+      }
+    },
+    "2026-08-07": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 7001316
+          },
+          "user1.project": {
+            "seconds": 349156296
+          },
+          "user2.project": {
+            "seconds": 8568
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 1555848
+          },
+          "user1.project": {
+            "seconds": 342005040
+          },
+          "user2.project": {
+            "seconds": 8568
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 21609
+          },
+          "user1.project": {
+            "seconds": 4750070
+          },
+          "user2.project": {
+            "seconds": 119
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 2485035000
+          },
+          "user1.project": {
+            "seconds": 544784882096
+          },
+          "user2.project": {
+            "seconds": 60928
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 23,
+      "num_requeue_events": 2,
+      "reports": {
+        "user7.project": {
+          "seconds": 8104
+        },
+        "user1.project": {
+          "seconds": 1191066
+        },
+        "user2.project": {
+          "seconds": 32
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 250384896
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 250384896
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 3477568
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 398835318784
+          }
+        }
+      },
+      "requeue_reports": {
+        "user1.project": {
+          "seconds": 869392
+        }
+      },
+      "requeue_state_usage": {
+        "REQUEUED": {
+          "seconds": 869392
+        }
+      },
+      "requeue_states": {
+        "REQUEUED": 2
+      },
+      "requeue_wait_seconds": 85987,
+      "reservation_jobs": {
+        "interactive": 3
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 8104
+          },
+          "user1.project": {
+            "seconds": 10643
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 72360,
+      "total_allocated_gpus": 1005,
+      "total_expansion_milli": 49592750,
+      "total_runtime_seconds": 251578,
+      "total_wait_seconds": 433491,
+      "user_allocated_cpus": {
+        "user7.project": 72,
+        "user1.project": 71856,
+        "user2.project": 432
+      },
+      "user_allocated_gpus": {
+        "user7.project": 1,
+        "user1.project": 998,
+        "user2.project": 6
+      },
+      "user_expansion_milli": {
+        "user7.project": 1001,
+        "user1.project": 48011117,
+        "user2.project": 1580632
+      },
+      "user_job_counts": {
+        "user7.project": 1,
+        "user1.project": 16,
+        "user2.project": 6
+      },
+      "user_requeue_events": {
+        "user1.project": 2
+      },
+      "user_requeue_wait_seconds": {
+        "user1.project": 85987
+      },
+      "user_runtime_seconds": {
+        "user7.project": 21609,
+        "user1.project": 229850,
+        "user2.project": 119
+      },
+      "user_wait_seconds": {
+        "user7.project": 43,
+        "user1.project": 403557,
+        "user2.project": 29891
+      }
+    },
+    "2026-08-08": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 324206712
+          },
+          "user2.project": {
+            "seconds": 3024
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 321209424
+          },
+          "user2.project": {
+            "seconds": 3024
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 4461242
+          },
+          "user2.project": {
+            "seconds": 42
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 511654633424
+          },
+          "user2.project": {
+            "seconds": 21504
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 6,
+      "num_requeue_events": 0,
+      "reports": {
+        "user1.project": {
+          "seconds": 1116798
+        },
+        "user2.project": {
+          "seconds": 11
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 3
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user1.project": {
+            "seconds": 4461
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 5184,
+      "total_allocated_gpus": 72,
+      "total_expansion_milli": 52941308,
+      "total_runtime_seconds": 11919,
+      "total_wait_seconds": 109949,
+      "user_allocated_cpus": {
+        "user1.project": 5040,
+        "user2.project": 144
+      },
+      "user_allocated_gpus": {
+        "user1.project": 70,
+        "user2.project": 2
+      },
+      "user_expansion_milli": {
+        "user1.project": 49679166,
+        "user2.project": 3262142
+      },
+      "user_job_counts": {
+        "user1.project": 4,
+        "user2.project": 2
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user1.project": 11877,
+        "user2.project": 42
+      },
+      "user_wait_seconds": {
+        "user1.project": 49680,
+        "user2.project": 60269
+      }
+    },
+    "2026-08-09": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 189478944
+          },
+          "user2.project": {
+            "seconds": 12384
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 189478944
+          },
+          "user2.project": {
+            "seconds": 12384
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 2631652
+          },
+          "user2.project": {
+            "seconds": 172
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 301818904576
+          },
+          "user2.project": {
+            "seconds": 88064
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 12,
+      "num_requeue_events": 1,
+      "reports": {
+        "user1.project": {
+          "seconds": 657913
+        },
+        "user2.project": {
+          "seconds": 45
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 14948352
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 14948352
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 207616
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 23811063808
+          }
+        }
+      },
+      "requeue_reports": {
+        "user1.project": {
+          "seconds": 51904
+        }
+      },
+      "requeue_state_usage": {
+        "NODE_FAIL": {
+          "seconds": 51904
+        }
+      },
+      "requeue_states": {
+        "NODE_FAIL": 1
+      },
+      "requeue_wait_seconds": 21401,
+      "reservation_jobs": {},
+      "reservation_reports": {},
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 14688,
+      "total_allocated_gpus": 204,
+      "total_expansion_milli": 4835457,
+      "total_runtime_seconds": 142034,
+      "total_wait_seconds": 175399,
+      "user_allocated_cpus": {
+        "user1.project": 14112,
+        "user2.project": 576
+      },
+      "user_allocated_gpus": {
+        "user1.project": 196,
+        "user2.project": 8
+      },
+      "user_expansion_milli": {
+        "user1.project": 17094,
+        "user2.project": 4818363
+      },
+      "user_job_counts": {
+        "user1.project": 4,
+        "user2.project": 8
+      },
+      "user_requeue_events": {
+        "user1.project": 1
+      },
+      "user_requeue_wait_seconds": {
+        "user1.project": 21401
+      },
+      "user_runtime_seconds": {
+        "user1.project": 141862,
+        "user2.project": 172
+      },
+      "user_wait_seconds": {
+        "user1.project": 89674,
+        "user2.project": 85725
+      }
+    },
+    "2026-08-10": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 1864296
+          },
+          "user1.project": {
+            "seconds": 349833888
+          },
+          "user2.project": {
+            "seconds": 3236220
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 414288
+          },
+          "user1.project": {
+            "seconds": 333744192
+          },
+          "user2.project": {
+            "seconds": 722016
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 5754
+          },
+          "user1.project": {
+            "seconds": 4635336
+          },
+          "user2.project": {
+            "seconds": 10028
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 661710000
+          },
+          "user1.project": {
+            "seconds": 531637335744
+          },
+          "user2.project": {
+            "seconds": 1147381112
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 15,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 2158
+        },
+        "user1.project": {
+          "seconds": 1166815
+        },
+        "user2.project": {
+          "seconds": 3755
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 7
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 2158
+          },
+          "user1.project": {
+            "seconds": 23943
+          },
+          "user2.project": {
+            "seconds": 3742
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 21456,
+      "total_allocated_gpus": 298,
+      "total_expansion_milli": 4471988,
+      "total_runtime_seconds": 61539,
+      "total_wait_seconds": 185861,
+      "user_allocated_cpus": {
+        "user7.project": 72,
+        "user1.project": 18720,
+        "user2.project": 2664
+      },
+      "user_allocated_gpus": {
+        "user7.project": 1,
+        "user1.project": 260,
+        "user2.project": 37
+      },
+      "user_expansion_milli": {
+        "user7.project": 1002,
+        "user1.project": 53647,
+        "user2.project": 4417339
+      },
+      "user_job_counts": {
+        "user7.project": 1,
+        "user1.project": 5,
+        "user2.project": 9
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 5754,
+        "user1.project": 54486,
+        "user2.project": 1299
+      },
+      "user_wait_seconds": {
+        "user7.project": 12,
+        "user1.project": 141417,
+        "user2.project": 44432
+      }
+    },
+    "2026-08-11": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 405106092
+          },
+          "user2.project": {
+            "seconds": 7634160
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 399656088
+          },
+          "user2.project": {
+            "seconds": 1698048
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 5550779
+          },
+          "user2.project": {
+            "seconds": 23584
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 636614489576
+          },
+          "user2.project": {
+            "seconds": 2744850672
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 12,
+      "num_requeue_events": 0,
+      "reports": {
+        "user1.project": {
+          "seconds": 1390399
+        },
+        "user2.project": {
+          "seconds": 8843
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 9
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user1.project": {
+            "seconds": 8111
+          },
+          "user2.project": {
+            "seconds": 8835
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 7416,
+      "total_allocated_gpus": 103,
+      "total_expansion_milli": 5493747,
+      "total_runtime_seconds": 112094,
+      "total_wait_seconds": 134199,
+      "user_allocated_cpus": {
+        "user1.project": 4680,
+        "user2.project": 2736
+      },
+      "user_allocated_gpus": {
+        "user1.project": 65,
+        "user2.project": 38
+      },
+      "user_expansion_milli": {
+        "user1.project": 2737,
+        "user2.project": 5491010
+      },
+      "user_job_counts": {
+        "user1.project": 2,
+        "user2.project": 10
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user1.project": 107837,
+        "user2.project": 4257
+      },
+      "user_wait_seconds": {
+        "user1.project": 63568,
+        "user2.project": 70631
+      }
+    },
+    "2026-08-12": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 7229736
+          },
+          "user1.project": {
+            "seconds": 52270560
+          },
+          "user5.project": {
+            "seconds": 758160
+          },
+          "user2.project": {
+            "seconds": 2304
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 1606608
+          },
+          "user1.project": {
+            "seconds": 52270560
+          },
+          "user5.project": {
+            "seconds": 168480
+          },
+          "user2.project": {
+            "seconds": 2304
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 22314
+          },
+          "user1.project": {
+            "seconds": 725980
+          },
+          "user5.project": {
+            "seconds": 2340
+          },
+          "user2.project": {
+            "seconds": 32
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 2566110000
+          },
+          "user1.project": {
+            "seconds": 83261194240
+          },
+          "user5.project": {
+            "seconds": 268369920
+          },
+          "user2.project": {
+            "seconds": 16384
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 10,
+      "num_requeue_events": 1,
+      "reports": {
+        "user7.project": {
+          "seconds": 8369
+        },
+        "user1.project": {
+          "seconds": 181495
+        },
+        "user5.project": {
+          "seconds": 878
+        },
+        "user2.project": {
+          "seconds": 9
+        }
+      },
+      "requeue_components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 28491264
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 28491264
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 395712
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 45383417856
+          }
+        }
+      },
+      "requeue_reports": {
+        "user1.project": {
+          "seconds": 98928
+        }
+      },
+      "requeue_state_usage": {
+        "REQUEUED": {
+          "seconds": 98928
+        }
+      },
+      "requeue_states": {
+        "REQUEUED": 1
+      },
+      "requeue_wait_seconds": 63568,
+      "reservation_jobs": {
+        "interactive": 5
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 8369
+          },
+          "user5.project": {
+            "seconds": 878
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 10224,
+      "total_allocated_gpus": 142,
+      "total_expansion_milli": 6323772,
+      "total_runtime_seconds": 115632,
+      "total_wait_seconds": 264134,
+      "user_allocated_cpus": {
+        "user7.project": 288,
+        "user1.project": 9504,
+        "user5.project": 288,
+        "user2.project": 144
+      },
+      "user_allocated_gpus": {
+        "user7.project": 4,
+        "user1.project": 132,
+        "user5.project": 4,
+        "user2.project": 2
+      },
+      "user_expansion_milli": {
+        "user7.project": 4000,
+        "user1.project": 42553,
+        "user5.project": 1001,
+        "user2.project": 6276218
+      },
+      "user_job_counts": {
+        "user7.project": 4,
+        "user1.project": 3,
+        "user5.project": 1,
+        "user2.project": 2
+      },
+      "user_requeue_events": {
+        "user1.project": 1
+      },
+      "user_requeue_wait_seconds": {
+        "user1.project": 63568
+      },
+      "user_runtime_seconds": {
+        "user7.project": 22314,
+        "user1.project": 92701,
+        "user5.project": 585,
+        "user2.project": 32
+      },
+      "user_wait_seconds": {
+        "user7.project": 2,
+        "user1.project": 180367,
+        "user5.project": 1,
+        "user2.project": 83764
+      }
+    },
+    "2026-08-13": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 1582848
+          },
+          "user2.project": {
+            "seconds": 1296
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 1582848
+          },
+          "user2.project": {
+            "seconds": 1296
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 21984
+          },
+          "user2.project": {
+            "seconds": 18
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 2521300992
+          },
+          "user2.project": {
+            "seconds": 9216
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 2,
+      "num_requeue_events": 0,
+      "reports": {
+        "user1.project": {
+          "seconds": 5496
+        },
+        "user2.project": {
+          "seconds": 5
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {},
+      "reservation_reports": {},
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 144,
+      "total_allocated_gpus": 2,
+      "total_expansion_milli": 8521950,
+      "total_runtime_seconds": 18,
+      "total_wait_seconds": 77160,
+      "user_allocated_cpus": {
+        "user2.project": 144
+      },
+      "user_allocated_gpus": {
+        "user2.project": 2
+      },
+      "user_expansion_milli": {
+        "user2.project": 8521950
+      },
+      "user_job_counts": {
+        "user2.project": 2
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user2.project": 18
+      },
+      "user_wait_seconds": {
+        "user2.project": 77160
+      }
+    },
+    "2026-08-14": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 7971696
+          },
+          "user2.project": {
+            "seconds": 2520
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 3019896
+          },
+          "user2.project": {
+            "seconds": 2520
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 19650
+          },
+          "user2.project": {
+            "seconds": 35
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 2990247024
+          },
+          "user2.project": {
+            "seconds": 17920
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 7,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 12944
+        },
+        "user2.project": {
+          "seconds": 9
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 4
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 7370
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 504,
+      "total_allocated_gpus": 6,
+      "total_expansion_milli": 4122601,
+      "total_runtime_seconds": 62911,
+      "total_wait_seconds": 101820,
+      "user_allocated_cpus": {
+        "user7.project": 360,
+        "user2.project": 144
+      },
+      "user_allocated_gpus": {
+        "user7.project": 4,
+        "user2.project": 2
+      },
+      "user_expansion_milli": {
+        "user7.project": 5674,
+        "user2.project": 4116927
+      },
+      "user_job_counts": {
+        "user7.project": 5,
+        "user2.project": 2
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 62876,
+        "user2.project": 35
+      },
+      "user_wait_seconds": {
+        "user7.project": 28862,
+        "user2.project": 72958
+      }
+    },
+    "2026-08-15": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 2019600
+          },
+          "user2.project": {
+            "seconds": 31176
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 2019600
+          },
+          "user2.project": {
+            "seconds": 31176
+          }
+        },
+        "gpu": {
+          "user2.project": {
+            "seconds": 433
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 919142400
+          },
+          "user2.project": {
+            "seconds": 221696
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 10,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 7014
+        },
+        "user2.project": {
+          "seconds": 112
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {},
+      "reservation_reports": {},
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 720,
+      "total_allocated_gpus": 9,
+      "total_expansion_milli": 954076,
+      "total_runtime_seconds": 51102,
+      "total_wait_seconds": 57224,
+      "user_allocated_cpus": {
+        "user7.project": 72,
+        "user2.project": 648
+      },
+      "user_allocated_gpus": {
+        "user7.project": 0,
+        "user2.project": 9
+      },
+      "user_expansion_milli": {
+        "user7.project": 1066,
+        "user2.project": 953010
+      },
+      "user_job_counts": {
+        "user7.project": 1,
+        "user2.project": 9
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 50669,
+        "user2.project": 433
+      },
+      "user_wait_seconds": {
+        "user7.project": 3384,
+        "user2.project": 53840
+      }
+    },
+    "2026-08-16": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 3135744
+          },
+          "user2.project": {
+            "seconds": 30312
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 3135744
+          },
+          "user2.project": {
+            "seconds": 30312
+          }
+        },
+        "gpu": {
+          "user2.project": {
+            "seconds": 421
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 1427111936
+          },
+          "user2.project": {
+            "seconds": 215552
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 14,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 10888
+        },
+        "user2.project": {
+          "seconds": 111
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {},
+      "reservation_reports": {},
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 1008,
+      "total_allocated_gpus": 14,
+      "total_expansion_milli": 461272,
+      "total_runtime_seconds": 421,
+      "total_wait_seconds": 10942,
+      "user_allocated_cpus": {
+        "user2.project": 1008
+      },
+      "user_allocated_gpus": {
+        "user2.project": 14
+      },
+      "user_expansion_milli": {
+        "user2.project": 461272
+      },
+      "user_job_counts": {
+        "user2.project": 14
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user2.project": 421
+      },
+      "user_wait_seconds": {
+        "user2.project": 10942
+      }
+    },
+    "2026-08-17": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 8918424
+          },
+          "user1.project": {
+            "seconds": 128628
+          },
+          "user2.project": {
+            "seconds": 6984
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 1981872
+          },
+          "user1.project": {
+            "seconds": 28584
+          },
+          "user2.project": {
+            "seconds": 6984
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 27526
+          },
+          "user1.project": {
+            "seconds": 397
+          },
+          "user2.project": {
+            "seconds": 97
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 3165490000
+          },
+          "user1.project": {
+            "seconds": 45655000
+          },
+          "user2.project": {
+            "seconds": 49664
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 11,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 10323
+        },
+        "user1.project": {
+          "seconds": 149
+        },
+        "user2.project": {
+          "seconds": 27
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 5
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 10323
+          },
+          "user1.project": {
+            "seconds": 149
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 792,
+      "total_allocated_gpus": 11,
+      "total_expansion_milli": 3245444,
+      "total_runtime_seconds": 28020,
+      "total_wait_seconds": 29511,
+      "user_allocated_cpus": {
+        "user7.project": 216,
+        "user1.project": 144,
+        "user2.project": 432
+      },
+      "user_allocated_gpus": {
+        "user7.project": 3,
+        "user1.project": 2,
+        "user2.project": 6
+      },
+      "user_expansion_milli": {
+        "user7.project": 3038,
+        "user1.project": 2928,
+        "user2.project": 3239478
+      },
+      "user_job_counts": {
+        "user7.project": 3,
+        "user1.project": 2,
+        "user2.project": 6
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 27526,
+        "user1.project": 397,
+        "user2.project": 97
+      },
+      "user_wait_seconds": {
+        "user7.project": 214,
+        "user1.project": 185,
+        "user2.project": 29112
+      }
+    },
+    "2026-08-18": {
+      "components": {
+        "billing": {
+          "user1.project": {
+            "seconds": 11252520
+          },
+          "user8.project": {
+            "seconds": 4282308
+          },
+          "user2.project": {
+            "seconds": 11808
+          }
+        },
+        "cpu": {
+          "user1.project": {
+            "seconds": 2500560
+          },
+          "user8.project": {
+            "seconds": 951624
+          },
+          "user2.project": {
+            "seconds": 11808
+          }
+        },
+        "gpu": {
+          "user1.project": {
+            "seconds": 34730
+          },
+          "user8.project": {
+            "seconds": 13217
+          },
+          "user2.project": {
+            "seconds": 164
+          }
+        },
+        "memory": {
+          "user1.project": {
+            "seconds": 3993950000
+          },
+          "user8.project": {
+            "seconds": 1519955000
+          },
+          "user2.project": {
+            "seconds": 83968
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 10,
+      "num_requeue_events": 0,
+      "reports": {
+        "user1.project": {
+          "seconds": 13024
+        },
+        "user8.project": {
+          "seconds": 4957
+        },
+        "user2.project": {
+          "seconds": 44
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 3
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user1.project": {
+            "seconds": 13024
+          },
+          "user8.project": {
+            "seconds": 4957
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 720,
+      "total_allocated_gpus": 10,
+      "total_expansion_milli": 2417638,
+      "total_runtime_seconds": 49298,
+      "total_wait_seconds": 68620,
+      "user_allocated_cpus": {
+        "user1.project": 144,
+        "user8.project": 72,
+        "user2.project": 504
+      },
+      "user_allocated_gpus": {
+        "user1.project": 2,
+        "user8.project": 1,
+        "user2.project": 7
+      },
+      "user_expansion_milli": {
+        "user1.project": 2000,
+        "user8.project": 1000,
+        "user2.project": 2414638
+      },
+      "user_job_counts": {
+        "user1.project": 2,
+        "user8.project": 1,
+        "user2.project": 7
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user1.project": 34730,
+        "user8.project": 14404,
+        "user2.project": 164
+      },
+      "user_wait_seconds": {
+        "user1.project": 3,
+        "user8.project": 0,
+        "user2.project": 68617
+      }
+    },
+    "2026-08-19": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 9059688
+          },
+          "user1.project": {
+            "seconds": 3338820
+          },
+          "user8.project": {
+            "seconds": 3204684
+          },
+          "user2.project": {
+            "seconds": 28152
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 2013264
+          },
+          "user1.project": {
+            "seconds": 741960
+          },
+          "user8.project": {
+            "seconds": 712152
+          },
+          "user2.project": {
+            "seconds": 28152
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 27962
+          },
+          "user1.project": {
+            "seconds": 10305
+          },
+          "user8.project": {
+            "seconds": 9891
+          },
+          "user2.project": {
+            "seconds": 391
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 3215630000
+          },
+          "user1.project": {
+            "seconds": 1185075000
+          },
+          "user8.project": {
+            "seconds": 1137465000
+          },
+          "user2.project": {
+            "seconds": 200192
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 18,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 10487
+        },
+        "user1.project": {
+          "seconds": 3865
+        },
+        "user8.project": {
+          "seconds": 3711
+        },
+        "user2.project": {
+          "seconds": 101
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 6
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 10487
+          },
+          "user1.project": {
+            "seconds": 3865
+          },
+          "user8.project": {
+            "seconds": 3711
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 1440,
+      "total_allocated_gpus": 20,
+      "total_expansion_milli": 1985397,
+      "total_runtime_seconds": 35533,
+      "total_wait_seconds": 25903,
+      "user_allocated_cpus": {
+        "user7.project": 360,
+        "user1.project": 72,
+        "user8.project": 144,
+        "user2.project": 864
+      },
+      "user_allocated_gpus": {
+        "user7.project": 5,
+        "user1.project": 1,
+        "user8.project": 2,
+        "user2.project": 12
+      },
+      "user_expansion_milli": {
+        "user7.project": 3000,
+        "user1.project": 1000,
+        "user8.project": 2005,
+        "user2.project": 1979392
+      },
+      "user_job_counts": {
+        "user7.project": 3,
+        "user1.project": 1,
+        "user8.project": 2,
+        "user2.project": 12
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 16133,
+        "user1.project": 10305,
+        "user8.project": 8704,
+        "user2.project": 391
+      },
+      "user_wait_seconds": {
+        "user7.project": 11,
+        "user1.project": 0,
+        "user8.project": 19,
+        "user2.project": 25873
+      }
+    },
+    "2026-08-20": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 14000040
+          },
+          "user2.project": {
+            "seconds": 24624
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 3111120
+          },
+          "user2.project": {
+            "seconds": 24624
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 43210
+          },
+          "user2.project": {
+            "seconds": 342
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 4969150000
+          },
+          "user2.project": {
+            "seconds": 175104
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 13,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 16204
+        },
+        "user2.project": {
+          "seconds": 91
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 1
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 16204
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 1008,
+      "total_allocated_gpus": 14,
+      "total_expansion_milli": 1736665,
+      "total_runtime_seconds": 21947,
+      "total_wait_seconds": 22367,
+      "user_allocated_cpus": {
+        "user7.project": 144,
+        "user2.project": 864
+      },
+      "user_allocated_gpus": {
+        "user7.project": 2,
+        "user2.project": 12
+      },
+      "user_expansion_milli": {
+        "user7.project": 1000,
+        "user2.project": 1735665
+      },
+      "user_job_counts": {
+        "user7.project": 1,
+        "user2.project": 12
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 21605,
+        "user2.project": 342
+      },
+      "user_wait_seconds": {
+        "user7.project": 0,
+        "user2.project": 22367
+      }
+    },
+    "2026-08-21": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 19528776
+          },
+          "user2.project": {
+            "seconds": 13320
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 4339728
+          },
+          "user2.project": {
+            "seconds": 13320
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 60274
+          },
+          "user2.project": {
+            "seconds": 185
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 6931510000
+          },
+          "user2.project": {
+            "seconds": 94720
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 15,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 22604
+        },
+        "user2.project": {
+          "seconds": 53
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 2
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 22604
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 1224,
+      "total_allocated_gpus": 17,
+      "total_expansion_milli": 1441922,
+      "total_runtime_seconds": 30322,
+      "total_wait_seconds": 16336,
+      "user_allocated_cpus": {
+        "user7.project": 288,
+        "user2.project": 936
+      },
+      "user_allocated_gpus": {
+        "user7.project": 4,
+        "user2.project": 13
+      },
+      "user_expansion_milli": {
+        "user7.project": 2000,
+        "user2.project": 1439922
+      },
+      "user_job_counts": {
+        "user7.project": 2,
+        "user2.project": 13
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 30137,
+        "user2.project": 185
+      },
+      "user_wait_seconds": {
+        "user7.project": 2,
+        "user2.project": 16334
+      }
+    },
+    "2026-08-22": {
+      "components": {
+        "billing": {
+          "user2.project": {
+            "seconds": 108792
+          }
+        },
+        "cpu": {
+          "user2.project": {
+            "seconds": 108792
+          }
+        },
+        "gpu": {
+          "user2.project": {
+            "seconds": 1511
+          }
+        },
+        "memory": {
+          "user2.project": {
+            "seconds": 773632
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 15,
+      "num_requeue_events": 0,
+      "reports": {
+        "user2.project": {
+          "seconds": 381
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {},
+      "reservation_reports": {},
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 1080,
+      "total_allocated_gpus": 15,
+      "total_expansion_milli": 249584,
+      "total_runtime_seconds": 1511,
+      "total_wait_seconds": 5748,
+      "user_allocated_cpus": {
+        "user2.project": 1080
+      },
+      "user_allocated_gpus": {
+        "user2.project": 15
+      },
+      "user_expansion_milli": {
+        "user2.project": 249584
+      },
+      "user_job_counts": {
+        "user2.project": 15
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user2.project": 1511
+      },
+      "user_wait_seconds": {
+        "user2.project": 5748
+      }
+    },
+    "2026-08-23": {
+      "components": {
+        "billing": {
+          "user2.project": {
+            "seconds": 15386976
+          }
+        },
+        "cpu": {
+          "user2.project": {
+            "seconds": 3430080
+          }
+        },
+        "gpu": {
+          "user2.project": {
+            "seconds": 47640
+          }
+        },
+        "memory": {
+          "user2.project": {
+            "seconds": 5456618304
+          }
+        }
+      },
+      "is_complete": true,
+      "num_jobs": 16,
+      "num_requeue_events": 0,
+      "reports": {
+        "user2.project": {
+          "seconds": 17846
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 3
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user2.project": {
+            "seconds": 17793
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 2664,
+      "total_allocated_gpus": 37,
+      "total_expansion_milli": 393652,
+      "total_runtime_seconds": 6123,
+      "total_wait_seconds": 5932,
+      "user_allocated_cpus": {
+        "user2.project": 2664
+      },
+      "user_allocated_gpus": {
+        "user2.project": 37
+      },
+      "user_expansion_milli": {
+        "user2.project": 393652
+      },
+      "user_job_counts": {
+        "user2.project": 16
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user2.project": 6123
+      },
+      "user_wait_seconds": {
+        "user2.project": 5932
+      }
+    },
+    "2026-08-24": {
+      "components": {
+        "billing": {
+          "user7.project": {
+            "seconds": 9894312
+          },
+          "user1.project": {
+            "seconds": 4599504
+          },
+          "user2.project": {
+            "seconds": 3456
+          }
+        },
+        "cpu": {
+          "user7.project": {
+            "seconds": 2198736
+          },
+          "user1.project": {
+            "seconds": 1022112
+          },
+          "user2.project": {
+            "seconds": 3456
+          }
+        },
+        "gpu": {
+          "user7.project": {
+            "seconds": 30538
+          },
+          "user1.project": {
+            "seconds": 14196
+          },
+          "user2.project": {
+            "seconds": 48
+          }
+        },
+        "memory": {
+          "user7.project": {
+            "seconds": 3511870000
+          },
+          "user1.project": {
+            "seconds": 1632540000
+          },
+          "user2.project": {
+            "seconds": 24576
+          }
+        }
+      },
+      "is_complete": false,
+      "num_jobs": 7,
+      "num_requeue_events": 0,
+      "reports": {
+        "user7.project": {
+          "seconds": 11453
+        },
+        "user1.project": {
+          "seconds": 5324
+        },
+        "user2.project": {
+          "seconds": 14
+        }
+      },
+      "requeue_components": {},
+      "requeue_reports": {},
+      "requeue_state_usage": {},
+      "requeue_states": {},
+      "requeue_wait_seconds": 0,
+      "reservation_jobs": {
+        "interactive": 3
+      },
+      "reservation_reports": {
+        "interactive": {
+          "user7.project": {
+            "seconds": 11453
+          },
+          "user1.project": {
+            "seconds": 5324
+          }
+        }
+      },
+      "reservation_requeue_usage": {},
+      "total_allocated_cpus": 648,
+      "total_allocated_gpus": 9,
+      "total_expansion_milli": 1675281,
+      "total_runtime_seconds": 29567,
+      "total_wait_seconds": 24392,
+      "user_allocated_cpus": {
+        "user7.project": 288,
+        "user1.project": 72,
+        "user2.project": 288
+      },
+      "user_allocated_gpus": {
+        "user7.project": 4,
+        "user1.project": 1,
+        "user2.project": 4
+      },
+      "user_expansion_milli": {
+        "user7.project": 2000,
+        "user1.project": 1000,
+        "user2.project": 1672281
+      },
+      "user_job_counts": {
+        "user7.project": 2,
+        "user1.project": 1,
+        "user2.project": 4
+      },
+      "user_requeue_events": {},
+      "user_requeue_wait_seconds": {},
+      "user_runtime_seconds": {
+        "user7.project": 15296,
+        "user1.project": 14223,
+        "user2.project": 48
+      },
+      "user_wait_seconds": {
+        "user7.project": 3,
+        "user1.project": 0,
+        "user2.project": 24389
+      }
+    }
+  },
+  "users": {}
+}
+

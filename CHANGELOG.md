@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- **Slurm usage reports missed everything a requeued job consumed before its
+  final attempt.** `op-slurm` called `sacct` without `--duplicates`, which
+  returns only the most recent accounting record for each job id. A requeued job
+  has one record per attempt, each carrying only its own elapsed time, so every
+  attempt before the last was invisible. On a production account measured over a
+  single day this hid about a third of the account's real consumption; jobs whose
+  final attempt was cancelled before it ran were reported as having used nothing
+  at all, because the one record we saw had zero elapsed time and was discarded
+  as a non-consumer.
+
+### Added
+
+- **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
+  of superseded attempts separately from the usage it has always reported, so
+  the two can be told apart rather than merged:
+
+- **Expansion factor.** Usage reports now record each project's total wall-clock
+  runtime and the expansion factor of its jobs - queue time over runtime - so
+  that a project waiting a long time for a little work can be spotted. The
+  particular pattern of a job that queues for hours and then exits in seconds,
+  repeatedly, is what a user fighting a job that will not run looks like from
+  the outside.
+
+- **Mean job size.** Reports now record the cores and GPUs each job was
+  allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
+  per-user variants) - many small jobs against a few large ones. Usage cannot
+  answer this: the same core-seconds come from one job on a hundred cores or a
+  hundred jobs on one core, which is exactly the distinction being drawn.
+
+## [0.92.0] - 2026-08-21
+
 ### Added
 
 - **An example site portal** ([python/examples/site_portal/](python/examples/site_portal/)):
@@ -25,12 +58,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
   Nothing in it is Python-specific except the convenience of the module, so an
   equivalent in another language belongs alongside it.
-
 - **`AwardDetails()` with no arguments** gives an empty award to fill in with the
   setters, which is what code building one from scratch wants.
   `AwardDetails(json)` is unchanged - the default argument is exactly the `"{}"`
   that produced an empty award before, so no existing caller behaves differently.
-
 - **Structured errors on the wire.** A job's failure was a `String`, so every
   agent that wanted to *act* on one rather than log it had to parse prose - and
   crossing an agent boundary flattened whatever the failing agent had known. A
@@ -69,13 +100,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   message, with prose-parsing kept only as the fallback for an older peer, and
   `job.error_kind` exposes the raw kind for anything the class hierarchy does
   not cover.
-
 - **`ProjectStorageReport.to_storage_report()`**, the mirror of
   `ProjectUsageReport.to_usage_report()`. A portal answering
   `get_storage_reports` builds one project report at a time and has to lift each
   into a portal-level `StorageReport` before combining them; without this the
   path raised `AttributeError`.
-
 - **A typed error hierarchy in the `openportal` Python module**, replacing the
   hand-rolled classes and string parser that every portal implementation had to
   write for itself: `OpenPortalError` (deriving from `OSError`, so existing
@@ -97,7 +126,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   removed by prefix rather than by trimming a character set (which ate the start
   of any message beginning with those letters), and the message is no longer
   off-by-one for `OpenPortalError`.
-
 - **A specification of what a connected site portal must implement**
   ([docs/specifications/site-portal-api.md](docs/specifications/site-portal-api.md)):
   the requests that arrive on the bridge board, the exact result type each one must
@@ -106,10 +134,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   and the fact that identifiers name that portal rather than the local one. Written
   to be handed to someone connecting a new portal; `bridge-api.md` continues to
   specify the HTTP transport itself.
-
 - `remove_award` is accepted as a synonym for `remove_project`, completing the
   `*_award` spellings alongside `create_award` and `update_award`.
-
 - `freeipa-write-server`, `freeipa-replication-window` and
   `freeipa-concurrent-writes` options for `op-freeipa`,
   and [scripts/check-replication-conflicts.sh](scripts/check-replication-conflicts.sh)
@@ -134,7 +160,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   a re-enabled user would otherwise get back the access they had before rather than what
   they are entitled to now - the same reasoning `op-freeipa` applies. The `userdel`
   configuration option is gone, being unused.
-
 - **`op-localaccount` no longer creates the home directory** (`useradd -m` is dropped).
   Home directories belong to `op-filesystem`, which creates them and recycles rather
   than deletes them, and this matches `op-freeipa`, whose `user_add` likewise only
@@ -164,7 +189,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `OpenPortalOtherError`, because the kind-first path flattened everything it
   could not place; it now defers to the message in that case, which is what the
   older prose-only path always did.
-
 - **`AwardDetails.set_allowed_domains([])` meant the opposite of what it said.**
   The setter normalised an empty list to `None`, so the strictest setting a
   caller could ask for - permit nobody - silently became the most permissive
@@ -181,7 +205,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `clear_allowed_domains()` and passing `None` remain the ways to reach "no
   restriction". `from_json`, `to_json` and `merge` already preserved the empty
   list, so the setter was the only path that lost it.
-
 - **`update_award` could widen an allow-list but never narrow it.** `merge`
   took the union of the two lists, so a domain once granted could not be
   withdrawn and an empty list sent to a project that already had entries was a
@@ -194,18 +217,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   still changes nothing. The fields that accumulate on merge are `notes` (an
   audit trail) and `breakdown`, and they still do; `add_allowed_domain` remains
   the incremental path for a portal building a list up locally.
-
 - Documentation: `python-api.md` listed a `Status.expired()` that does not
   exist - expiry is not one of the six job states, and is read from
   `job.is_expired` - and omitted `Status.created()`, which does.
-
 - **The portal agent sent malformed error sentinels.** `ExpirationError{{}}` and
   `UnknownError{{}}` were written as plain string literals, where `{{` is not an
   escape — only `format!` treats it as one, which is why the neighbouring
   `RuntimeError{…}` was correct. Both reached the portal with doubled braces, so
   a portal matching the documented `ExpirationError{}` never matched. They now
   say what they are documented to say.
-
 - **OpenPortal was creating LDAP replication conflicts in multi-master FreeIPA
   topologies.** A site reported 67 `namingConflict` entries accumulated over 11
   months - 29 project groups, 19 users and their 19 server-generated private groups -
@@ -245,13 +265,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
   Every `freeipa-server` entry must name an individual master for this to hold: a VIP
   or a round-robin DNS alias is several masters behind one name.
-
 - **A 401 from FreeIPA could hang a job until its deadline.** The replay path
   reconnected - possibly to a different server - but reused the URL built from the
   original one, so it posted the new server's session cookie to the old server, which
   401s again. The URL is now rebuilt from the server actually being addressed, and the
   replay is bounded.
-
 - **An empty home directory stopped a recycled one from being restored.** `create_dir`
   treated any existing directory as the finished article, so an account agent that
   creates a home when it creates the account left `op-filesystem` looking at an empty
@@ -265,7 +283,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   non-recursive `remove_dir`; `EXPECTED_SKEL_FILES` names the unsurprising ones so
   anything else is logged loudly rather than passing silently. Nothing here can remove a
   subtree even if those checks are ever wrong.
-
 - **A directory restored from `.recycle` kept its old ownership.** Restoring moved the
   directory back and stopped there, so a user volume restored for an account that had
   been deleted and recreated came back owned by the *old* uid - which that user no
@@ -281,7 +298,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   walking a tree of unbounded size does not belong inside a job with an answering
   deadline, so the warning names both id pairs and says plainly that a recursive chown
   may still be needed.
-
 - **`op-filesystem` intermittently failed to resolve users and groups that exist.**
   Jobs failed with `Could not find a group called <name>` or `Could not search for
   group <name>: EIO: I/O error` for groups that `getent group` on the same node
@@ -311,7 +327,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   rather than silently resolving names through some other program - a `getent`
   appearing or disappearing under a running agent means something is wrong with the
   host, not that a different binary should be picked up.
-
 - **A name that could not be looked up was reported as a name that does not exist.**
   The two are now distinguished. A genuine absence - every source on the host was asked
   and none knows the name - fails immediately and says so. An indeterminate lookup
@@ -324,7 +339,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `op-filesystem`'s Lustre quota engine had a second, separate copy of this logic
   (`id -u` and `getent group`, with a `/etc/group` fallback that treated a local miss
   as authoritative). It now shares the one implementation.
-
 - **A portal could not report its members.** `get_users` returns each member's email
   address as the `UserMapping` local user - the portal-level equivalent of a Unix
   username - but mapping validation rejected `@`, so every such mapping failed to
@@ -338,7 +352,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   an RPC parameter. Nothing that reaches a Unix account, Slurm, FreeIPA or a
   filesystem path accepts the wider charset. `local_group` is unchanged: it names a
   Unix group at every layer.
-
 - Documentation errors in [docs/specifications/json-types.md](docs/specifications/json-types.md):
   `get_projects` returns `Vec<ProjectMapping>` (not `Vec<ProjectDetails>`), `get_users`
   returns `Vec<UserMapping>` (not `Vec<UserIdentifier>`), and `get_project` returns
@@ -2352,6 +2365,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.92.0]: https://github.com/isambard-sc/openportal/releases/tag/0.92.0
 [0.91.0]: https://github.com/isambard-sc/openportal/releases/tag/0.91.0
 [0.90.0]: https://github.com/isambard-sc/openportal/releases/tag/0.90.0
 [0.32.2]: https://github.com/isambard-sc/openportal/releases/tag/0.32.2

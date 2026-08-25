@@ -1025,6 +1025,250 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
     Ok(())
 }
 
+///
+/// The totals accumulated alongside a `DailyProjectUsageReport`, kept so that
+/// what the report says about itself can be checked against what we counted.
+///
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReportTotals {
+    usage: u64,
+    num_jobs: u64,
+    wait_seconds: u64,
+    runtime_seconds: u64,
+    requeue_usage: u64,
+    requeue_events: u64,
+    requeue_wait_seconds: u64,
+}
+
+///
+/// Accumulate one Slurm accounting record into `report`.
+///
+/// A record describing an attempt superseded by a requeue goes into the
+/// report's requeue figures; every other record goes into the figures we have
+/// always reported. Keeping the two apart is the whole point of requeue
+/// accounting - see `docs/plans/slurm-requeue-accounting-design.md`.
+///
+/// Usage is accumulated for every record overlapping the window, since the
+/// record has already been clipped to it. Job and event *counts*, and the wait
+/// times that go with them, are accumulated only for records that started
+/// inside the window, so that an attempt spanning several windows is counted
+/// once rather than once per window.
+///
+fn record_job(
+    report: &mut DailyProjectUsageReport,
+    job: &SlurmJob,
+    window_start: &chrono::DateTime<Utc>,
+    totals: &mut ReportTotals,
+) {
+    let usage = job.billed_node_seconds();
+    let wait_seconds = job.wait_time().num_seconds().max(0) as u64;
+
+    // A record that is still running when the window ends reappears in the next
+    // window, so counting a *job* needs this guard or a long job is counted
+    // once per window it touches.
+    let started_in_window = job.original_start_time() >= window_start;
+
+    if job.is_requeued_attempt() {
+        let state = job.terminal_state();
+
+        report.add_requeue_usage(job.user(), Usage::new(usage));
+        report.add_requeue_state_usage(state, Usage::new(usage));
+        totals.requeue_usage = totals.requeue_usage.saturating_add(usage);
+
+        report.add_requeue_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+        report.add_requeue_component_usage("memory", job.user(), Usage::new(job.memory_seconds()));
+        report.add_requeue_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+        report.add_requeue_component_usage(
+            "billing",
+            job.user(),
+            Usage::new(job.billing_seconds()),
+        );
+
+        // A requeue event needs no such guard, and applying one is actively
+        // wrong: a superseded attempt is classified `Requeued` in *at most one*
+        // window, so counting every one of them counts each event exactly once.
+        //
+        // Why at most one. A record is only returned for windows it overlaps,
+        // so it can be seen at all only up to the window holding its end. It is
+        // only classified `Requeued` when a later attempt is in the same
+        // response, and a later attempt cannot start before this one ended - so
+        // the window must also reach the successor's start, which is at or
+        // after this record's end. The two conditions meet in exactly one
+        // window: the one holding the end, which is the moment of the requeue.
+        //
+        // Requiring the record to have *started* in that window as well asked
+        // for something almost no real requeue can satisfy. The attempts that
+        // get requeued are the long ones - a job near its wall-clock limit -
+        // so the requeue lands on the day after the attempt began, and the two
+        // conditions could not both hold. The count came out as very nearly
+        // zero while the usage it was counting was correct.
+        //
+        // The one case still missed is a requeue within seconds of a window
+        // boundary, where the successor is submitted on the far side of it and
+        // the two records never appear in one response. The count is a lower
+        // bound to that extent; nothing is ever counted twice.
+        report.add_requeue_events(job.user(), state, 1);
+        report.add_requeue_wait_seconds(job.user(), wait_seconds);
+        totals.requeue_events = totals.requeue_events.saturating_add(1);
+        totals.requeue_wait_seconds = totals.requeue_wait_seconds.saturating_add(wait_seconds);
+
+        // A superseded attempt occupied the reservation's nodes exactly as its
+        // replacement did, so it counts towards what the reservation held. The
+        // discarded share is recorded alongside it so the two can be separated.
+        if job.is_reserved() {
+            report.add_reservation_usage(job.reservation(), job.user(), Usage::new(usage));
+            report.add_reservation_requeue_usage(job.reservation(), Usage::new(usage));
+        }
+
+        return;
+    }
+
+    report.add_usage(job.user(), Usage::new(usage));
+    totals.usage = totals.usage.saturating_add(usage);
+
+    report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
+    report.add_component_usage("memory", job.user(), Usage::new(job.memory_seconds()));
+    report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
+    report.add_component_usage("billing", job.user(), Usage::new(job.billing_seconds()));
+
+    if job.is_reserved() {
+        report.add_reservation_usage(job.reservation(), job.user(), Usage::new(usage));
+    }
+
+    if started_in_window {
+        report.add_jobs(job.user(), 1);
+        report.add_wait_seconds(job.user(), wait_seconds);
+        totals.num_jobs = totals.num_jobs.saturating_add(1);
+        totals.wait_seconds = totals.wait_seconds.saturating_add(wait_seconds);
+
+        // The expansion factor is queue time over runtime, so it uses the job's
+        // whole runtime rather than the part that fell inside this window - the
+        // ratio is a property of the job, like the wait it is divided into.
+        let runtime_seconds = job.total_duration().num_seconds().max(0) as u64;
+        report.add_expansion(job.user(), wait_seconds, runtime_seconds);
+        totals.runtime_seconds = totals.runtime_seconds.saturating_add(runtime_seconds);
+
+        // The cores and GPUs the job actually got, not what it asked for - one
+        // job's worth however long it ran, so the mean describes the shape of
+        // the jobs rather than what the machine was busy with.
+        report.add_job_size(job.user(), job.cpus(), job.gpus());
+
+        if job.is_reserved() {
+            // counted as `num_jobs` is, so a job spanning several windows is one
+            // job in the reservation rather than one per window
+            report.add_reservation_jobs(job.reservation(), 1);
+        }
+    }
+}
+
+///
+/// Report a node that Slurm blamed for losing a job.
+///
+/// This is deliberately loud: a node failure destroys a user's work, and on a
+/// requeued job it is the difference between "the project spent this" and "the
+/// site lost this", which is exactly what a charging dispute turns on. Site
+/// monitoring picks these up.
+///
+/// Called only where a fresh `sacct` response has just been parsed, never when
+/// replaying the cache, so that re-reading a cached hour does not re-report a
+/// failure that has already been reported.
+///
+fn report_node_failures(jobs: &[SlurmJob], project: &ProjectMapping) {
+    for job in jobs {
+        if job.terminal_state() != "NODE_FAIL" {
+            continue;
+        }
+
+        match job.failed_node().is_empty() {
+            true => tracing::error!(
+                "Node failure lost job {} of project {} (user {}) after {} seconds \
+                 (states: {}). Slurm did not name the node.",
+                job.id(),
+                project.project(),
+                job.user(),
+                job.duration().num_seconds(),
+                job.states().join(", ")
+            ),
+            false => tracing::error!(
+                "Node failure on {} lost job {} of project {} (user {}) after {} seconds \
+                 (states: {}).",
+                job.failed_node(),
+                job.id(),
+                project.project(),
+                job.user(),
+                job.duration().num_seconds(),
+                job.states().join(", ")
+            ),
+        }
+    }
+}
+
+///
+/// Warn if the report disagrees with what we counted while building it. A
+/// mismatch means a bug in the accumulation above, not bad data from Slurm.
+///
+fn check_counter_consistency(
+    report: &DailyProjectUsageReport,
+    totals: &ReportTotals,
+    project: &ProjectMapping,
+    day: &greatwestern::grammar::Date,
+) {
+    if report.total_runtime_seconds() != totals.runtime_seconds {
+        tracing::warn!(
+            "Runtime inconsistency for project {} on {}: local counter ({}s) differs from \
+             report total ({}s). This may indicate a bug.",
+            project.project(),
+            day,
+            totals.runtime_seconds,
+            report.total_runtime_seconds()
+        );
+    }
+
+    if report.num_jobs() != totals.num_jobs || report.total_wait_seconds() != totals.wait_seconds {
+        tracing::warn!(
+            "Job count/wait time inconsistency for project {} on {}: \
+             local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
+             This may indicate a bug.",
+            project.project(),
+            day,
+            totals.num_jobs,
+            totals.wait_seconds,
+            report.num_jobs(),
+            report.total_wait_seconds()
+        );
+    }
+
+    if report.num_requeue_events() != totals.requeue_events
+        || report.requeue_wait_seconds() != totals.requeue_wait_seconds
+        || report.total_requeue_usage().seconds() != totals.requeue_usage
+    {
+        tracing::warn!(
+            "Requeue accounting inconsistency for project {} on {}: \
+             local counters ({} events, {}s wait, {}s usage) differ from report totals \
+             ({} events, {}s wait, {}s usage). This may indicate a bug.",
+            project.project(),
+            day,
+            totals.requeue_events,
+            totals.requeue_wait_seconds,
+            totals.requeue_usage,
+            report.num_requeue_events(),
+            report.requeue_wait_seconds(),
+            report.total_requeue_usage().seconds()
+        );
+    }
+
+    // the per-state maps must account for every event and every second of
+    // requeue usage - an unrecognised Slurm state is bucketed, never dropped
+    if !report.is_consistent() {
+        tracing::warn!(
+            "Report for project {} on {} is internally inconsistent - its per-user or \
+             per-state maps do not sum to its own totals. This may indicate a bug.",
+            project.project(),
+            day
+        );
+    }
+}
+
 async fn get_hourly_report(
     expires: &chrono::DateTime<Utc>,
     project: &ProjectMapping,
@@ -1036,9 +1280,7 @@ async fn get_hourly_report(
 ) -> Result<DailyProjectUsageReport, Error> {
     let now = chrono::Utc::now();
     let mut daily_report = DailyProjectUsageReport::default();
-    let mut total_usage: u64 = 0;
-    let mut num_jobs: u64 = 0;
-    let mut total_wait_seconds: u64 = 0;
+    let mut totals = ReportTotals::default();
 
     // we need to get the report hour by hour from slurm, as users may have
     // run very large numbers of jobs in a day, and sacct may time out
@@ -1053,29 +1295,8 @@ async fn get_hourly_report(
 
             let hour_start_time = hour.start_time().and_utc();
 
-            for job in hourly_report {
-                total_usage += job.billed_node_seconds();
-                daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
-
-                daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
-                daily_report.add_component_usage(
-                    "memory",
-                    job.user(),
-                    Usage::new(job.memory_seconds()),
-                );
-                daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
-                daily_report.add_component_usage(
-                    "billing",
-                    job.user(),
-                    Usage::new(job.billing_seconds()),
-                );
-
-                if job.original_start_time() >= &hour_start_time {
-                    num_jobs += 1;
-                    total_wait_seconds += job.wait_time().num_seconds() as u64;
-                    daily_report.add_jobs(job.user(), 1);
-                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
-                }
+            for job in &hourly_report {
+                record_job(&mut daily_report, job, &hour_start_time, &mut totals);
             }
 
             continue;
@@ -1114,6 +1335,10 @@ async fn get_hourly_report(
                 "--noconvert".to_string(),
                 "--allocations".to_string(),
                 "--allusers".to_string(),
+                // one record per attempt, not just the last one - without this
+                // everything a requeued job consumed before its final attempt
+                // is invisible. `get_consumers` classifies them.
+                "--duplicates".to_string(),
                 format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
                 format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
                 format!("--account={}", account.name()),
@@ -1147,66 +1372,35 @@ async fn get_hourly_report(
             }
         }
 
-        for job in jobs {
-            total_usage += job.billed_node_seconds();
-            daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+        report_node_failures(&jobs, project);
 
-            daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
-            daily_report.add_component_usage(
-                "memory",
-                job.user(),
-                Usage::new(job.memory_seconds()),
-            );
-            daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
-            daily_report.add_component_usage(
-                "billing",
-                job.user(),
-                Usage::new(job.billing_seconds()),
-            );
-
-            // only count wait time for jobs that started in this hour
-            if job.original_start_time() >= &start_time {
-                num_jobs += 1;
-                total_wait_seconds += job.wait_time().num_seconds() as u64;
-                daily_report.add_jobs(job.user(), 1);
-                daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
-            }
+        for job in &jobs {
+            record_job(&mut daily_report, job, &start_time, &mut totals);
         }
     }
 
     tracing::debug!(
-        "Got {} jobs consuming {} seconds for project {} on {}",
-        num_jobs,
-        total_usage,
+        "Got {} jobs consuming {} seconds for project {} on {}, plus {} requeue events \
+         consuming {} seconds",
+        totals.num_jobs,
+        totals.usage,
         project.project(),
-        day
+        day,
+        totals.requeue_events,
+        totals.requeue_usage
     );
 
     // runtime consistency check: local shadow counters must match the report's scalar totals
-    if daily_report.num_jobs() != num_jobs
-        || daily_report.total_wait_seconds() != total_wait_seconds
-    {
-        tracing::warn!(
-            "Job count/wait time inconsistency for project {} on {}: \
-             local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
-             This may indicate a bug.",
-            project.project(),
-            day,
-            num_jobs,
-            total_wait_seconds,
-            daily_report.num_jobs(),
-            daily_report.total_wait_seconds()
-        );
-    }
+    check_counter_consistency(&daily_report, &totals, project, day);
 
     // check that the total usage in the daily report matches the total usage calculated manually
-    if daily_report.total_usage().seconds() != total_usage {
+    if daily_report.total_usage().seconds() != totals.usage {
         // it doesn't - we don't want to mark this as complete or cache it, because
         // this points to some error when generating the values...
         tracing::error!(
             "Total usage in daily report does not match total usage calculated manually: {} != {}",
             daily_report.total_usage().seconds(),
-            total_usage
+            totals.usage
         );
     } else if day.day().end_time().and_utc() < now {
         // we can set this day as completed if it is in the past
@@ -1284,6 +1478,8 @@ async fn get_daily_report(
             "--noconvert".to_string(),
             "--allocations".to_string(),
             "--allusers".to_string(),
+            // see the note in `get_hourly_report` - one record per attempt
+            "--duplicates".to_string(),
             format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
             format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
             format!("--account={}", account.name()),
@@ -1310,62 +1506,25 @@ async fn get_daily_report(
             );
 
             let mut daily_report = DailyProjectUsageReport::default();
-            let mut total_usage: u64 = 0;
-            let mut num_jobs_started: u64 = 0;
-            let mut total_wait_seconds: u64 = 0;
+            let mut totals = ReportTotals::default();
 
-            for job in jobs {
-                total_usage += job.billed_node_seconds();
-                daily_report.add_usage(job.user(), Usage::new(job.billed_node_seconds()));
+            report_node_failures(&jobs, project);
 
-                // only count jobs and wait time for jobs that started in this day
-                if job.original_start_time() >= &start_time {
-                    num_jobs_started += 1;
-                    total_wait_seconds += job.wait_time().num_seconds() as u64;
-                    daily_report.add_jobs(job.user(), 1);
-                    daily_report.add_wait_seconds(job.user(), job.wait_time().num_seconds() as u64);
-                }
-
-                // also add in all of the components
-                daily_report.add_component_usage("cpu", job.user(), Usage::new(job.cpu_seconds()));
-                daily_report.add_component_usage(
-                    "memory",
-                    job.user(),
-                    Usage::new(job.memory_seconds()),
-                );
-                daily_report.add_component_usage("gpu", job.user(), Usage::new(job.gpu_seconds()));
-                daily_report.add_component_usage(
-                    "billing",
-                    job.user(),
-                    Usage::new(job.billing_seconds()),
-                );
+            for job in &jobs {
+                record_job(&mut daily_report, job, &start_time, &mut totals);
             }
 
             // runtime consistency check
-            if daily_report.num_jobs() != num_jobs_started
-                || daily_report.total_wait_seconds() != total_wait_seconds
-            {
-                tracing::warn!(
-                    "Job count/wait time inconsistency for project {} on {}: \
-                     local counters ({} jobs, {}s wait) differ from report totals ({} jobs, {}s wait). \
-                     This may indicate a bug.",
-                    project.project(),
-                    day,
-                    num_jobs_started,
-                    total_wait_seconds,
-                    daily_report.num_jobs(),
-                    daily_report.total_wait_seconds()
-                );
-            }
+            check_counter_consistency(&daily_report, &totals, project, day);
 
             // check that the total usage in the daily report matches the total usage calculated manually
-            if daily_report.total_usage().seconds() != total_usage {
+            if daily_report.total_usage().seconds() != totals.usage {
                 // it doesn't - we don't want to mark this as complete or cache it, because
                 // this points to some error when generating the values...
                 tracing::error!(
                     "Total usage in daily report does not match total usage calculated manually: {} != {}",
                     daily_report.total_usage().seconds(),
-                    total_usage
+                    totals.usage
                 );
             } else if day.day().end_time().and_utc() < now {
                 // we can set this day as completed if it is in the past
@@ -1943,5 +2102,333 @@ pub async fn cancel_pending_project_jobs(
             // Don't fail the whole operation if scancel fails - log the error and continue
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slurm::test_fixture::*;
+    use crate::slurm::Attempt;
+
+    /// Build a daily report the way `get_hourly_report` and `get_daily_report`
+    /// do, over the records `sacct` would return for one window.
+    fn report_for(
+        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+    ) -> (DailyProjectUsageReport, ReportTotals) {
+        let (start, _) = window;
+        let mut report = DailyProjectUsageReport::default();
+        let mut totals = ReportTotals::default();
+
+        for job in consumers_for(window) {
+            record_job(&mut report, &job, &start, &mut totals);
+        }
+
+        (report, totals)
+    }
+
+    #[test]
+    fn test_a_requeue_is_counted_on_the_day_it_happened_not_the_day_it_started() {
+        // The regression this test exists for. A requeue event was only counted
+        // if the superseded attempt had also *started* inside the window, a
+        // guard copied from the job count without noticing that the two need
+        // opposite treatment. The attempts that get requeued are the long ones,
+        // so the requeue almost always falls on the day after the attempt
+        // began, and the guard could almost never be satisfied: on real data
+        // the event count came out as 1 where there were several, while the
+        // usage those events accounted for was correct throughout.
+        //
+        // Job 900 is that shape - an attempt running past midnight, requeued on
+        // day two, replaced by an attempt that never ran.
+        let (day_one_report, _) = report_for(day_one());
+        let (day_two_report, _) = report_for(day_two());
+
+        // day one cannot see the requeue: the successor does not exist yet, so
+        // the attempt is still the job's last one, and its usage is reported as
+        // ordinary usage - exactly as default sacct reported it
+        assert_eq!(day_one_report.requeue_events_for_user("user_six"), 0);
+        assert_eq!(day_one_report.requeue_usage("user_six"), Usage::default());
+        assert_eq!(day_one_report.usage("user_six"), Usage::new(14400));
+
+        // day two sees it, and counts it, even though the attempt started the
+        // day before
+        assert_eq!(day_two_report.requeue_events_for_user("user_six"), 1);
+        assert_eq!(day_two_report.requeue_usage("user_six"), Usage::new(28800));
+
+        // counted once across the two days, not twice and not never
+        assert_eq!(
+            day_one_report.requeue_events_for_user("user_six")
+                + day_two_report.requeue_events_for_user("user_six"),
+            1
+        );
+    }
+
+    #[test]
+    fn test_a_job_is_counted_once_however_many_windows_it_spans() {
+        // The other half of the asymmetry: a job *does* need the guard the
+        // requeue count must not have. Job 900's attempt is the job's last one
+        // on day one and a superseded one on day two, and it must be counted as
+        // a job exactly once - on the day it started.
+        let (day_one_report, _) = report_for(day_one());
+        let (day_two_report, _) = report_for(day_two());
+
+        assert_eq!(day_one_report.num_jobs_for_user("user_six"), 1);
+        assert_eq!(day_two_report.num_jobs_for_user("user_six"), 0);
+    }
+
+    #[test]
+    fn test_the_days_report_splits_usage_without_losing_or_repeating_any() {
+        let (report, totals) = report_for(day_one());
+
+        // what we have always reported, unchanged by requeue accounting
+        assert_eq!(report.total_usage(), Usage::new(28800));
+        assert_eq!(report.num_jobs(), 9);
+
+        // and what was invisible before
+        assert_eq!(report.total_requeue_usage(), Usage::new(20700));
+        assert_eq!(report.num_requeue_events(), 7);
+        assert_eq!(
+            report.total_usage_including_requeues(),
+            Usage::new(28800 + 20700)
+        );
+
+        // the shadow counters agree with the report's own totals, and the
+        // report agrees with itself
+        assert_eq!(totals.usage, report.total_usage().seconds());
+        assert_eq!(totals.requeue_usage, report.total_requeue_usage().seconds());
+        assert_eq!(totals.requeue_events, report.num_requeue_events());
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_requeue_events_are_attributed_to_the_state_that_interrupted_them() {
+        // Which state did the interrupting is the difference between "the
+        // project spent this" and "the site lost this", so it has to survive
+        // into the report rather than being flattened into one requeue total.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(
+            report.requeue_states(),
+            vec![
+                ("NODE_FAIL".to_string(), 2),
+                ("OTHER".to_string(), 1),
+                ("PREEMPTED".to_string(), 1),
+                ("REQUEUED".to_string(), 3),
+            ]
+        );
+
+        // the per-state maps account for every event and every second
+        assert_eq!(
+            report
+                .requeue_states()
+                .iter()
+                .map(|(_, count)| count)
+                .sum::<u64>(),
+            report.num_requeue_events()
+        );
+        assert_eq!(
+            report
+                .requeue_states()
+                .iter()
+                .map(|(state, _)| report.requeue_usage_in_state(state))
+                .sum::<Usage>(),
+            report.total_requeue_usage()
+        );
+    }
+
+    #[test]
+    fn test_the_three_wait_figures_are_each_exact() {
+        // A client can ask for the wait excluding requeues (what it always
+        // got), the wait per requeue, or the total wait per job including every
+        // attempt - and none of the three double counts, because a record is
+        // either a job's last attempt in a window or a superseded one.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(report.total_wait_seconds(), 66480);
+        assert_eq!(report.requeue_wait_seconds(), 21000);
+
+        assert_eq!(report.average_wait_seconds(), 66480 / 9);
+        assert_eq!(report.average_requeue_wait_seconds(), 21000 / 7);
+        assert_eq!(
+            report.average_wait_seconds_including_requeues(),
+            (66480 + 21000) / 9
+        );
+    }
+
+    #[test]
+    fn test_the_mean_job_size_comes_from_what_slurm_allocated() {
+        // The fixture's jobs each hold a whole 128-core node with no GPUs, so
+        // the mean job size is 128 cores - and it is recorded once per job,
+        // regardless of how many attempts that job took.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(report.num_jobs(), 9);
+        assert_eq!(report.total_allocated_cpus(), 9 * 128);
+        assert_eq!(report.average_cpus_per_job(), 128.0);
+        assert_eq!(report.average_gpus_per_job(), 0.0);
+
+        // job 300 took three attempts and is still one 128-core job
+        assert_eq!(report.average_cpus_per_job_for_user("user_two"), 128.0);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_the_expansion_factor_uses_the_whole_job_not_the_windowed_part() {
+        // Both halves of the ratio are properties of the job rather than of the
+        // window it is reported in, so a job running past midnight must not be
+        // recorded as having a runtime of "until the window closed" - that would
+        // inflate the factor for exactly the long jobs it should reassure about.
+        //
+        // Job 900's attempt ran for twelve hours from 20:00 on day one, so four
+        // of them fall inside day one. It waited twelve hours to start.
+        let (report, totals) = report_for(day_one());
+
+        // the runtime counted is the whole twelve hours, not the four
+        assert_eq!(report.runtime_seconds_for_user("user_six"), 43200);
+        assert_eq!(totals.runtime_seconds, report.total_runtime_seconds());
+
+        // it waited as long as it ran, so 86400 of turnaround over 43200 of
+        // runtime - had the runtime been clipped to the four hours inside day
+        // one, the same job would have scored 4.0
+        assert!((report.expansion_factor_for_user("user_six") - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_only_the_jobs_counted_as_jobs_contribute_an_expansion_factor() {
+        // The mean needs a denominator it agrees with, so the population is
+        // exactly `num_jobs` - one job, once, in the window it started in. A
+        // superseded attempt has its own wait recorded as requeue wait instead.
+        let (day_one_report, _) = report_for(day_one());
+        let (day_two_report, _) = report_for(day_two());
+
+        // job 900 is counted on day one, where it started
+        assert!(day_one_report.runtime_seconds_for_user("user_six") > 0);
+
+        // on day two the same attempt is a superseded one, so it contributes no
+        // expansion factor there - it is not a job that started that day
+        assert_eq!(day_two_report.runtime_seconds_for_user("user_six"), 0);
+        assert_eq!(day_two_report.average_expansion_factor(), 0.0);
+
+        // and the report agrees with itself
+        assert!(day_one_report.is_consistent());
+        assert!(day_two_report.is_consistent());
+    }
+
+    #[test]
+    fn test_the_days_expansion_factors_are_reported_both_ways() {
+        let (report, _) = report_for(day_one());
+
+        // nine jobs, each contributing its own ratio
+        assert_eq!(report.num_jobs(), 9);
+        assert!(report.average_expansion_factor() > 0.0);
+        assert!(report.aggregate_expansion_factor() > 0.0);
+
+        // the two differ, which is the reason for carrying both: the mean is
+        // moved by the short jobs and the aggregate by the long ones
+        assert!(
+            (report.average_expansion_factor() - report.aggregate_expansion_factor()).abs() > 1e-9
+        );
+    }
+
+    #[test]
+    fn test_reservation_usage_counts_every_attempt_that_held_the_nodes() {
+        // A reservation's occupancy is physical: a superseded attempt held its
+        // nodes exactly as the replacement did, so both count towards what went
+        // into the reservation. The discarded share is carried alongside so the
+        // two can still be separated.
+        let (report, _) = report_for(day_one());
+
+        // job 300 ran in gpu_bench: 300s completed, plus 1800s and 900s of node
+        // failures that occupied the reservation before it
+        assert_eq!(report.reservation_usage("gpu_bench"), Usage::new(3000));
+        assert_eq!(
+            report.reservation_requeue_usage("gpu_bench"),
+            Usage::new(2700)
+        );
+
+        // jobs 100 and 200 ran in maintenance_test: 3600 + 1800 completed, plus
+        // 3600 preempted
+        assert_eq!(
+            report.reservation_usage("maintenance_test"),
+            Usage::new(9000)
+        );
+        assert_eq!(
+            report.reservation_requeue_usage("maintenance_test"),
+            Usage::new(3600)
+        );
+
+        // job 400's two attempts ran under two *instances* of `interactive`,
+        // which is one reservation as far as a report is concerned: 1800s
+        // discarded plus the 600s that finished
+        assert_eq!(report.reservation_usage("interactive"), Usage::new(2400));
+        assert_eq!(
+            report.reservation_requeue_usage("interactive"),
+            Usage::new(1800)
+        );
+
+        assert_eq!(
+            report.reservations(),
+            vec!["gpu_bench", "interactive", "maintenance_test"]
+        );
+        assert!(report.has_reservations());
+    }
+
+    #[test]
+    fn test_reservation_jobs_are_counted_like_jobs_not_like_records() {
+        let (report, _) = report_for(day_one());
+
+        // job 300's three records are one job, in the window it started in
+        assert_eq!(report.reservation_jobs("gpu_bench"), 1);
+        // jobs 100 and 200
+        assert_eq!(report.reservation_jobs("maintenance_test"), 2);
+
+        // job 400 is one job however many reservation instances its attempts
+        // ran under
+        assert_eq!(report.reservation_jobs("interactive"), 1);
+    }
+
+    #[test]
+    fn test_reserved_and_unreserved_usage_partition_the_days_consumption() {
+        // Reservation usage is a subset of everything consumed, so the two
+        // complement each other within the true total rather than within the
+        // reported one - the reservation figures count superseded attempts.
+        let (report, _) = report_for(day_one());
+
+        assert_eq!(report.total_reservation_usage(), Usage::new(14400));
+        assert_eq!(
+            report.total_reservation_usage() + report.usage_outside_reservations(),
+            report.total_usage_including_requeues()
+        );
+
+        // a reservation cannot hold more than the day consumed
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn test_a_day_with_no_reservations_records_none() {
+        // Day two holds only job 900, which ran outside any reservation - the
+        // overwhelmingly common case.
+        let (report, _) = report_for(day_two());
+
+        assert!(!report.has_reservations());
+        assert!(report.reservations().is_empty());
+        assert_eq!(report.total_reservation_usage(), Usage::default());
+        assert_eq!(
+            report.usage_outside_reservations(),
+            report.total_usage_including_requeues()
+        );
+    }
+
+    #[test]
+    fn test_a_zero_duration_final_attempt_leaves_the_base_figure_alone() {
+        // Job 500 ran for two hours, was requeued, and its replacement was
+        // cancelled before it ran. Default sacct returned only that
+        // zero-elapsed replacement, so the job was reported as having consumed
+        // nothing - and it still is, in the figure that has to stay unchanged.
+        // All of it is in the requeue figure instead.
+        let jobs = consumers_for(day_one());
+
+        assert_eq!(usage_of(&jobs, 500, Attempt::Base), 0);
+        assert_eq!(usage_of(&jobs, 500, Attempt::Requeued), 7200);
     }
 }

@@ -3143,6 +3143,15 @@ impl ProjectUsageReport {
         Ok(self.0.total_runtime_seconds())
     }
 
+    /// How many jobs the runtime and expansion figures were accumulated over -
+    /// the denominator for the means derived from them. Not the same as
+    /// `num_jobs`: a job still running when the window closed is counted as a
+    /// job but has no runtime to contribute.
+    #[getter]
+    fn expansion_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.expansion_jobs())
+    }
+
     /// The mean runtime of a job, in seconds - the figure that gives a wait its
     /// meaning. Eleven hours of queueing says one thing beside a job that runs
     /// for a day and quite another beside one that runs for five minutes.
@@ -4014,6 +4023,15 @@ impl DailyProjectUsageReport {
     #[getter]
     fn total_runtime_seconds(&self) -> PyResult<u64> {
         Ok(self.0.total_runtime_seconds())
+    }
+
+    /// How many jobs the runtime and expansion figures were accumulated over -
+    /// the denominator for the means derived from them. Not the same as
+    /// `num_jobs`: a job still running when the window closed is counted as a
+    /// job but has no runtime to contribute.
+    #[getter]
+    fn expansion_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.expansion_jobs())
     }
 
     /// The mean runtime of a job, in seconds - the figure that gives a wait its

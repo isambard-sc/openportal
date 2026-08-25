@@ -560,6 +560,20 @@ pub struct DailyProjectUsageReport {
     /// Scalar total — equals sum of user_runtime_seconds when populated.
     #[serde(default, skip_serializing_if = "is_zero")]
     total_runtime_seconds: u64,
+    // The denominator for the two figures above, and deliberately not
+    // `num_jobs`. A job whose runtime is not yet known - one still running when
+    // the window was closed - is counted as a job and contributes no runtime,
+    // so dividing by `num_jobs` would average a sum over a population it was
+    // never summed across, quietly dragging every mean towards zero. Keeping
+    // the count that the sums were actually accumulated over makes the
+    // denominator answer the same question as the numerator.
+    /// Per-user count of the jobs that contributed a runtime and an expansion
+    /// factor. Empty when reading data from older instances.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    user_expansion_jobs: HashMap<String, u64>,
+    /// Scalar total — equals sum of user_expansion_jobs when populated.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    num_expansion_jobs: u64,
 
     // ---- Job size -----------------------------------------------------------
     //
@@ -940,6 +954,33 @@ impl DailyProjectUsageReport {
 
         accumulate(&mut self.user_runtime_seconds, user, runtime_seconds);
         self.total_runtime_seconds = self.total_runtime_seconds.saturating_add(runtime_seconds);
+
+        accumulate(&mut self.user_expansion_jobs, user, 1);
+        self.num_expansion_jobs = self.num_expansion_jobs.saturating_add(1);
+    }
+
+    ///
+    /// How many jobs the runtime and expansion figures were accumulated over -
+    /// the denominator for every mean derived from them.
+    ///
+    /// Not the same as `num_jobs`: a job still running when the window closed
+    /// has no runtime to record and contributes to one but not the other.
+    /// Falls back to `num_jobs` for a report written before this was counted,
+    /// where the two populations were the same by construction.
+    ///
+    pub fn expansion_jobs(&self) -> u64 {
+        match self.num_expansion_jobs {
+            0 => self.num_jobs,
+            counted => counted,
+        }
+    }
+
+    /// `expansion_jobs` for one local user.
+    pub fn expansion_jobs_for_user(&self, user: &str) -> u64 {
+        match self.user_expansion_jobs.get(user).copied().unwrap_or(0) {
+            0 => self.num_jobs_for_user(user),
+            counted => counted,
+        }
     }
 
     ///
@@ -1047,14 +1088,14 @@ impl DailyProjectUsageReport {
     /// mean something: eleven hours of queueing says one thing beside a job that
     /// runs for a day and quite another beside one that runs for five minutes.
     pub fn average_runtime_seconds(&self) -> u64 {
-        match self.num_jobs {
+        match self.expansion_jobs() {
             0 => 0,
             n => self.total_runtime_seconds / n,
         }
     }
 
     pub fn average_runtime_seconds_for_user(&self, user: &str) -> u64 {
-        match self.num_jobs_for_user(user) {
+        match self.expansion_jobs_for_user(user) {
             0 => 0,
             n => self.runtime_seconds_for_user(user) / n,
         }
@@ -1097,7 +1138,7 @@ impl DailyProjectUsageReport {
     /// moved by one short job.
     ///
     pub fn average_expansion_factor(&self) -> f64 {
-        match self.num_jobs {
+        match self.expansion_jobs() {
             0 => 0.0,
             n => self.total_expansion_milli as f64 / (EXPANSION_SCALE as f64 * n as f64),
         }
@@ -1107,7 +1148,7 @@ impl DailyProjectUsageReport {
     /// which is where a struggling user shows up, the project-wide mean having
     /// averaged them away.
     pub fn expansion_factor_for_user(&self, user: &str) -> f64 {
-        match self.num_jobs_for_user(user) {
+        match self.expansion_jobs_for_user(user) {
             0 => 0.0,
             n => {
                 let milli = self.user_expansion_milli.get(user).copied().unwrap_or(0);
@@ -1182,6 +1223,13 @@ impl DailyProjectUsageReport {
         if !self.user_expansion_milli.is_empty() {
             let expansion_sum = sum_counters(&self.user_expansion_milli);
             if expansion_sum != self.total_expansion_milli {
+                return false;
+            }
+        }
+
+        if !self.user_expansion_jobs.is_empty() {
+            let expansion_jobs_sum = sum_counters(&self.user_expansion_jobs);
+            if expansion_jobs_sum != self.num_expansion_jobs {
                 return false;
             }
         }
@@ -1374,6 +1422,8 @@ impl DailyProjectUsageReport {
         report.total_expansion_milli = self.total_expansion_milli;
         report.user_runtime_seconds = self.user_runtime_seconds.clone();
         report.total_runtime_seconds = self.total_runtime_seconds;
+        report.user_expansion_jobs = self.user_expansion_jobs.clone();
+        report.num_expansion_jobs = self.num_expansion_jobs;
 
         report.user_allocated_cpus = self.user_allocated_cpus.clone();
         report.total_allocated_cpus = self.total_allocated_cpus;
@@ -1886,6 +1936,8 @@ impl DailyProjectUsageReport {
             remap_counters(std::mem::take(&mut self.user_expansion_milli), string_map);
         self.user_runtime_seconds =
             remap_counters(std::mem::take(&mut self.user_runtime_seconds), string_map);
+        self.user_expansion_jobs =
+            remap_counters(std::mem::take(&mut self.user_expansion_jobs), string_map);
         self.user_allocated_cpus =
             remap_counters(std::mem::take(&mut self.user_allocated_cpus), string_map);
         self.user_allocated_gpus =
@@ -1949,12 +2001,18 @@ impl std::ops::Add<DailyProjectUsageReport> for DailyProjectUsageReport {
         for (user, secs) in &other.user_runtime_seconds {
             accumulate(&mut new_report.user_runtime_seconds, user, *secs);
         }
+        for (user, jobs) in &other.user_expansion_jobs {
+            accumulate(&mut new_report.user_expansion_jobs, user, *jobs);
+        }
         new_report.total_expansion_milli = self
             .total_expansion_milli
             .saturating_add(other.total_expansion_milli);
         new_report.total_runtime_seconds = self
             .total_runtime_seconds
             .saturating_add(other.total_runtime_seconds);
+        new_report.num_expansion_jobs = self
+            .num_expansion_jobs
+            .saturating_add(other.num_expansion_jobs);
 
         for (user, cpus) in &other.user_allocated_cpus {
             accumulate(&mut new_report.user_allocated_cpus, user, *cpus);
@@ -2046,12 +2104,18 @@ impl std::ops::AddAssign<DailyProjectUsageReport> for DailyProjectUsageReport {
         for (user, secs) in &other.user_runtime_seconds {
             accumulate(&mut self.user_runtime_seconds, user, *secs);
         }
+        for (user, jobs) in &other.user_expansion_jobs {
+            accumulate(&mut self.user_expansion_jobs, user, *jobs);
+        }
         self.total_expansion_milli = self
             .total_expansion_milli
             .saturating_add(other.total_expansion_milli);
         self.total_runtime_seconds = self
             .total_runtime_seconds
             .saturating_add(other.total_runtime_seconds);
+        self.num_expansion_jobs = self
+            .num_expansion_jobs
+            .saturating_add(other.num_expansion_jobs);
 
         for (user, cpus) in &other.user_allocated_cpus {
             accumulate(&mut self.user_allocated_cpus, user, *cpus);
@@ -2906,17 +2970,36 @@ impl ProjectUsageReport {
     /// The mean runtime of a job in this report - the figure that makes a wait
     /// mean something. See `DailyProjectUsageReport::average_runtime_seconds`.
     pub fn average_runtime_seconds(&self) -> u64 {
-        match self.num_jobs() {
+        match self.expansion_jobs() {
             0 => 0,
             n => self.total_runtime_seconds() / n,
         }
     }
 
     pub fn average_runtime_seconds_for_user(&self, user: &str) -> u64 {
-        match self.num_jobs_for_user(user) {
+        match self.expansion_jobs_for_user(user) {
             0 => 0,
             n => self.runtime_seconds_for_user(user) / n,
         }
+    }
+
+    ///
+    /// How many jobs the runtime and expansion figures were accumulated over,
+    /// across every day in this report - the denominator for the means derived
+    /// from them, and not the same as `num_jobs`. See
+    /// `DailyProjectUsageReport::expansion_jobs`.
+    ///
+    pub fn expansion_jobs(&self) -> u64 {
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.expansion_jobs())
+        })
+    }
+
+    /// `expansion_jobs` for one local user.
+    pub fn expansion_jobs_for_user(&self, user: &str) -> u64 {
+        self.reports.values().fold(0u64, |total, report| {
+            total.saturating_add(report.expansion_jobs_for_user(user))
+        })
     }
     ///
     /// One user's total turnaround over their total runtime - their whole share
@@ -2958,7 +3041,7 @@ impl ProjectUsageReport {
     /// figure means, and for its relationship to the classical form.
     ///
     pub fn average_expansion_factor(&self) -> f64 {
-        let jobs = self.num_jobs();
+        let jobs = self.expansion_jobs();
 
         match jobs {
             0 => 0.0,
@@ -2974,9 +3057,7 @@ impl ProjectUsageReport {
 
     /// The mean expansion factor for one local user, across every day.
     pub fn expansion_factor_for_user(&self, user: &str) -> f64 {
-        let jobs = self.reports.values().fold(0u64, |total, report| {
-            total.saturating_add(report.num_jobs_for_user(user))
-        });
+        let jobs = self.expansion_jobs_for_user(user);
 
         match jobs {
             0 => 0.0,
@@ -5823,6 +5904,85 @@ mod tests {
 
         assert_eq!(report.average_expansion_factor(), 2.0);
         assert_eq!(report.aggregate_expansion_factor(), 2.0);
+    }
+
+    #[test]
+    fn test_a_job_with_no_runtime_recorded_is_left_out_of_the_denominator() {
+        // The runtime and expansion sums are accumulated over the jobs that
+        // have a runtime to contribute, so they have to be averaged over that
+        // same population. Dividing by `num_jobs` averaged a sum over jobs it
+        // was never summed across, dragging both means towards zero in
+        // proportion to how many jobs were still running when the window
+        // closed.
+        let mut report = DailyProjectUsageReport::default();
+
+        // two jobs that each waited exactly as long as they ran, so the honest
+        // expansion factor is 2.00
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 600);
+        report.add_expansion("alice", 600, 600);
+
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 1800);
+        report.add_expansion("alice", 1800, 1800);
+
+        // and a third whose runtime is not known - counted as a job, with no
+        // runtime and no ratio to contribute
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 900);
+
+        assert_eq!(report.num_jobs(), 3);
+        assert_eq!(report.expansion_jobs(), 2);
+        assert_eq!(report.expansion_jobs_for_user("alice"), 2);
+
+        assert_eq!(report.average_expansion_factor(), 2.0);
+        assert_eq!(report.expansion_factor_for_user("alice"), 2.0);
+        assert_eq!(report.average_runtime_seconds(), 1200);
+        assert_eq!(report.average_runtime_seconds_for_user("alice"), 1200);
+
+        // the wait is still averaged over every job, because every job has one
+        assert_eq!(report.average_wait_seconds(), 1100);
+
+        assert!(report.is_consistent());
+
+        // and the same over a project made of such days
+        let project = ProjectIdentifier::parse("proj.portal").unwrap();
+        let mut month = ProjectUsageReport::new(&project);
+        month.set_report(&Date::parse("2026-03-01").unwrap(), &report);
+        month.set_report(&Date::parse("2026-03-02").unwrap(), &report);
+
+        assert_eq!(month.num_jobs(), 6);
+        assert_eq!(month.expansion_jobs(), 4);
+        assert_eq!(month.average_expansion_factor(), 2.0);
+        assert_eq!(month.average_runtime_seconds(), 1200);
+    }
+
+    #[test]
+    fn test_a_report_without_the_expansion_denominator_falls_back_to_the_job_count() {
+        // A report written before the denominator was counted has the sums but
+        // not the count they were summed over. Those two populations were the
+        // same by construction, so the job count is the right answer there -
+        // and the figure must not silently become zero on upgrade.
+        let mut report = DailyProjectUsageReport::default();
+        report.add_jobs("alice", 2);
+        report.add_wait_seconds("alice", 1200);
+        report.add_expansion("alice", 600, 600);
+        report.add_expansion("alice", 600, 600);
+
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("user_expansion_jobs");
+        object.remove("num_expansion_jobs");
+
+        let legacy: DailyProjectUsageReport =
+            serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        assert_eq!(legacy.expansion_jobs(), 2);
+        assert_eq!(legacy.expansion_jobs_for_user("alice"), 2);
+        assert_eq!(legacy.average_expansion_factor(), 2.0);
+        assert_eq!(legacy.average_runtime_seconds(), 600);
+        assert!(legacy.is_consistent());
     }
 
     #[test]

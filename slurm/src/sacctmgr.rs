@@ -1035,6 +1035,7 @@ struct ReportTotals {
     num_jobs: u64,
     wait_seconds: u64,
     runtime_seconds: u64,
+    expansion_jobs: u64,
     requeue_usage: u64,
     requeue_events: u64,
     requeue_wait_seconds: u64,
@@ -1147,6 +1148,9 @@ fn record_job(
         let runtime_seconds = job.total_duration().num_seconds().max(0) as u64;
         report.add_expansion(job.user(), wait_seconds, runtime_seconds);
         totals.runtime_seconds = totals.runtime_seconds.saturating_add(runtime_seconds);
+        if runtime_seconds > 0 {
+            totals.expansion_jobs = totals.expansion_jobs.saturating_add(1);
+        }
 
         // The cores and GPUs the job actually got, not what it asked for - one
         // job's worth however long it ran, so the mean describes the shape of
@@ -1232,6 +1236,22 @@ fn check_counter_consistency(
             day,
             totals.runtime_seconds,
             report.total_runtime_seconds()
+        );
+    }
+
+    // The runtime and expansion sums are averaged over this count rather than
+    // over the job count, so it has to be checked in its own right - a report
+    // whose denominator has drifted reports a plausible figure rather than an
+    // obviously broken one.
+    if report.expansion_jobs() != totals.expansion_jobs {
+        consistent = false;
+        tracing::warn!(
+            "Expansion denominator inconsistency for project {} on {}: local counter \
+             ({} jobs) differs from report total ({} jobs). This may indicate a bug.",
+            project.project(),
+            day,
+            totals.expansion_jobs,
+            report.expansion_jobs()
         );
     }
 

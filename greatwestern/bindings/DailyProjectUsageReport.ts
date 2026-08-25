@@ -37,6 +37,15 @@ user_runtime_seconds: { [key in string]?: bigint },
  */
 total_runtime_seconds: bigint, 
 /**
+ * Per-user count of the jobs that contributed a runtime and an expansion
+ * factor. Empty when reading data from older instances.
+ */
+user_expansion_jobs: { [key in string]?: bigint }, 
+/**
+ * Scalar total — equals sum of user_expansion_jobs when populated.
+ */
+num_expansion_jobs: bigint, 
+/**
  * Per-user sum of the cores each job was allocated.
  */
 user_allocated_cpus: { [key in string]?: bigint }, 

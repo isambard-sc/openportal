@@ -646,6 +646,21 @@ question, and both are exposed. The same is true of the expansion factor, and fo
 the same reason - these are distribution questions being asked of a single
 number, so the per-user breakdown is not a refinement but the point.
 
+The same argument applies to the expansion factor itself, which is why every row
+carries both forms of it. A mean of ratios alone cannot distinguish a user whose
+jobs queued a long time and then exited almost at once from a user who simply
+waits, and those want different responses. Reading the pair settles it: on the
+real fixture one user shows 7290.14 against 3.49 - 85% of that mean comes from
+three days, and on the worst of them the day's own totals leave only one
+possibility, a job that queued for about three days and then ran for one second,
+so a single job out of ninety-two is 40% of the figure. Another user shows 5.83
+against 12.52, the opposite case, where the waiting fell on the long jobs. A
+third has one job, so the two are the same arithmetic and agree exactly.
+
+Reporting only the aggregate would have hidden the three-day, one-second job
+completely, which is the thing worth finding; reporting only the mean leaves an
+operator unable to tell whether a large number matters.
+
 A wait also means nothing without a runtime beside it, so the report's tables
 carry both: nine hours of queueing for a job that runs for a day is a busy
 queue, and nine hours for a job that runs for thirty seconds is somebody

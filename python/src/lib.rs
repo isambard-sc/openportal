@@ -3155,6 +3155,18 @@ impl ProjectUsageReport {
         Ok(self.0.average_runtime_seconds_for_user(user))
     }
 
+    /// One user's total turnaround over their total runtime - their whole share
+    /// of the report treated as one job.
+    ///
+    /// Read beside `expansion_factor_for_user`, which is a mean of ratios. The
+    /// gap between the two is the diagnostic: a mean far above this means a
+    /// handful of the user's jobs waited a long time and then exited almost
+    /// immediately, which one figure alone cannot tell apart from a user who
+    /// simply waits.
+    fn aggregate_expansion_factor_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.aggregate_expansion_factor_for_user(user))
+    }
+
     /// Mean expansion factor per job: turnaround over runtime,
     /// `(wait + run) / run`, the classical definition used by `sreport`.
     ///
@@ -4014,6 +4026,18 @@ impl DailyProjectUsageReport {
 
     fn average_runtime_seconds_for_user(&self, user: &str) -> PyResult<u64> {
         Ok(self.0.average_runtime_seconds_for_user(user))
+    }
+
+    /// One user's total turnaround over their total runtime - their whole share
+    /// of the report treated as one job.
+    ///
+    /// Read beside `expansion_factor_for_user`, which is a mean of ratios. The
+    /// gap between the two is the diagnostic: a mean far above this means a
+    /// handful of the user's jobs waited a long time and then exited almost
+    /// immediately, which one figure alone cannot tell apart from a user who
+    /// simply waits.
+    fn aggregate_expansion_factor_for_user(&self, user: &str) -> PyResult<f64> {
+        Ok(self.0.aggregate_expansion_factor_for_user(user))
     }
 
     /// Mean expansion factor per job: turnaround over runtime,

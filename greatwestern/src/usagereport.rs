@@ -988,6 +988,24 @@ impl DailyProjectUsageReport {
             n => self.runtime_seconds_for_user(user) / n,
         }
     }
+    ///
+    /// One user's total turnaround over their total runtime - their whole share
+    /// of the report treated as one job, on the same 1.0-is-ideal scale.
+    ///
+    /// Read beside `expansion_factor_for_user`, which is a mean of ratios. The
+    /// gap between the two is the diagnostic: a mean far above this means a
+    /// handful of the user's jobs waited a long time and then exited almost
+    /// immediately, which one figure alone cannot tell apart from a user who
+    /// simply waits.
+    ///
+    pub fn aggregate_expansion_factor_for_user(&self, user: &str) -> f64 {
+        match self.runtime_seconds_for_user(user) {
+            0 => 0.0,
+            runtime => {
+                self.wait_seconds_for_user(user).saturating_add(runtime) as f64 / runtime as f64
+            }
+        }
+    }
 
     ///
     /// The mean expansion factor of the jobs counted in this report: turnaround
@@ -2888,6 +2906,24 @@ impl ProjectUsageReport {
             n => self.runtime_seconds_for_user(user) / n,
         }
     }
+    ///
+    /// One user's total turnaround over their total runtime - their whole share
+    /// of the report treated as one job, on the same 1.0-is-ideal scale.
+    ///
+    /// Read beside `expansion_factor_for_user`, which is a mean of ratios. The
+    /// gap between the two is the diagnostic: a mean far above this means a
+    /// handful of the user's jobs waited a long time and then exited almost
+    /// immediately, which one figure alone cannot tell apart from a user who
+    /// simply waits.
+    ///
+    pub fn aggregate_expansion_factor_for_user(&self, user: &str) -> f64 {
+        match self.runtime_seconds_for_user(user) {
+            0 => 0.0,
+            runtime => {
+                self.wait_seconds_for_user(user).saturating_add(runtime) as f64 / runtime as f64
+            }
+        }
+    }
 
     /// Total wall-clock runtime of every job in this report. Not usage - usage
     /// weights each second by the fraction of a node held.
@@ -3114,7 +3150,7 @@ impl ProjectUsageReport {
         use std::fmt::Write;
 
         let mut out = String::new();
-        let rule = "=".repeat(80);
+        let rule = "=".repeat(83);
 
         // `write!` to a String cannot fail, so the results are deliberately
         // discarded rather than unwrapped - `unwrap` is denied in this crate.
@@ -3225,7 +3261,8 @@ impl ProjectUsageReport {
             local_to_portal.insert(local_user.clone(), user.clone());
         }
 
-        let mut users: Vec<(String, u64, f64, f64, f64, u64, u64)> = self
+        #[allow(clippy::type_complexity)]
+        let mut users: Vec<(String, u64, f64, f64, f64, u64, u64, f64)> = self
             .job_users()
             .into_iter()
             .map(|user| {
@@ -3235,7 +3272,8 @@ impl ProjectUsageReport {
                 let gpus = self.average_gpus_per_job_for_user(&user);
                 let wait = self.average_wait_seconds_for_user(&user);
                 let runtime = self.average_runtime_seconds_for_user(&user);
-                (user, jobs, expansion, cpus, gpus, wait, runtime)
+                let aggregate = self.aggregate_expansion_factor_for_user(&user);
+                (user, jobs, expansion, cpus, gpus, wait, runtime, aggregate)
             })
             .collect();
 
@@ -3263,14 +3301,20 @@ impl ProjectUsageReport {
             false => "-".to_string(),
         };
 
+        // The two expansion columns sit together because it is the gap between
+        // them that an operator is looking for. `mean` is the mean of the
+        // per-job ratios and `overall` is the whole user treated as one job: a
+        // mean far above the overall figure means a few of their jobs queued a
+        // long time and then exited almost at once, and the two figures agreeing
+        // means the user simply waits. Neither says that on its own.
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
-            "user", "jobs", "expansion", "run (h)", "wait (h)", "cores", "gpus"
+            "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
+            "user", "jobs", "mean", "overall", "run (h)", "wait (h)", "cores", "gpus"
         );
 
-        for (user, jobs, expansion, cpus, gpus, wait, runtime) in users {
+        for (user, jobs, expansion, cpus, gpus, wait, runtime, aggregate) in users {
             let label = match local_to_portal.get(&user) {
                 Some(portal_user) => portal_user.to_string(),
                 None => format!("{} - unknown", user),
@@ -3278,10 +3322,11 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
+                "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
                 label,
                 jobs,
                 or_dash(expansion, 2),
+                or_dash(aggregate, 2),
                 hours(runtime),
                 hours(wait),
                 or_dash(cpus, 1),
@@ -3293,8 +3338,8 @@ impl ProjectUsageReport {
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
-            "day", "jobs", "expansion", "run (h)", "wait (h)", "cores", "gpus"
+            "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
+            "day", "jobs", "mean", "overall", "run (h)", "wait (h)", "cores", "gpus"
         );
 
         for date in self.dates() {
@@ -3308,10 +3353,11 @@ impl ProjectUsageReport {
 
             let _ = writeln!(
                 out,
-                "  {:<25} {:>5} {:>10} {:>9} {:>9} {:>8} {:>6}",
+                "  {:<24} {:>5} {:>9} {:>8} {:>8} {:>8} {:>7} {:>5}",
                 date.to_string(),
                 report.num_jobs(),
                 or_dash(report.average_expansion_factor(), 2),
+                or_dash(report.aggregate_expansion_factor(), 2),
                 hours(report.average_runtime_seconds()),
                 hours(report.average_wait_seconds()),
                 or_dash(report.average_cpus_per_job(), 1),
@@ -3326,21 +3372,29 @@ impl ProjectUsageReport {
         );
         let _ = writeln!(
             out,
-            "worse - and it is the runtime column that says how much a wait cost: nine"
+            "worse. Read the two columns together: `mean` averages the per-job ratios and"
         );
         let _ = writeln!(
             out,
-            "hours of queueing means one thing beside a job that runs for a day and quite"
+            "`overall` treats the whole row as one job, so a mean far above the overall"
         );
         let _ = writeln!(
             out,
-            "another beside one that runs for thirty seconds. Job sizes count each job"
+            "figure means a few jobs queued for a long time and then exited almost at"
         );
         let _ = writeln!(
             out,
-            "once however long it ran, so they describe the shape of the jobs rather than"
+            "once - the runtime column is where that shows. The two agreeing means the"
         );
-        let _ = writeln!(out, "what the machine was busy with.");
+        let _ = writeln!(
+            out,
+            "waiting was spread across the work. Job sizes count each job once however"
+        );
+        let _ = writeln!(
+            out,
+            "long it ran, so they describe the shape of the jobs rather than what the"
+        );
+        let _ = writeln!(out, "machine was busy with.");
 
         out
     }
@@ -5290,14 +5344,13 @@ mod tests {
         let report = project_report_with_mixed_habits();
         let dump = report.expansion_factor_report();
 
-        // worst-served first, so the user in trouble is the first row
-        let user_rows: Vec<&str> = dump
+        // worst-served first, so the user in trouble is the row after the first
+        // column header - "wait (h)" appears only in a header
+        let Some(worst) = dump
             .lines()
-            .skip_while(|line| !line.contains("expansion"))
-            .filter(|line| line.starts_with("  ") && !line.contains("expansion"))
-            .collect();
-
-        let Some(worst) = user_rows.first() else {
+            .skip_while(|line| !line.contains("wait (h)"))
+            .nth(1)
+        else {
             unreachable!("no per-user rows in:\n{}", dump);
         };
 
@@ -5373,6 +5426,68 @@ mod tests {
             struggling.contains("0.009") && struggling.contains("9.475"),
             "{}",
             struggling
+        );
+    }
+
+    #[test]
+    fn test_the_pair_of_expansion_columns_separates_three_different_stories() {
+        // One figure cannot distinguish "a few jobs waited forever and then died"
+        // from "this user simply waits", and an operator scanning the table needs
+        // to. The real month has all three shapes in it.
+        let report = real_month();
+
+        // user1: a mean two thousand times the overall figure. 85% of that mean
+        // comes from three days, and on the worst of them the day's own totals
+        // leave only one possibility - a job that queued for about three days
+        // and then ran for one second. One job in ninety-two is 40% of the mean.
+        assert!((report.expansion_factor_for_user("user1.project") - 7_290.137).abs() < 0.01);
+        assert!((report.aggregate_expansion_factor_for_user("user1.project") - 3.495).abs() < 0.01);
+
+        // user6: one job, so a mean of ratios and a ratio of totals are the same
+        // arithmetic. Nine hours of queueing for a job that ran 34 seconds.
+        assert_eq!(report.num_jobs_for_user("user6.project"), 1);
+        assert!(
+            (report.expansion_factor_for_user("user6.project")
+                - report.aggregate_expansion_factor_for_user("user6.project"))
+            .abs()
+                < 0.01
+        );
+
+        // user5: the other direction - the mean is *below* the overall figure, so
+        // the waiting fell on the longer jobs rather than the short ones
+        assert!(
+            report.expansion_factor_for_user("user5.project")
+                < report.aggregate_expansion_factor_for_user("user5.project"),
+            "user5's waiting should sit on the long jobs"
+        );
+
+        // user8: served immediately, and both figures say so
+        assert!((report.expansion_factor_for_user("user8.project") - 1.002).abs() < 0.01);
+        assert!((report.aggregate_expansion_factor_for_user("user8.project") - 1.001).abs() < 0.01);
+
+        // all of which has to be legible in the row, side by side
+        let dump = report.expansion_factor_report();
+        let row_for = |user: &str| {
+            dump.lines()
+                .find(|line| line.starts_with(&format!("  {}", user)))
+                .map(|line| line.to_string())
+        };
+
+        let Some(row) = row_for("user1.project") else {
+            unreachable!("no row for user1 in:\n{}", dump);
+        };
+        assert!(row.contains("7290.14") && row.contains("3.49"), "{}", row);
+
+        // and the day table carries the same pair, so a day where the gap opens
+        // up can be spotted - 2026-08-05 is the one
+        let worst_day = dump.lines().find(|line| line.starts_with("  2026-08-05"));
+        let Some(worst_day) = worst_day else {
+            unreachable!("no row for 2026-08-05 in:\n{}", dump);
+        };
+        assert!(
+            worst_day.contains("16075.49") && worst_day.contains("10.35"),
+            "{}",
+            worst_day
         );
     }
 

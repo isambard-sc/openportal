@@ -281,14 +281,6 @@ early is the expensive direction: the allocator records what it has and stops
 asking, and a correction that arrives afterwards is never collected. When in
 doubt, leave it open.
 
-> **One caveat about today's Waldur.** It currently sweeps only the last two
-> months and never looks further back, so at the moment a month that is never
-> declared complete stops being asked about after about thirty days rather than
-> being retried. That is a bug on the allocator side and is being fixed to retry
-> every month from the award's start date until it is reported complete. Nothing
-> in this example changes either way — which is the point of implementing
-> against the rule rather than against the current behaviour.
-
 ### 7. The same question asked of the wrong resource returns nothing
 
 Ask `allocator.site.cluster2 get_usage_report myaward1.allocator` and the answer

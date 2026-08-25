@@ -1,0 +1,1165 @@
+{
+  "meta": {
+    "comment": [
+      "Synthetic `sacct --json --duplicates --allocations` output, shaped like real",
+      "output from a production Slurm but carrying no real project's data. Every",
+      "record covers a window of one day: 2026-03-01T00:00:00Z (1772323200) to",
+      "2026-03-02T00:00:00Z (1772409600).",
+      "",
+      "Nodes are all `testnode`, which the tests map to a 128-cpu, 128-billing node,",
+      "so a job allocating the whole node bills one node-second per second and the",
+      "expected values are the elapsed times themselves. A node name the test's",
+      "`SlurmNodes` does not know would silently fall back to the default node and",
+      "change every number here - see the anonymisation note in",
+      "docs/plans/slurm-requeue-accounting-design.md.",
+      "",
+      "The cases, in order:",
+      "  100 - never requeued. One record, the whole of it inside the window.",
+      "  200 - requeued once, both attempts inside the window. Attempt 0 was",
+      "        preempted after 3600s; attempt 1 completed in 1800s.",
+      "  300 - requeued twice, all three attempts inside the window. The two",
+      "        superseded attempts were node failures, on named nodes.",
+      "  400 - earlier attempts fell before the window, so the lowest restart_cnt",
+      "        returned is 2, not 0. Tests that classification orders attempts",
+      "        rather than looking for restart_cnt == 0.",
+      "  500 - the final attempt was cancelled before it ran, so it has zero",
+      "        elapsed. Everything this job consumed belongs to the requeue bucket",
+      "        and its base usage is zero - which is what we reported before,",
+      "        because the zero-elapsed record was the only one sacct returned.",
+      "  600 - two unrelated jobs sharing an id after a job-id reset: two records,",
+      "        both with restart_cnt 0. Neither may be classed as a requeue of the",
+      "        other.",
+      "  700 - an attempt that started before the window and was requeued inside",
+      "        it, so its usage is clipped but its start is outside.",
+      "  800 - a state Slurm reports that TERMINAL_STATES does not name, which must",
+      "        be bucketed as OTHER rather than dropped.",
+      "  900 - the shape almost every real requeue has, and the one that made the",
+      "        first version of the event count useless. A long attempt starts on",
+      "        day one, runs past midnight and is requeued on day two; the attempt",
+      "        that replaces it is cancelled before it runs, so it has zero elapsed.",
+      "        The two records only ever appear in one response together in the",
+      "        day-two window, which is where the requeue must be counted - the",
+      "        attempt's own start is on day one. Spans the second window,",
+      "        2026-03-02T00:00:00Z (1772409600) to 2026-03-03T00:00:00Z",
+      "        (1772496000).",
+      "",
+      "Reservations. Records carry the reservation they ran under, in both of the",
+      "shapes Slurm has been seen to report - a bare name and an object with a name",
+      "and an id - since which one arrives depends on the version. Jobs 100 and 200",
+      "ran inside 'maintenance_test'; job 300 inside 'gpu_bench' (and its two",
+      "superseded attempts held its nodes just as the successful one did); every",
+      "other job ran outside any reservation, which is how Slurm reports almost",
+      "everything.",
+      "",
+      "Job 400's two records carry the same reservation name with different ids.",
+      "Slurm gives each *instance* of a reservation its own id, so a recurring or",
+      "on-demand reservation appears as one name across many ids - on a production",
+      "cluster a single account-day showed 'interactive' under seventeen of them.",
+      "Reports key on the name, so the instances merge; see the design note."
+    ]
+  },
+  "jobs": [
+    {
+      "job_id": 100,
+      "user": "user_one",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "COMPLETED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772326800,
+        "eligible": 1772326800,
+        "start": 1772330400,
+        "end": 1772334000,
+        "elapsed": 3600
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": "maintenance_test"
+    },
+    {
+      "job_id": 200,
+      "user": "user_one",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "PREEMPTED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772326800,
+        "eligible": 1772327400,
+        "start": 1772330400,
+        "end": 1772334000,
+        "elapsed": 3600
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 7,
+        "name": "maintenance_test"
+      }
+    },
+    {
+      "job_id": 200,
+      "user": "user_one",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 1,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "COMPLETED"
+        ],
+        "reason": "BeginTime"
+      },
+      "time": {
+        "submission": 1772334000,
+        "eligible": 1772334120,
+        "start": 1772337600,
+        "end": 1772339400,
+        "elapsed": 1800
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 7,
+        "name": "maintenance_test"
+      }
+    },
+    {
+      "job_id": 300,
+      "user": "user_two",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "badnode01",
+      "state": {
+        "current": [
+          "NODE_FAIL"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772323200,
+        "eligible": 1772323200,
+        "start": 1772326800,
+        "end": 1772328600,
+        "elapsed": 1800
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 9,
+        "name": " gpu_bench "
+      }
+    },
+    {
+      "job_id": 300,
+      "user": "user_two",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 1,
+      "failed_node": "badnode02",
+      "state": {
+        "current": [
+          "NODE_FAIL"
+        ],
+        "reason": "BeginTime"
+      },
+      "time": {
+        "submission": 1772328600,
+        "eligible": 1772328600,
+        "start": 1772330400,
+        "end": 1772331300,
+        "elapsed": 900
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 9,
+        "name": " gpu_bench "
+      }
+    },
+    {
+      "job_id": 300,
+      "user": "user_two",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 2,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "COMPLETED"
+        ],
+        "reason": "BeginTime"
+      },
+      "time": {
+        "submission": 1772331300,
+        "eligible": 1772331300,
+        "start": 1772333100,
+        "end": 1772333400,
+        "elapsed": 300
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 9,
+        "name": " gpu_bench "
+      }
+    },
+    {
+      "job_id": 400,
+      "user": "user_two",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 2,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "PENDING",
+          "REQUEUED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772326800,
+        "eligible": 1772326800,
+        "start": 1772328600,
+        "end": 1772330400,
+        "elapsed": 1800
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 595,
+        "name": "interactive"
+      }
+    },
+    {
+      "job_id": 400,
+      "user": "user_two",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 3,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "FAILED"
+        ],
+        "reason": "BeginTime"
+      },
+      "time": {
+        "submission": 1772330400,
+        "eligible": 1772330400,
+        "start": 1772332200,
+        "end": 1772332800,
+        "elapsed": 600
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 597,
+        "name": "interactive"
+      }
+    },
+    {
+      "job_id": 500,
+      "user": "user_three",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "PENDING",
+          "REQUEUED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772323200,
+        "eligible": 1772323200,
+        "start": 1772326800,
+        "end": 1772334000,
+        "elapsed": 7200
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    },
+    {
+      "job_id": 500,
+      "user": "user_three",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 1,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "CANCELLED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772334000,
+        "eligible": 1772334000,
+        "start": 1772337600,
+        "end": 1772337600,
+        "elapsed": 0
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    },
+    {
+      "job_id": 600,
+      "user": "user_four",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "COMPLETED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772323200,
+        "eligible": 1772323200,
+        "start": 1772326800,
+        "end": 1772328600,
+        "elapsed": 1800
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    },
+    {
+      "job_id": 600,
+      "user": "user_four",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "COMPLETED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772337600,
+        "eligible": 1772337600,
+        "start": 1772341200,
+        "end": 1772344800,
+        "elapsed": 3600
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    },
+    {
+      "job_id": 700,
+      "user": "user_five",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "PENDING",
+          "REQUEUED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772316000,
+        "eligible": 1772316000,
+        "start": 1772319600,
+        "end": 1772326800,
+        "elapsed": 7200
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    },
+    {
+      "job_id": 700,
+      "user": "user_five",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 1,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "COMPLETED"
+        ],
+        "reason": "BeginTime"
+      },
+      "time": {
+        "submission": 1772326800,
+        "eligible": 1772326800,
+        "start": 1772330400,
+        "end": 1772332200,
+        "elapsed": 1800
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    },
+    {
+      "job_id": 800,
+      "user": "user_five",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "SOME_FUTURE_SLURM_STATE"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772323200,
+        "eligible": 1772323200,
+        "start": 1772326800,
+        "end": 1772328600,
+        "elapsed": 1800
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 0,
+        "name": ""
+      }
+    },
+    {
+      "job_id": 800,
+      "user": "user_five",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 1,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "COMPLETED"
+        ],
+        "reason": "BeginTime"
+      },
+      "time": {
+        "submission": 1772328600,
+        "eligible": 1772328600,
+        "start": 1772330400,
+        "end": 1772331300,
+        "elapsed": 900
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      },
+      "reservation": {
+        "id": 0,
+        "name": ""
+      }
+    },
+    {
+      "job_id": 900,
+      "user": "user_six",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 0,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "REQUEUED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772352000,
+        "eligible": 1772352000,
+        "start": 1772395200,
+        "end": 1772438400,
+        "elapsed": 43200
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    },
+    {
+      "job_id": 900,
+      "user": "user_six",
+      "account": "testaccount",
+      "cluster": "testcluster",
+      "nodes": "testnode",
+      "qos": "standard",
+      "restart_cnt": 1,
+      "failed_node": "",
+      "state": {
+        "current": [
+          "CANCELLED"
+        ],
+        "reason": "None"
+      },
+      "time": {
+        "submission": 1772438460,
+        "eligible": 1772438580,
+        "start": 0,
+        "end": 1772438520,
+        "elapsed": 0
+      },
+      "tres": {
+        "allocated": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ],
+        "requested": [
+          {
+            "type": "cpu",
+            "name": "",
+            "count": 128
+          },
+          {
+            "type": "node",
+            "name": "",
+            "count": 1
+          },
+          {
+            "type": "billing",
+            "name": "",
+            "count": 128
+          }
+        ]
+      }
+    }
+  ]
+}

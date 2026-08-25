@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- **Slurm usage reports missed everything a requeued job consumed before its
+  final attempt.** `op-slurm` called `sacct` without `--duplicates`, which
+  returns only the most recent accounting record for each job id. A requeued job
+  has one record per attempt, each carrying only its own elapsed time, so every
+  attempt before the last was invisible. On a production account measured over a
+  single day this hid about a third of the account's real consumption; jobs whose
+  final attempt was cancelled before it ran were reported as having used nothing
+  at all, because the one record we saw had zero elapsed time and was discarded
+  as a non-consumer.
+
+### Added
+
+- **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
+  of superseded attempts separately from the usage it has always reported, so
+  the two can be told apart rather than merged:
+
+- **Expansion factor.** Usage reports now record each project's total wall-clock
+  runtime and the expansion factor of its jobs - queue time over runtime - so
+  that a project waiting a long time for a little work can be spotted. The
+  particular pattern of a job that queues for hours and then exits in seconds,
+  repeatedly, is what a user fighting a job that will not run looks like from
+  the outside.
+
+- **Mean job size.** Reports now record the cores and GPUs each job was
+  allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
+  per-user variants) - many small jobs against a few large ones. Usage cannot
+  answer this: the same core-seconds come from one job on a hundred cores or a
+  hundred jobs on one core, which is exactly the distinction being drawn.
+
 ## [0.92.0] - 2026-08-21
 
 ### Added

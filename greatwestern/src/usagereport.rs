@@ -4893,6 +4893,59 @@ mod tests {
     }
 
     #[test]
+    fn test_an_absent_is_complete_reads_as_incomplete() {
+        // `is_complete` is one of the three fields still written even when it
+        // has nothing to say, because release 0.92.0 cannot read a report
+        // without it. It now carries a `serde(default)` so that a later release
+        // can stop writing it - and the default has to be the safe direction.
+        //
+        // `false` is that direction: a report that does not say it is finished
+        // is treated as still being filled in. `op-slurm` refuses to cache an
+        // incomplete day and will fetch it again, and the printout marks it as
+        // incomplete, so the cost of guessing wrong is a repeated query. The
+        // other way round, a partial day would be cached as final and a
+        // project's usage silently understated for ever.
+        let without: DailyProjectUsageReport = serde_json::from_value(serde_json::json!({
+            "reports": { "alice": { "seconds": 3600 } }
+        }))
+        .unwrap();
+
+        assert!(!without.is_complete());
+        assert_eq!(without.total_usage(), Usage::new(3600));
+        assert!(without.to_string().contains("incomplete"));
+
+        // and a report that does say so is believed
+        let with: DailyProjectUsageReport = serde_json::from_value(serde_json::json!({
+            "reports": { "alice": { "seconds": 3600 } },
+            "is_complete": true
+        }))
+        .unwrap();
+
+        assert!(with.is_complete());
+        assert!(!with.to_string().contains("incomplete"));
+
+        // the real month has one day still being filled in, and it reads as such
+        let month = real_month();
+        let incomplete: Vec<Date> = month
+            .dates()
+            .into_iter()
+            .filter(|date| {
+                !month
+                    .get_report(date)
+                    .daily_reports(false)
+                    .iter()
+                    .all(|day| day.is_complete())
+            })
+            .collect();
+
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(
+            incomplete.first().map(|d| d.to_string()),
+            Some("2026-08-24".to_string())
+        );
+    }
+
+    #[test]
     fn test_a_report_from_the_previous_release_still_reads_correctly() {
         // Exactly what release 0.92.0 serialised - the fields it had, and none
         // of the ones added since. Every new figure has to read as "not

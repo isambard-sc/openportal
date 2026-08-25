@@ -1,9 +1,6 @@
 {
   "meta": {
     "comment": [
-      "SPDX-FileCopyrightText: \u00a9 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>",
-      "SPDX-License-Identifier: CC0-1.0",
-      "",
       "Synthetic `sacct --json --duplicates --allocations` output, shaped like real",
       "output from a production Slurm but carrying no real project's data. Every",
       "record covers a window of one day: 2026-03-01T00:00:00Z (1772323200) to",

@@ -1255,10 +1255,26 @@ impl DailyProjectUsageReport {
             report.requeue_reports = reports.clone();
         }
 
+        // How many jobs ran, how long they queued, how long they ran and how
+        // many cores they held are properties of the *jobs*, not of the
+        // component being sliced out, so they come along unchanged. Leaving
+        // them behind would give a component report a non-zero job count beside
+        // an expansion factor of 0.0 - which this scale defines as "no jobs",
+        // the opposite of the truth.
         report.user_job_counts = self.user_job_counts.clone();
         report.user_wait_seconds = self.user_wait_seconds.clone();
         report.num_jobs = self.num_jobs;
         report.total_wait_seconds = self.total_wait_seconds;
+
+        report.user_expansion_milli = self.user_expansion_milli.clone();
+        report.total_expansion_milli = self.total_expansion_milli;
+        report.user_runtime_seconds = self.user_runtime_seconds.clone();
+        report.total_runtime_seconds = self.total_runtime_seconds;
+
+        report.user_allocated_cpus = self.user_allocated_cpus.clone();
+        report.total_allocated_cpus = self.total_allocated_cpus;
+        report.user_allocated_gpus = self.user_allocated_gpus.clone();
+        report.total_allocated_gpus = self.total_allocated_gpus;
 
         report.user_requeue_events = self.user_requeue_events.clone();
         report.num_requeue_events = self.num_requeue_events;
@@ -1269,6 +1285,13 @@ impl DailyProjectUsageReport {
         // whole report's requeue events and usage, and there is no way to
         // apportion them to one component - copying them would leave a report
         // whose state breakdown claims more usage than the report contains.
+        //
+        // The reservation maps are left behind for the same reason, and this is
+        // a decision rather than an oversight. `reservation_reports` is usage,
+        // which cannot be apportioned to one component; carrying
+        // `reservation_jobs` alone - it being a count, like the job counts above
+        // - would make `reservation_summary` show jobs against no usage at all,
+        // which reads worse than showing nothing.
 
         report.is_complete = self.is_complete;
 
@@ -6376,6 +6399,41 @@ mod tests {
         // the per-state breakdown describes the whole report, so it is not
         // carried onto a single component - there is no way to apportion it
         assert!(cpu.requeue_states().is_empty());
+    }
+
+    #[test]
+    fn test_a_component_report_keeps_the_per_job_statistics() {
+        // How long a job queued, how long it ran and how big it was are
+        // properties of the job, not of the component the usage is being sliced
+        // by - so asking for "cpu" must not lose them. It did: the component
+        // report carried the job count but not the runtime, so a caller got a
+        // non-zero `num_jobs` beside an expansion factor of 0.0, which on this
+        // scale is the sentinel for "no jobs at all".
+        let mut report = DailyProjectUsageReport::default();
+
+        report.add_usage("alice", Usage::new(1800));
+        report.add_component_usage("cpu", "alice", Usage::new(3600));
+        report.add_jobs("alice", 1);
+        report.add_wait_seconds("alice", 1800);
+        report.add_expansion("alice", 1800, 1800);
+        report.add_job_size("alice", 64, 2);
+
+        let cpu = report.get_component("cpu");
+
+        assert_eq!(cpu.num_jobs(), report.num_jobs());
+        assert_eq!(cpu.total_runtime_seconds(), 1800);
+        assert_eq!(cpu.average_runtime_seconds(), 1800);
+        assert_eq!(cpu.average_expansion_factor(), 2.0);
+        assert_eq!(cpu.aggregate_expansion_factor(), 2.0);
+        assert_eq!(cpu.expansion_factor_for_user("alice"), 2.0);
+        assert_eq!(cpu.average_cpus_per_job(), 64.0);
+        assert_eq!(cpu.average_gpus_per_job(), 2.0);
+        assert_eq!(cpu.average_cpus_per_job_for_user("alice"), 64.0);
+        assert!(cpu.is_consistent());
+
+        // and the component's own usage is still the component's, not the
+        // whole report's
+        assert_eq!(cpu.total_usage(), Usage::new(3600));
     }
 
     #[test]

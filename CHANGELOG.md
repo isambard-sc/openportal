@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- **`get_reservation_report`** ([slurm/tools/](slurm/tools/)): an operator tool
+  that answers the question a usage report cannot. A project's report says which
+  reservations *it* used; this says which projects used a *reservation*.
+
+  ```
+  get_reservation_report interactive this_month
+  ```
+
+  It reads `sacct` directly on the cluster - no config file, no agent, no
+  network - and prints what each project put into the named reservation: a
+  per-project total and share, a per-user table with waits, runtimes and
+  expansion factors, requeued usage where there is any, and a day-by-day table.
+  Slurm accounts named `{portal}.{project}` are resolved to the OpenPortal
+  project they belong to; any other account is counted and named, but not
+  reported on, since OpenPortal did not create it and cannot say whose it is.
+
+  What it deliberately does not report is how *full* the reservation was: that
+  comes from the reservation's node count and duration, which job accounting
+  records do not carry.
+
+  The tool shares the agent's code rather than reimplementing it - the slurm
+  crate now builds a library as well as its binaries - so what it says a job
+  consumed cannot drift from what the agent says.
+
 ### Fixed
 
 - **A job still running when its window closed had its runtime and expansion

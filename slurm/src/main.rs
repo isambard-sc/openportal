@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: © 2024 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 // SPDX-License-Identifier: MIT
 
+// Every dependency of this crate is now declared for the library, which the two
+// binaries share; a binary uses only the handful it needs directly. The lint is
+// still doing its job on `src/lib.rs`, which is where an unused dependency would
+// actually be dead weight.
+#![allow(unused_crate_dependencies)]
+
 use anyhow::Result;
 
 use greatwestern::grammar::Instruction::{
@@ -18,9 +24,9 @@ use templemeads::Error;
 type Envelope = templemeads::job::Envelope<Hpc>;
 type Job = templemeads::job::Job<Hpc>;
 
-mod cache;
-mod sacctmgr;
-mod slurm;
+use op_slurm::cache;
+use op_slurm::sacctmgr;
+use op_slurm::slurm;
 
 ///
 /// Main function for the slurm scheduler application

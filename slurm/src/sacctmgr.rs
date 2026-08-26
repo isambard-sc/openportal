@@ -1030,7 +1030,7 @@ pub async fn add_user(user: &UserMapping, expires: &chrono::DateTime<Utc>) -> Re
 /// what the report says about itself can be checked against what we counted.
 ///
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ReportTotals {
+pub struct ReportTotals {
     usage: u64,
     num_jobs: u64,
     wait_seconds: u64,
@@ -1043,6 +1043,16 @@ struct ReportTotals {
     /// we asked, so its runtime is not yet final. Such a window must not be
     /// frozen - see `record_job`.
     saw_unfinished_job: bool,
+}
+
+impl ReportTotals {
+    /// True if a job counted in this window had not finished when we asked, so
+    /// its runtime and expansion factor are not in the report. The agent uses
+    /// this to decline to cache the window; a tool that reads Slurm directly
+    /// uses it to say so in its output.
+    pub fn saw_unfinished_job(&self) -> bool {
+        self.saw_unfinished_job
+    }
 }
 
 ///
@@ -1059,7 +1069,7 @@ struct ReportTotals {
 /// inside the window, so that an attempt spanning several windows is counted
 /// once rather than once per window.
 ///
-fn record_job(
+pub fn record_job(
     report: &mut DailyProjectUsageReport,
     job: &SlurmJob,
     window_start: &chrono::DateTime<Utc>,

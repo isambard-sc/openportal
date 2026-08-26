@@ -2963,6 +2963,30 @@ impl ProjectUsageReport {
         })
     }
 
+    ///
+    /// Usage attributed to one *local* user across every day in this report.
+    ///
+    /// The `usage` method above takes a `UserIdentifier` and needs a mapping to
+    /// resolve it. This one takes the local name that Slurm recorded, which is
+    /// what the per-user maps are keyed on and what the rest of the
+    /// `*_for_user` family here already accepts - a caller reading a report
+    /// straight out of a scheduler has no mapping to hand.
+    ///
+    pub fn usage_for_local_user(&self, local_user: &str) -> Usage {
+        self.reports
+            .values()
+            .map(|report| report.usage(local_user))
+            .sum()
+    }
+
+    /// The same for usage discarded by a requeue.
+    pub fn requeue_usage_for_local_user(&self, local_user: &str) -> Usage {
+        self.reports
+            .values()
+            .map(|report| report.requeue_usage(local_user))
+            .sum()
+    }
+
     /// The mean queue wait per job for one local user, over every day.
     pub fn average_wait_seconds_for_user(&self, user: &str) -> u64 {
         match self.num_jobs_for_user(user) {

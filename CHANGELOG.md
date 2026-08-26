@@ -18,8 +18,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
   It reads `sacct` directly on the cluster - no config file, no agent, no
   network - and prints what each project put into the named reservation: a
-  per-project total and share, a per-user table with waits, runtimes and
-  expansion factors, requeued usage where there is any, and a day-by-day table.
+  per-project total and share, a per-user table with waits, runtimes, expansion
+  factors and mean job sizes, requeued usage where there is any, and two
+  day-by-day tables - mean wait per job, then usage.
+
+  Progress goes to standard error so that the report on standard output can be
+  redirected to a file on its own. `--sacct-filter` asks `sacct` to return only
+  the reservation's jobs, which is much less work on a busy cluster; it is off
+  by default because `--reservation` is not available on every `sacct`, and the
+  records read and the records kept are logged so that a run with it can be
+  checked against a run without.
   Slurm accounts named `{portal}.{project}` are resolved to the OpenPortal
   project they belong to; any other account is counted and named, but not
   reported on, since OpenPortal did not create it and cannot say whose it is.

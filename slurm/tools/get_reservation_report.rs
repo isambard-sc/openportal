@@ -56,10 +56,16 @@ const DEFAULT_NODE: &str = r#"{ "cpus": 288, "gpus": 4, "mem": 491520, "billing"
 /// use.
 const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Projects shown as their own column in the day-by-day table before the rest
+/// Projects shown as their own column in the day-by-day tables before the rest
 /// are gathered into `other`. Wide enough to see who the reservation is for,
 /// narrow enough to stay on a terminal.
 const MAX_DAY_TABLE_COLUMNS: usize = 6;
+
+/// The width of every rule and table here. An operator reads this in whatever
+/// terminal they happen to be in, and a report that wraps is a report that has
+/// to be widened before it can be read - so it fits the eighty columns that
+/// every terminal has.
+const REPORT_WIDTH: usize = 80;
 
 struct Options {
     reservation: String,
@@ -67,6 +73,7 @@ struct Options {
     node: String,
     sacct: String,
     cluster: String,
+    sacct_filter: bool,
 }
 
 const USAGE: &str = "\
@@ -84,6 +91,12 @@ Options:
   --sacct CMD     the sacct command to run (default: sacct). Accepts a
                   composite command, e.g. 'docker exec slurmctld sacct'.
   --cluster NAME  restrict the query to one cluster
+  --sacct-filter  ask sacct to return only this reservation's jobs, instead
+                  of reading every job and filtering here. Much less work on
+                  a busy cluster, but --reservation is not available on every
+                  sacct, so this is off by default. To check it on yours, run
+                  once with it and once without and compare the totals - the
+                  records read and the records kept are logged either way.
   --help          show this message
 
 Example:
@@ -102,6 +115,7 @@ fn parse_args() -> Result<Option<Options>> {
     let mut node = DEFAULT_NODE.to_string();
     let mut sacct = "sacct".to_string();
     let mut cluster = String::new();
+    let mut sacct_filter = false;
 
     let mut remaining = args.into_iter();
 
@@ -116,6 +130,7 @@ fn parse_args() -> Result<Option<Options>> {
             "--node" => node = value("--node")?,
             "--sacct" => sacct = value("--sacct")?,
             "--cluster" => cluster = value("--cluster")?,
+            "--sacct-filter" => sacct_filter = true,
             other if other.starts_with('-') => {
                 anyhow::bail!("Unknown option '{}'. Try --help.", other);
             }
@@ -139,6 +154,7 @@ fn parse_args() -> Result<Option<Options>> {
         node,
         sacct,
         cluster,
+        sacct_filter,
     }))
 }
 
@@ -160,15 +176,19 @@ fn project_of_account(account: &str) -> Option<ProjectIdentifier> {
 /// Ask Slurm for every job that ran on one day, for every account.
 ///
 /// Deliberately not filtered by account: the question is who used a
-/// reservation, and the answer is not known until the records are read. It is
-/// also not filtered by reservation - `sacct` cannot be relied upon to do that
-/// across the versions this may meet, and a flag that quietly means something
-/// else on an older Slurm is worse than reading a few more records.
+/// reservation, and the answer is not known until the records are read.
+///
+/// Whether `sacct` is asked to filter by reservation is the caller's choice -
+/// see `--sacct-filter`. It is off by default because `--reservation` cannot be
+/// relied upon across the versions this may meet, and a flag that quietly means
+/// something else on an older Slurm is worse than reading a few more records.
+/// Either way the records are filtered again below, so the flag can only change
+/// how much is read, never what is reported.
 ///
 async fn jobs_on_day(
     day: &Date,
     nodes: &SlurmNodes,
-    cluster: &str,
+    options: &Options,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<SlurmJob>> {
     let start_time = day.day().start_time().and_utc();
@@ -186,9 +206,21 @@ async fn jobs_on_day(
     // an agent servicing a job with a deadline
     let expires = *now + chrono::Duration::hours(1);
 
-    let cluster_arg = match cluster.is_empty() {
+    let cluster_arg = match options.cluster.is_empty() {
         true => String::new(),
-        false => format!("--cluster={}", cluster),
+        false => format!("--cluster={}", options.cluster),
+    };
+
+    // Off by default: `--reservation` is not available on every `sacct` this
+    // may meet, and one that quietly means something else would silently change
+    // what the report covers. Where it does work it is worth a great deal on a
+    // busy cluster - the alternative is reading every job on the machine and
+    // discarding nearly all of them. The records kept are filtered here either
+    // way, so turning this on can narrow what is read but can never widen what
+    // is reported.
+    let reservation_arg = match options.sacct_filter {
+        true => format!("--reservation={}", options.reservation),
+        false => String::new(),
     };
 
     let cmd = runner(&expires).await?.build_command(
@@ -203,6 +235,7 @@ async fn jobs_on_day(
             format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
             format!("--endtime={}", end_time.format("%Y-%m-%dT%H:%M:%S")),
             cluster_arg,
+            reservation_arg,
             "--json".to_string(),
         ],
     )?;
@@ -232,6 +265,11 @@ struct Collected {
     /// the reservation's name as Slurm spells it, which may differ in case
     /// from what was asked for
     name_in_slurm: String,
+    /// The days actually read, in order. `this_month` asked for on the 8th
+    /// names thirty-one days, of which twenty-three have not happened; the
+    /// tables are built from this so they show the period that was reported on
+    /// rather than a run of empty rows for a future nobody can have used.
+    days: Vec<Date>,
 }
 
 ///
@@ -245,13 +283,75 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
         ..Default::default()
     };
 
-    for day in options.dates.days() {
-        let jobs = jobs_on_day(&day, nodes, &options.cluster, &now)
+    // A day that has not started cannot have been used, and `sacct` has nothing
+    // to say about it. Dropping them here rather than querying and discarding
+    // keeps the progress count honest as well.
+    let days: Vec<Date> = options
+        .dates
+        .days()
+        .into_iter()
+        .filter(|day| day.day().start_time().and_utc() <= now)
+        .collect();
+
+    let total_days = days.len();
+
+    if total_days == 0 {
+        tracing::warn!("The period '{}' has not started yet", options.dates);
+    }
+
+    // A month of a busy cluster is a month of unfiltered `sacct` queries, and
+    // an operator watching a silent terminal cannot tell a slow query from a
+    // hung one. This goes to standard error, so the report on standard output
+    // can still be redirected to a file on its own.
+    tracing::info!(
+        "Reading reservation '{}' over {} day(s)",
+        options.reservation,
+        total_days
+    );
+
+    for (index, day) in days.iter().enumerate() {
+        tracing::info!("Processing day {} of {} ({})", index + 1, total_days, day);
+
+        let jobs = jobs_on_day(day, nodes, options, &now)
             .await
             .with_context(|| format!("Could not read Slurm accounting for {}", day))?;
 
-        absorb_day(&mut collected, &jobs, &options.reservation, &day);
+        let kept = jobs
+            .iter()
+            .filter(|job| job.reservation().eq_ignore_ascii_case(&options.reservation))
+            .count();
+
+        absorb_day(&mut collected, &jobs, &options.reservation, day);
+
+        // Both numbers, always: they are how an operator checks whether
+        // `--sacct-filter` does what it claims. With it on the two should be
+        // equal, and the totals of a run with it and a run without should
+        // agree.
+        tracing::info!(
+            "{}: {} record(s) read, {} inside the reservation",
+            day,
+            jobs.len(),
+            kept
+        );
+
+        if options.sacct_filter && kept != jobs.len() {
+            tracing::warn!(
+                "{}: sacct was asked for reservation '{}' but {} of the {} records it \
+                 returned are not in it. They have been discarded, so this report is still \
+                 right, but --reservation is not filtering the way this expects.",
+                day,
+                options.reservation,
+                jobs.len().saturating_sub(kept),
+                jobs.len()
+            );
+        }
     }
+
+    tracing::info!(
+        "Read {} day(s): {} project(s) used the reservation",
+        total_days,
+        collected.projects.len()
+    );
 
     Ok(collected)
 }
@@ -264,6 +364,8 @@ async fn collect(options: &Options, nodes: &SlurmNodes) -> Result<Collected> {
 /// response - which is the half worth testing, the other being a subprocess.
 ///
 fn absorb_day(collected: &mut Collected, jobs: &[SlurmJob], reservation: &str, day: &Date) {
+    collected.days.push(day.clone());
+
     let start_time = day.day().start_time().and_utc();
 
     // one report per project per day, so that each day's records are recorded
@@ -332,7 +434,9 @@ fn total_usage(collected: &Collected) -> Usage {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    templemeads::config::initialise_tracing();
+    // progress goes to standard error, the report to standard output, so that
+    // `get_reservation_report ... > report.txt` leaves a clean file
+    templemeads::config::initialise_tracing_to_stderr();
 
     let Some(options) = parse_args()? else {
         return Ok(());
@@ -352,20 +456,37 @@ async fn main() -> Result<()> {
 
     let collected = collect(&options, &nodes).await?;
 
-    print!("{}", render(&options, &collected));
+    print!("{}", render(&collected));
 
     Ok(())
 }
 
-fn render(options: &Options, collected: &Collected) -> String {
+///
+/// The whole report, from what was collected.
+///
+/// Takes no `Options`: what the report says has to be a function of what was
+/// read, not of what was asked for. A period naming days that have not happened
+/// must not put empty rows in a table, and a reservation named in a different
+/// case must be printed the way the cluster spells it.
+///
+fn render(collected: &Collected) -> String {
     use std::fmt::Write;
 
     let mut out = String::new();
-    let rule = "=".repeat(78);
+    let rule = "=".repeat(REPORT_WIDTH);
 
-    let days = options.dates.days();
-    let first = days.first().map(|day| day.to_string()).unwrap_or_default();
-    let last = days.last().map(|day| day.to_string()).unwrap_or_default();
+    // the span actually read, which for `this_month` on the 8th stops at the
+    // 8th rather than claiming a month nobody has lived through yet
+    let first = collected
+        .days
+        .first()
+        .map(|day| day.to_string())
+        .unwrap_or_default();
+    let last = collected
+        .days
+        .last()
+        .map(|day| day.to_string())
+        .unwrap_or_default();
 
     // `write!` to a String cannot fail, so the results are discarded rather
     // than unwrapped - `unwrap` is denied in this crate.
@@ -439,6 +560,19 @@ fn render(options: &Options, collected: &Collected) -> String {
         "duration, which job accounting records do not carry. Every share below is a"
     );
     let _ = writeln!(out, "share of what went in.");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Per-user figures are means over that user's jobs; cpus and gpus are the mean"
+    );
+    let _ = writeln!(
+        out,
+        "size of a job, counting each job once however long it ran. Expansion factor is"
+    );
+    let _ = writeln!(
+        out,
+        "turnaround over runtime, so 1.00 is ideal and higher means more queueing."
+    );
 
     if collected.saw_unfinished_job {
         let _ = writeln!(out);
@@ -459,9 +593,143 @@ fn render(options: &Options, collected: &Collected) -> String {
         let _ = write!(out, "{}", render_project(project, report, &total));
     }
 
-    let _ = write!(out, "{}", render_day_table(&projects, &options.dates));
+    let _ = write!(out, "{}", render_wait_table(&projects, &collected.days));
+    let _ = write!(out, "{}", render_usage_table(&projects, &collected.days));
 
     out
+}
+
+/// The header shared by the day-by-day tables, and whether an `other` column
+/// is needed - the two have to agree or the columns do not line up.
+fn day_table_header(projects: &[(&ProjectIdentifier, &ProjectUsageReport)]) -> String {
+    use std::fmt::Write;
+
+    let (columns, rest) = projects.split_at(projects.len().min(MAX_DAY_TABLE_COLUMNS));
+
+    let mut header = format!("{:<12}", "date");
+
+    for (project, _) in columns {
+        let _ = write!(header, " {:>9}", elide(&project.project(), 9));
+    }
+
+    if !rest.is_empty() {
+        let _ = write!(header, " {:>9}", "other");
+    }
+
+    header
+}
+
+///
+/// Mean queue wait per job, day by day.
+///
+/// Before the usage table because it is the question a reservation is usually
+/// created to answer: a reservation exists so that someone does not have to
+/// queue, and this is whether they did.
+///
+/// Every figure is a mean over the jobs *started* that day, and the `all`
+/// column pools the jobs rather than averaging the columns - a project that
+/// ran four jobs must not weigh as heavily as one that ran four hundred.
+///
+fn render_wait_table(
+    projects: &[(&ProjectIdentifier, &ProjectUsageReport)],
+    days: &[Date],
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    let (columns, rest) = projects.split_at(projects.len().min(MAX_DAY_TABLE_COLUMNS));
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Day by day: mean wait per job, in hours");
+    let _ = writeln!(out, "{}", "-".repeat(REPORT_WIDTH));
+    let _ = writeln!(out, "{} {:>10}", day_table_header(projects), "all");
+
+    // A day on which a project ran nothing has no mean to report, and printing
+    // 0.00 there would read as "waited no time at all" - the opposite.
+    let cell = |wait: u64, jobs: u64| match jobs {
+        0 => "-".to_string(),
+        jobs => format!("{:.2}", Usage::new(wait / jobs).hours()),
+    };
+
+    for day in days {
+        let mut row = format!("{:<12}", day.to_string());
+        let mut all_wait = 0u64;
+        let mut all_jobs = 0u64;
+
+        for (_, report) in columns {
+            let day_report = report.get_report(day);
+            all_wait = all_wait.saturating_add(day_report.total_wait_seconds());
+            all_jobs = all_jobs.saturating_add(day_report.num_jobs());
+
+            let _ = write!(
+                out_cell(&mut row),
+                " {:>9}",
+                cell(day_report.total_wait_seconds(), day_report.num_jobs())
+            );
+        }
+
+        if !rest.is_empty() {
+            let (wait, jobs) = pooled(rest, day);
+            all_wait = all_wait.saturating_add(wait);
+            all_jobs = all_jobs.saturating_add(jobs);
+            let _ = write!(out_cell(&mut row), " {:>9}", cell(wait, jobs));
+        }
+
+        let _ = write!(out_cell(&mut row), " {:>10}", cell(all_wait, all_jobs));
+        let _ = writeln!(out, "{}", row);
+    }
+
+    // and the same over the whole period, pooled the same way
+    let mut totals = format!("{:<12}", "overall");
+    let mut all_wait = 0u64;
+    let mut all_jobs = 0u64;
+
+    for (_, report) in columns {
+        all_wait = all_wait.saturating_add(report.total_wait_seconds());
+        all_jobs = all_jobs.saturating_add(report.num_jobs());
+        let _ = write!(
+            out_cell(&mut totals),
+            " {:>9}",
+            cell(report.total_wait_seconds(), report.num_jobs())
+        );
+    }
+
+    if !rest.is_empty() {
+        let wait = rest.iter().fold(0u64, |total, (_, report)| {
+            total.saturating_add(report.total_wait_seconds())
+        });
+        let jobs = rest.iter().fold(0u64, |total, (_, report)| {
+            total.saturating_add(report.num_jobs())
+        });
+        all_wait = all_wait.saturating_add(wait);
+        all_jobs = all_jobs.saturating_add(jobs);
+        let _ = write!(out_cell(&mut totals), " {:>9}", cell(wait, jobs));
+    }
+
+    let _ = write!(out_cell(&mut totals), " {:>10}", cell(all_wait, all_jobs));
+    let _ = writeln!(out, "{}", "-".repeat(REPORT_WIDTH));
+    let _ = writeln!(out, "{}", totals);
+
+    out
+}
+
+/// The wait and job count of the projects gathered into the `other` column, on
+/// one day.
+fn pooled(rest: &[(&ProjectIdentifier, &ProjectUsageReport)], day: &Date) -> (u64, u64) {
+    rest.iter().fold((0u64, 0u64), |(wait, jobs), (_, report)| {
+        let day_report = report.get_report(day);
+        (
+            wait.saturating_add(day_report.total_wait_seconds()),
+            jobs.saturating_add(day_report.num_jobs()),
+        )
+    })
+}
+
+/// `write!` needs a `fmt::Write`, and a `String` is one - this only exists to
+/// keep the call sites reading as writes to the row being built.
+fn out_cell(row: &mut String) -> &mut String {
+    row
 }
 
 fn unmanaged_note(collected: &Collected) -> String {
@@ -504,7 +772,7 @@ fn render_project(
     use std::fmt::Write;
 
     let mut out = String::new();
-    let rule = "-".repeat(78);
+    let rule = "-".repeat(REPORT_WIDTH);
 
     let usage = report.total_usage_including_requeues();
 
@@ -525,8 +793,8 @@ fn render_project(
 
     let _ = writeln!(
         out,
-        "{:<16} {:>14} {:>7} {:>11} {:>11} {:>9}",
-        "user", "usage", "jobs", "mean wait", "mean run", "expansion"
+        "{:<14} {:>9} {:>5} {:>12} {:>11} {:>9} {:>6} {:>6}",
+        "user", "usage(h)", "jobs", "mean_wait(h)", "mean_run(h)", "expansion", "cpus", "gpus"
     );
 
     let mut users = report.job_users();
@@ -553,20 +821,31 @@ fn render_project(
     };
 
     let or_dash_hours = |seconds: u64| match seconds > 0 {
-        true => Usage::new(seconds).in_hours().to_string(),
+        true => format!("{:.2}", Usage::new(seconds).hours()),
+        false => "-".to_string(),
+    };
+
+    // A GPU count of zero is a real answer - a project running no GPU work on a
+    // GPU machine is worth seeing - so it is printed rather than dashed.
+    let or_dash_size = |value: f64, jobs: u64| match jobs > 0 {
+        true => format!("{:.1}", value),
         false => "-".to_string(),
     };
 
     for user in &users {
+        let jobs = report.num_jobs_for_user(user);
+
         let _ = writeln!(
             out,
-            "{:<16} {:>14} {:>7} {:>11} {:>11} {:>9}",
-            elide(user, 16),
-            put_in(user).in_hours().to_string(),
-            report.num_jobs_for_user(user),
+            "{:<14} {:>9.2} {:>5} {:>12} {:>11} {:>9} {:>6} {:>6}",
+            elide(user, 14),
+            put_in(user).hours(),
+            jobs,
             or_dash_hours(report.average_wait_seconds_for_user(user)),
             or_dash_hours(report.average_runtime_seconds_for_user(user)),
             or_dash(report.aggregate_expansion_factor_for_user(user)),
+            or_dash_size(report.average_cpus_per_job_for_user(user), jobs),
+            or_dash_size(report.average_gpus_per_job_for_user(user), jobs),
         );
     }
 
@@ -588,9 +867,9 @@ fn render_project(
 /// A day-by-day table, so that a reservation filling and emptying is visible
 /// rather than having to be inferred from one total.
 ///
-fn render_day_table(
+fn render_usage_table(
     projects: &[(&ProjectIdentifier, &ProjectUsageReport)],
-    dates: &DateRange,
+    days: &[Date],
 ) -> String {
     use std::fmt::Write;
 
@@ -599,28 +878,16 @@ fn render_day_table(
     let (columns, rest) = projects.split_at(projects.len().min(MAX_DAY_TABLE_COLUMNS));
 
     let _ = writeln!(out);
-    let _ = writeln!(out, "Day by day, in hours");
-    let _ = writeln!(out, "{}", "-".repeat(78));
+    let _ = writeln!(out, "Day by day: usage, in hours");
+    let _ = writeln!(out, "{}", "-".repeat(REPORT_WIDTH));
+    let _ = writeln!(out, "{} {:>10}", day_table_header(projects), "total");
 
-    let mut header = format!("{:<12}", "date");
-
-    for (project, _) in columns {
-        let _ = write!(header, " {:>9}", elide(&project.project(), 9));
-    }
-
-    if !rest.is_empty() {
-        let _ = write!(header, " {:>9}", "other");
-    }
-
-    let _ = write!(header, " {:>10}", "total");
-    let _ = writeln!(out, "{}", header);
-
-    for day in dates.days() {
+    for day in days {
         let mut row = format!("{:<12}", day.to_string());
         let mut day_total = Usage::default();
 
         for (_, report) in columns {
-            let usage = usage_on_day(report, &day);
+            let usage = usage_on_day(report, day);
             day_total += usage;
             let _ = write!(row, " {:>9.2}", usage.hours());
         }
@@ -628,7 +895,7 @@ fn render_day_table(
         if !rest.is_empty() {
             let other: Usage = rest
                 .iter()
-                .map(|(_, report)| usage_on_day(report, &day))
+                .map(|(_, report)| usage_on_day(report, day))
                 .sum();
             day_total += other;
             let _ = write!(row, " {:>9.2}", other.hours());
@@ -662,7 +929,7 @@ fn render_day_table(
     }
 
     let _ = write!(totals, " {:>10.2}", whole.hours());
-    let _ = writeln!(out, "{}", "-".repeat(78));
+    let _ = writeln!(out, "{}", "-".repeat(REPORT_WIDTH));
     let _ = writeln!(out, "{}", totals);
 
     if !rest.is_empty() {
@@ -673,7 +940,7 @@ fn render_day_table(
         );
     }
 
-    let _ = writeln!(out, "{}", "=".repeat(78));
+    let _ = writeln!(out, "{}", "=".repeat(REPORT_WIDTH));
 
     out
 }
@@ -902,19 +1169,7 @@ mod tests {
     fn test_the_report_reads_sensibly_over_the_fixture() {
         let collected = collected_fixture("interactive");
 
-        let Ok(dates) = DateRange::parse("2026-03-01:2026-03-02") else {
-            unreachable!("a valid range");
-        };
-
-        let options = Options {
-            reservation: "interactive".to_string(),
-            dates,
-            node: DEFAULT_NODE.to_string(),
-            sacct: "sacct".to_string(),
-            cluster: String::new(),
-        };
-
-        let report = render(&options, &collected);
+        let report = render(&collected);
 
         assert!(report.contains("Reservation report for 'interactive'"));
         assert!(report.contains("u6dz.brics"));
@@ -938,19 +1193,7 @@ mod tests {
     fn test_a_reservation_nobody_used_says_so_rather_than_printing_nothing() {
         let collected = collected_fixture("no_such_reservation");
 
-        let Ok(dates) = DateRange::parse("2026-03-01:2026-03-02") else {
-            unreachable!("a valid range");
-        };
-
-        let options = Options {
-            reservation: "no_such_reservation".to_string(),
-            dates,
-            node: DEFAULT_NODE.to_string(),
-            sacct: "sacct".to_string(),
-            cluster: String::new(),
-        };
-
-        let report = render(&options, &collected);
+        let report = render(&collected);
 
         assert!(report.contains("No OpenPortal project ran a job inside this reservation"));
         assert!(collected.projects.is_empty());
@@ -965,6 +1208,82 @@ mod tests {
 
         // and the report names it the way the cluster does
         assert_eq!(collected.name_in_slurm, "interactive");
+    }
+
+    #[test]
+    fn test_the_tables_cover_the_days_that_were_read_and_no_others() {
+        // `this_month` asked for on the 8th names thirty-one days, of which
+        // twenty-three have not happened. The tables are built from the days
+        // actually read, so a period running into the future does not print a
+        // run of empty rows for days nobody can have used.
+        let collected = collected_fixture("interactive");
+        let report = render(&collected);
+
+        assert_eq!(collected.days.len(), 2);
+        assert!(report.contains("2026-03-01"));
+        assert!(report.contains("2026-03-02"));
+        assert!(!report.contains("2026-03-03"));
+
+        // and the header names the span that was read, not the one requested
+        assert!(report.contains("2026-03-01 to 2026-03-02"));
+    }
+
+    #[test]
+    fn test_the_wait_table_comes_first_and_pools_rather_than_averaging_columns() {
+        let collected = collected_fixture("interactive");
+        let report = render(&collected);
+
+        let Some(waits) = report.find("Day by day: mean wait per job") else {
+            unreachable!("the wait table is printed");
+        };
+
+        let Some(usage) = report.find("Day by day: usage") else {
+            unreachable!("the usage table is printed");
+        };
+
+        // a reservation exists so that someone does not have to queue, so
+        // whether they did is the first question
+        assert!(waits < usage);
+
+        // ab12 ran two jobs on day one - the requeued attempt is not one of
+        // them - waiting 600s and 900s, so the mean is 0.25 hours rather than
+        // the 0.21 that averaging the two rows separately would give
+        let Some(ab12) = collected
+            .projects
+            .get(&ProjectIdentifier::parse("ab12.brics").expect("a valid identifier"))
+        else {
+            unreachable!("ab12 ran in the reservation");
+        };
+
+        let day_one = ab12.get_report(&day(DAY_ONE));
+        assert_eq!(day_one.num_jobs(), 1);
+        assert_eq!(day_one.average_wait_seconds(), 900);
+    }
+
+    #[test]
+    fn test_the_user_table_carries_the_job_sizes() {
+        let collected = collected_fixture("interactive");
+        let report = render(&collected);
+
+        assert!(report.contains("mean_wait(h)"));
+        assert!(report.contains("mean_run(h)"));
+
+        // the size columns are named for what they hold and explained once in
+        // the legend, rather than carrying "mean" into a heading each time
+        assert!(report.contains("cpus"));
+        assert!(report.contains("gpus"));
+        assert!(report.contains("cpus and gpus are the mean"));
+
+        // units live in the headings now, so the rows are bare numbers
+        let Some(row) = report.lines().find(|line| line.starts_with("user_two")) else {
+            unreachable!("user_two has a row");
+        };
+
+        assert!(!row.contains("hours"));
+
+        // user_two's one job held a whole node: 288 cores and 4 GPUs
+        assert!(row.contains("288.0"), "{}", row);
+        assert!(row.contains("4.0"), "{}", row);
     }
 
     #[test]

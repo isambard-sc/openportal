@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **The example site portal's resources are now managed over its API.** Which
+  clusters the example advertises was a constant in `site_portal.py`; it is now
+  state in `store.py`, with `GET /offerings`, `POST /offerings`,
+  `DELETE /offerings/{name}` and `POST /offerings/sync` in `app.py`. Adding or
+  withdrawing one re-registers the complete set with OpenPortal immediately, so
+  a cluster can be offered while the portal is running. A fresh portal offers
+  nothing until a resource is added — which is the first step of the local setup
+  below. Withdrawing a resource keeps the awards made on it; they simply stop
+  being reachable.
+
 - **A one-command local setup for the example site portal** —
   `python/examples/site_portal/example.py` writes the configs for an awards
   portal, a site portal and a bridge for each, connects them, starts them

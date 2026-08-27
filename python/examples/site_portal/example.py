@@ -160,8 +160,9 @@ AWARDING_PORTALS = ALLOCATOR.name
 #: timeout. Peer the two portals here and the hand-off lands.
 PORTAL_ZONE = f"{ALLOCATOR.name}>{SITE.name}"
 
-#: One of the resources site_portal.OFFERINGS advertises, used in the worked
-#: example printed by `run`.
+#: The resource used in the worked example printed by `run`. Nothing here
+#: creates it: a site offers nothing until an operator adds a resource through
+#: the app's `POST /offerings`, which is step 1 of those instructions.
 OFFERING = "cluster1"
 
 
@@ -753,7 +754,26 @@ Everything is up.
   {SITE_BRIDGE.name:<17}  site bridge API      {SITE_BRIDGE.http_url}
   {'app.py':<17}  the site portal      http://127.0.0.1:{APP_PORT}  (docs at /docs)
 
-1. Ask the awards portal to place an award on the site, from Python:
+1. **The site has to offer a resource first.** A fresh portal advertises
+   nothing, so there is nothing for the awards portal to address yet - and a
+   request for a resource that is not advertised is *held*, not refused, which
+   looks exactly like nothing happening. So start here:
+
+     curl -X POST http://127.0.0.1:{APP_PORT}/offerings \\
+          -H 'content-type: application/json' \\
+          -d '{{"name": "{OFFERING}", "templates": ["standard", "large"]}}'
+
+   That registers `{OFFERING}.{SITE.name}.{ALLOCATOR.name}` with the agents: a
+   virtual agent on `{SITE.name}` that `{ALLOCATOR.name}` may address directly.
+   The other two endpoints are
+
+     curl http://127.0.0.1:{APP_PORT}/offerings                    # what is offered
+     curl -X DELETE http://127.0.0.1:{APP_PORT}/offerings/{OFFERING}   # withdraw it
+
+   and withdrawing keeps the awards made on it, it just stops them being
+   reachable.
+
+2. Ask the awards portal to place an award on that resource, from Python:
 
      import openportal
      openportal.load_config("{_short(ALLOCATOR_BRIDGE.py_config)}")
@@ -770,7 +790,10 @@ Everything is up.
    errored job and it raises that error as an exception, which is why the line
    above looks at `error_message` first.)
 
-2. Approve it, as the site's operators would:
+   If it hangs for 30 seconds and comes back unfinished instead, the resource in
+   the destination is not one the site offers - go back to step 1.
+
+3. Approve it, as the site's operators would:
 
      curl http://127.0.0.1:{APP_PORT}/awards
 
@@ -778,7 +801,7 @@ Everything is up.
           -H 'content-type: application/json' \\
           -d '{{"project": "myproject1", "reason": "approved by the panel"}}'
 
-3. Repeat step 1. It now succeeds, and returns the mapping both portals hold
+4. Repeat step 2. It now succeeds, and returns the mapping both portals hold
    from here on: {award}:myproject1.{SITE.name}
 
    Then walk the rest of the README - pushing usage in, asking for a report,

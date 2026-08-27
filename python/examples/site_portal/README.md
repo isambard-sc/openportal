@@ -42,8 +42,8 @@ away.
 | File | What it is |
 |---|---|
 | `site_portal.py` | **The contract.** One function per instruction, plus the dispatch that guarantees every job is answered. Read this first. |
-| `store.py` | The portal's own state: awards, their attachment history, and per-project usage. The file you replace. |
-| `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for approving awards, pushing usage figures and declaring a month's accounting final. |
+| `store.py` | The portal's own state: the resources this site offers, its awards, their attachment history, and per-project usage. The file you replace. |
+| `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for saying which resources the site offers, approving awards, pushing usage figures and declaring a month's accounting final. |
 | `test_site_portal.py` | Drives every handler with synthetic jobs — no bridge, no agents, no network. Proves the example works, and shows that the contract is testable in isolation. |
 | `example.py` | Builds and runs a complete two-portal setup on your own machine — four agents, this application, and the wiring between them. Not part of the contract; it exists so you can *watch* the contract work. |
 
@@ -60,8 +60,9 @@ python example.py run
 ```
 
 It prints what is running and, more to the point, the Python and `curl` calls
-that walk the award through the eight steps below. `python example.py stop`
-stops it again, and `python example.py clean` also deletes `data/`.
+that walk an award through the steps below — starting with adding a cluster,
+since a fresh site offers nothing. `python example.py stop` stops it again, and
+`python example.py clean` also deletes `data/`.
 
 What it builds is the smallest arrangement in which one portal can make an award
 on another:
@@ -121,7 +122,38 @@ python test_site_portal.py
 
 With the application running and an awarding portal called `allocator`
 configured, here is the whole life of an award. This is the part to read
-carefully — most of the contract is visible in these eight steps.
+carefully — most of the contract is visible in these steps.
+
+### 0. The site says which resources it offers
+
+Nothing can happen until this portal advertises a resource. A fresh portal
+advertises none, so the operators add one:
+
+```bash
+curl -X POST localhost:8080/offerings \
+     -H 'content-type: application/json' \
+     -d '{"name": "cluster1", "templates": ["standard", "large"]}'
+```
+
+That registers `cluster1.site.allocator` — the resource `cluster1`, offered by
+`site`, to `allocator` — as a virtual agent that `allocator` may address
+directly. `GET /offerings` lists what is offered, along with whether OpenPortal
+currently has each one registered; `DELETE /offerings/cluster1` withdraws it.
+
+`templates` are the `AwardDetails.template` values awards on this resource may
+name, and they are per-resource because a template selects things that belong to
+the resource. It defaults to `["standard"]`.
+
+This is a step people skip, and skipping it produces the least helpful failure in
+the whole system: **a request for a resource that is not advertised is held, not
+refused** (§1.1). It sits on the portal agent waiting for the offering to appear,
+the caller waits out its timeout, and nothing anywhere says why. So if a
+`create_award` never comes back, check `GET /offerings` first.
+
+Withdrawing a resource ends its *reachability*, and nothing else. The awards made
+on it stay on record — they still own the days they were attached for, and those
+days may not have been collected yet (see step 8) — so `DELETE` reports how many
+it kept, and adding the resource back makes them reachable again.
 
 ### 1. The allocator asks for an award to be attached to a project
 
@@ -400,7 +432,10 @@ reason the example exists.
    `(offering, project id)`; answers are scoped by it; and a question about a
    project that is not on this resource returns empty, not an error. Reading it
    as an access-control list is the mistake this example is arranged to prevent
-   — which is why it offers two resources rather than one.
+   — which is why it is worth adding two resources rather than one and asking
+   each of them about the other's awards. And the set of them is *state*, not a
+   constant: `POST /offerings` adds one, `DELETE` withdraws one, and OpenPortal
+   is told the complete new set each time.
 
 2. **An award is *attached* to a project, not the same thing as one.**
    `create_award` asks you to connect an award to a project on a resource.

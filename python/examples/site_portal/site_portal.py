@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import re
 import time
 
 import openportal
@@ -32,32 +33,86 @@ logger = logging.getLogger(__name__)
 # What this portal offers
 # --------------------------------------------------------------------------
 
-#: The resources we offer, and to whom.
-#:
-#: An offering is a **virtual agent** on this portal: a name the awarding portal
-#: addresses directly, standing for one resource we run. On the wire it is
-#: written `<offering>.<us>.<them>` - the resource, offered by us, to them - and
-#: `app.py` registers the full paths with the bridge at startup.
-#:
-#: Two of them here, because one would hide the most important thing about them:
-#: **the offering is part of an award's identity, not a permission check.** An
-#: award created through `cluster1` is an award *on `cluster1`*. The same
-#: awarding portal can hold a different award of the same name on `cluster2`,
-#: and asking one resource about a project that lives on the other gets nothing
-#: back - see `_offering_of` and `build_usage_report` below.
-OFFERINGS = {"cluster1", "cluster2"}
+# An offering is a **virtual agent** on this portal: a name the awarding portal
+# addresses directly, standing for one resource we run. On the wire it is
+# written `<offering>.<us>.<them>` - the resource, offered by us, to them - and
+# `app.py` registers the full paths with the bridge.
+#
+# **The offering is part of an award's identity, not a permission check.** An
+# award created through `cluster1` is an award *on `cluster1`*. The same awarding
+# portal can hold a different award of the same name on `cluster2`, and asking
+# one resource about a project that lives on the other gets nothing back - see
+# `_offering_of` and `build_usage_report` below. Which is why running this with
+# two resources teaches more than running it with one.
+#
+# The set lives in `store.py` rather than in a constant here, because it is
+# state: a site procures a cluster, retires one, or opens one to a second
+# awarding portal, and none of those are code changes. `app.py` exposes
+# add/remove/list endpoints over these functions, and re-registers the set with
+# OpenPortal whenever it changes. A fresh portal therefore offers **nothing**
+# until an operator adds a resource - which is not a misconfiguration, just a
+# site that cannot be asked for anything yet (§1.1).
 
-#: The `AwardDetails.template` values each offering accepts.
-#:
-#: Per-offering, because a template means something different on each resource -
-#: in Waldur it selects the organisation, the default offerings and the billing
-#: that a project is created with, all of which are properties of the resource.
-#: An award naming a template this resource does not offer is rejected rather
-#: than quietly given a default (§4.1).
-OFFERED_TEMPLATES = {
-    "cluster1": {"standard", "large"},
-    "cluster2": {"standard"},
-}
+#: What an offering may be called. It becomes one element of a `Destination`, so
+#: it is what the grammar allows for an agent name and nothing more - checked
+#: here, at the point an operator types it, rather than failing later inside a
+#: destination nobody is looking at.
+OFFERING_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+
+#: The templates a resource accepts if the operator does not say. One, called
+#: `standard`, so that adding a cluster and creating an award on it needs no
+#: further decisions.
+DEFAULT_TEMPLATES = ("standard",)
+
+
+def offerings() -> list[store.Offering]:
+    """Every resource we advertise, in name order."""
+    return list(store.load_offerings().values())
+
+
+def offering_names() -> list[str]:
+    """Just the names, which is what most callers want."""
+    return sorted(store.load_offerings())
+
+
+def templates_for(offering: str) -> set[str]:
+    """The templates one resource accepts - empty if we do not offer it."""
+    found = store.load_offerings().get(offering)
+
+    return set(found.templates) if found else set()
+
+
+def add_offering(name: str, templates: list[str] | None = None) -> store.Offering:
+    """
+    Start advertising a resource, or change the templates it accepts.
+
+    Raises `ValueError` on a name that could not survive being part of a
+    destination, or on an empty template list - an offering that accepts no
+    template would reject every award made through it, which is a
+    misconfiguration rather than a policy.
+    """
+    if not OFFERING_NAME.match(name or ""):
+        raise ValueError(
+            f"'{name}' is not a usable offering name: 1-64 characters of "
+            "A-Z, a-z, 0-9, '_' or '-', not starting with '-'"
+        )
+
+    templates = list(templates) if templates else list(DEFAULT_TEMPLATES)
+
+    if not all(t and t.strip() for t in templates):
+        raise ValueError("a template name cannot be empty")
+
+    return store.add_offering(name, templates, datetime.date.today())
+
+
+def remove_offering(name: str) -> store.Offering | None:
+    """
+    Stop advertising a resource; returns what was removed, or `None`.
+
+    The awards on it are kept - see `store.remove_offering` for why that is not
+    laziness.
+    """
+    return store.remove_offering(name)
 
 
 # --------------------------------------------------------------------------
@@ -220,7 +275,7 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     if details.project_template is None:
         raise openportal.ManagedProjectRejectedError("no template named in the award")
 
-    if str(details.project_template) not in OFFERED_TEMPLATES.get(offering, set()):
+    if str(details.project_template) not in templates_for(offering):
         raise openportal.ManagedProjectRejectedError(
             f"template '{details.project_template}' is not offered on {offering}"
         )
@@ -769,7 +824,7 @@ def _authorise(job: openportal.Job) -> None:
     """
     offering = _offering_of(job)
 
-    if offering not in OFFERINGS:
+    if offering not in offering_names():
         raise openportal.ManagedProjectRejectedError(
             f"offering '{offering}' is not advertised by this portal"
         )

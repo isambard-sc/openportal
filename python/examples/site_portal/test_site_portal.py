@@ -141,6 +141,44 @@ def run() -> None:
 
 
 def _run_all() -> None:
+    print("\n-- what this site offers ---------------------------------------")
+
+    # Offerings are state, not a constant, so a fresh portal offers nothing and
+    # the suite starts by adding the two resources it works with. This is the
+    # same call `POST /offerings` makes.
+    check("a fresh portal offers nothing", site_portal.offering_names() == [])
+
+    site_portal.add_offering(OFFERING, ["standard", "large"])
+    site_portal.add_offering(OTHER_OFFERING, ["standard"])
+    check(
+        "both resources are now offered",
+        site_portal.offering_names() == [OFFERING, OTHER_OFFERING],
+        f"-> {site_portal.offering_names()}",
+    )
+    check(
+        "each carries its own templates",
+        site_portal.templates_for(OFFERING) == {"standard", "large"}
+        and site_portal.templates_for(OTHER_OFFERING) == {"standard"},
+    )
+
+    # Adding one twice is an update, not an error - the operator API is retried
+    # like everything else here.
+    site_portal.add_offering(OTHER_OFFERING, ["standard", "small"])
+    check(
+        "re-adding a resource updates its templates",
+        site_portal.templates_for(OTHER_OFFERING) == {"standard", "small"},
+    )
+    site_portal.add_offering(OTHER_OFFERING, ["standard"])
+    check("still two resources", len(site_portal.offerings()) == 2)
+
+    for bad in ["", "-lead", "my.cluster", "my cluster", "caf\u00e9"]:
+        try:
+            site_portal.add_offering(bad)
+            raise AssertionError(f"{bad!r} should not be a usable offering name")
+        except ValueError:
+            pass
+    check("a name that could not be part of a destination is refused", True)
+
     print("\n-- create_award, and the pending answer -------------------------")
 
     # A new award is recorded and answers "not yet", because a human has not
@@ -824,6 +862,36 @@ def _run_all() -> None:
 
     for stale in store.all_awards():
         store.delete(stale.offering, stale.project_id)
+
+    print("\n-- withdrawing a resource --------------------------------------")
+
+    # A resource can be retired. What that ends is its *reachability*: requests
+    # for it are refused, because the virtual agent behind it is withdrawn too.
+    site_portal.add_offering("cluster3", ["standard"])
+    job = site_portal.answer(make_job(f"create_project temp.allocator {details()}", offering="cluster3"))
+    check(
+        "an award can be made on a newly added resource",
+        type(job.error) is openportal.ManagedProjectPendingError,
+        f"-> {job.error}",
+    )
+
+    check("removing it reports what went", site_portal.remove_offering("cluster3") is not None)
+    check("removing it again reports nothing", site_portal.remove_offering("cluster3") is None)
+
+    job = site_portal.answer(make_job("get_award temp.allocator", offering="cluster3"))
+    check(
+        "a request through a withdrawn resource is refused",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+
+    # ...and what it does *not* end is the record. Those days still have to be
+    # reportable if the resource comes back (§4.1.2).
+    check(
+        "the awards on it are kept, not deleted",
+        store.load("cluster3", "temp.allocator") is not None,
+    )
+    store.delete("cluster3", "temp.allocator")
 
     print("\n-- every job gets an answer ------------------------------------")
 

@@ -13,6 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other
   dependencies, and only the *agents* it talks to have to be built.
 
+- **The site portal example can be run without a Rust toolchain at all.** Its
+  README now points at the prebuilt `op-portal` and `op-bridge` attached to each
+  release (Linux x86-64 and aarch64; anywhere else still builds), and
+  `example.py` prints the `curl` for the missing binary rather than only
+  `cargo build`.
+
 - **The example site portal's walkthrough covers `update_award`.** The
   instructions `example.py` prints now add a second member to a live award and
   show what that teaches: an update answers with the mapping and needs no

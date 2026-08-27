@@ -65,6 +65,12 @@ HERE = Path(__file__).resolve().parent
 #: Used only to find the agent binaries in `target/`.
 REPO = HERE.parents[2]
 
+#: Where the prebuilt agents live, for someone who would rather not install a
+#: Rust toolchain to look at a Python example. Linux x86-64 and aarch64 only -
+#: anywhere else has to build. The tag tracks the `openportal>=0.92.0` pin in
+#: requirements.txt, so the agents and the module are the same version.
+RELEASES = "https://github.com/isambard-sc/openportal/releases/download/0.92.0"
+
 #: Everything this script creates, and the only thing `clean` deletes. It is in
 #: .gitignore: it holds key material, and nothing in it is worth keeping.
 BASE = HERE / "data"
@@ -201,9 +207,15 @@ def binary(name: str) -> Path:
             return candidate
 
     raise Failed(
-        f"Could not find the {name} binary.\n"
-        f"  Build the agents first:  cd {REPO} && cargo build\n"
-        f"  (or set OPENPORTAL_BIN_DIR to the directory holding them)"
+        f"Could not find the {name} binary. Two ways to get it:\n"
+        f"  Download it (Linux x86-64; on aarch64 fetch {name}-aarch64 and save "
+        f"it under this name):\n"
+        f"    curl -L -o {name} {RELEASES}/{name} && chmod +x {name}\n"
+        f"    export OPENPORTAL_BIN_DIR=$PWD\n"
+        f"  Build it, which is the only option off Linux:\n"
+        f"    cd {REPO} && cargo build\n"
+        f"  Looked in: $OPENPORTAL_BIN_DIR, $PATH, "
+        f"{REPO}/target/release, {REPO}/target/debug"
     )
 
 
@@ -930,9 +942,10 @@ Everything is up.
 
    Two things about it are easy to get wrong. The member list is the **whole**
    set, not a delta - send an update without `{member2}` and they have been
-   removed, because there is no "remove_member". And the details carry the
-   template like a create does; omit it and the update is *rejected*, terminally,
-   which is not what an allocator wants for an award it still holds.
+   removed, because there is no "remove_member". And the awards portal must name
+   the right template every time, on an update exactly as on a create: a missing
+   or unoffered one is a ManagedProjectRejectedError, which is terminal, so the
+   award is recorded as errored rather than retried.
 
    Then walk the rest of the README - moving the award to another project, and
    removing it.

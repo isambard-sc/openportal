@@ -406,10 +406,11 @@ def _run_all() -> None:
         f"-> {list((held.members or {}).keys())}",
     )
 
-    # An update carries the *whole* of AwardDetails, template included. Sending
-    # one without a template is refused - and refused terminally, which is worth
-    # knowing: it is the same check a create gets, and an allocator that omits it
-    # will have its award recorded as errored rather than retried.
+    # An update carries the *whole* of AwardDetails, and the awarding portal must
+    # always name the right template - on an update exactly as on a create. A
+    # missing or unoffered one is refused, and refused *terminally*: the award is
+    # recorded as errored rather than retried. Nothing here substitutes the
+    # template we happen to hold; getting it right is the caller's obligation.
     no_template = (
         f'{{"name":"My First Award","members":{{"{LEAD}":"Project Lead"}}}}'
     )

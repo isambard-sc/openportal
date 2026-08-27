@@ -8,7 +8,6 @@ SPDX-License-Identifier: CC0-1.0
 ## Quick start
 
 ```bash
-cargo build                       # from the workspace root: builds the agents
 pip install -r requirements.txt   # openportal, fastapi, uvicorn
 python example.py start
 ```
@@ -16,11 +15,37 @@ python example.py start
 and follow the instructions that are printed there. Then come back here
 to understand what this did in more detail.
 
-Only the first line needs a Rust toolchain, and only because the *agents* are
-Rust: `example.py` looks for `op-portal` and `op-bridge` on your `PATH`, then in
-the workspace's `target/release` and `target/debug`, and tells you which is
-missing if it cannot find them. `openportal` itself is on PyPI, so the Python
-side needs nothing but `pip`.
+### Getting the two agents
+
+`example.py` drives two OpenPortal agents, `op-portal` and `op-bridge`. On Linux
+you can just download them — no Rust toolchain, and it takes seconds:
+
+```bash
+# Linux x86-64
+curl -L -o op-portal https://github.com/isambard-sc/openportal/releases/download/0.92.0/op-portal
+curl -L -o op-bridge https://github.com/isambard-sc/openportal/releases/download/0.92.0/op-bridge
+chmod +x op-portal op-bridge
+export OPENPORTAL_BIN_DIR=$PWD
+```
+
+They are statically linked, so there is nothing to install alongside them. On
+Linux aarch64 the assets are `op-portal-aarch64` and `op-bridge-aarch64` —
+download them under the plain names above, because those are the names
+`example.py` looks for. Each release has its own tag; these are from
+[0.92.0](https://github.com/isambard-sc/openportal/releases/tag/0.92.0), matching
+the `openportal>=0.92.0` in `requirements.txt`.
+
+Binaries are published for **Linux x86-64 and aarch64 only**. Anywhere else — a
+Mac, for instance — has to build them, which is the one step that needs Rust:
+
+```bash
+cargo build            # from the workspace root
+```
+
+Either way, `example.py` looks for the two in `$OPENPORTAL_BIN_DIR`, then on your
+`PATH`, then in the workspace's `target/release` and `target/debug`, and tells you
+which one it could not find. `openportal` itself is on PyPI, so the Python side
+needs nothing but `pip`.
 
 ## What is the setup?
 
@@ -84,11 +109,8 @@ pip install -r requirements.txt   # openportal, fastapi, uvicorn
 python example.py start
 ```
 
-The Python side needs no Rust toolchain — `openportal` is on PyPI and comes with
-the requirements. The *agents* are the part that has to be built: `cargo build`
-from the workspace root, or a release binary on your `PATH`. `example.py` looks
-for `op-portal` and `op-bridge` on the `PATH`, then in `target/release` and
-`target/debug`, and says which is missing if it cannot find them.
+(plus the two agents — downloaded or built, see
+[Getting the two agents](#getting-the-two-agents) above.)
 
 It prints what is running and, more to the point, the Python and `curl` calls
 that walk an award through the steps below — adding a cluster, making the award,
@@ -534,13 +556,20 @@ allocator.site.cluster1 update_award myaward1.allocator
 ```
 
 Note the `template` in there. An update carries the **whole** of `AwardDetails`,
-so it repeats everything that has not changed as well — and this example applies
-the same check to an update as to a create, so an update with no template is
-refused with `ManagedProjectRejectedError: no template named in the award`. That
-refusal is terminal, so an allocator that leaves it out has its award recorded as
-errored rather than retried. If you would rather be forgiving here, fall back to
-the template you already hold for that award; be strict or be lenient, but decide
-deliberately.
+so it repeats everything that has not changed as well — and the template is not
+optional. **The allocator must always name the right template**, on an update
+exactly as on a create. One that is missing, or that this resource does not
+offer, is refused with `ManagedProjectRejectedError`:
+
+```
+no template named in the award
+template 'large' is not offered on cluster2
+```
+
+That refusal is terminal — the allocator records the award as errored rather than
+retrying — and it is meant to be. Supplying the correct template is the
+allocator's obligation, and a site that quietly substituted the template it
+happens to hold would be provisioning against something nobody agreed.
 
 These updates can be approved automatically, and should apply to whichever project
 you have attached the award to. The update does not change the attachment, and

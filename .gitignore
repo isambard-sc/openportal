@@ -17,3 +17,6 @@ agents/*.toml
 __pycache__
 *.pyc
 portal-state
+
+# Everything `python example.py setup` creates (python/examples/site_portal)
+python/examples/site_portal/data

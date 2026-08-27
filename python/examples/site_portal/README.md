@@ -45,8 +45,44 @@ away.
 | `store.py` | The portal's own state: awards, their attachment history, and per-project usage. The file you replace. |
 | `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for approving awards, pushing usage figures and declaring a month's accounting final. |
 | `test_site_portal.py` | Drives every handler with synthetic jobs — no bridge, no agents, no network. Proves the example works, and shows that the contract is testable in isolation. |
+| `example.py` | Builds and runs a complete two-portal setup on your own machine — four agents, this application, and the wiring between them. Not part of the contract; it exists so you can *watch* the contract work. |
 
-## Running it
+## Running the whole thing locally
+
+There is a script that does the entire setup — both portals, both bridges, this
+application, and the peering between them — into one git-ignored `data/`
+directory:
+
+```bash
+# from this directory, with the agents built (cargo build) and the
+# openportal module installed (make python, from the workspace root)
+python example.py run
+```
+
+It prints what is running and, more to the point, the Python and `curl` calls
+that walk the award through the eight steps below. `python example.py stop`
+stops it again, and `python example.py clean` also deletes `data/`.
+
+What it builds is the smallest arrangement in which one portal can make an award
+on another:
+
+```
+     your Python  ──►  allocator_bridge  ──►  allocator      (the awards portal)
+                                                   │
+                                                   ▼
+     this app     ◄──  site_bridge       ◄──  site           (the site portal)
+```
+
+Both bridges get a config file for the `openportal` module, so you can drive
+either end: `allocator_bridge` to *make* requests of the site, `site_bridge` to
+see what this portal's own bridge holds. Everything binds to `127.0.0.1` on
+ports in the 187xx range, and the agent configs are unencrypted — it is a
+development toy, not a deployment.
+
+Read the script if you would rather do it by hand: each step is one command,
+and the comments say why it is there.
+
+## Running it against your own bridge
 
 You need a running `op-bridge` with `--signal-url` and `--notification-url`
 pointing at this application.
@@ -57,7 +93,7 @@ cd ../../..            # the workspace root
 make python            # or: maturin develop -m python/Cargo.toml
 
 # 2. Install the example's own dependencies
-cd python/examples/portal
+cd python/examples/site_portal
 pip install -r requirements.txt
 
 # 3. Point it at your bridge config and run it

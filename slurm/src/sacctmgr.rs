@@ -2090,6 +2090,210 @@ pub async fn set_limit(
     }
 }
 
+///
+/// How far back `has_pending_jobs` looks for a job that is still queued.
+///
+/// `sacct` needs an explicit window whenever a state filter is given, and the
+/// controller's queue carries no such bound. A year is far longer than any real
+/// scheduler will hold a job pending, and this is an occasional verification
+/// query rather than something on the add/remove path.
+///
+const PENDING_JOB_WINDOW_DAYS: i64 = 365;
+
+///
+/// Return whether Slurm still holds a queued (PENDING) job matching `filter`,
+/// which is a single `sacct` selector such as `--user=bob` or
+/// `--account=proj`.
+///
+/// This is the one thing `remove_local_user` / `remove_local_project` actually
+/// change: the Slurm user and account records are deliberately kept so that the
+/// accounting history stays intact, and all removal does is cancel whatever is
+/// still queued. So this is what "has the removal finished?" has to mean here.
+///
+async fn has_pending_jobs(filter: &str, expires: &chrono::DateTime<Utc>) -> Result<bool, Error> {
+    let cluster = cache::get_cluster().await?;
+
+    let start_time = chrono::Utc::now() - chrono::Duration::days(PENDING_JOB_WINDOW_DAYS);
+
+    let cmd = priority_runner(expires).await?.build_command(
+        "SACCT",
+        vec![
+            "--noheader".to_string(),
+            "--parsable2".to_string(),
+            "--allocations".to_string(),
+            "--allusers".to_string(),
+            "--state=PENDING".to_string(),
+            "--format=JobID".to_string(),
+            format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
+            format!("--cluster={}", cluster),
+            filter.to_string(),
+        ],
+    )?;
+
+    let output = priority_runner(expires)
+        .await?
+        .run(&cmd, DEFAULT_TIMEOUT)
+        .await?;
+
+    Ok(output.lines().any(|line| !line.trim().is_empty()))
+}
+
+///
+/// Return whether everything `add_project` does for this mapping has been done:
+/// the Slurm account exists, is managed by OpenPortal, is attached to this
+/// cluster, and carries the name the mapping says it should.
+///
+/// Read straight from Slurm rather than through this agent's account cache -
+/// the question is whether Slurm really is in the state an earlier
+/// `add_local_project` claimed to leave it in, and the cache would only replay
+/// that claim back.
+///
+pub async fn is_local_project_added(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let expected = SlurmAccount::from_mapping(mapping)?;
+
+    let account = match get_account_from_slurm(expected.name(), expires).await? {
+        Some(account) => account,
+        None => {
+            tracing::info!("Slurm account {} does not exist", expected.name());
+            return Ok(false);
+        }
+    };
+
+    if !account.is_managed() {
+        tracing::info!(
+            "Slurm account {} is not managed by OpenPortal - nothing for add_local_project to do",
+            account.name()
+        );
+        return Ok(true);
+    }
+
+    let cluster = cache::get_cluster().await?;
+
+    if !account.in_cluster(&cluster) {
+        tracing::info!(
+            "Slurm account {} is not in cluster {}, so has not been added",
+            account.name(),
+            cluster
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_local_project` does for this mapping has
+/// been done. That is only the cancellation of the project's queued jobs: the
+/// account itself is kept on purpose, so that its usage history survives the
+/// project being removed and its gid/associations stay stable if it is ever
+/// re-added.
+///
+pub async fn is_local_project_removed(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let account = clean_account_name(mapping.local_group())?;
+
+    if has_pending_jobs(&format!("--account={}", account), expires).await? {
+        tracing::info!(
+            "Slurm account {} still has pending jobs, so has not been removed",
+            account
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `add_user` does for this mapping has been done:
+/// the Slurm user exists, has the project's account as their default, and is
+/// associated with it on this cluster. Read straight from Slurm, not the cache.
+///
+pub async fn is_local_user_added(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    // The user cannot be fully added while the account they are meant to
+    // default to is not - `get_user_create_if_not_exists` creates it first.
+    if !is_local_project_added(&mapping.clone().into(), expires).await? {
+        return Ok(false);
+    }
+
+    let expected = SlurmUser::from_mapping(mapping)?;
+
+    let user = match get_user_from_slurm(expected.name(), expires).await? {
+        Some(user) => user,
+        None => {
+            tracing::info!("Slurm user {} does not exist", expected.name());
+            return Ok(false);
+        }
+    };
+
+    let account = SlurmAccount::from_mapping(&mapping.clone().into())?;
+    let cluster = cache::get_cluster().await?;
+
+    if *user.default_account() != Some(account.name().to_string()) {
+        tracing::info!(
+            "Slurm user {} does not default to account {}, so has not been added",
+            user.name(),
+            account.name()
+        );
+        return Ok(false);
+    }
+
+    if !user
+        .associations()
+        .iter()
+        .any(|a| a.account() == account.name() && a.cluster() == cluster)
+    {
+        tracing::info!(
+            "Slurm user {} is not associated with account {} on cluster {}, so has not \
+             been added",
+            user.name(),
+            account.name(),
+            cluster
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_local_user` does for this mapping has been
+/// done. As with a project, that is only the cancellation of the user's queued
+/// jobs - the Slurm user and their associations are kept so that their usage
+/// history survives, and it is the account agent that stops them logging in.
+///
+pub async fn is_local_user_removed(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let user = clean_user_name(mapping.local_user().unix()?)?;
+
+    if has_pending_jobs(&format!("--user={}", user), expires).await? {
+        tracing::info!(
+            "Slurm user {} still has pending jobs, so has not been removed",
+            user
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 pub async fn cancel_pending_user_jobs(
     user: &str,
     expires: &chrono::DateTime<Utc>,

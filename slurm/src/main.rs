@@ -10,7 +10,8 @@
 use anyhow::Result;
 
 use greatwestern::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, GetLocalLimit, GetLocalUsageReport, RemoveLocalProject,
+    AddLocalProject, AddLocalUser, GetLocalLimit, GetLocalUsageReport, IsLocalProjectAdded,
+    IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved, RemoveLocalProject,
     RemoveLocalUser, SetLocalLimit,
 };
 use greatwestern::Hpc;
@@ -176,6 +177,18 @@ async fn main() -> Result<()> {
                         tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
                     },
+                    IsLocalProjectAdded(mapping) => {
+                        job.completed(sacctmgr::is_local_project_added(&mapping, job.expires()).await?)
+                    },
+                    IsLocalProjectRemoved(mapping) => {
+                        job.completed(sacctmgr::is_local_project_removed(&mapping, job.expires()).await?)
+                    },
+                    IsLocalUserAdded(mapping) => {
+                        job.completed(sacctmgr::is_local_user_added(&mapping, job.expires()).await?)
+                    },
+                    IsLocalUserRemoved(mapping) => {
+                        job.completed(sacctmgr::is_local_user_removed(&mapping, job.expires()).await?)
+                    },
                     GetLocalUsageReport(mapping, dates) => {
                         let report = sacctmgr::get_usage_report(&mapping, &dates, job.expires()).await?;
                         job.completed(report)
@@ -279,6 +292,18 @@ async fn main() -> Result<()> {
                         sacctmgr::cancel_pending_user_jobs(mapping.local_user().unix()?, job.expires()).await?;
                         tracing::info!("Cancelled pending jobs for user {}", mapping);
                         job.completed_none()
+                    },
+                    IsLocalProjectAdded(mapping) => {
+                        job.completed(slurm::is_local_project_added(&mapping, job.expires()).await?)
+                    },
+                    IsLocalProjectRemoved(mapping) => {
+                        job.completed(slurm::is_local_project_removed(&mapping, job.expires()).await?)
+                    },
+                    IsLocalUserAdded(mapping) => {
+                        job.completed(slurm::is_local_user_added(&mapping, job.expires()).await?)
+                    },
+                    IsLocalUserRemoved(mapping) => {
+                        job.completed(slurm::is_local_user_removed(&mapping, job.expires()).await?)
                     },
                     GetLocalUsageReport(mapping, dates) => {
                         // use sacctmgr for now, as we need to validate the API response

@@ -8,6 +8,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **State verification instructions** — a caller can now ask whether an earlier
+  `add_user` / `add_project` / `remove_user` / `remove_project` actually ran to
+  completion, and re-run it if it did not:
+
+  ```
+  is_user_added alice.myproject.waldur
+  is_user_removed alice.myproject.waldur
+  is_project_added myproject.waldur
+  is_project_removed myproject.waldur
+  ```
+
+  Each returns `bool` and is handled by the cluster instance agent
+  (`op-cluster`), which is where adds and removes fan out from. **Nothing is
+  answered from a cache.** The cluster resolves the user's `UserMapping` (or the
+  project's `ProjectMapping`) from its account agent and then asks all three of
+  its sub-agents — account, filesystem and scheduler — the matching new
+  per-agent instruction:
+
+  ```
+  is_local_user_added <user_mapping>
+  is_local_user_removed <user_mapping>
+  is_local_project_added <project_mapping>
+  is_local_project_removed <project_mapping>
+  ```
+
+  It returns `true` only if all three say yes. An agent that cannot be reached
+  is an error rather than a `false`: not knowing whether the work finished is
+  not the same as knowing that it did not, and answering `false` there would
+  have a caller re-running an add or remove against a half-connected cluster.
+
+  Each agent answers by looking at the system it actually manages, and at
+  exactly what its own add or remove does — the checks are built from the same
+  configuration those paths are, so they cannot drift from them. `op-freeipa`
+  and `op-localaccount` check that the account exists, is managed, is enabled,
+  is not blocked, maps to this mapping and is in every group a managed user
+  belongs to (and, for removal, that it is disabled and out of the instance's
+  groups). `op-filesystem` checks that every directory and link the add creates
+  is present, or that every one the remove recycles is gone. `op-slurm` checks
+  the account/user/association for an add, and that no queued job remains for a
+  remove — the Slurm records themselves are kept on purpose so that the
+  accounting history survives, so cancelling the queued jobs is all that
+  removal actually changes there.
+
+  These are deliberately stronger than `is_existing_user` /
+  `is_existing_project`, which only ask the account agent whether the account or
+  group is there: an `add_user` that created the account and then failed to
+  create the home directory leaves `is_existing_user` true and `is_user_added`
+  false, which is exactly the case worth finding. A **blocked** user is reported
+  as neither added nor removed, since neither instruction can move them until
+  `unblock_user` runs; a **protected** user is reported as both, since
+  `add_user` and `remove_user` are documented no-ops for them.
+
 - **`get_reservation_report`** ([slurm/tools/](slurm/tools/)): an operator tool
   that answers the question a usage report cannot. A project's report says which
   reservations *it* used; this says which projects used a *reservation*.

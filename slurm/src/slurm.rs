@@ -3880,6 +3880,136 @@ pub async fn add_project(
     Ok(())
 }
 
+///
+/// Return whether everything `add_project` does for this mapping has been done:
+/// the Slurm account exists, is managed by OpenPortal, and is attached to this
+/// cluster. The REST counterpart of `sacctmgr::is_local_project_added`, and
+/// like it, read straight from Slurm rather than from this agent's cache.
+///
+pub async fn is_local_project_added(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let expected = SlurmAccount::from_mapping(mapping)?;
+
+    let account = match get_account_from_slurm(expected.name(), expires).await? {
+        Some(account) => account,
+        None => {
+            tracing::info!("Slurm account {} does not exist", expected.name());
+            return Ok(false);
+        }
+    };
+
+    if !account.is_managed() {
+        tracing::info!(
+            "Slurm account {} is not managed by OpenPortal - nothing for add_local_project to do",
+            account.name()
+        );
+        return Ok(true);
+    }
+
+    let cluster = cache::get_cluster().await?;
+
+    if !account.in_cluster(&cluster) {
+        tracing::info!(
+            "Slurm account {} is not in cluster {}, so has not been added",
+            account.name(),
+            cluster
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `add_user` does for this mapping has been done:
+/// the Slurm user exists, defaults to the project's account, and is associated
+/// with it on this cluster. The REST counterpart of
+/// `sacctmgr::is_local_user_added`.
+///
+pub async fn is_local_user_added(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    // The user cannot be fully added while the account they are meant to
+    // default to is not - `get_user_create_if_not_exists` creates it first.
+    if !is_local_project_added(&mapping.clone().into(), expires).await? {
+        return Ok(false);
+    }
+
+    let expected = SlurmUser::from_mapping(mapping)?;
+
+    let user = match get_user_from_slurm(expected.name(), expires).await? {
+        Some(user) => user,
+        None => {
+            tracing::info!("Slurm user {} does not exist", expected.name());
+            return Ok(false);
+        }
+    };
+
+    let account = SlurmAccount::from_mapping(&mapping.clone().into())?;
+    let cluster = cache::get_cluster().await?;
+
+    if *user.default_account() != Some(account.name().to_string()) {
+        tracing::info!(
+            "Slurm user {} does not default to account {}, so has not been added",
+            user.name(),
+            account.name()
+        );
+        return Ok(false);
+    }
+
+    if !user
+        .associations()
+        .iter()
+        .any(|a| a.account() == account.name() && a.cluster() == cluster)
+    {
+        tracing::info!(
+            "Slurm user {} is not associated with account {} on cluster {}, so has not been added",
+            user.name(),
+            account.name(),
+            cluster
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_local_project` does for this mapping has
+/// been done. Delegated to the `sacctmgr` version because the removal itself is:
+/// `remove_local_project` cancels the project's queued jobs through
+/// `sacctmgr::cancel_pending_project_jobs` on this path too.
+///
+pub async fn is_local_project_removed(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    sacctmgr::is_local_project_removed(mapping, expires).await
+}
+
+///
+/// Return whether everything `remove_local_user` does for this mapping has been
+/// done. Delegated to the `sacctmgr` version, as for
+/// `is_local_project_removed`.
+///
+pub async fn is_local_user_removed(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    sacctmgr::is_local_user_removed(mapping, expires).await
+}
+
 pub async fn get_usage_report(
     project: &ProjectMapping,
     dates: &DateRange,

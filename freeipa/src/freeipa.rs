@@ -2701,13 +2701,14 @@ pub async fn get_primary_group_name(user: &UserIdentifier) -> Result<String, Err
 /// or removes them as necessary. Groups will match the project group,
 /// the system groups, and the openportal group.
 ///
-async fn sync_groups(
-    user: &IPAUser,
-    instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
-) -> Result<IPAUser, Error> {
-    // the user probably doesn't exist, so add them, making sure they
-    // are in the correct groups
+///
+/// Every group a fully-added, managed user must belong to on this instance.
+///
+/// Factored out of `sync_groups` so that `is_local_user_added` - which has to
+/// decide whether an earlier `add_user` really finished - asks about exactly
+/// the groups adding a user puts them in, and cannot drift from it.
+///
+async fn expected_groups(user: &UserIdentifier, instance: &Peer) -> Result<Vec<IPAGroup>, Error> {
     let mut groups = cache::get_system_groups().await?;
 
     // add in the groups for this instance
@@ -2718,7 +2719,19 @@ async fn sync_groups(
     groups.push(get_managed_group()?);
 
     // also add in the group for the user's project (this is their primary group)
-    groups.push(get_primary_group(user.identifier())?);
+    groups.push(get_primary_group(user)?);
+
+    Ok(groups)
+}
+
+async fn sync_groups(
+    user: &IPAUser,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<IPAUser, Error> {
+    // the user probably doesn't exist, so add them, making sure they
+    // are in the correct groups
+    let groups = expected_groups(user.identifier(), instance).await?;
 
     // first step, make sure that all of the groups exist - and get their CNs
     let mut group_cns = Vec::new();
@@ -4263,6 +4276,229 @@ pub async fn unblock_user(
     tracing::info!("Unblocked user: {}", user.identifier());
 
     Ok(user)
+}
+
+///
+/// Return whether everything `add_user` does for this mapping has been done.
+///
+/// FreeIPA is asked directly (`force_get_user`) rather than through the cache:
+/// the whole point of the question is to find out whether the directory really
+/// is in the state an earlier `add_user` claimed to leave it in, and a cache
+/// would just replay that claim back.
+///
+pub async fn is_local_user_added(
+    mapping: &UserMapping,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let user = match force_get_user(mapping.user(), expires).await? {
+        Some(user) => user,
+        None => {
+            tracing::info!("User {} does not exist in FreeIPA", mapping.user());
+            return Ok(false);
+        }
+    };
+
+    // An unmanaged user is one `add_user` deliberately leaves exactly as it
+    // found them and reports success for, so "has the add finished?" is
+    // vacuously yes - there was never anything for us to do.
+    if !user.is_managed() {
+        tracing::info!(
+            "User {} is not managed by OpenPortal - nothing for add_user to do",
+            mapping.user()
+        );
+        return Ok(true);
+    }
+
+    // A blocked user is neither added nor removed: `add_user` refuses to
+    // re-enable them, and only `unblock_user` will. `is_blocked_user` is the
+    // instruction that tells a caller that.
+    if user.is_blocked() {
+        tracing::info!("User {} is blocked, so has not been added", mapping.user());
+        return Ok(false);
+    }
+
+    if !user.is_enabled() {
+        tracing::info!("User {} is disabled, so has not been added", mapping.user());
+        return Ok(false);
+    }
+
+    let actual = user.mapping()?;
+
+    if actual != *mapping {
+        tracing::info!(
+            "User {} exists, but maps to {} rather than the requested {}",
+            mapping.user(),
+            actual,
+            mapping
+        );
+        return Ok(false);
+    }
+
+    let groups = expected_groups(mapping.user(), instance).await?;
+
+    if !user.in_all_groups(&groups) {
+        tracing::info!(
+            "User {} is not yet in all of the groups they should be: {:?}",
+            mapping.user(),
+            groups
+                .iter()
+                .filter(|g| !user.in_group(g))
+                .map(|g| g.groupid().to_string())
+                .collect::<Vec<String>>()
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_user` does for this mapping has been done.
+///
+/// `remove_user` disables the account and takes it out of this instance's
+/// groups; it never deletes it, so "removed" is a state the user is left in
+/// rather than their absence. It is also distinct from "blocked", which is also
+/// disabled - the blocked group is what tells the two apart, and it is the same
+/// distinction `remove_user` itself makes before deciding it has nothing to do.
+///
+pub async fn is_local_user_removed(
+    mapping: &UserMapping,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let user = match force_get_user(mapping.user(), expires).await? {
+        Some(user) => user,
+        None => return Ok(true),
+    };
+
+    // As in `is_local_user_added`: `remove_user` refuses to touch a user it
+    // does not manage, so there is nothing outstanding for it to do.
+    if !user.is_managed() {
+        tracing::info!(
+            "User {} is not managed by OpenPortal - nothing for remove_user to do",
+            mapping.user()
+        );
+        return Ok(true);
+    }
+
+    if user.is_blocked() {
+        tracing::info!("User {} is blocked, not removed", mapping.user());
+        return Ok(false);
+    }
+
+    if user.is_enabled() {
+        tracing::info!(
+            "User {} is still enabled, so has not been removed",
+            mapping.user()
+        );
+        return Ok(false);
+    }
+
+    // Disabled is not enough on its own - `remove_user` also strips this
+    // instance's groups, and a user still in one of them can be re-added to
+    // this resource by a `sync_groups` that has not run yet.
+    for group in cache::get_instance_groups(instance).await? {
+        if user.in_group(&group) {
+            tracing::info!(
+                "User {} is still in instance group {}, so has not been fully removed",
+                mapping.user(),
+                group.groupid()
+            );
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `add_project` does for this mapping has been done,
+/// i.e. the project's group exists in FreeIPA with the name the mapping says it
+/// should have. Read straight from FreeIPA rather than from the cache.
+///
+pub async fn is_local_project_added(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let group = match force_get_group_on(&Target::Any, mapping.project(), expires).await? {
+        Some(group) => group,
+        None => {
+            tracing::info!(
+                "Group for project {} does not exist in FreeIPA",
+                mapping.project()
+            );
+            return Ok(false);
+        }
+    };
+
+    if !group.is_project_group() {
+        tracing::warn!(
+            "Group {} for project {} is not a project group",
+            group,
+            mapping.project()
+        );
+        return Ok(false);
+    }
+
+    let actual = group.mapping()?;
+
+    if actual != *mapping {
+        tracing::info!(
+            "Project {} exists, but maps to {} rather than the requested {}",
+            mapping.project(),
+            actual,
+            mapping
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_project` does for this mapping has been
+/// done. The group itself is deliberately kept - it holds the gid, which has to
+/// stay stable if the project is ever re-added - so what removal actually means
+/// here is that every managed user who was in it has been removed.
+///
+pub async fn is_local_project_removed(
+    mapping: &ProjectMapping,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    let group = match force_get_group_on(&Target::Any, mapping.project(), expires).await? {
+        Some(group) => group,
+        None => return Ok(true),
+    };
+
+    if !group.is_project_group() {
+        tracing::warn!(
+            "Group {} for project {} is not a project group",
+            group,
+            mapping.project()
+        );
+        return Ok(true);
+    }
+
+    for user in force_get_users_in_group(&Target::Any, &group, expires).await? {
+        // `remove_project` skips unmanaged users, so they are not evidence
+        // that it has not finished.
+        if !user.is_managed() {
+            continue;
+        }
+
+        if !is_local_user_removed(&user.mapping()?, instance, expires).await? {
+            tracing::info!(
+                "Project {} still has user {} who has not been removed",
+                mapping.project(),
+                user.identifier()
+            );
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 #[cfg(test)]

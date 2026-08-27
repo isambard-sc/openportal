@@ -1616,6 +1616,36 @@ async fn recycle_dir_remote(path: &Path, prefix: &[String]) -> Result<(), Error>
     Ok(())
 }
 
+///
+/// Return whether `path` is currently present on the managed filesystem.
+///
+/// A symlink counts as present even when it dangles: `create_link` /
+/// `remove_link` treat the link itself as the thing that exists, and
+/// `recycle_dir` moves a link rather than its target, so a link left behind
+/// means the removal has not finished.
+///
+/// This is only ever a read, but it still goes through `clean_and_check_path`
+/// like every write does. The paths come from a `UserMapping`/`ProjectMapping`
+/// that arrived over the wire, and without the guard this would be a way to
+/// ask the agent whether an arbitrary path outside the configured volume
+/// roots exists.
+///
+pub async fn path_exists(path: &Path, roots: &[PathBuf]) -> Result<bool, Error> {
+    let path = clean_and_check_path(path, roots, false).await?;
+
+    match get_exec_prefix() {
+        Some(prefix) => {
+            if remote_exists(prefix, &path).await? {
+                return Ok(true);
+            }
+
+            // `test -e` follows symlinks, so a dangling one reads as absent.
+            remote_is_symlink(prefix, &path).await
+        }
+        None => Ok(path.exists() || path.is_symlink()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1635,6 +1665,63 @@ mod tests {
         }
 
         base.to_path_buf()
+    }
+
+    #[tokio::test]
+    async fn test_path_exists_reports_directories_files_and_dangling_links() {
+        // `path_exists` is what decides the filesystem agent's answer to
+        // `is_local_user_added` / `is_local_user_removed`, so each of these
+        // cases is a different answer to "did the add or remove finish?".
+        // Not `temp_dir()` like the tests around this one: those call the
+        // `*_native` helpers directly, whereas `path_exists` goes through
+        // `clean_and_check_path`, which refuses '/tmp' as a sensitive location.
+        // The build directory is somewhere writable that is not on that list.
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("op-exists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let root = make_dir(&base.join("root"), &["a_file"]);
+        let roots = vec![root.clone()];
+
+        let dir = make_dir(&root.join("a_dir"), &[]);
+
+        assert!(
+            path_exists(&dir, &roots).await.expect("dir"),
+            "a directory that is there must read as present"
+        );
+        assert!(
+            path_exists(&root.join("a_file"), &roots)
+                .await
+                .expect("file"),
+            "a file that is there must read as present"
+        );
+        assert!(
+            !path_exists(&root.join("nope"), &roots)
+                .await
+                .expect("missing"),
+            "a path that was never created must read as absent"
+        );
+
+        // A recycled directory leaves its symlink behind, and that link is
+        // exactly the evidence that the removal has not finished - so a
+        // dangling link must not read as absent the way `test -e` would have it.
+        let link = root.join("a_link");
+        std::os::unix::fs::symlink(root.join("nope"), &link).expect("symlink");
+
+        assert!(
+            path_exists(&link, &roots).await.expect("dangling link"),
+            "a dangling symlink must still read as present"
+        );
+
+        // The guard is the same one every write goes through: a mapping that
+        // arrived over the wire must not be usable to probe outside the roots.
+        assert!(
+            path_exists(Path::new("/etc/shadow"), &roots).await.is_err(),
+            "a path outside the configured roots must be refused, not answered"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

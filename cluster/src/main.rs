@@ -9,8 +9,9 @@ use greatwestern::grammar::Instruction::{
     GetLimit, GetLocalHomeDir, GetLocalProjectDirs, GetLocalUserDirs, GetProjectDirs,
     GetProjectMapping, GetProjectQuota, GetProjectQuotas, GetProjects, GetStorageReport,
     GetStorageReports, GetUsageReport, GetUsageReports, GetUserDirs, GetUserMapping, GetUserQuota,
-    GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser, IsProtectedUser, RemoveProject,
-    RemoveUser, SetLimit, SetProjectQuota, SetUserQuota, UnblockProject, UnblockUser,
+    GetUserQuotas, GetUsers, IsBlockedProject, IsBlockedUser, IsProjectAdded, IsProjectRemoved,
+    IsProtectedUser, IsUserAdded, IsUserRemoved, RemoveProject, RemoveUser, SetLimit,
+    SetProjectQuota, SetUserQuota, UnblockProject, UnblockUser,
 };
 use greatwestern::grammar::{
     DateRange, ProjectIdentifier, ProjectMapping, UserIdentifier, UserMapping,
@@ -276,6 +277,18 @@ async fn main() -> Result<()> {
                     let is_protected = is_protected_user(me.name(), &user).await?;
                     job.completed(is_protected)
                 }
+                IsUserAdded(user) => {
+                    job.completed(is_user_added(me.name(), &user).await?)
+                }
+                IsUserRemoved(user) => {
+                    job.completed(is_user_removed(me.name(), &user).await?)
+                }
+                IsProjectAdded(project) => {
+                    job.completed(is_project_added(me.name(), &project).await?)
+                }
+                IsProjectRemoved(project) => {
+                    job.completed(is_project_removed(me.name(), &project).await?)
+                }
                 GetProjectMapping(project) => {
                     let mapping = get_project_mapping(me.name(), &project).await?;
                     job.completed(mapping)
@@ -424,6 +437,229 @@ async fn assert_agents_connected() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+///
+/// Ask every agent behind this cluster - account, filesystem and scheduler -
+/// the same `is_local_*` question about the same mapping, and return true only
+/// if all three say yes.
+///
+/// Nothing here is cached, and nothing is inferred from what a previous
+/// `add_*`/`remove_*` job reported: each agent is asked afresh and answers by
+/// looking at the system it actually manages. That is the whole point of the
+/// question - a caller uses it to find out whether an earlier add or remove
+/// really ran to completion, and to re-run it if it did not.
+///
+/// An agent that cannot be reached is an error rather than a "no". Not knowing
+/// whether the work finished is not the same as knowing it did not, and
+/// answering "no" here would have a caller re-running an add or remove against
+/// a cluster that is only half connected.
+///
+async fn ask_all_agents(me: &str, instruction: &str, mapping: &str) -> Result<bool, Error> {
+    // Fail up front, and with the same message the add/remove paths use, if any
+    // of the three is missing - rather than part-way through the loop below.
+    assert_agents_connected().await?;
+
+    let agents = [
+        ("account", agent::account(AGENT_WAIT_TIME).await),
+        ("filesystem", agent::filesystem(AGENT_WAIT_TIME).await),
+        ("scheduler", agent::scheduler(AGENT_WAIT_TIME).await),
+    ];
+
+    for (role, peer) in agents {
+        let Some(peer) = peer else {
+            tracing::error!("No {} agent found", role);
+            return Err(Error::MissingAgent(format!(
+                "Cannot run the job because there is no {} agent",
+                role
+            )));
+        };
+
+        let job = Job::parse(
+            &format!("{}.{} {} {}", me, peer.name(), instruction, mapping),
+            false,
+        )?
+        .put(&peer)
+        .await?;
+
+        let answer = match job.wait().await?.result::<bool>()? {
+            Some(answer) => answer,
+            None => {
+                tracing::error!("No answer from {} agent {}?", role, peer.name());
+                return Err(Error::Call(format!(
+                    "The {} agent {} gave no answer to '{} {}'",
+                    role,
+                    peer.name(),
+                    instruction,
+                    mapping
+                )));
+            }
+        };
+
+        if !answer {
+            tracing::info!(
+                "The {} agent {} reports '{} {}' as false",
+                role,
+                peer.name(),
+                instruction,
+                mapping
+            );
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+///
+/// Look up the mapping for `user`, distinguishing "there is no such user here"
+/// (`Ok(None)`) from "the account agent could not tell us" (`Err`).
+///
+/// The distinction matters: a lookup that fails to answer is not a user who is
+/// not there, and treating an identity service that is merely unreachable as
+/// proof of absence would let `is_user_removed` report a user as fully removed
+/// during an outage. So the mapping is asked for first, and only if that fails
+/// is `is_existing_user` - which answers with a plain bool, and is itself
+/// allowed to fail - used to decide which of the two happened.
+///
+async fn lookup_user_mapping(
+    me: &str,
+    user: &UserIdentifier,
+) -> Result<Option<UserMapping>, Error> {
+    match get_user_mapping(me, user).await {
+        Ok(mapping) => Ok(Some(mapping)),
+        Err(e) => {
+            if is_existing_user(me, user).await? {
+                Err(e)
+            } else {
+                tracing::info!("The account agent has no record of user {}", user);
+                Ok(None)
+            }
+        }
+    }
+}
+
+///
+/// Look up the mapping for `project`. As `lookup_user_mapping`, `Ok(None)`
+/// means the account agent has no record of the project, and an error means it
+/// could not tell us.
+///
+async fn lookup_project_mapping(
+    me: &str,
+    project: &ProjectIdentifier,
+) -> Result<Option<ProjectMapping>, Error> {
+    match get_project_mapping(me, project).await {
+        Ok(mapping) => Ok(Some(mapping)),
+        Err(e) => {
+            if is_existing_project(me, project).await? {
+                Err(e)
+            } else {
+                tracing::info!("The account agent has no record of project {}", project);
+                Ok(None)
+            }
+        }
+    }
+}
+
+///
+/// Return whether `user` has been fully added to this cluster - that is,
+/// whether the account, filesystem and scheduler agents all report every part
+/// of `add_user` as done.
+///
+/// Deliberately stronger than `is_existing_user`, which only asks the account
+/// agent whether the account is there. An `add_user` that created the account
+/// and then failed to create the home directory leaves `is_existing_user` true
+/// and this false, which is exactly the case a caller needs to find so that it
+/// can re-run the add.
+///
+async fn is_user_added(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
+    // A protected user is one `add_user` deliberately leaves exactly as it
+    // found them, returning their existing mapping and reporting success - so
+    // there is never anything outstanding for a caller to re-run.
+    match is_protected_user(me, user).await {
+        Ok(true) => {
+            tracing::info!(
+                "User {} is not managed by OpenPortal - nothing for add_user to do",
+                user
+            );
+            return Ok(true);
+        }
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => return Err(e),
+        _ => {}
+    }
+
+    let Some(mapping) = lookup_user_mapping(me, user).await? else {
+        return Ok(false);
+    };
+
+    ask_all_agents(me, "is_local_user_added", &mapping.to_string()).await
+}
+
+///
+/// Return whether `user` has been fully removed from this cluster - that is,
+/// whether the account, filesystem and scheduler agents all report every part
+/// of `remove_user` as done.
+///
+/// Note that neither account agent deletes the account: `remove_user` disables
+/// it and strips its groups, keeping the uid so that the files the filesystem
+/// agent recycled rather than deleted still belong to their owner. So a removed
+/// user still has a mapping, which is what lets the filesystem and scheduler
+/// agents be asked about them at all.
+///
+async fn is_user_removed(me: &str, user: &UserIdentifier) -> Result<bool, Error> {
+    // As in `is_user_added`: `remove_user` is a no-op that reports success for
+    // a user OpenPortal does not manage.
+    match is_protected_user(me, user).await {
+        Ok(true) => {
+            tracing::info!(
+                "User {} is not managed by OpenPortal - nothing for remove_user to do",
+                user
+            );
+            return Ok(true);
+        }
+        Err(Error::MissingUser(_)) => {}
+        Err(e) => return Err(e),
+        _ => {}
+    }
+
+    let Some(mapping) = lookup_user_mapping(me, user).await? else {
+        // No account record at all, so nothing was ever added here for a
+        // removal to leave behind.
+        return Ok(true);
+    };
+
+    ask_all_agents(me, "is_local_user_removed", &mapping.to_string()).await
+}
+
+///
+/// Return whether `project` has been fully added to this cluster - that is,
+/// whether the account, filesystem and scheduler agents all report every part
+/// of `add_project` as done.
+///
+async fn is_project_added(me: &str, project: &ProjectIdentifier) -> Result<bool, Error> {
+    let Some(mapping) = lookup_project_mapping(me, project).await? else {
+        return Ok(false);
+    };
+
+    ask_all_agents(me, "is_local_project_added", &mapping.to_string()).await
+}
+
+///
+/// Return whether `project` has been fully removed from this cluster - that is,
+/// whether the account, filesystem and scheduler agents all report every part
+/// of `remove_project` as done.
+///
+/// A project is only removed once its users are: `remove_project_from_cluster`
+/// leaves the directories and the scheduler account alone while any protected
+/// user remains, and the account agent's own check walks the project's members.
+///
+async fn is_project_removed(me: &str, project: &ProjectIdentifier) -> Result<bool, Error> {
+    let Some(mapping) = lookup_project_mapping(me, project).await? else {
+        return Ok(true);
+    };
+
+    ask_all_agents(me, "is_local_project_removed", &mapping.to_string()).await
 }
 
 async fn add_project_to_cluster(

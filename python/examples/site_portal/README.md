@@ -211,35 +211,56 @@ it kept, and adding the resource back makes them reachable again.
 
 ### 1. The allocator asks for an award to be attached to a project
 
-`allocator` addresses `allocator.site.cluster1`. That last element is a *virtual
-agent* on this portal standing for one resource we run, so the request carries
-which resource it is about.
+`allocator` addresses `allocator.site.cluster1` and sends a request to
+link an award to a project. This request looks like this:
 
-What it is asking for is more subtle than it first looks. It is **not** "create
+```
+allocator.site.cluster1 create_award myaward1.allocator
+  {"name":"My First Award","template":"standard","members":{"alice@example.com":"Project Lead"}}
+```
+
+Here, the allocator is addressing your `cluster1` offering on your `site` portal.
+It is asking to create an award (via the `create_award` instruction)
+where it is telling you that it refers to the award as `myaward1.allocator`.
+
+It is also providing some metadata about the award, including its name,
+the template it is against, and a list of members and their roles.
+
+The members are keyed by their email addresses, and the roles are strings
+that have been pre-agreed between you and the allocator. Typically they will
+be things like "Project Lead", "Project Co-Lead" or "Project Member".
+They provide a way for you and the allocator to agree on how the project
+team should be represented, what their responsibilities are, and what
+permissions they should have on the project.
+
+This request is more subtle than it first looks. It is **not** "create
 an award" — the award already exists; `allocator` decided it. It is *"connect
-this award to a project on `cluster1`"*. Most often that will mean creating a new
-project for it, but nothing requires that: you are free to attach the award to a
-project that already exists, if that is what your site's records say should
-happen.
+this award to a project on your site's `cluster1`"*. Most often that will mean
+creating a new project for it, but nothing requires that: you are free to
+attach the award to a project that already exists, if that is what your
+site's records say should happen.
 
-Since this site wants a human to look at every award first, nothing is attached
-yet, and `site_portal.create_award` answers with `ManagedProjectPendingError`.
+All create award requests should be reviewed by a human operator. So your
+site portal should store these requests somewhere for you to review. In
+the meantime, it sends back a `ManagedProjectPendingError` to the allocator.
+This tells the allocator that you have received the request and are
+reviewing it. The allocator will keep periodically retrying the request
+until you approve or reject it.
 
-**This is not a failure.** It is the honest answer to "is this award connected to
-a project yet?" — not yet. `allocator` logs it quietly and **will repeat the
-request periodically until it is approved or rejected**. That retry is what makes
-the rest of this work, and it is why nothing below needs to push anything back.
+### 2. You, as the site operator see the pending awards, and decide
 
-### 2. The site operators see the pending awards, and decide
-
-Their job is exactly two decisions: approve or reject.
+Your job is to provide a human-in-the-loop review of whether or not to
+approve the award request. This isn't to judge the allocator's decision,
+but instead provides a cybersecurity check to ensure that new awards are
+not created without your knowledge. You can see the pending awards by running:
 
 ```bash
 curl localhost:8080/awards
 ```
 
-**To approve, they must name the project the award is attached to** — either one
-they have just created for it, or one that already exists:
+**To approve, you must provide a short, unique identifier
+for the project the award should be attached to** — either one
+you have just created for it, or one that already exists:
 
 ```bash
 curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/approve \
@@ -247,14 +268,8 @@ curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/approve \
      -d '{"project": "myproject1", "reason": "approved by the panel"}'
 ```
 
-Note they supply `myproject1`, **not** `myproject1.site`. The `.site` half is
-added from the portal's own name, because it is the one part of the identifier an
-operator can get wrong and cannot usefully vary — a project in somebody else's
-namespace is not something this portal can claim. Sending the full identifier is
-refused with a message saying so, rather than being quietly accepted.
-
-The name must uniquely identify the project on this site, and must fit what a
-`ProjectIdentifier` component allows:
+This must uniquely identify the project on this site, and must fit this
+requirement:
 
 | | |
 |---|---|
@@ -265,17 +280,40 @@ The name must uniquely identify the project on this site, and must fit what a
 So `myproject1`, `MyProject_1` and `my-project` are all fine; `my.project`,
 `my project`, `café` and `-lead` are not.
 
-The offering is in the path because an award is identified by *both* the resource
-and the identifier — the same name arriving on `cluster2` would be a different
-award, for a different resource.
+Typically, sites will automatically generate their identifiers. But manually
+created identifiers are ok too.
 
-**One project, one award — at a time.** A project can be attached to only one
-award at any moment, so approving a second award onto `myproject1` is refused
-with a `409`. The operator is free to *change* which project an award is attached
-to, though: approving again with a different `project` moves it, and the project
-it leaves behind becomes available to another award.
+In this case, the identifier is `myproject1`. In OpenPortal this is combined
+with the site portal's name (in this case `site`) to form a unique full
+identifier for the project: `myproject1.site`.
 
-**To reject**, they say so, and the reason travels back:
+Note how the allocator had asked for the `myaward1.allocator` award to be
+attached to this project. This is because their unique award identifier was
+`myaward1` and thier portal name was `allocator`. In accepting the award,
+we've now created a linkage (or mapping) from the allocator's
+`myaward1.allocator` award to our `myproject1.site` project. This is why
+you will see `myaward1.allocator:myproject1.site` in the logs and
+in the usage reports. The allocator will also receive this mapping
+the next time they try to create the award. They will then know that the
+award is live and connected to the project.
+
+Note that you called a URL with the offering is in the path because an
+award is requested against a specific offering, in this case the request
+was to link `myaward1.allocator` to a project on the `cluster1` offering.
+
+You can freely change which projects are linked to which awards, as long as
+you keep a record of the changes. You should also follow the rule that
+a project can only be linked to one award at a time. And any accounting
+data you send back to the allocator from a project will resolve only to the
+award it was linked against. Typically this is by assigning one award per
+day, and allocating the entire usage within a day to the last award linked
+on that day. However, it is up to you how you choose this division,
+as long as you keep a record of the changes and can report them back to the
+allocator if requested.
+
+You don't have to approve the award. If something looks wrong, then you
+can reject it. **To reject**, give a reason so the allocator knows why it
+was rejected:
 
 ```bash
 curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/reject \
@@ -308,19 +346,21 @@ retrying request *is* the delivery mechanism.
 ### 4. Usage figures are pushed in — against *our* identifier
 
 Your accounting is the source of truth, and it produces figures for
-`myproject1.site`. It has never heard of `myaward1.allocator`:
+`myproject1.site`. You push in accounting data against your own
+project identifier, e.g. `myproject1.site`. For example, assuming
+we get TODAY via
+
+```bash
+TODAY=$(date +%F)
+```
+
+then we could push in today's usage by `alice@example.com` of 12.5 hours like this:
 
 ```bash
 curl -X PUT localhost:8080/projects/myproject1.site/usage \
      -H 'content-type: application/json' \
-     -d '{"hours": {"2026-08-01": {"alice@bristol.ac.uk": 12.5}}}'
+     -d "{\"hours\": {\"$TODAY\": {\"alice@example.com\": 12.5}}}"
 ```
-
-The day matters as much as the figure. A day's usage is billed to whichever
-award the project was attached to during that day (step 8), so usage dated
-*before* the attachment belongs to no award and will not appear in any report —
-which looks like the push having failed when it has not. The reply names the
-award the day will be billed to, so it can be checked rather than assumed.
 
 Or, if your parser already produces OpenPortal types, push a complete
 `ProjectUsageReport`:
@@ -328,40 +368,56 @@ Or, if your parser already produces OpenPortal types, push a complete
 ```bash
 curl -X PUT localhost:8080/projects/myproject1.site/usage \
      -H 'content-type: application/json' \
-     -d '{"report": { ... ProjectUsageReport JSON ... }}'
+     -d "{\"report\": { ... ProjectUsageReport JSON ... }}"
 ```
 
-Both end up in the same store, and `get_usage_report` serves either.
-
-Note that everything under `/awards` is keyed on `allocator`'s identifier and this
-endpoint on ours. That is not an inconsistency — those are the two namespaces,
-and the mapping from step 3 is what joins them.
+(you can see the specification of `ProjectUsageReport` in
+[json-types.md](../../../docs/specifications/json-types.md#projectusagereport)).
 
 ### 5. The allocator asks for usage, and gets it in its own namespace
 
-It asks `allocator.site.cluster1 get_usage_report myaward1.allocator`. The
-figures were recorded against `myproject1.site`, so `build_usage_report`
-assembles the report in our namespace and then `remap_project`s it into theirs:
-`alice.myproject1.site` becomes `alice.myaward1.allocator`, while the member's
-email is untouched, because that is the same person either way.
+The allocator will periodically ask for usage reports for awards that are
+active and linked at your site. It will send request like this:
 
-It answers from what was pushed, with no computing on the request path — there
-are only about thirty seconds to answer in.
+```
+allocator.site.cluster1 get_usage_report myaward1.allocator this_month
+```
 
-### 6. How often you are asked, and how to make it stop
+This is asking for the most recent full month's accounting for all used
+to be billed against the award `myaward1.allocator`. Your job is to provide
+the usage figures for the project that was linked to that award, in this case
+`myproject1.site`.
 
-Usage is not asked for once. `get_usage_report` arrives on every sync cycle, and
-almost always for **`this_month`** — the allocator is watching a month fill up,
-not fetching a finished ledger. Your answer carries a flag that decides whether
-it comes back for that month again.
+The usage reports you were pushing in against your own project identifier
+in this example are now filtered to the days that were attached to the award.
+Identifiers from your project to the allocators award are remapped, and the
+result is returned to the allocator. This is a very quick operation,
+because the usage is stored against your own project, and the award is derived
+from the attachment history. You have about 30 seconds to provide the report,
+or else it will time out and the allocator will try again. If computing the
+report takes longer, then use a background reporter to compute it, and serve
+it from cache when it is ready. All OpenPortal calls are designed to be
+idempotent and re-tryable. The allocator portal will keep re-trying the
+request until it gets a valid response.
 
-Each day in a `ProjectUsageReport` is either complete or not, and the report as
-a whole is complete when every day in it is. Complete means one specific thing:
-*these figures will not change.* An allocator that receives a complete month
-records it and stops asking; one that receives an incomplete month asks again
-next cycle.
+### 6. Finalised versus unfinalised reports
 
-So which months you get asked about is, in part, up to you:
+Note that accounts do change and may need to be revised. OpenPortal has the
+concept of a "finalised" report, which is a report that will not change. The
+allocator will keep asking for usage reports until it receives a finalised report
+for a given month. It is up to you to decide when a report is finalised,
+and to tell the allocator when that is the case. You can do this by calling
+the `finalise` endpoint for a given month. For example, to finalise the
+report for August 2026, you would call:
+
+```bash
+curl -X POST localhost:8080/projects/myproject1.site/usage/finalise \
+     -H 'content-type: application/json' \
+     -d '{"month": "2026-08"}'
+```
+
+Note that you can't finalise the current month - this is obviously because
+things can still change.
 
 * **The current month is always re-requested,** whatever you say about it. The
   reference implementation will not even store it as complete — the month is
@@ -369,66 +425,63 @@ So which months you get asked about is, in part, up to you:
 * **A past month is re-requested until you report it complete.** Once you do,
   the allocator has what it needs and moves on.
 
-The asking therefore stops when, and only when, you say the month is settled —
-which is why this example makes that an explicit operations decision rather than
-inferring it:
-
-```bash
-# "August's accounting is settled — stop asking."
-curl -X POST localhost:8080/projects/myproject1.site/usage/finalise \
-     -H 'content-type: application/json' \
-     -d '{"month": "2026-08"}'
-```
-
-and, because a late correction can always land, it can be taken back:
-
-```bash
-curl -X POST localhost:8080/projects/myproject1.site/usage/finalise \
-     -H 'content-type: application/json' \
-     -d '{"month": "2026-08", "final": false}'
-```
-
-The alternative — guessing from the calendar, "the day has passed, so it must be
-settled" — is what the example deliberately does *not* do. A scheduler outage, a
-job record that lands late, a billing correction: any of them moves a number
-after the month has ended. Only the team running the accounting knows when their
-own pipeline has settled, so only they get to say so.
-
-There is one trap here, and it is easy to walk into. A report containing **no
-days at all** is complete, vacuously — "every day I contain is complete" is true
-of nothing. So a month whose figures have simply not been ingested yet would
-answer *"nothing was used, and that is final"*, and be believed.
-`build_usage_report` guards it by writing an explicit zero-usage,
-**not**-complete day for any month in the requested range that it has no data
-for and has not been told is final. That says the honest thing instead: nothing
-so far, ask again.
-
-Note also which way the two mistakes run. Never finalising a month costs you one
-request per sync cycle and nothing else — a small, permanent bill. Finalising
-early is the expensive direction: the allocator records what it has and stops
-asking, and a correction that arrives afterwards is never collected. When in
-doubt, leave it open.
+Note, that once finalised the allocator will stop asking for a usage
+report. If you need to make a later correction then you need to let the
+allocator know. They can remove the "finalised" flag and can re-request
+the accounting from you once it is ready. Your accounts are always treated
+as the source of truth, and the allocator will always accept your usage
+figures as the final word.
 
 ### 7. The same question asked of the wrong resource returns nothing
 
 Ask `allocator.site.cluster2 get_usage_report myaward1.allocator` and the answer
 is an **empty** report, not an error. The award is attached to a project on
-`cluster1`, so nothing was used on `cluster2`. An allocator sweeping every
-offering it knows about, to find which one holds a given award, depends on that.
+`cluster1`, so nothing was used on `cluster2`.
 
-### 8. The award is removed — and the project carries on
+### 8. The award is updated
 
-Eventually `allocator` sends `allocator.site.cluster1 remove_award
-myaward1.allocator`. It is the mirror image of step 1: step 1 asked us to
+The allocator may send an update to the award, for example to change its name,
+or to add or remove members. This is done via the `update_award` instruction:
+
+```
+allocator.site.cluster1 update_award myaward1.allocator
+   {"name":"My First Award","members":{"alice@example.com":"Project Lead","bob@example.com":"Project Member"}}
+```
+
+These updates can be approved automatically, and should apply to whichever project
+you have attached the award to. The update does not change the attachment, and
+does not change the usage figures. It is simply a way for the allocator to keep
+the award's metadata in sync with the project it is attached to.
+
+Note that some allocators may require that the members of the award are kept
+in sync with the members of the project. In this case, you should ensure that
+the members of the project are updated to match the members of the award. This
+is not a requirement of the OpenPortal contract, but it is a common practice
+to ensure that the project and award are kept in sync.
+
+Because of this, the `update_award` instruction will always send the full set
+of metadata associated with an award. You can infer that, if someone is
+missing from the members list, that they have been removed.
+If someone is added, then they have been added.
+
+### 9. The award is removed — and the project carries on
+
+Eventually `allocator` sends a request to detach an award from a project. This
+is the command
+
+```
+allocator.site.cluster1 remove_award myaward1.allocator
+```
+
+It is the mirror image of step 1: step 1 asked us to
 *attach* an award to a project, and this asks us to *detach* it. It says nothing
 about the project.
 
 So `myproject1.site` carries on exactly as before — its accounts, its files, its
-members, its identity. Whether a project outlives its funding is a question for
-the site, answered through the site's own processes. Nothing about it belongs in
-a handler for a message from another portal.
+members, its identity. Whether a project outlives its award is a question for
+the site, answered through the site's own processes.
 
-What removal ends is `myproject1.site`'s ability to bill usage against
+What detachment ends is `myproject1.site`'s ability to bill usage against
 `myaward1.allocator`, and it ends it *per day*:
 
 ```
@@ -441,15 +494,19 @@ What removal ends is `myproject1.site`'s ability to bill usage against
                                                        Aug 21 → nobody
 ```
 
-The rule is *the award the project was last attached to on that day*. Because
-the handover happened during 20 August, **the whole of that day** goes to
+A good rule to follow is *the award the project was last attached to on that day*.
+Because the handover happened during 20 August, **the whole of that day** goes to
 `myaward2` — not just the hours after the swap. A day is indivisible; usage is
 accounted daily and splitting one would need per-hour attribution nobody keeps.
 And had nothing replaced `myaward1`, 20 August would still have been its own,
 with 21 August the first day billed to nobody. Removal therefore bites *at most*
 the day after it happens.
 
-Two things follow, and the example is arranged around them.
+You don't have to do this, but it does make things cleaner. What you do
+have to ensure is that no usage *after* the removal is billed to the award
+that was removed.
+
+In the case of this example, two things follow, and the example is arranged around them.
 
 **Removal keeps the record.** `remove_award` marks the award detached; it does
 not delete it, and it does not touch the usage. The award still owns every day up
@@ -486,8 +543,9 @@ kept, because those days are still its days.
 Each of these is commented at the point it matters in the code, but they are the
 reason the example exists.
 
-1. **The offering says which resource, and scopes everything.** It is a virtual
-   agent standing for one resource you run, and it is part of what is being
+1. **The offering says which resource, and scopes everything.** In
+   OpenPortal terms, it is created as a virtual agent standing for one
+   resource you run, and it is part of what is being
    asked rather than a permission to ask it. Awards are keyed on
    `(offering, project id)`; answers are scoped by it; and a question about a
    project that is not on this resource returns empty, not an error. Reading it
@@ -505,10 +563,10 @@ reason the example exists.
 
 3. **The mapping is where two portals agree what to call a thing.** You name
    the project you attached — just its own name, qualified with your portal —
-   and it is returned as the second half of the `ProjectMapping`. It is what the allocator joins on, and
-   what your usage figures translate through. Until an award is attached you
-   have nothing honest to put there — which is why an unattached award answers
-   with an error instead.
+   and it is returned as the second half of the `ProjectMapping`. It is what
+   the allocator joins on, and what your usage figures translate through.
+   Until an award is attached you have nothing honest to put there —
+   which is why an unattached award answers with an error instead.
 
 4. **Failing is a normal answer, and *which* failure matters.**
    `ManagedProjectPendingError` means "not yet, ask again" and is benign;

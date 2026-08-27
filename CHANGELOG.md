@@ -24,7 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `python/examples/site_portal/example.py` writes the configs for an awards
   portal, a site portal and a bridge for each, connects them, starts them
   together with the example's FastAPI app, and prints the calls that walk an
-  award through the whole cycle. `setup`, `start`, `status`, `stop` and `clean`,
+  award through the whole cycle — offering a cluster, making the award,
+  approving it, pushing in today's usage and reading the report back on the
+  awarding portal's side, in its own namespace. `setup`, `start`, `status`, `stop` and `clean`,
   with everything it creates confined to a git-ignored `data/` directory.
 
 - **State verification instructions** — a caller can now ask whether an earlier

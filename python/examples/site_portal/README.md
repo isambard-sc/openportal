@@ -60,8 +60,9 @@ python example.py start
 ```
 
 It prints what is running and, more to the point, the Python and `curl` calls
-that walk an award through the steps below — starting with adding a cluster,
-since a fresh site offers nothing. `python example.py stop` stops it again, and
+that walk an award through the steps below — adding a cluster, making the award,
+approving it, pushing today's usage in and reading it back from the awards
+portal's side. `python example.py stop` stops it again, and
 `python example.py clean` also deletes `data/`.
 
 What it builds is the smallest arrangement in which one portal can make an award
@@ -267,7 +268,13 @@ curl -X PUT localhost:8080/projects/myproject1.site/usage \
      -d '{"hours": {"2026-08-01": {"alice@bristol.ac.uk": 12.5}}}'
 ```
 
-or, if your parser already produces OpenPortal types, push a complete
+The day matters as much as the figure. A day's usage is billed to whichever
+award the project was attached to during that day (step 8), so usage dated
+*before* the attachment belongs to no award and will not appear in any report —
+which looks like the push having failed when it has not. The reply names the
+award the day will be billed to, so it can be checked rather than assumed.
+
+Or, if your parser already produces OpenPortal types, push a complete
 `ProjectUsageReport`:
 
 ```bash

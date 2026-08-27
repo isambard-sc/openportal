@@ -806,8 +806,61 @@ Everything is up.
 4. Repeat step 2. It now succeeds, and returns the mapping both portals hold
    from here on: {award}:myproject1.{SITE.name}
 
-   Then walk the rest of the README - pushing usage in, asking for a report,
-   finalising a month, removing the award.
+5. Push today's usage in - against *our* project identifier, not the award's:
+
+     TODAY=$(date +%F)
+
+     curl -X PUT http://127.0.0.1:{APP_PORT}/projects/myproject1.{SITE.name}/usage \\
+          -H 'content-type: application/json' \\
+          -d "{{\\"hours\\": {{\\"$TODAY\\": {{\\"alice@bristol.ac.uk\\": 12.5}}}}}}"
+
+   Two things to notice. The figures are filed under `myproject1.{SITE.name}`,
+   because your accounting produces numbers for your own projects and has never
+   heard of `{award}` - the mapping from step 4 is what joins the two.
+
+   And the day has to be **today**, which is why it comes from `date` rather than
+   being typed. A day's usage is billed to whichever award the project was
+   attached to during that day, and it was attached in step 3 - so a date before
+   that belongs to no award, and step 6 would come back empty and leave you
+   wondering why. The reply names the award the day will be billed to
+   (`billing_to`), which is the quickest way to notice that it is not the one
+   you expected.
+
+6. Ask the awards portal for it. This is where the translation shows:
+
+     import openportal
+     openportal.load_config("{_short(ALLOCATOR_BRIDGE.py_config)}")
+
+     report = openportal.run(
+         '{ALLOCATOR.name}.{SITE.name}.{OFFERING} get_usage_report {award} today',
+         30000).result
+
+     print(report)
+     print("complete?", report.is_complete)
+     for user in report.users:
+         print(user, report.usage(user), report.user_mapping[user])
+
+   `today` is a keyword the date-range grammar understands, so nothing needs
+   substituting on this side. What comes back is in the **awards portal's**
+   namespace:
+
+     {award}
+     <today>
+       alice.{award}: 12.500 hours
+     Daily total: 12.500 hours
+
+   The usage went in against `alice@bristol.ac.uk` on `myproject1.{SITE.name}`
+   and comes out as `alice.{award}` - while `user_mapping` still carries the
+   email, because that is the same person either way.
+
+   `complete?` is False, and stays False until the site declares the month
+   settled (`POST /projects/myproject1.{SITE.name}/usage/finalise` with
+   `{{"month": "YYYY-MM"}}`). That is what decides whether the awards portal
+   asks about this month again - README step 6, which is the one worth reading
+   twice.
+
+   Then walk the rest of the README - moving the award to another project, and
+   removing it.
 
 To drive the *site's* own bridge from Python instead, load the other config:
 

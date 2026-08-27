@@ -262,7 +262,7 @@ def _username(email: str) -> str:
 
 def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     """
-    `create_project <project_id> <AwardDetails JSON>`
+    `create_award <project_id> <AwardDetails JSON>` (arrives as `create_project`)
 
     **This arrives repeatedly for awards you already hold.** The awarding
     portal re-sends it every synchronisation cycle to re-assert the award's
@@ -328,7 +328,7 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
 
 def update_award(job: openportal.Job) -> openportal.ProjectMapping:
     """
-    `update_project <project_id> <AwardDetails JSON>`
+    `update_award <project_id> <AwardDetails JSON>` (arrives as `update_project`)
 
     An update for an award we have never seen is normal, not an error - a
     missed message or a rebuilt database gets us here. Treat it as a create,
@@ -347,7 +347,7 @@ def update_award(job: openportal.Job) -> openportal.ProjectMapping:
 
 def remove_award(job: openportal.Job) -> openportal.ProjectMapping:
     """
-    `remove_project <project_id>`
+    `remove_award <project_id>` (arrives as `remove_project`)
 
     **Disconnects an award from a project. It does not delete the project.**
     The answer is `<project_id>:None` - there is no longer a project attached to
@@ -788,23 +788,38 @@ def get_storage_reports(job: openportal.Job) -> openportal.StorageReport:
 # Dispatch
 # --------------------------------------------------------------------------
 
-#: Canonical instruction name → handler. The `*_award` spellings arrive as their
-#: `*_project` equivalents, so dispatching on the canonical name handles both
-#: (§2).
+#: Every instruction this portal answers, keyed on the command name as it
+#: arrives.
 #:
 #: Anything absent is answered with `OpenPortalUnsupportedCommandError`, which
 #: is a legitimate answer: a portal implements as much of the contract as it has
 #: answers for (§4.0). `get_users` is deliberately absent - members travel in
 #: `AwardDetails.members` instead.
+#:
+#: **Both spellings of the award instructions are here, deliberately.** An
+#: awarding portal sends `create_award`; the agents currently deliver it under
+#: its original name, `create_project`, and that is what you see in a job's
+#: `command` field today. The wire vocabulary is moving to the `*_award`
+#: spellings (and the attach/detach pair may end up named for what they actually
+#: do) before 1.0, so a table keyed on only one of the two will start answering
+#: `OpenPortalUnsupportedCommandError` on the day it changes. Keying on both
+#: costs three entries and spans the change - and since each pair is one
+#: instruction under two names, they share a handler rather than duplicating it.
 HANDLERS = {
+    # Attaching an award to a project, and detaching it again.
+    "create_award": create_award,
     "create_project": create_award,
+    "update_award": update_award,
     "update_project": update_award,
+    "remove_award": remove_award,
     "remove_project": remove_award,
-    "get_project": get_award,
+    # Reading awards back.
     "get_award": get_award,
+    "get_project": get_award,
     "get_awards": get_awards,
     "get_projects": get_projects,
     "get_project_mapping": get_project_mapping,
+    # Accounting.
     "get_usage_report": get_usage_report,
     "get_usage_reports": get_usage_reports,
     "get_storage_report": get_storage_report,

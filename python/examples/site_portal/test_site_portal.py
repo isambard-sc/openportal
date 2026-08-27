@@ -354,6 +354,30 @@ def _run_all() -> None:
         f"-> {list((job.result.members or {}).keys())}",
     )
 
+    print("\n-- both spellings of an instruction reach one handler -----------")
+
+    # An awarding portal sends `create_award`; the agents deliver it as
+    # `create_project` today, and the wire vocabulary is moving to the award
+    # spellings before 1.0. Either name must land on the same handler, or the day
+    # it changes this portal starts answering "unsupported command".
+    for spelling in ("create_project", "create_award"):
+        job = site_portal.answer(make_job(f"{spelling} {AWARD} {details()}"))
+        check(
+            f"'{spelling}' is answered by the same handler",
+            str(job.result) == f"{AWARD}:{LOCAL_PROJECT}",
+            f"-> {job.result}",
+        )
+
+    check(
+        "...and every award instruction has both spellings",
+        all(
+            site_portal.HANDLERS.get(f"{verb}_award")
+            is site_portal.HANDLERS.get(f"{verb}_project")
+            is not None
+            for verb in ("create", "update", "remove")
+        ),
+    )
+
     print("\n-- update_award for an award we do not hold ---------------------")
 
     job = site_portal.answer(make_job(f"update_project myaward4.allocator {details()}"))

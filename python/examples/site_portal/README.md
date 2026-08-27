@@ -294,12 +294,12 @@ where it is telling you that it refers to the award as `myaward1.allocator`.
 It is also providing some metadata about the award, including its name,
 the template it is against, and a list of members and their roles.
 
-One wrinkle to know before writing your dispatch: the `*_award` spellings are
-exact synonyms of the `*_project` ones, and what reaches you is the **canonical**
-form. An allocator that sends `create_award` produces a job whose `command` says
-`create_project`. So dispatch on the canonical name and both spellings are
-handled — which is why this example's `HANDLERS` table is keyed on
-`create_project`, `update_project` and `remove_project`.
+> [!NOTE]
+> The `*_award` instructions used throughout this README are the spellings to
+> write against. Older agents deliver the same instructions under their original
+> `*_project` names — `create_award` arrives as `create_project` — so accept both
+> and dispatch them to one handler, as this example's `HANDLERS` table does. The
+> wire vocabulary is still being settled and will be fixed before 1.0.
 
 The members are keyed by their email addresses, and the roles are strings
 that have been pre-agreed between you and the allocator. Typically they will

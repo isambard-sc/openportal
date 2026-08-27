@@ -13,6 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other
   dependencies, and only the *agents* it talks to have to be built.
 
+- **The site portal example dispatches both spellings of the award
+  instructions.** `create_award` and `create_project` (and the update and remove
+  pairs) are one instruction under two names, so its `HANDLERS` table maps both
+  to one handler. Agents deliver the `*_project` spelling today; the example
+  keeps working when the wire moves to the `*_award` forms, and its README is
+  written against those.
+
 - **The site portal example can be run without a Rust toolchain at all.** Its
   README now points at the prebuilt `op-portal` and `op-bridge` attached to each
   release (Linux x86-64 and aarch64; anywhere else still builds), and

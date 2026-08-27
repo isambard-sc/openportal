@@ -758,6 +758,9 @@ async def finalise_usage(local_project_id: str, decision: Finalisation):
     *wrong* is the expensive direction: finalise a month early and the allocator
     records the figures it has and stops asking, so a correction that lands
     afterwards is never collected. When in doubt, leave it open.
+
+    The one thing it will not let you do is declare the **current** month final -
+    see below. Withdrawing a declaration (`final: false`) is always allowed.
     """
     # As with pushing usage: a month of a detached award can still be declared
     # final, and often needs to be - it is the last thing the allocator is
@@ -785,6 +788,35 @@ async def finalise_usage(local_project_id: str, decision: Finalisation):
         )
 
     month = f"{parsed.year:04d}-{parsed.month:02d}"
+
+    # **The current month cannot be declared final**, and this is a refusal
+    # rather than a warning.
+    #
+    # `is_complete` means "these figures will not change", and about a month
+    # that is still running that cannot be true - the day is not over. The
+    # awarding portal knows it too: the current month is exempt from
+    # completeness and is re-requested whatever it is told (§4.3), so the claim
+    # would be disregarded at the other end anyway.
+    #
+    # Refusing it here means this portal never *stores* a promise it cannot
+    # keep, which matters for the month after: a stored claim would silently
+    # become a claim about a finished month the moment the calendar rolled over,
+    # and it would then be believed.
+    #
+    # Withdrawing a claim (`final: false`) is always allowed - taking back
+    # something you should not have said needs no permission.
+    today = datetime.date.today()
+
+    if decision.final and month == f"{today.year:04d}-{today.month:02d}":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{month} is the current month, so its figures can still change "
+                "and it cannot be declared final. Finalise it once it has "
+                "ended; until then the awarding portal will keep asking about "
+                "it, which is correct and costs one request per sync cycle."
+            ),
+        )
 
     project = store.load_project(local_project_id)
     months = set(project.final_months)

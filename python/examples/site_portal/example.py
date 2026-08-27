@@ -41,6 +41,7 @@ unencrypted. None of that is safe anywhere but your own machine.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -746,10 +747,24 @@ def start_all() -> None:
 def instructions() -> None:
     """Print what is running and, more usefully, what to do with it."""
     award = f"myaward1.{ALLOCATOR.name}"
+
+    # Step 6 shows both a finalisation that works and one that is refused, so it
+    # needs the current month and a month that has ended. Computed here rather
+    # than left as `YYYY-MM` because the difference between the two is the point
+    # being made, and a placeholder hides it.
+    today = datetime.date.today()
+    this_month = f"{today.year:04d}-{today.month:02d}"
+    previous = today.replace(day=1) - datetime.timedelta(days=1)
+    last_month = f"{previous.year:04d}-{previous.month:02d}"
+    #: The award as the README's step 1 spells it - same name, same member, same
+    #: role - so a reader moving between the two is looking at one award and not
+    #: two. Spaces inside the JSON are fine: everything after the identifier is
+    #: the details blob.
     details = (
-        '{"name":"MyFirstAward","template":"standard",'
-        '"members":{"alice@bristol.ac.uk":"member"}}'
+        '{"name":"My First Award","template":"standard",'
+        '"members":{"alice@example.com":"Project Lead"}}'
     )
+    member = "alice@example.com"
 
     print(
         f"""
@@ -780,7 +795,13 @@ Everything is up.
      curl -X DELETE http://127.0.0.1:{APP_PORT}/offerings/{OFFERING}   # withdraw it
 
    and withdrawing keeps the awards made on it, it just stops them being
-   reachable.
+   reachable. Add a second resource the same way -
+
+     -d '{{"name": "cluster2", "templates": ["standard"]}}'
+
+   and README step 7 becomes visible too: asking `cluster2` about an award that
+   lives on `{OFFERING}` answers with an empty report rather than an error, which
+   is what lets an awards portal sweep every resource to find one.
 
 2. Ask the awards portal to place an award on that resource, from Python:
 
@@ -819,7 +840,7 @@ Everything is up.
 
      curl -X PUT http://127.0.0.1:{APP_PORT}/projects/myproject1.{SITE.name}/usage \\
           -H 'content-type: application/json' \\
-          -d "{{\\"hours\\": {{\\"$TODAY\\": {{\\"alice@bristol.ac.uk\\": 12.5}}}}}}"
+          -d "{{\\"hours\\": {{\\"$TODAY\\": {{\\"{member}\\": 12.5}}}}}}"
 
    Two things to notice. The figures are filed under `myproject1.{SITE.name}`,
    because your accounting produces numbers for your own projects and has never
@@ -856,15 +877,29 @@ Everything is up.
        alice.{award}: 12.500 hours
      Daily total: 12.500 hours
 
-   The usage went in against `alice@bristol.ac.uk` on `myproject1.{SITE.name}`
+   The usage went in against `{member}` on `myproject1.{SITE.name}`
    and comes out as `alice.{award}` - while `user_mapping` still carries the
    email, because that is the same person either way.
 
-   `complete?` is False, and stays False until the site declares the month
-   settled (`POST /projects/myproject1.{SITE.name}/usage/finalise` with
-   `{{"month": "YYYY-MM"}}`). That is what decides whether the awards portal
-   asks about this month again - README step 6, which is the one worth reading
-   twice.
+   `complete?` is False, and it decides whether the awards portal asks about this
+   month again. Declaring a month settled is what stops it:
+
+     curl -X POST http://127.0.0.1:{APP_PORT}/projects/myproject1.{SITE.name}/usage/finalise \\
+          -H 'content-type: application/json' \\
+          -d '{{"month": "{last_month}"}}'
+
+   `{last_month}` is last month, and this is the honest demonstration available
+   today: the current month cannot be finalised, and this app refuses it -
+
+     -d '{{"month": "{this_month}"}}'   ->  400, "{this_month} is the current month,
+                                       so its figures can still change"
+
+   "these figures will not change" cannot be true while the month is still
+   running. So the month you have usage in is the one you cannot close, and the
+   ones you can close have nothing in them - which is worth noticing rather than
+   working around, because a finalised empty month tells the awards portal
+   "nothing was used, and that is settled" and is believed. README step 6 is the
+   one worth reading twice.
 
    Then walk the rest of the README - moving the award to another project, and
    removing it.

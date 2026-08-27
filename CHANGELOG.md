@@ -13,6 +13,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other
   dependencies, and only the *agents* it talks to have to be built.
 
+- **The example site portal refuses to finalise the current month.**
+  `is_complete` means "these figures will not change", which cannot be true of a
+  month that is still running - and an awarding portal is entitled to disregard
+  such a claim anyway (site-portal-api.md §4.3). `POST /usage/finalise` now
+  answers `400` for the current month, so the portal never stores a promise that
+  would quietly become a claim about a finished month once the calendar rolled
+  over. Withdrawing a declaration (`final: false`) is still allowed for any
+  month.
+
 - **The example site portal's resources are now managed over its API.** Which
   clusters the example advertises was a constant in `site_portal.py`; it is now
   state in `store.py`, with `GET /offerings`, `POST /offerings`,

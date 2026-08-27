@@ -5,17 +5,24 @@ SPDX-License-Identifier: CC0-1.0
 
 # An example site portal
 
-## Quick start
+## Quick start
 
 ```bash
-pip install -r requirements.txt
-python example.py run
+cargo build                       # from the workspace root: builds the agents
+pip install -r requirements.txt   # openportal, fastapi, uvicorn
+python example.py start
 ```
 
 and follow the instructions that are printed there. Then come back here
 to understand what this did in more detail.
 
-## What is the setup?
+Only the first line needs a Rust toolchain, and only because the *agents* are
+Rust: `example.py` looks for `op-portal` and `op-bridge` on your `PATH`, then in
+the workspace's `target/release` and `target/debug`, and tells you which is
+missing if it cannot find them. `openportal` itself is on PyPI, so the Python
+side needs nothing but `pip`.
+
+## What is the setup?
 
 OpenPortal is used to connect two portals: one that allocates awards
 (the awards or allocator portal), and one that actually runs them via
@@ -147,30 +154,52 @@ With the application running and an awarding portal called `allocator`
 configured, here is the whole life of an award. This is the part to read
 carefully — most of the contract is visible in these steps.
 
+The `curl` calls below use `localhost:18780`, which is where `example.py` runs
+this application — so they can be pasted as they stand after
+`python example.py start`. That port is this application's own, chosen when
+uvicorn is started (`--port`), and it has to match the `--signal-url` and
+`--notification-url` the bridge was initialised with. It is *not* the bridge's
+port: the bridge's HTTP API is in its config file (`[bridge] port`, default
+`3000`; `18752` and `18753` under `example.py`), and it is the `openportal`
+Python module that talks to that, not you.
+
 ### 0. The site says which resources it offers
 
 Nothing can happen until your site advertises a resource. A fresh portal
-advertises none, so the operators add one:
+advertises none, so the operators add them — two here, because a single resource
+hides most of what an offering is for:
 
 ```bash
-curl -X POST localhost:8080/offerings \
+curl -X POST localhost:18780/offerings \
      -H 'content-type: application/json' \
      -d '{"name": "cluster1", "templates": ["standard", "large"]}'
+
+curl -X POST localhost:18780/offerings \
+     -H 'content-type: application/json' \
+     -d '{"name": "cluster2", "templates": ["standard"]}'
 ```
 
-This registers a cluster called `cluster1`, and names two templates that
-the allocator may ask for, "standard" and "large".
+That registers two clusters, and names the templates the allocator may ask for
+on each: `standard` and `large` on `cluster1`, only `standard` on `cluster2`.
 
 Running get on the same URL shows what is offered:
 
 ```bash
-curl localhost:8080/offerings
+curl localhost:18780/offerings
 ```
 
 returns
 
-```
-{"portal":"site","awarding_portals":["allocator"],"offerings":[{"name":"cluster1","templates":["large","standard"],"since":"2026-08-27","awards":0,"destinations":["cluster1.site.allocator"],"registered":true}]}
+```json
+{"portal": "site",
+ "awarding_portals": ["allocator"],
+ "offerings": [{"name": "cluster1",
+                "templates": ["large", "standard"],
+                "since": "2026-08-27",
+                "awards": 0,
+                "destinations": ["cluster1.site.allocator"],
+                "registered": true},
+               ...]}
 ```
 
 This shows that our site portal is called `site`, and the allocator portal is
@@ -185,6 +214,18 @@ portal is offered to the `allocator` portal.
 
 You can remove an offering via `DELETE /offerings/cluster1`.
 
+Do this first, and check it when something goes quiet, because an unadvertised
+resource produces the least helpful failure in the whole system: **a request for
+a resource that is not advertised is held, not refused** (§1.1). It sits on the
+portal agent waiting for the offering to appear, the caller waits out its
+timeout, and nothing anywhere says why. So if a `create_award` never comes back,
+check `GET /offerings` first.
+
+Withdrawing a resource ends its *reachability*, and nothing else. The awards made
+on it stay on record — they still own the days they were attached for, and those
+days may not have been collected yet (see step 9) — so `DELETE` reports how many
+it kept, and adding the resource back makes them reachable again.
+
 The templates refer to the types of awards that you are willing to accept.
 For example, you may accept "large" or "standard" awards in this case.
 The template provides a way for you and the allocator to agree a shared
@@ -193,21 +234,21 @@ may have lower priority in queues, or less guaranteed resources than a "large"
 award. It is entirely up to you and the allocator to decide what these
 templates mean.
 
-Note that the allocator has to say which template an award is against. If
-it asks for a template you do not offer, the request is silently dropped.
-This is a security measure: the allocator cannot cheaply
-probe your site to see what templates you offer.
+Note that the allocator has to say which template an award is against, and that
+the templates are per-resource: `large` is offered on `cluster1` and not on
+`cluster2`, because a template selects things that belong to the resource. An
+award naming a template you do not offer *on that resource* is refused with
+`ManagedProjectRejectedError`, naming the template:
 
-This gives rise to the least helpful failure in
-the whole system: **a request for a resource that is not advertised is held, not
-refused** (§1.1). It sits on the portal agent waiting for the offering to appear,
-the caller waits out its timeout, and nothing anywhere says why. So if a
-`create_award` never comes back, check `GET /offerings` first.
+```
+template 'large' is not offered on cluster2
+```
 
-Withdrawing a resource ends its *reachability*, and nothing else. The awards made
-on it stay on record — they still own the days they were attached for, and those
-days may not have been collected yet (see step 8) — so `DELETE` reports how many
-it kept, and adding the resource back makes them reachable again.
+That is terminal, so the allocator stops asking rather than retrying a request
+that can never succeed — the same distinction as pending versus rejected in
+step 1. It tells the allocator only about the template it guessed, and never
+enumerates what you do offer; the list is on your own operator API
+(`GET /offerings`), which is not a path the allocator can reach.
 
 ### 1. The allocator asks for an award to be attached to a project
 
@@ -255,7 +296,7 @@ but instead provides a cybersecurity check to ensure that new awards are
 not created without your knowledge. You can see the pending awards by running:
 
 ```bash
-curl localhost:8080/awards
+curl localhost:18780/awards
 ```
 
 **To approve, you must provide a short, unique identifier
@@ -263,7 +304,7 @@ for the project the award should be attached to** — either one
 you have just created for it, or one that already exists:
 
 ```bash
-curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/approve \
+curl -X POST localhost:18780/awards/cluster1/myaward1.allocator/approve \
      -H 'content-type: application/json' \
      -d '{"project": "myproject1", "reason": "approved by the panel"}'
 ```
@@ -316,7 +357,7 @@ can reject it. **To reject**, give a reason so the allocator knows why it
 was rejected:
 
 ```bash
-curl -X POST localhost:8080/awards/cluster1/myaward1.allocator/reject \
+curl -X POST localhost:18780/awards/cluster1/myaward1.allocator/reject \
      -H 'content-type: application/json' \
      -d '{"reason": "no capacity on cluster1 this quarter"}'
 ```
@@ -357,7 +398,7 @@ TODAY=$(date +%F)
 then we could push in today's usage by `alice@example.com` of 12.5 hours like this:
 
 ```bash
-curl -X PUT localhost:8080/projects/myproject1.site/usage \
+curl -X PUT localhost:18780/projects/myproject1.site/usage \
      -H 'content-type: application/json' \
      -d "{\"hours\": {\"$TODAY\": {\"alice@example.com\": 12.5}}}"
 ```
@@ -366,7 +407,7 @@ Or, if your parser already produces OpenPortal types, push a complete
 `ProjectUsageReport`:
 
 ```bash
-curl -X PUT localhost:8080/projects/myproject1.site/usage \
+curl -X PUT localhost:18780/projects/myproject1.site/usage \
      -H 'content-type: application/json' \
      -d "{\"report\": { ... ProjectUsageReport JSON ... }}"
 ```
@@ -383,10 +424,15 @@ active and linked at your site. It will send request like this:
 allocator.site.cluster1 get_usage_report myaward1.allocator this_month
 ```
 
-This is asking for the most recent full month's accounting for all used
-to be billed against the award `myaward1.allocator`. Your job is to provide
-the usage figures for the project that was linked to that award, in this case
-`myproject1.site`.
+This is asking for the usage to be billed against the award
+`myaward1.allocator` over a date range - here `this_month`, which is the
+*current* month, the one still filling up. That is what you will be asked for
+almost every time: the allocator is watching a month accumulate rather than
+fetching a finished ledger, which is what makes step 6 matter. Other ranges are
+accepted too (`today`, `last_month`, `2026-08-01:2026-08-31`, ...).
+
+Your job is to provide the usage figures for the project that was linked to that
+award, in this case `myproject1.site`.
 
 The usage reports you were pushing in against your own project identifier
 in this example are now filtered to the days that were attached to the award.
@@ -407,38 +453,76 @@ concept of a "finalised" report, which is a report that will not change. The
 allocator will keep asking for usage reports until it receives a finalised report
 for a given month. It is up to you to decide when a report is finalised,
 and to tell the allocator when that is the case. You can do this by calling
-the `finalise` endpoint for a given month. For example, to finalise the
-report for August 2026, you would call:
+the `finalise` endpoint for a month that has ended. So to declare July 2026
+settled:
 
 ```bash
-curl -X POST localhost:8080/projects/myproject1.site/usage/finalise \
+curl -X POST localhost:18780/projects/myproject1.site/usage/finalise \
      -H 'content-type: application/json' \
-     -d '{"month": "2026-08"}'
+     -d '{"month": "2026-07"}'
 ```
 
-Note that you can't finalise the current month - this is obviously because
-things can still change.
+**You cannot finalise the current month, and this application refuses to try:**
+
+```bash
+curl -X POST localhost:18780/projects/myproject1.site/usage/finalise \
+     -H 'content-type: application/json' \
+     -d '{"month": "2026-08"}'     # ...during August 2026
+
+{"detail": "2026-08 is the current month, so its figures can still change and
+            it cannot be declared final. ..."}
+```
+
+"These figures will not change" cannot be true of a month that is still running,
+and refusing means this portal never stores a promise it cannot keep — which
+matters most the moment the calendar rolls over, when a stored claim would
+quietly become a claim about a *finished* month, and would then be believed.
 
 * **The current month is always re-requested,** whatever you say about it. The
-  reference implementation will not even store it as complete — the month is
-  still running, so the claim cannot be true yet.
+  awarding portal is entitled to disregard a completeness claim about a month
+  that has not finished — Waldur will not even store one — which is the other
+  half of the reason this is refused here.
 * **A past month is re-requested until you report it complete.** Once you do,
   the allocator has what it needs and moves on.
 
-Note, that once finalised the allocator will stop asking for a usage
-report. If you need to make a later correction then you need to let the
-allocator know. They can remove the "finalised" flag and can re-request
-the accounting from you once it is ready. Your accounts are always treated
+Following the walkthrough, there is nothing satisfying to finalise yet: the award
+was attached today, so the only month with any usage in it is the current one,
+and the months you *can* finalise have no figures. That is worth seeing rather
+than working around — a finalised month with no usage says "nothing was used, and
+that is settled", which is a real answer and a real risk (see takeaway 9). The
+call above is what you will use for last month once a month has passed.
+
+Once finalised the allocator stops asking for that month. If a late correction
+arrives, take the declaration back — the same endpoint, with `final` cleared:
+
+```bash
+curl -X POST localhost:18780/projects/myproject1.site/usage/finalise \
+     -H 'content-type: application/json' \
+     -d '{"month": "2026-07", "final": false}'
+```
+
+The month then reports incomplete again, the allocator resumes asking about it,
+and it collects your corrected figures. Your accounts are always treated
 as the source of truth, and the allocator will always accept your usage
 figures as the final word.
 
 ### 7. The same question asked of the wrong resource returns nothing
 
-Ask `allocator.site.cluster2 get_usage_report myaward1.allocator` and the answer
-is an **empty** report, not an error. The award is attached to a project on
-`cluster1`, so nothing was used on `cluster2`.
+Ask `allocator.site.cluster2 get_usage_report myaward1.allocator this_month`
+and the answer is an **empty** report, not an error. The award is attached to a
+project on `cluster1`, so nothing was used on `cluster2`.
 
-### 8. The award is updated
+An awarding portal sweeping every offering it knows about, to find which one
+holds a given award, depends on that: the resource that holds nothing has to say
+so plainly rather than failing.
+
+This is also the one thing in the walkthrough that needs `cluster2` to have been
+added back in step 0. If it was not, this question is not answered at all - it is
+held, waiting for an offering called `cluster2` to appear, and the caller times
+out. Empty and never are very different answers, and only one of them is this
+step.
+
+### 8. The award is updated
 
 The allocator may send an update to the award, for example to change its name,
 or to add or remove members. This is done via the `update_award` instruction:
@@ -463,6 +547,15 @@ Because of this, the `update_award` instruction will always send the full set
 of metadata associated with an award. You can infer that, if someone is
 missing from the members list, that they have been removed.
 If someone is added, then they have been added.
+
+One more case to handle, and it is not an error: **an update can arrive for an
+award you have never seen.** A missed message or a rebuilt database gets you
+there, and the allocator has no way to know. Route it through the same path as
+`create_award` — so it lands in the pending queue for an operator rather than
+silently provisioning something nobody approved — which is exactly what
+`site_portal.update_award` does: it looks the award up, logs that it is unknown,
+and hands the job to `create_award`. The allocator then gets
+`ManagedProjectPendingError` and keeps asking, as it would for a new award.
 
 ### 9. The award is removed — and the project carries on
 

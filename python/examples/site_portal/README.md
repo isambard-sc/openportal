@@ -54,10 +54,16 @@ application, and the peering between them — into one git-ignored `data/`
 directory:
 
 ```bash
-# from this directory, with the agents built (cargo build) and the
-# openportal module installed (make python, from the workspace root)
+# from this directory
+pip install -r requirements.txt   # openportal, fastapi, uvicorn
 python example.py start
 ```
+
+The Python side needs no Rust toolchain — `openportal` is on PyPI and comes with
+the requirements. The *agents* are the part that has to be built: `cargo build`
+from the workspace root, or a release binary on your `PATH`. `example.py` looks
+for `op-portal` and `op-bridge` on the `PATH`, then in `target/release` and
+`target/debug`, and says which is missing if it cannot find them.
 
 It prints what is running and, more to the point, the Python and `curl` calls
 that walk an award through the steps below — adding a cluster, making the award,
@@ -90,15 +96,13 @@ You need a running `op-bridge` with `--signal-url` and `--notification-url`
 pointing at this application.
 
 ```bash
-# 1. Build and install the openportal module from this repository
-cd ../../..            # the workspace root
-make python            # or: maturin develop -m python/Cargo.toml
-
-# 2. Install the example's own dependencies
-cd python/examples/site_portal
+# 1. Install the example's dependencies, `openportal` among them
 pip install -r requirements.txt
 
-# 3. Point it at your bridge config and run it
+# ...or, to run against an `openportal` built from this checkout instead:
+#   cd ../../.. && make python      # or: maturin develop -m python/Cargo.toml
+
+# 2. Point it at your bridge config and run it
 export OPENPORTAL_CONFIG=~/.config/openportal/bridge.toml
 export PORTAL_STATE_DIR=./portal-state
 export PORTAL_AWARDING_PORTALS=allocator     # who may make awards here

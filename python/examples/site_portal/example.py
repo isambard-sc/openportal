@@ -653,29 +653,36 @@ def check_python_deps() -> None:
     """
     Fail early, and usefully, if the app's imports are not there.
 
-    Uvicorn's own failure is a traceback in a log file this script started, so
-    it is worth pre-empting: the fix differs per module, and none of them is
-    guessable from the traceback.
+    Worth pre-empting rather than leaving to uvicorn, whose own failure would be
+    a traceback in a log file this script started - so it is out of sight, and
+    it names the module without naming the fix.
     """
-    missing = []
-
-    for module, remedy in (
-        ("openportal", f"cd {REPO} && make python"),
-        ("fastapi", f"pip install -r {_short(HERE / 'requirements.txt')}"),
-        ("uvicorn", f"pip install -r {_short(HERE / 'requirements.txt')}"),
-    ):
-        try:
-            __import__(module)
-        except ImportError:
-            missing.append((module, remedy))
+    missing = [
+        module
+        for module in ("openportal", "fastapi", "uvicorn")
+        if not _importable(module)
+    ]
 
     if missing:
         raise Failed(
-            "The FastAPI app cannot start - these Python modules are missing:\n"
-            + "".join(f"  - {module}:  {remedy}\n" for module, remedy in missing)
-            + "  (the agents themselves need neither, so `start` gets this far "
-            "without them)"
+            "The FastAPI app cannot start - these Python modules are missing: "
+            + ", ".join(missing)
+            + f"\n  pip install -r {_short(HERE / 'requirements.txt')}\n"
+            + "  (`openportal` is on PyPI and comes with them, so no Rust "
+            "toolchain is needed for this;\n"
+            + f"   to use one built from this checkout instead: cd {REPO} && "
+            "make python)\n"
+            + "  The agents need none of them, so `start` gets this far without "
+            "them."
         )
+
+
+def _importable(module: str) -> bool:
+    try:
+        __import__(module)
+        return True
+    except ImportError:
+        return False
 
 
 def start_all() -> None:

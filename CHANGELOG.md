@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **The `openportal` Python module is on PyPI** (`pip install openportal`), so
+  using it needs no Rust toolchain. The site portal example's
+  `requirements.txt` now pins `openportal>=0.92.0` alongside its other
+  dependencies, and only the *agents* it talks to have to be built.
+
 - **The example site portal's resources are now managed over its API.** Which
   clusters the example advertises was a constant in `site_portal.py`; it is now
   state in `store.py`, with `GET /offerings`, `POST /offerings`,

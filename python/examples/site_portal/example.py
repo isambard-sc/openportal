@@ -13,7 +13,7 @@ rather than an error. This script does all of it, into one git-ignored
 directory, and can take it all away again:
 
     python example.py setup     # write the configs (idempotent)
-    python example.py run       # start everything, and say how to talk to it
+    python example.py start     # start everything, and say how to talk to it
     python example.py status    # what is running
     python example.py stop      # stop everything
     python example.py clean     # stop everything and delete ./data
@@ -160,7 +160,7 @@ AWARDING_PORTALS = ALLOCATOR.name
 #: timeout. Peer the two portals here and the hand-off lands.
 PORTAL_ZONE = f"{ALLOCATOR.name}>{SITE.name}"
 
-#: The resource used in the worked example printed by `run`. Nothing here
+#: The resource used in the worked example printed by `start`. Nothing here
 #: creates it: a site offers nothing until an operator adds a resource through
 #: the app's `POST /offerings`, which is step 1 of those instructions.
 OFFERING = "cluster1"
@@ -254,7 +254,7 @@ def setup(force: bool = False) -> None:
     Write every config file, and connect the agents to each other.
 
     Safe to call repeatedly: if the configs are all there it does nothing, which
-    is what makes `run` able to call it unconditionally. `--force` throws them
+    is what makes `start` able to call it unconditionally. `--force` throws them
     away and starts again - keys and all, so every peer relationship is rebuilt.
     """
     if is_configured() and not force:
@@ -645,7 +645,7 @@ def _signal(process: Process, sig: int) -> None:
 
 
 # --------------------------------------------------------------------------
-# run
+# start
 # --------------------------------------------------------------------------
 
 
@@ -673,12 +673,12 @@ def check_python_deps() -> None:
         raise Failed(
             "The FastAPI app cannot start - these Python modules are missing:\n"
             + "".join(f"  - {module}:  {remedy}\n" for module, remedy in missing)
-            + "  (the agents themselves need neither, so `run` gets this far "
+            + "  (the agents themselves need neither, so `start` gets this far "
             "without them)"
         )
 
 
-def run() -> None:
+def start_all() -> None:
     """Set up if needed, start the four agents and the app, then explain how to use them."""
     setup()
     check_python_deps()
@@ -819,6 +819,7 @@ Logs are in {_short(LOG_DIR)}/ - one per process, and worth watching:
 
   python example.py status    what is running
   python example.py stop      stop it all
+  python example.py start     start anything that is not running
   python example.py clean     stop it all and delete {_short(BASE)}
 """
     )
@@ -881,7 +882,7 @@ def main() -> int:
         help="throw away the existing configs (and keys) and write them again",
     )
 
-    commands.add_parser("run", help="set up if needed, then start everything")
+    commands.add_parser("start", help="set up if needed, then start everything")
     commands.add_parser("status", help="show what is running")
     commands.add_parser("stop", help="stop everything")
     commands.add_parser("clean", help="stop everything and delete ./data")
@@ -891,8 +892,8 @@ def main() -> int:
     try:
         if args.command == "setup":
             setup(force=args.force)
-        elif args.command == "run":
-            run()
+        elif args.command == "start":
+            start_all()
         elif args.command == "status":
             status()
         elif args.command == "stop":

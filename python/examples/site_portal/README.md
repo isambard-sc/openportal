@@ -56,7 +56,7 @@ directory:
 ```bash
 # from this directory, with the agents built (cargo build) and the
 # openportal module installed (make python, from the workspace root)
-python example.py run
+python example.py start
 ```
 
 It prints what is running and, more to the point, the Python and `curl` calls

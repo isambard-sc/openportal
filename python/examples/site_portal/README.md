@@ -15,37 +15,35 @@ python example.py start
 and follow the instructions that are printed there. Then come back here
 to understand what this did in more detail.
 
-### Getting the two agents
+..note:: `example.py` drives two OpenPortal agents, `op-portal` and `op-bridge`. On Linux
+   you can just download them — no Rust toolchain, and it takes seconds:
 
-`example.py` drives two OpenPortal agents, `op-portal` and `op-bridge`. On Linux
-you can just download them — no Rust toolchain, and it takes seconds:
+   ```bash
+   # Linux x86-64
+   curl -L -o op-portal https://github.com/isambard-sc/openportal/releases/download/0.92.0/op-portal
+   curl -L -o op-bridge https://github.com/isambard-sc/openportal/releases/download/0.92.0/op-bridge
+   chmod +x op-portal op-bridge
+   export OPENPORTAL_BIN_DIR=$PWD
+   ```
 
-```bash
-# Linux x86-64
-curl -L -o op-portal https://github.com/isambard-sc/openportal/releases/download/0.92.0/op-portal
-curl -L -o op-bridge https://github.com/isambard-sc/openportal/releases/download/0.92.0/op-bridge
-chmod +x op-portal op-bridge
-export OPENPORTAL_BIN_DIR=$PWD
-```
+   They are statically linked, so there is nothing to install alongside them. On
+   Linux aarch64 the assets are `op-portal-aarch64` and `op-bridge-aarch64` —
+   download them under the plain names above, because those are the names
+   `example.py` looks for. Each release has its own tag; these are from
+   [0.92.0](https://github.com/isambard-sc/openportal/releases/tag/0.92.0), matching
+   the `openportal>=0.92.0` in `requirements.txt`.
 
-They are statically linked, so there is nothing to install alongside them. On
-Linux aarch64 the assets are `op-portal-aarch64` and `op-bridge-aarch64` —
-download them under the plain names above, because those are the names
-`example.py` looks for. Each release has its own tag; these are from
-[0.92.0](https://github.com/isambard-sc/openportal/releases/tag/0.92.0), matching
-the `openportal>=0.92.0` in `requirements.txt`.
+   Binaries are published for **Linux x86-64 and aarch64 only**. Anywhere else — a
+   Mac, for instance — has to build them, which is the one step that needs Rust:
 
-Binaries are published for **Linux x86-64 and aarch64 only**. Anywhere else — a
-Mac, for instance — has to build them, which is the one step that needs Rust:
+   ```bash
+   cargo build            # from the workspace root
+   ```
 
-```bash
-cargo build            # from the workspace root
-```
-
-Either way, `example.py` looks for the two in `$OPENPORTAL_BIN_DIR`, then on your
-`PATH`, then in the workspace's `target/release` and `target/debug`, and tells you
-which one it could not find. `openportal` itself is on PyPI, so the Python side
-needs nothing but `pip`.
+   Either way, `example.py` looks for the two in `$OPENPORTAL_BIN_DIR`, then on your
+   `PATH`, then in the workspace's `target/release` and `target/debug`, and tells you
+   which one it could not find. `openportal` itself is on PyPI, so the Python side
+   needs nothing but `pip`.
 
 ## What is the setup?
 

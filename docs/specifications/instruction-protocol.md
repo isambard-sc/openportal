@@ -832,9 +832,17 @@ of it for this mapping:
 - **filesystem**: every directory `remove_local_user` recycles is gone. The
   project directories are not consulted - removal does not touch them, and they
   outlive any one member of the project.
-- **scheduler**: no queued job for the user remains. The Slurm user and their
-  associations are kept on purpose so that the accounting history survives;
-  cancelling the queued jobs is all that removal actually changes.
+- **scheduler**: no job of the user's is queued **or running**. The Slurm user
+  and their associations are kept on purpose so that the accounting history
+  survives, so the jobs are all that removal actually changes.
+
+  A running job counts even though removal does not cancel one. OpenPortal never
+  destroys anything — it disables, recycles, and cancels only what has not
+  started — so a job already running is left to finish, and until it does the
+  user genuinely has not finished leaving the cluster. This is the one place in
+  these checks where a `false` cannot be cleared by re-running the removal; it
+  clears itself when the job ends. It is barely reachable in practice, since a
+  removed user has already lost the ability to submit.
 
 ```
 is_local_user_removed <user_mapping>
@@ -870,8 +878,8 @@ asks of it for this mapping:
   the group, and checks that it is gone.
 - **filesystem**: every project directory, link and per-project user-volume root
   is gone.
-- **scheduler**: no queued job for the account remains, for the same reason as
-  `is_local_user_removed`.
+- **scheduler**: no job of the project's is queued or running, for the same
+  reasons as `is_local_user_removed`.
 
 ```
 is_local_project_removed <project_mapping>

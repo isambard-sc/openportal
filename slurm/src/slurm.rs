@@ -3985,7 +3985,8 @@ pub async fn is_local_user_added(
 /// Return whether everything `remove_local_project` does for this mapping has
 /// been done. Delegated to the `sacctmgr` version because the removal itself is:
 /// `remove_local_project` cancels the project's queued jobs through
-/// `sacctmgr::cancel_pending_project_jobs` on this path too.
+/// `sacctmgr::cancel_pending_project_jobs` on this path too. See
+/// `sacctmgr::has_active_jobs` for what counts as not-yet-removed.
 ///
 pub async fn is_local_project_removed(
     mapping: &ProjectMapping,

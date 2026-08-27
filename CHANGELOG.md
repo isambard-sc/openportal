@@ -46,10 +46,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   belongs to (and, for removal, that it is disabled and out of the instance's
   groups). `op-filesystem` checks that every directory and link the add creates
   is present, or that every one the remove recycles is gone. `op-slurm` checks
-  the account/user/association for an add, and that no queued job remains for a
-  remove — the Slurm records themselves are kept on purpose so that the
-  accounting history survives, so cancelling the queued jobs is all that
-  removal actually changes there.
+  the account/user/association for an add, and that no job is queued *or
+  running* for a remove — the Slurm records themselves are kept on purpose so
+  that the accounting history survives, so the jobs are all that removal
+  actually changes there.
+
+  A running job counts there even though removal does not cancel one: OpenPortal
+  never destroys anything, so a job already running is left to finish, and until
+  it does the user or project has not finished leaving the cluster. It is the
+  one place in these checks where a `false` cannot be cleared by re-running the
+  removal — it clears itself when the job ends — and it is barely reachable in
+  practice, since a removed user has already lost the ability to submit.
 
   These are deliberately stronger than `is_existing_user` /
   `is_existing_project`, which only ask the account agent whether the account or

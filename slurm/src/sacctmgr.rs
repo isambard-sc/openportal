@@ -2091,29 +2091,41 @@ pub async fn set_limit(
 }
 
 ///
-/// How far back `has_pending_jobs` looks for a job that is still queued.
+/// How far back `has_active_jobs` looks for a job that is still queued or
+/// running.
 ///
 /// `sacct` needs an explicit window whenever a state filter is given, and the
 /// controller's queue carries no such bound. A year is far longer than any real
-/// scheduler will hold a job pending, and this is an occasional verification
-/// query rather than something on the add/remove path.
+/// scheduler will hold a job pending or running, and this is an occasional
+/// verification query rather than something on the add/remove path.
 ///
-const PENDING_JOB_WINDOW_DAYS: i64 = 365;
+const ACTIVE_JOB_WINDOW_DAYS: i64 = 365;
 
 ///
-/// Return whether Slurm still holds a queued (PENDING) job matching `filter`,
-/// which is a single `sacct` selector such as `--user=bob` or
-/// `--account=proj`.
+/// Return whether Slurm still holds a queued (PENDING) or running (RUNNING) job
+/// matching `filter`, which is a single `sacct` selector such as `--user=bob`
+/// or `--account=proj`.
 ///
-/// This is the one thing `remove_local_user` / `remove_local_project` actually
-/// change: the Slurm user and account records are deliberately kept so that the
-/// accounting history stays intact, and all removal does is cancel whatever is
-/// still queued. So this is what "has the removal finished?" has to mean here.
+/// The Slurm user and account records are deliberately kept so that the
+/// accounting history stays intact, so the jobs are the only thing a removal
+/// changes here - which makes them what "has the removal finished?" has to
+/// mean.
 ///
-async fn has_pending_jobs(filter: &str, expires: &chrono::DateTime<Utc>) -> Result<bool, Error> {
+/// RUNNING is counted even though `remove_local_user` / `remove_local_project`
+/// only cancel what is PENDING. That asymmetry is deliberate, and is the one
+/// place in these checks where a `false` is not something re-running the
+/// removal can change: OpenPortal never destroys anything - it disables,
+/// recycles and cancels only what has not started - so a job already running is
+/// left to finish, and until it does the user or project genuinely has not
+/// finished leaving the cluster. Do not close the gap by having removal cancel
+/// running jobs. It is barely reachable in practice: a removed user has already
+/// lost the ability to submit, and jobs run for a day or two at most, so this
+/// resolves itself.
+///
+async fn has_active_jobs(filter: &str, expires: &chrono::DateTime<Utc>) -> Result<bool, Error> {
     let cluster = cache::get_cluster().await?;
 
-    let start_time = chrono::Utc::now() - chrono::Duration::days(PENDING_JOB_WINDOW_DAYS);
+    let start_time = chrono::Utc::now() - chrono::Duration::days(ACTIVE_JOB_WINDOW_DAYS);
 
     let cmd = priority_runner(expires).await?.build_command(
         "SACCT",
@@ -2122,7 +2134,7 @@ async fn has_pending_jobs(filter: &str, expires: &chrono::DateTime<Utc>) -> Resu
             "--parsable2".to_string(),
             "--allocations".to_string(),
             "--allusers".to_string(),
-            "--state=PENDING".to_string(),
+            "--state=PENDING,RUNNING".to_string(),
             "--format=JobID".to_string(),
             format!("--starttime={}", start_time.format("%Y-%m-%dT%H:%M:%S")),
             format!("--cluster={}", cluster),
@@ -2188,10 +2200,13 @@ pub async fn is_local_project_added(
 
 ///
 /// Return whether everything `remove_local_project` does for this mapping has
-/// been done. That is only the cancellation of the project's queued jobs: the
+/// been done - that is, that no job of the project's is queued or running. The
 /// account itself is kept on purpose, so that its usage history survives the
-/// project being removed and its gid/associations stay stable if it is ever
-/// re-added.
+/// project being removed and its associations stay stable if it is ever
+/// re-added, which leaves the jobs as the only thing removal changes here.
+///
+/// See `has_active_jobs` for why a running job counts even though removal
+/// deliberately does not cancel one.
 ///
 pub async fn is_local_project_removed(
     mapping: &ProjectMapping,
@@ -2201,9 +2216,9 @@ pub async fn is_local_project_removed(
 
     let account = clean_account_name(mapping.local_group())?;
 
-    if has_pending_jobs(&format!("--account={}", account), expires).await? {
+    if has_active_jobs(&format!("--account={}", account), expires).await? {
         tracing::info!(
-            "Slurm account {} still has pending jobs, so has not been removed",
+            "Slurm account {} still has queued or running jobs, so has not been removed",
             account
         );
         return Ok(false);
@@ -2271,9 +2286,12 @@ pub async fn is_local_user_added(
 
 ///
 /// Return whether everything `remove_local_user` does for this mapping has been
-/// done. As with a project, that is only the cancellation of the user's queued
-/// jobs - the Slurm user and their associations are kept so that their usage
+/// done - that is, that no job of theirs is queued or running. As with a
+/// project, the Slurm user and their associations are kept so that their usage
 /// history survives, and it is the account agent that stops them logging in.
+///
+/// See `has_active_jobs` for why a running job counts even though removal
+/// deliberately does not cancel one.
 ///
 pub async fn is_local_user_removed(
     mapping: &UserMapping,
@@ -2283,9 +2301,9 @@ pub async fn is_local_user_removed(
 
     let user = clean_user_name(mapping.local_user().unix()?)?;
 
-    if has_pending_jobs(&format!("--user={}", user), expires).await? {
+    if has_active_jobs(&format!("--user={}", user), expires).await? {
         tracing::info!(
-            "Slurm user {} still has pending jobs, so has not been removed",
+            "Slurm user {} still has queued or running jobs, so has not been removed",
             user
         );
         return Ok(false);

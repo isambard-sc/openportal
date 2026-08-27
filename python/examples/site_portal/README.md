@@ -46,14 +46,14 @@ to understand what this did in more detail.
 >   which one it could not find. `openportal` itself is on PyPI, so the Python side
 >   needs nothing but `pip`.
 
-## What is the setup?
+## Background - Award Portals and Site Portals
 
 OpenPortal is used to connect two portals: one that allocates awards
 (the awards or allocator portal), and one that actually runs them via
 projects (the site portal). This example is used to help you understand
 how to implement a site portal.
 
-## What is this?
+## What is this example Site Portal?
 
 A small, complete, working implementation of
 [site-portal-api.md](../../../docs/specifications/site-portal-api.md) — the
@@ -66,7 +66,7 @@ every instruction is one function, and the awkward parts of the contract — the
 ones that are easy to get wrong and hard to discover — are commented where they
 bite rather than left in the specification.
 
-## This is not a production site portal
+## This is not a production Site Portal
 
 This is deliberately **NOT** a production portal. It is a working example
 to help you test and understand the contract. It is not a reference

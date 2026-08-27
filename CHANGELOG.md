@@ -53,6 +53,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **The `slurmrestd` path never worked out which cluster it was talking to.**
+  `find_cluster` was only called when `op-slurm` was driving the command line, so
+  with `slurm-server` set and no `slurm-cluster` option the cluster fell back to
+  the literal `"linux"`. That name is written into the account and association
+  payloads sent over REST, and checked by `is_local_project_added`, so accounts
+  were created against a cluster that probably did not exist while every check
+  compared against the same wrong value and passed - and usage reports, which
+  query `sacct --cluster=`, came back empty. The REST path now resolves the
+  cluster too, warning rather than failing if it cannot, since a site with
+  `slurmrestd` but no local `sacctmgr` should be told what will not work rather
+  than stopped from starting.
+
 - **`op-cluster` no longer swallows filesystem and scheduler failures when
   adding or removing a user or project.** All four paths now follow one policy:
   the account agent goes first and a failure there aborts immediately, since

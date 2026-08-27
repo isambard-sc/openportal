@@ -256,6 +256,37 @@ async fn main() -> Result<()> {
 
         tracing::info!("Connected to slurm server at {}", slurm_server);
 
+        // The cluster is needed on this path too, and for more than reading:
+        // the account and association payloads sent over REST name it, and
+        // `is_local_project_added` checks against it. Left unresolved,
+        // `cache::get_cluster` falls back to the literal "linux", so accounts
+        // would be created against a cluster that probably does not exist while
+        // every check compared against that same wrong value and passed.
+        //
+        // A warning rather than an error, unlike the command-line path above.
+        // There, `sacctmgr` is how the agent does everything, so being unable
+        // to run it is fatal by definition. Here it is only needed for this and
+        // for usage reporting, and a site that has slurmrestd but not a local
+        // `sacctmgr` should not be stopped from starting - it should be told
+        // loudly what will not work.
+        if let Err(e) = sacctmgr::find_cluster().await {
+            match slurm_cluster.is_empty() {
+                true => tracing::warn!(
+                    "Could not ask Slurm which cluster to use ({}), and no slurm-cluster \
+                     option is set. Accounts and associations will be created against the \
+                     default cluster name, and usage reports will be empty. Set \
+                     slurm-cluster to the name of your cluster.",
+                    e
+                ),
+                false => tracing::warn!(
+                    "Could not confirm that cluster '{}' exists ({}). Continuing with it, \
+                     since it was configured explicitly.",
+                    slurm_cluster,
+                    e
+                ),
+            }
+        }
+
         async_runnable! {
             ///
             /// Runnable function that will be called when a job is received

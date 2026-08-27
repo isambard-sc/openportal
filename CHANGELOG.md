@@ -13,6 +13,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other
   dependencies, and only the *agents* it talks to have to be built.
 
+- **The example site portal's walkthrough covers `update_award`.** The
+  instructions `example.py` prints now add a second member to a live award and
+  show what that teaches: an update answers with the mapping and needs no
+  approval, the member list is the whole set rather than a delta (so an absent
+  member has been removed), and the details carry the template like a create
+  does - omit it and the update is refused terminally. The test suite covers the
+  same ground, and all three files now use one cast (`alice@example.com` as
+  Project Lead, `bob@example.com` as Project Member).
+
 - **The example site portal refuses to finalise the current month.**
   `is_complete` means "these figures will not change", which cannot be true of a
   month that is still running - and an awarding portal is entitled to disregard

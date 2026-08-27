@@ -53,6 +53,11 @@ LOCAL_PROJECT2 = "myproject2.site"
 OFFERING = "cluster1"
 OTHER_OFFERING = "cluster2"
 
+#: The award's members. The same two the README and `example.py` use, so all
+#: three describe one award rather than three similar ones.
+LEAD = "alice@example.com"
+MEMBER = "bob@example.com"
+
 
 def make_job(
     instruction: str,
@@ -89,12 +94,26 @@ def make_job(
     )
 
 
-def details(template: str = "standard", **extra) -> str:
-    """An `AwardDetails` JSON blob, as an awarding portal would send it."""
+def details(
+    template: str = "standard",
+    members: dict[str, str] | None = None,
+    **extra,
+) -> str:
+    """
+    An `AwardDetails` JSON blob, as an awarding portal would send it.
+
+    `members` maps email to role. Roles are free-form strings agreed between the
+    two portals - "Project Lead", "Project Member" and so on - and the awarding
+    portal always sends the **whole** set, so passing a different one here is how
+    a membership change arrives.
+    """
     d = openportal.AwardDetails()
-    d.name = extra.pop("name", "My Project")
+    d.name = extra.pop("name", "My First Award")
     d.project_template = openportal.ProjectTemplate(template)
-    d.add_member("alice@bristol.ac.uk", "member")
+
+    for email, role in (members or {LEAD: "Project Lead"}).items():
+        d.add_member(email, role)
+
     for key, value in extra.items():
         setattr(d, key, value)
     return d.to_json()
@@ -331,7 +350,7 @@ def _run_all() -> None:
     check("get_award returns AwardDetails", type(job.result) is openportal.AwardDetails)
     check(
         "...with members populated (there is no get_users)",
-        "alice@bristol.ac.uk" in (job.result.members or {}),
+        LEAD in (job.result.members or {}),
         f"-> {list((job.result.members or {}).keys())}",
     )
 
@@ -348,12 +367,65 @@ def _run_all() -> None:
     )
     store.delete(OFFERING, "myaward4.allocator")
 
+    print("\n-- update_award for one we hold: a member is added --------------")
+
+    # The everyday case: the award exists and is attached, and the allocator has
+    # added someone to it. That needs no approval - the award was already
+    # approved, and this changes its metadata rather than its attachment - so it
+    # answers with the mapping, exactly as a repeated create would.
+    both = {LEAD: "Project Lead", MEMBER: "Project Member"}
+    job = site_portal.answer(make_job(f"update_project {AWARD} {details(members=both)}"))
+    check(
+        "an update for a held award answers with the mapping",
+        str(job.result) == f"{AWARD}:{LOCAL_PROJECT}",
+        f"-> {job.result}",
+    )
+
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "...and both members are now on the award, with their roles",
+        (held.members or {}) == both,
+        f"-> {held.members}",
+    )
+    check(
+        "...and the attachment is untouched",
+        store.load(OFFERING, AWARD).local_project_id == LOCAL_PROJECT,
+    )
+
+    # **The member list is definitive, not a delta.** The awarding portal sends
+    # the whole set every time, so somebody who has left simply is not in it -
+    # there is no "remove_member". `AwardDetails.merge` replaces `members`
+    # wholesale for exactly this reason.
+    job = site_portal.answer(
+        make_job(f"update_project {AWARD} {details(members={LEAD: 'Project Lead'})}")
+    )
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "a member absent from an update has been removed",
+        MEMBER not in (held.members or {}),
+        f"-> {list((held.members or {}).keys())}",
+    )
+
+    # An update carries the *whole* of AwardDetails, template included. Sending
+    # one without a template is refused - and refused terminally, which is worth
+    # knowing: it is the same check a create gets, and an allocator that omits it
+    # will have its award recorded as errored rather than retried.
+    no_template = (
+        f'{{"name":"My First Award","members":{{"{LEAD}":"Project Lead"}}}}'
+    )
+    job = site_portal.answer(make_job(f"update_project {AWARD} {no_template}"))
+    check(
+        "an update with no template is rejected",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+
     print("\n-- usage: recorded in our namespace, answered in theirs --------")
 
     # Push figures in the way an operator's parser would - against our own
     # project identifier, which is the only one that accounting knows.
     award = store.load(OFFERING, AWARD)
-    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {LEAD: 12.5}})
 
     job = site_portal.answer(make_job(f"get_usage_report {AWARD} this_month"))
     check("get_usage_report succeeds", not job.is_error, f"{job.error_message}")
@@ -379,7 +451,7 @@ def _run_all() -> None:
     )
     check(
         "...and the email unchanged, being the same person either way",
-        "alice@bristol.ac.uk" in report.user_mapping.values(),
+        LEAD in report.user_mapping.values(),
         f"-> {list(report.user_mapping.values())}",
     )
     check(
@@ -482,7 +554,7 @@ def _run_all() -> None:
 
     # Put the award back the way the rest of the suite expects it.
     set_final(LOCAL_PROJECT, [])
-    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {LEAD: 12.5}})
 
     print("\n-- a second award, on the other resource ------------------------")
 
@@ -712,7 +784,7 @@ def _run_all() -> None:
     # project, and - the part that is easy to get wrong - it must not delete the
     # usage the award already accrued.
     set_final(LOCAL_PROJECT, [])
-    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {LEAD: 12.5}})
 
     job = site_portal.answer(make_job(f"remove_project {AWARD}"))
     check("remove_award answers with :None", str(job.result) == f"{AWARD}:None")
@@ -796,10 +868,10 @@ def _run_all() -> None:
     set_usage(
         LOCAL_PROJECT,
         {
-            early.isoformat(): {"alice@bristol.ac.uk": 1.0},
-            handover.isoformat(): {"alice@bristol.ac.uk": 2.0},
+            early.isoformat(): {LEAD: 1.0},
+            handover.isoformat(): {LEAD: 2.0},
             (handover + datetime.timedelta(days=1)).isoformat(): {
-                "alice@bristol.ac.uk": 4.0
+                LEAD: 4.0
             },
         },
     )

@@ -765,6 +765,16 @@ def instructions() -> None:
         '"members":{"alice@example.com":"Project Lead"}}'
     )
     member = "alice@example.com"
+    member2 = "bob@example.com"
+
+    #: The same award with a second member added - what step 7 sends. Note it
+    #: repeats the name and template: an update carries the whole of
+    #: AwardDetails, not just the parts that changed.
+    updated = (
+        '{"name":"My First Award","template":"standard",'
+        '"members":{"alice@example.com":"Project Lead",'
+        '"bob@example.com":"Project Member"}}'
+    )
 
     print(
         f"""
@@ -900,6 +910,29 @@ Everything is up.
    working around, because a finalised empty month tells the awards portal
    "nothing was used, and that is settled" and is believed. README step 6 is the
    one worth reading twice.
+
+7. Later, the awards portal adds someone to the award:
+
+     job = openportal.run(
+         '{ALLOCATOR.name}.{SITE.name}.{OFFERING} update_award {award} '
+         '{updated}',
+         30000)
+     print(job.state, job.error_message or job.result)
+
+   That answers with the mapping again, and needs no approval: the award was
+   approved in step 3, and this changes its metadata rather than its attachment.
+
+     curl http://127.0.0.1:{APP_PORT}/awards/{OFFERING}/{award}
+
+   now shows both members with their roles. (The `/awards` listing summarises -
+   it names the members but not their roles; the single-award view above holds
+   the details exactly as the awards portal sent them.)
+
+   Two things about it are easy to get wrong. The member list is the **whole**
+   set, not a delta - send an update without `{member2}` and they have been
+   removed, because there is no "remove_member". And the details carry the
+   template like a create does; omit it and the update is *rejected*, terminally,
+   which is not what an allocator wants for an award it still holds.
 
    Then walk the rest of the README - moving the award to another project, and
    removing it.

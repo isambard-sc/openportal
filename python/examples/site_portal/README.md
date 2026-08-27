@@ -529,8 +529,18 @@ or to add or remove members. This is done via the `update_award` instruction:
 
 ```
 allocator.site.cluster1 update_award myaward1.allocator
-   {"name":"My First Award","members":{"alice@example.com":"Project Lead","bob@example.com":"Project Member"}}
+   {"name":"My First Award","template":"standard",
+    "members":{"alice@example.com":"Project Lead","bob@example.com":"Project Member"}}
 ```
+
+Note the `template` in there. An update carries the **whole** of `AwardDetails`,
+so it repeats everything that has not changed as well — and this example applies
+the same check to an update as to a create, so an update with no template is
+refused with `ManagedProjectRejectedError: no template named in the award`. That
+refusal is terminal, so an allocator that leaves it out has its award recorded as
+errored rather than retried. If you would rather be forgiving here, fall back to
+the template you already hold for that award; be strict or be lenient, but decide
+deliberately.
 
 These updates can be approved automatically, and should apply to whichever project
 you have attached the award to. The update does not change the attachment, and

@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- **`op-cluster` reported success for a scheduler step that had failed.** The
+  four scheduler helpers waited for their job and then asked the wrong value
+  whether it had failed:
+
+  ```rust
+  job.wait().await?;        // returns the finished job - discarded
+
+  if job.is_error() { ... } // asks the pre-wait binding, still pending
+  ```
+
+  `Job::wait` returns the finished job rather than updating the one it was
+  called on, and `Status::Error` counts as finished, so `wait` returns `Ok` for
+  a failed job and `job.is_error()` was always false. The error branch was
+  unreachable and all four returned `Ok(())` whatever the scheduler agent said.
+
+  On the remove paths this was masked, because the caller discarded the error
+  anyway (see below). On the add paths it was not: `add_user` and `add_project`
+  could report success with the Slurm account never created.
+
+  Every step now goes through one `wait_for_step`, which reads the job `wait`
+  hands back. The same stale-binding check existed in the two filesystem delete
+  helpers, where it was dead rather than wrong - `result_none()?` had already
+  turned a failed job into an error - and those are folded into the same helper.
+
+### Changed
+
+- **`op-cluster` no longer swallows filesystem and scheduler failures when
+  adding or removing a user or project.** All four paths now follow one policy:
+  the account agent goes first and a failure there aborts immediately, since
+  without it the mapping cannot be trusted; the filesystem and scheduler steps
+  are then both attempted, even if the first fails, because they manage separate
+  systems and there is no clean "nothing happened" to return to once the account
+  agent has been changed; and if either failed the operation returns an error
+  naming each system that failed and why.
+
+  Previously `remove_user` and `remove_project` logged a filesystem or scheduler
+  failure and returned success, so a caller was told the removal had completed
+  when the home directories were still there. They now fail, and the
+  `user_removed` / `project_removed` notification is not sent for a removal that
+  did not finish.
+
 ### Added
 
 - **State verification instructions** — a caller can now ask whether an earlier

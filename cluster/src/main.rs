@@ -440,6 +440,82 @@ async fn assert_agents_connected() -> Result<(), Error> {
 }
 
 ///
+/// Wait for a step's job to finish, and turn a job that came back failed into
+/// an error here. `what` names the step, as a phrase that reads after "Error"
+/// and after "Finished" - e.g. "removing the user's directories".
+///
+/// This exists because `Job::wait` *returns* the finished job rather than
+/// updating the one it was called on. Every one of the helpers below used to
+/// write `job.wait().await?; if job.is_error() { ... }`, which asks the
+/// pre-wait copy - still pending, so never an error - and so reported success
+/// for a step that had failed. On the scheduler helpers nothing else caught it,
+/// which meant `add_user` and `add_project` could report success with the Slurm
+/// account never created. Routing every step through here is what stops that
+/// being writable again.
+///
+async fn wait_for_step(job: Job, what: &str) -> Result<(), Error> {
+    // NOT `job.is_error()` - see above. The state must be read from the job
+    // that `wait` hands back.
+    let job = job.wait().await?;
+
+    if job.is_error() {
+        tracing::error!("Error {}: {:?}", what, job);
+        return Err(Error::Call(format!("Error {}: {:?}", what, job)));
+    }
+
+    job.result_none()?;
+
+    tracing::info!("Finished {}", what);
+
+    Ok(())
+}
+
+///
+/// Run the filesystem step and then the scheduler step of an add or remove, and
+/// fail with everything that went wrong rather than only the first thing.
+///
+/// The account agent has already been changed by the time either of these runs:
+/// that step goes first precisely so that a failure there aborts before
+/// anything else is touched, since without it the mapping cannot be trusted.
+/// Past that point there is no clean "nothing happened" to return to, so both
+/// remaining steps are attempted even if the first fails: they manage separate
+/// systems, and abandoning the second would leave its work undone with nothing
+/// recorded about it.
+///
+/// Whatever failed is then reported together, naming each system, so that the
+/// caller learns that the operation did not complete *and* which agent to look
+/// at - rather than the failure being logged and swallowed, which is what used
+/// to happen on both remove paths.
+///
+async fn run_both_steps(
+    what: &str,
+    filesystem: impl std::future::Future<Output = Result<(), Error>>,
+    scheduler: impl std::future::Future<Output = Result<(), Error>>,
+) -> Result<(), Error> {
+    let mut failures: Vec<String> = Vec::new();
+
+    if let Err(e) = filesystem.await {
+        tracing::error!("{}: the filesystem agent failed: {}", what, e);
+        failures.push(format!("filesystem agent: {}", e));
+    }
+
+    if let Err(e) = scheduler.await {
+        tracing::error!("{}: the scheduler agent failed: {}", what, e);
+        failures.push(format!("scheduler agent: {}", e));
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::Call(format!(
+        "{} failed - {}",
+        what,
+        failures.join("; ")
+    )))
+}
+
+///
 /// Ask every agent behind this cluster - account, filesystem and scheduler -
 /// the same `is_local_*` question about the same mapping, and return true only
 /// if all three say yes.
@@ -667,13 +743,19 @@ async fn add_project_to_cluster(
     project: &ProjectIdentifier,
 ) -> Result<ProjectMapping, Error> {
     tracing::info!("Adding project to cluster: {}", project);
+
+    // The account agent goes first: if it fails there is no mapping to be
+    // trusted, and nothing else has been touched yet.
     let mapping = create_project(me, project).await?;
 
-    // now create the project directories
-    create_project_directories(me, &mapping).await?;
-
-    // and finally add the project to the job scheduler
-    add_project_to_scheduler(me, project, &mapping).await?;
+    // The project directories and the scheduler account are then both
+    // attempted, and any failure of either is reported - see `run_both_steps`.
+    run_both_steps(
+        &format!("Adding project {} to the cluster", project),
+        create_project_directories(me, &mapping),
+        add_project_to_scheduler(me, project, &mapping),
+    )
+    .await?;
 
     Ok(mapping)
 }
@@ -684,7 +766,8 @@ async fn remove_project_from_cluster(
 ) -> Result<ProjectMapping, Error> {
     tracing::info!("Removing project from cluster: {}", project);
 
-    // remove the users
+    // The account agent goes first, and a failure there aborts before anything
+    // else is touched - the mapping the rest of this needs comes from it.
     let mapping = remove_project(me, project).await?;
 
     // now get the users who remain - if any do, then there
@@ -699,27 +782,12 @@ async fn remove_project_from_cluster(
         return Ok(mapping);
     }
 
-    match delete_project_directories(me, &mapping).await {
-        Ok(_) => {
-            tracing::info!("Project directories removed: {:?}", mapping);
-        }
-        Err(e) => {
-            tracing::error!(
-                "Error removing directories for project {}: {:?}",
-                mapping,
-                e
-            );
-        }
-    }
-
-    match remove_project_from_scheduler(me, project, &mapping).await {
-        Ok(_) => {
-            tracing::info!("Project removed from scheduler: {:?}", mapping);
-        }
-        Err(e) => {
-            tracing::error!("Error removing project from scheduler {}: {:?}", mapping, e);
-        }
-    }
+    run_both_steps(
+        &format!("Removing project {} from the cluster", project),
+        delete_project_directories(me, &mapping),
+        remove_project_from_scheduler(me, project, &mapping),
+    )
+    .await?;
 
     Ok(mapping)
 }
@@ -739,19 +807,28 @@ async fn add_user_to_cluster(me: &str, user: &UserIdentifier) -> Result<UserMapp
 
     tracing::info!("Adding user to cluster: {}", user);
 
+    // The account agent goes first: if it fails there is no mapping to be
+    // trusted, and nothing else has been touched yet.
     let mapping = create_account(me, user).await?;
 
-    // now create their home directories
-    create_user_directories(me, &mapping).await?;
+    // Creating the directories, asking where the home one ended up, and
+    // recording that path on the account are one filesystem step: they are a
+    // single chain, and a failure anywhere in it leaves the home directory not
+    // properly set up. It stops at the first failure for that reason, unlike
+    // the filesystem and scheduler steps themselves.
+    let filesystem = async {
+        create_user_directories(me, &mapping).await?;
+        let homedir = get_home_dir(me, &mapping).await?;
+        update_homedir(me, user, &homedir).await?;
+        Ok::<(), Error>(())
+    };
 
-    // get the home directory path from the filesystem
-    let homedir = get_home_dir(me, &mapping).await?;
-
-    // update the home directory in the account
-    update_homedir(me, user, &homedir).await?;
-
-    // and finally add the user to the job scheduler
-    add_user_to_scheduler(me, user, &mapping).await?;
+    run_both_steps(
+        &format!("Adding user {} to the cluster", user),
+        filesystem,
+        add_user_to_scheduler(me, user, &mapping),
+    )
+    .await?;
 
     Ok(mapping)
 }
@@ -771,25 +848,16 @@ async fn remove_user_from_cluster(me: &str, user: &UserIdentifier) -> Result<Use
 
     tracing::info!("Removing user from cluster: {}", user);
 
+    // The account agent goes first, and a failure there aborts before anything
+    // else is touched - the mapping the rest of this needs comes from it.
     let mapping = remove_account(me, user).await?;
 
-    match delete_user_directories(me, &mapping).await {
-        Ok(_) => {
-            tracing::info!("User directories removed: {:?}", mapping);
-        }
-        Err(e) => {
-            tracing::error!("Error removing directories for user {}: {:?}", mapping, e);
-        }
-    }
-
-    match remove_user_from_scheduler(me, user, &mapping).await {
-        Ok(_) => {
-            tracing::info!("User removed from scheduler: {:?}", mapping);
-        }
-        Err(e) => {
-            tracing::error!("Error removing user from scheduler {}: {:?}", mapping, e);
-        }
-    }
+    run_both_steps(
+        &format!("Removing user {} from the cluster", user),
+        delete_user_directories(me, &mapping),
+        remove_user_from_scheduler(me, user, &mapping),
+    )
+    .await?;
 
     Ok(mapping)
 }
@@ -1105,10 +1173,7 @@ async fn create_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
             .put(&filesystem)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?.result_none()?;
-
-            Ok(())
+            wait_for_step(job, "creating the project directories").await
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -1136,18 +1201,7 @@ async fn delete_project_directories(me: &str, mapping: &ProjectMapping) -> Resul
             .put(&filesystem)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?.result_none()?;
-
-            if job.is_error() {
-                tracing::error!("Error removing the project directories: {:?}", job);
-                Err(Error::Call(
-                    format!("Error removing the project directories: {:?}", job).to_string(),
-                ))
-            } else {
-                tracing::info!("Directories removed for project: {:?}", mapping);
-                Ok(())
-            }
+            wait_for_step(job, "removing the project directories").await
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -1170,10 +1224,7 @@ async fn create_user_directories(me: &str, mapping: &UserMapping) -> Result<(), 
             .put(&filesystem)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?.result_none()?;
-
-            Ok(())
+            wait_for_step(job, "creating the user's directories").await
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -1196,18 +1247,7 @@ async fn delete_user_directories(me: &str, mapping: &UserMapping) -> Result<(), 
             .put(&filesystem)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?.result_none()?;
-
-            if job.is_error() {
-                tracing::error!("Error removing the user's directories: {:?}", job);
-                Err(Error::Call(
-                    format!("Error removing the user's directories: {:?}", job).to_string(),
-                ))
-            } else {
-                tracing::info!("Directories removed for user: {:?}", mapping);
-                Ok(())
-            }
+            wait_for_step(job, "removing the user's directories").await
         }
         None => {
             tracing::error!("No filesystem agent found");
@@ -1277,18 +1317,7 @@ async fn add_project_to_scheduler(
             .put(&scheduler)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?;
-
-            if job.is_error() {
-                tracing::error!("Error adding the project to the scheduler: {:?}", job);
-                Err(Error::Call(
-                    format!("Error adding the project to the scheduler: {:?}", job).to_string(),
-                ))
-            } else {
-                tracing::info!("Project {} added to scheduler", project);
-                Ok(())
-            }
+            wait_for_step(job, &format!("adding project {} to the scheduler", project)).await
         }
         None => {
             tracing::error!("No scheduler agent found");
@@ -1320,18 +1349,11 @@ async fn remove_project_from_scheduler(
             .put(&scheduler)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?;
-
-            if job.is_error() {
-                tracing::error!("Error removing the project from the scheduler: {:?}", job);
-                Err(Error::Call(
-                    format!("Error removing the project from the scheduler: {:?}", job).to_string(),
-                ))
-            } else {
-                tracing::info!("Project {} removed from scheduler", project);
-                Ok(())
-            }
+            wait_for_step(
+                job,
+                &format!("removing project {} from the scheduler", project),
+            )
+            .await
         }
         None => {
             tracing::error!("No scheduler agent found");
@@ -1358,18 +1380,7 @@ async fn add_user_to_scheduler(
             .put(&scheduler)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?;
-
-            if job.is_error() {
-                tracing::error!("Error adding the user to the scheduler: {:?}", job);
-                Err(Error::Call(
-                    format!("Error adding the user to the scheduler: {:?}", job).to_string(),
-                ))
-            } else {
-                tracing::info!("User {} added to scheduler", user);
-                Ok(())
-            }
+            wait_for_step(job, &format!("adding user {} to the scheduler", user)).await
         }
         None => {
             tracing::error!("No scheduler agent found");
@@ -1396,18 +1407,7 @@ async fn remove_user_from_scheduler(
             .put(&scheduler)
             .await?;
 
-            // Wait for the add_job to complete
-            job.wait().await?;
-
-            if job.is_error() {
-                tracing::error!("Error removing the user from the scheduler: {:?}", job);
-                Err(Error::Call(
-                    format!("Error removing the user from the scheduler: {:?}", job).to_string(),
-                ))
-            } else {
-                tracing::info!("User {} removed from scheduler", user);
-                Ok(())
-            }
+            wait_for_step(job, &format!("removing user {} from the scheduler", user)).await
         }
         None => {
             tracing::error!("No scheduler agent found");
@@ -2417,6 +2417,51 @@ mod tests {
     /// The identifier parsers enforce that, but they live in another crate, so
     /// pin the composition here - this is the invariant `op-cluster` actually
     /// depends on.
+    /// `Job::wait` returns the finished job rather than updating the one it was
+    /// called on. Every step helper in this file used to ignore that and ask
+    /// its own pre-wait binding whether the job had failed - which it never
+    /// had, because that copy is still pending - so a failed step reported
+    /// success. On the scheduler helpers nothing else caught it, and `add_user`
+    /// could report success with the Slurm account never created.
+    ///
+    /// `wait_for_step` is the one place that reads the state now. This pins the
+    /// property it depends on: a job's own error state does not propagate to
+    /// the value it was produced from, so the returned job is the only thing
+    /// worth asking.
+    #[test]
+    fn test_a_jobs_error_state_is_not_visible_on_the_value_it_came_from() {
+        let job: Job<Hpc> = match Job::parse(
+            "cluster1.slurm add_local_user bob.proj.brics:bob:proj",
+            false,
+        ) {
+            Ok(job) => job,
+            Err(e) => unreachable!("job: {:?}", e),
+        };
+
+        // Only a job that has been put on a board can fail, so move it to the
+        // state `put` leaves it in - which is exactly the state the stale
+        // binding was stuck in.
+        let job = match job.pending() {
+            Ok(job) => job,
+            Err(e) => unreachable!("pending: {:?}", e),
+        };
+
+        assert!(!job.is_error(), "a job waiting to run is not an error");
+
+        let errored = match job.errored("the scheduler said no") {
+            Ok(errored) => errored,
+            Err(e) => unreachable!("errored: {:?}", e),
+        };
+
+        assert!(errored.is_error(), "the returned job carries the failure");
+        assert!(
+            !job.is_error(),
+            "the original binding must stay clean - this is exactly why \
+             `job.wait().await?; if job.is_error()` never saw a failure, and \
+             why every step must read the job that `wait` hands back"
+        );
+    }
+
     #[test]
     fn test_delegated_commands_cannot_be_extended_by_a_peer_supplied_identifier() {
         let job: Job<Hpc> =

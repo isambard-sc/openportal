@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.
 SPDX-License-Identifier: CC0-1.0
 -->
 
-# An example site portal
+# An Example Site Portal
 
 ## Quick start
 

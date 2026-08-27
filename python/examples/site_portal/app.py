@@ -477,8 +477,13 @@ class Finalisation(BaseModel):
     An operations decision that one month's accounting will not change again.
 
     `month` is `"YYYY-MM"`. `final` is separate from it so the decision can be
-    taken back - if a late correction lands, clear it and the allocator starts
-    asking about that month again.
+    taken back when a late correction lands - but clearing it here does **not**
+    make the awarding portal ask again. It stopped asking when it recorded the
+    month as settled, and nothing on this side reaches into its records: someone
+    has to tell it, and it un-finalises the month at its end, which is what
+    triggers the refetch. Clearing the flag here is still right - it stops this
+    portal claiming a month is settled while corrections are still landing - it
+    is simply not what restarts the conversation.
     """
 
     month: str

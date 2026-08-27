@@ -108,8 +108,8 @@ pip install -r requirements.txt   # openportal, fastapi, uvicorn
 python example.py start
 ```
 
-(plus the two agents — downloaded or built, see
-[Getting the two agents](#getting-the-two-agents) above.)
+(plus the two agents — downloaded or built, as the
+[quick start](#quick-start) describes.)
 
 It prints what is running and, more to the point, the Python and `curl` calls
 that walk an award through the steps below — adding a cluster, making the award,
@@ -184,7 +184,7 @@ port: the bridge's HTTP API is in its config file (`[bridge] port`, default
 `3000`; `18752` and `18753` under `example.py`), and it is the `openportal`
 Python module that talks to that, not you.
 
-### 0. The site says which resources it offers
+### 1. The site says which resources it offers
 
 Nothing can happen until your site advertises a resource. A fresh portal
 advertises none, so the operators add them — two here, because a single resource
@@ -233,6 +233,12 @@ currently registered with OpenPortal - note that the offering is
 called `cluster1.site.allocator` - meaning that `cluster1` on the `site`
 portal is offered to the `allocator` portal.
 
+**The two forms are reversed, and it catches everybody once.** You *register*
+`cluster1.site.allocator` — the resource, offered by us, to them — while
+`allocator` *addresses* `allocator.site.cluster1`, because a destination starts
+with the sender and ends with the thing being addressed. The middle element is
+your own portal either way.
+
 You can remove an offering via `DELETE /offerings/cluster1`.
 
 Do this first, and check it when something goes quiet, because an unadvertised
@@ -244,7 +250,7 @@ check `GET /offerings` first.
 
 Withdrawing a resource ends its *reachability*, and nothing else. The awards made
 on it stay on record — they still own the days they were attached for, and those
-days may not have been collected yet (see step 9) — so `DELETE` reports how many
+days may not have been collected yet (see step 10) — so `DELETE` reports how many
 it kept, and adding the resource back makes them reachable again.
 
 The templates refer to the types of awards that you are willing to accept.
@@ -267,11 +273,11 @@ template 'large' is not offered on cluster2
 
 That is terminal, so the allocator stops asking rather than retrying a request
 that can never succeed — the same distinction as pending versus rejected in
-step 1. It tells the allocator only about the template it guessed, and never
+step 2. It tells the allocator only about the template it guessed, and never
 enumerates what you do offer; the list is on your own operator API
 (`GET /offerings`), which is not a path the allocator can reach.
 
-### 1. The allocator asks for an award to be attached to a project
+### 2. The allocator asks for an award to be attached to a project
 
 `allocator` addresses `allocator.site.cluster1` and sends a request to
 link an award to a project. This request looks like this:
@@ -287,6 +293,13 @@ where it is telling you that it refers to the award as `myaward1.allocator`.
 
 It is also providing some metadata about the award, including its name,
 the template it is against, and a list of members and their roles.
+
+One wrinkle to know before writing your dispatch: the `*_award` spellings are
+exact synonyms of the `*_project` ones, and what reaches you is the **canonical**
+form. An allocator that sends `create_award` produces a job whose `command` says
+`create_project`. So dispatch on the canonical name and both spellings are
+handled — which is why this example's `HANDLERS` table is keyed on
+`create_project`, `update_project` and `remove_project`.
 
 The members are keyed by their email addresses, and the roles are strings
 that have been pre-agreed between you and the allocator. Typically they will
@@ -309,7 +322,7 @@ This tells the allocator that you have received the request and are
 reviewing it. The allocator will keep periodically retrying the request
 until you approve or reject it.
 
-### 2. You, as the site operator see the pending awards, and decide
+### 3. You, as the site operator see the pending awards, and decide
 
 Your job is to provide a human-in-the-loop review of whether or not to
 approve the award request. This isn't to judge the allocator's decision,
@@ -387,7 +400,7 @@ curl -X POST localhost:18780/awards/cluster1/myaward1.allocator/reject \
 the award is refused. Unlike pending, that is terminal: `allocator` records the
 award as errored and stops asking.
 
-### 3. On approval, the two portals learn each other's names for the thing
+### 4. On approval, the two portals learn each other's names for the thing
 
 Nothing is pushed back to `allocator`. It is already re-sending `create_award`,
 so the next one simply succeeds, and what it returns is the mapping:
@@ -405,7 +418,7 @@ about. From here the award and the project are two names for one thing.
 That is also what makes approval need no notification path of its own: the
 retrying request *is* the delivery mechanism.
 
-### 4. Usage figures are pushed in — against *our* identifier
+### 5. Usage figures are pushed in — against *our* identifier
 
 Your accounting is the source of truth, and it produces figures for
 `myproject1.site`. You push in accounting data against your own
@@ -436,7 +449,7 @@ curl -X PUT localhost:18780/projects/myproject1.site/usage \
 (you can see the specification of `ProjectUsageReport` in
 [json-types.md](../../../docs/specifications/json-types.md#projectusagereport)).
 
-### 5. The allocator asks for usage, and gets it in its own namespace
+### 6. The allocator asks for usage, and gets it in its own namespace
 
 The allocator will periodically ask for usage reports for awards that are
 active and linked at your site. It will send request like this:
@@ -449,7 +462,7 @@ This is asking for the usage to be billed against the award
 `myaward1.allocator` over a date range - here `this_month`, which is the
 *current* month, the one still filling up. That is what you will be asked for
 almost every time: the allocator is watching a month accumulate rather than
-fetching a finished ledger, which is what makes step 6 matter. Other ranges are
+fetching a finished ledger, which is what makes step 7 matter. Other ranges are
 accepted too (`today`, `last_month`, `2026-08-01:2026-08-31`, ...).
 
 Your job is to provide the usage figures for the project that was linked to that
@@ -467,7 +480,7 @@ it from cache when it is ready. All OpenPortal calls are designed to be
 idempotent and re-tryable. The allocator portal will keep re-trying the
 request until it gets a valid response.
 
-### 6. Finalised versus unfinalised reports
+### 7. Finalised versus unfinalised reports
 
 Note that accounts do change and may need to be revised. OpenPortal has the
 concept of a "finalised" report, which is a report that will not change. The
@@ -513,8 +526,15 @@ than working around — a finalised month with no usage says "nothing was used, 
 that is settled", which is a real answer and a real risk (see takeaway 9). The
 call above is what you will use for last month once a month has passed.
 
-Once finalised the allocator stops asking for that month. If a late correction
-arrives, take the declaration back — the same endpoint, with `final` cleared:
+Once finalised the allocator stops asking for that month, and **nothing you can
+do from your side makes it ask again.** It has what it believes are final
+figures; clearing your own flag does not reach into its records. A late
+correction therefore needs a conversation: tell the allocator, and they
+un-finalise the month on their side, which is what triggers the refetch. What
+they collect then overwrites whatever they were holding — your accounts are the
+source of truth, and your figures are the final word.
+
+Clear your own declaration too, with the same endpoint:
 
 ```bash
 curl -X POST localhost:18780/projects/myproject1.site/usage/finalise \
@@ -522,12 +542,15 @@ curl -X POST localhost:18780/projects/myproject1.site/usage/finalise \
      -d '{"month": "2026-07", "final": false}'
 ```
 
-The month then reports incomplete again, the allocator resumes asking about it,
-and it collects your corrected figures. Your accounts are always treated
-as the source of truth, and the allocator will always accept your usage
-figures as the final word.
+so that the month reports incomplete while the corrected figures are still
+landing, rather than claiming to be settled when it is not.
 
-### 7. The same question asked of the wrong resource returns nothing
+This is the asymmetry to keep in mind, and the reason to leave a month open when
+in doubt. Never finalising a month costs one request per sync cycle, for ever,
+and nothing else. Finalising one early costs a conversation with the other portal
+before a single corrected figure can move.
+
+### 8. The same question asked of the wrong resource returns nothing
 
 Ask `allocator.site.cluster2 get_usage_report myaward1.allocator this_month`
 and the answer is an **empty** report, not an error. The award is attached to a
@@ -538,12 +561,12 @@ holds a given award, depends on that: the resource that holds nothing has to say
 so plainly rather than failing.
 
 This is also the one thing in the walkthrough that needs `cluster2` to have been
-added back in step 0. If it was not, this question is not answered at all - it is
+added back in step 1. If it was not, this question is not answered at all - it is
 held, waiting for an offering called `cluster2` to appear, and the caller times
 out. Empty and never are very different answers, and only one of them is this
 step.
 
-### 8. The award is updated
+### 9. The award is updated
 
 The allocator may send an update to the award, for example to change its name,
 or to add or remove members. This is done via the `update_award` instruction:
@@ -595,7 +618,7 @@ silently provisioning something nobody approved — which is exactly what
 and hands the job to `create_award`. The allocator then gets
 `ManagedProjectPendingError` and keeps asking, as it would for a new award.
 
-### 9. The award is removed — and the project carries on
+### 10. The award is removed — and the project carries on
 
 Eventually `allocator` sends a request to detach an award from a project. This
 is the command
@@ -604,7 +627,7 @@ is the command
 allocator.site.cluster1 remove_award myaward1.allocator
 ```
 
-It is the mirror image of step 1: step 1 asked us to
+It is the mirror image of step 2: step 2 asked us to
 *attach* an award to a project, and this asks us to *detach* it. It says nothing
 about the project.
 
@@ -645,7 +668,7 @@ to and including 20 August, and the allocator has very likely not collected thos
 yet — the last days of an award are the least likely to have been collected. The
 tempting shortcut is to delete the row, and it has a failure mode worse than an
 error: `get_usage_report` would then return an *empty* report, an empty report is
-vacuously complete (step 6), and we would be telling `allocator` that nothing was
+vacuously complete (step 7), and we would be telling `allocator` that nothing was
 ever used and that this is final. The final days of every award would vanish
 quietly. So the operator API keeps working after removal too — the last figures
 can still be pushed, and the month can still be declared final.
@@ -657,7 +680,7 @@ history. File a day's usage under "the award attached right now" as it arrives
 and re-attribution becomes impossible — the record of what happened has been
 overwritten by an answer that was only provisional.
 
-There is a nice consequence for step 6. A day whose attachment changed has to be
+There is a nice consequence for step 7. A day whose attachment changed has to be
 re-reported to *both* awards: `myaward1` needs to see 20 August leave, and
 `myaward2` needs to see it arrive. Neither is settled the moment the day begins,
 which is a second and quite separate reason completeness cannot be inferred from
@@ -726,9 +749,11 @@ reason the example exists.
    allocator a month's figures will not change, so it need not ask again.
    Nothing in the code can know when accounting has settled; your operations
    team can, so this example asks them rather than guessing from the calendar.
-   Leaving a month open costs one request per cycle; closing it early loses
-   every correction that arrives later. And note that an empty report is
-   complete *vacuously* — the one way to make that promise by accident.
+   Leaving a month open costs one request per cycle; closing it early means no
+   later correction can be collected until the other portal is asked to re-open
+   the month, because nothing on your side can make it ask again. And note that
+   an empty report is complete *vacuously* — the one way to make that promise by
+   accident.
 
 10. **`remove_award` detaches an award; it never deletes a project.** And it
     does not end the award's history: it still owns every day up to and

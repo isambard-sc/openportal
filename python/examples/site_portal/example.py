@@ -768,7 +768,7 @@ def instructions() -> None:
     this_month = f"{today.year:04d}-{today.month:02d}"
     previous = today.replace(day=1) - datetime.timedelta(days=1)
     last_month = f"{previous.year:04d}-{previous.month:02d}"
-    #: The award as the README's step 1 spells it - same name, same member, same
+    #: The award as the README's step 2 spells it - same name, same member, same
     #: role - so a reader moving between the two is looking at one award and not
     #: two. Spaces inside the JSON are fine: everything after the identifier is
     #: the details blob.
@@ -821,7 +821,7 @@ Everything is up.
 
      -d '{{"name": "cluster2", "templates": ["standard"]}}'
 
-   and README step 7 becomes visible too: asking `cluster2` about an award that
+   and README step 8 becomes visible too: asking `cluster2` about an award that
    lives on `{OFFERING}` answers with an empty report rather than an error, which
    is what lets an awards portal sweep every resource to find one.
 
@@ -837,8 +837,8 @@ Everything is up.
      print(job.state, job.error_message or job.result)
 
    The first answer is an error - ManagedProjectPendingError - and that is
-   correct: this site wants a human to look at every award first (README step
-   1). The awards portal would simply keep asking. (Read `job.result` on an
+   correct: this site wants a human to look at every award first (README steps 2
+   and 3). The awards portal would simply keep asking. (Read `job.result` on an
    errored job and it raises that error as an exception, which is why the line
    above looks at `error_message` first.)
 
@@ -920,7 +920,7 @@ Everything is up.
    running. So the month you have usage in is the one you cannot close, and the
    ones you can close have nothing in them - which is worth noticing rather than
    working around, because a finalised empty month tells the awards portal
-   "nothing was used, and that is settled" and is believed. README step 6 is the
+   "nothing was used, and that is settled" and is believed. README step 7 is the
    one worth reading twice.
 
 7. Later, the awards portal adds someone to the award:

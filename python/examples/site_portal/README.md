@@ -5,6 +5,25 @@ SPDX-License-Identifier: CC0-1.0
 
 # An example site portal
 
+## Quick start
+
+```bash
+pip install -r requirements.txt
+python example.py run
+```
+
+and follow the instructions that are printed there. Then come back here
+to understand what this did in more detail.
+
+## What is the setup?
+
+OpenPortal is used to connect two portals: one that allocates awards
+(the awards or allocator portal), and one that actually runs them via
+projects (the site portal). This example is used to help you understand
+how to implement a site portal.
+
+## What is this?
+
 A small, complete, working implementation of
 [site-portal-api.md](../../../docs/specifications/site-portal-api.md) — the
 contract a *site portal* fulfils when another portal creates awards on its
@@ -18,8 +37,10 @@ bite rather than left in the specification.
 
 ## This is not a production site portal
 
-Not "not yet" — not ever. It is missing, deliberately, everything a real
-deployment needs and nothing that would teach you about OpenPortal:
+This is deliberately **NOT** a production portal. It is a working example
+to help you test and understand the contract. It is not a reference
+implementation, and it is not a template for your own portal. As such,
+it has a number of limitations that make it unsuitable for production use:
 
 * **No authentication on the operator API.** Anyone who can reach `/awards` can
   approve any award. A real portal puts its own authentication and authorisation
@@ -34,16 +55,13 @@ deployment needs and nothing that would teach you about OpenPortal:
   logging that a notification arrived.
 * **No TLS, rate limiting, audit trail, or operational tooling.**
 
-Take the shape, not the code. `store.py` in particular is written to be thrown
-away.
-
 ## The files
 
 | File | What it is |
 |---|---|
 | `site_portal.py` | **The contract.** One function per instruction, plus the dispatch that guarantees every job is answered. Read this first. |
-| `store.py` | The portal's own state: the resources this site offers, its awards, their attachment history, and per-project usage. The file you replace. |
-| `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for saying which resources the site offers, approving awards, pushing usage figures and declaring a month's accounting final. |
+| `store.py` | The portal's own state: the resources this site offers, its awards, their attachment history, and per-project usage. This shows what state you will have to manage at your site. |
+| `app.py` | FastAPI: the two endpoints OpenPortal calls, plus a small operator API for saying which resources the site offers, approving awards, pushing usage figures and declaring a month's accounting final. This shows how you could connect to OpenPortal via a FastAPI-based REST API, or what your own connection would need to handle if it wants to connect to the OpenPortal bridge directly |
 | `test_site_portal.py` | Drives every handler with synthetic jobs — no bridge, no agents, no network. Proves the example works, and shows that the contract is testable in isolation. |
 | `example.py` | Builds and runs a complete two-portal setup on your own machine — four agents, this application, and the wiring between them. Not part of the contract; it exists so you can *watch* the contract work. |
 
@@ -131,7 +149,7 @@ carefully — most of the contract is visible in these steps.
 
 ### 0. The site says which resources it offers
 
-Nothing can happen until this portal advertises a resource. A fresh portal
+Nothing can happen until your site advertises a resource. A fresh portal
 advertises none, so the operators add one:
 
 ```bash
@@ -140,21 +158,47 @@ curl -X POST localhost:8080/offerings \
      -d '{"name": "cluster1", "templates": ["standard", "large"]}'
 ```
 
-That registers `cluster1.site.allocator` — the resource `cluster1`, offered by
-`site`, to `allocator` — as a virtual agent that `allocator` may address
-directly. `GET /offerings` lists what is offered, along with whether OpenPortal
-currently has each one registered; `DELETE /offerings/cluster1` withdraws it.
+This registers a cluster called `cluster1`, and names two templates that
+the allocator may ask for, "standard" and "large".
 
-`templates` are the `AwardDetails.template` values awards on this resource may
-name. They are per-resource because a template selects things that belong to the
-resource — in Waldur the organisation, the default offerings and the billing a
-project is created with — so the same name may be offered on one cluster and not
-another. **It is required and has no default**: what a resource can be asked for
-is the site's decision, and a guessed default would be published under the
-site's name with the awarding portal unable to tell it from a policy. Post the
-resource again with a new list to change it.
+Running get on the same URL shows what is offered:
 
-This is a step people skip, and skipping it produces the least helpful failure in
+```bash
+curl localhost:8080/offerings
+```
+
+returns
+
+```
+{"portal":"site","awarding_portals":["allocator"],"offerings":[{"name":"cluster1","templates":["large","standard"],"since":"2026-08-27","awards":0,"destinations":["cluster1.site.allocator"],"registered":true}]}
+```
+
+This shows that our site portal is called `site`, and the allocator portal is
+called `allocator` (these were both configured in config files
+— the example script sets them up for you).
+
+The `offerings` list shows that `cluster1` is offered, with the two templates,
+`large` and `standard`. It also shows whether the offering is
+currently registered with OpenPortal - note that the offering is
+called `cluster1.site.allocator` - meaning that `cluster1` on the `site`
+portal is offered to the `allocator` portal.
+
+You can remove an offering via `DELETE /offerings/cluster1`.
+
+The templates refer to the types of awards that you are willing to accept.
+For example, you may accept "large" or "standard" awards in this case.
+The template provides a way for you and the allocator to agree a shared
+name to represent different types of awards. For example, a "standard" award
+may have lower priority in queues, or less guaranteed resources than a "large"
+award. It is entirely up to you and the allocator to decide what these
+templates mean.
+
+Note that the allocator has to say which template an award is against. If
+it asks for a template you do not offer, the request is silently dropped.
+This is a security measure: the allocator cannot cheaply
+probe your site to see what templates you offer.
+
+This gives rise to the least helpful failure in
 the whole system: **a request for a resource that is not advertised is held, not
 refused** (§1.1). It sits on the portal agent waiting for the offering to appear,
 the caller waits out its timeout, and nothing anywhere says why. So if a

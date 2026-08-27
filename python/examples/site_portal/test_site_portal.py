@@ -173,11 +173,22 @@ def _run_all() -> None:
 
     for bad in ["", "-lead", "my.cluster", "my cluster", "caf\u00e9"]:
         try:
-            site_portal.add_offering(bad)
+            site_portal.add_offering(bad, ["standard"])
             raise AssertionError(f"{bad!r} should not be a usable offering name")
         except ValueError:
             pass
     check("a name that could not be part of a destination is refused", True)
+
+    # There is no default template. A resource that accepts none would reject
+    # every award made through it, and guessing one on the site's behalf would
+    # publish a policy nobody decided.
+    for no_templates in [[], [""], ["  "], None]:
+        try:
+            site_portal.add_offering("cluster9", no_templates)
+            raise AssertionError(f"{no_templates!r} should not be accepted")
+        except ValueError:
+            pass
+    check("a resource with no templates is refused", "cluster9" not in site_portal.offering_names())
 
     print("\n-- create_award, and the pending answer -------------------------")
 

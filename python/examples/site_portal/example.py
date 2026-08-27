@@ -765,6 +765,8 @@ Everything is up.
 
    That registers `{OFFERING}.{SITE.name}.{ALLOCATOR.name}` with the agents: a
    virtual agent on `{SITE.name}` that `{ALLOCATOR.name}` may address directly.
+   `templates` is required and has no default - which templates a resource
+   accepts is the site's decision, so it has to be stated rather than guessed.
    The other two endpoints are
 
      curl http://127.0.0.1:{APP_PORT}/offerings                    # what is offered

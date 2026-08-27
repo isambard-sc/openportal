@@ -15,7 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   withdrawing one re-registers the complete set with OpenPortal immediately, so
   a cluster can be offered while the portal is running. A fresh portal offers
   nothing until a resource is added — which is the first step of the local setup
-  below. Withdrawing a resource keeps the awards made on it; they simply stop
+  below — and adding one has to name the templates it accepts, since which
+  templates a resource offers is the site's decision and not something to
+  default. Withdrawing a resource keeps the awards made on it; they simply stop
   being reachable.
 
 - **A one-command local setup for the example site portal** —

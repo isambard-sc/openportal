@@ -59,12 +59,6 @@ logger = logging.getLogger(__name__)
 #: destination nobody is looking at.
 OFFERING_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 
-#: The templates a resource accepts if the operator does not say. One, called
-#: `standard`, so that adding a cluster and creating an award on it needs no
-#: further decisions.
-DEFAULT_TEMPLATES = ("standard",)
-
-
 def offerings() -> list[store.Offering]:
     """Every resource we advertise, in name order."""
     return list(store.load_offerings().values())
@@ -82,13 +76,21 @@ def templates_for(offering: str) -> set[str]:
     return set(found.templates) if found else set()
 
 
-def add_offering(name: str, templates: list[str] | None = None) -> store.Offering:
+def add_offering(name: str, templates: list[str]) -> store.Offering:
     """
     Start advertising a resource, or change the templates it accepts.
 
+    **`templates` is required, and there is deliberately no default.** What a
+    resource can be asked for is a decision about that resource - which
+    organisation, billing and default offerings a project on it is created with -
+    and nobody but the site knows it. A default would be a guess published under
+    the site's name, and the awarding portal has no way to tell a guess from a
+    policy: it would simply see the template accepted and make awards against
+    it.
+
     Raises `ValueError` on a name that could not survive being part of a
-    destination, or on an empty template list - an offering that accepts no
-    template would reject every award made through it, which is a
+    destination, and on an empty or blank template list - an offering that
+    accepts no template rejects every award made through it, which is a
     misconfiguration rather than a policy.
     """
     if not OFFERING_NAME.match(name or ""):
@@ -97,10 +99,13 @@ def add_offering(name: str, templates: list[str] | None = None) -> store.Offerin
             "A-Z, a-z, 0-9, '_' or '-', not starting with '-'"
         )
 
-    templates = list(templates) if templates else list(DEFAULT_TEMPLATES)
+    templates = [t.strip() for t in (templates or []) if t and t.strip()]
 
-    if not all(t and t.strip() for t in templates):
-        raise ValueError("a template name cannot be empty")
+    if not templates:
+        raise ValueError(
+            f"name at least one template that awards on '{name}' may use, "
+            'e.g. ["standard", "large"] - there is no default'
+        )
 
     return store.add_offering(name, templates, datetime.date.today())
 

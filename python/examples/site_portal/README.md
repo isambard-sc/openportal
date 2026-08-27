@@ -141,8 +141,13 @@ directly. `GET /offerings` lists what is offered, along with whether OpenPortal
 currently has each one registered; `DELETE /offerings/cluster1` withdraws it.
 
 `templates` are the `AwardDetails.template` values awards on this resource may
-name, and they are per-resource because a template selects things that belong to
-the resource. It defaults to `["standard"]`.
+name. They are per-resource because a template selects things that belong to the
+resource — in Waldur the organisation, the default offerings and the billing a
+project is created with — so the same name may be offered on one cluster and not
+another. **It is required and has no default**: what a resource can be asked for
+is the site's decision, and a guessed default would be published under the
+site's name with the awarding portal unable to tell it from a policy. Post the
+resource again with a new list to change it.
 
 This is a step people skip, and skipping it produces the least helpful failure in
 the whole system: **a request for a resource that is not advertised is held, not

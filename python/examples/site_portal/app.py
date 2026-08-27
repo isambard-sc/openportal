@@ -279,12 +279,14 @@ class OfferingRequest(BaseModel):
     advertise.
 
     `templates` are the `AwardDetails.template` values awards on this resource
-    may name. It defaults to `["standard"]` so that adding a cluster is a
-    one-liner; give it the real list when a resource offers more than one.
+    may name, and it is **required**: what a resource can be asked for is the
+    site's decision about that resource, and defaulting it would publish a guess
+    under the site's name that an awarding portal could not tell from a policy.
+    Name every template the resource really offers.
     """
 
     name: str
-    templates: list[str] | None = None
+    templates: list[str]
 
 
 def _offering_json(
@@ -357,7 +359,8 @@ async def add_offering(request: OfferingRequest):
 
     An upsert, and idempotent: posting a resource we already offer updates its
     templates and re-registers it, rather than failing. Everything here is
-    retried, including by operators.
+    retried, including by operators. It is also how the templates on a resource
+    are changed - post it again with the new list.
 
     Registration happens immediately, so an award request for this resource that
     an awarding portal has been retrying can land on the very next attempt.

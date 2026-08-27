@@ -10,6 +10,16 @@ license = "MIT"
 homepage = "https://github.com/chryswoods/openportal/"
 repository = "https://github.com/chryswoods/openportal/"
 
+[[bin]]
+name = "op-slurm"
+path = "src/main.rs"
+
+# An operator tool, not part of the agent. It shares the agent's library so that
+# what it reports about a job and what the agent reports cannot drift apart.
+[[bin]]
+name = "get_reservation_report"
+path = "tools/get_reservation_report.rs"
+
 [dependencies]
 anyhow = { version="1.0.100", features = ["backtrace"] }
 chrono = { version="0.4.42", features=["serde"] }

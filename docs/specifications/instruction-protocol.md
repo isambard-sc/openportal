@@ -611,6 +611,87 @@ Returns: `bool`
 
 ---
 
+### State Verification Instructions
+
+These answer one question: did an earlier `add_user` / `add_project` /
+`remove_user` / `remove_project` actually run to completion? A caller uses them
+to confirm that a user or project has finished moving into the state it asked
+for, and to re-run the instruction if it has not.
+
+They are handled by the cluster instance agent (`op-cluster`), which is where
+the add and remove instructions fan out from. **Nothing is answered from a
+cache.** The cluster asks each of its three sub-agents - account, filesystem
+and scheduler - the matching `is_local_*` question afresh, and returns `true`
+only if all three say yes. An agent that cannot be reached is an error, not a
+`false`: not knowing whether the work finished is not the same as knowing that
+it did not.
+
+They are deliberately stronger than `is_existing_user` / `is_existing_project`,
+which only ask the account agent whether the account or group is there. An
+`add_user` that created the account and then failed to create the home
+directory leaves `is_existing_user` true and `is_user_added` false - which is
+exactly the case worth finding.
+
+A **blocked** user is reported as neither added nor removed: `add_user` will not
+re-enable them and `remove_user` will not disable them further, so neither
+instruction can move them. `is_blocked_user` is what tells a caller that.
+
+A **protected** user (one OpenPortal does not manage) is reported as both added
+and removed, because `add_user` and `remove_user` are documented no-ops that
+report success for them - there is nothing for a caller to re-run.
+
+#### `is_user_added`
+
+Returns `true` only if the account, filesystem and scheduler agents all report
+every part of adding this user as done.
+
+```
+is_user_added <user_id>
+```
+
+Returns: `bool`
+
+#### `is_user_removed`
+
+Returns `true` only if all three agents report every part of removing this user
+as done.
+
+Note that neither account agent deletes the account: removal disables it and
+strips its groups, keeping the uid so that the files the filesystem agent
+recycled rather than deleted still belong to their owner. A removed user
+therefore still has a mapping, which is what lets the filesystem and scheduler
+agents be asked about them.
+
+```
+is_user_removed <user_id>
+```
+
+Returns: `bool`
+
+#### `is_project_added`
+
+Returns `true` only if all three agents report every part of adding this project
+as done.
+
+```
+is_project_added <project_id>
+```
+
+Returns: `bool`
+
+#### `is_project_removed`
+
+Returns `true` only if all three agents report every part of removing this
+project as done - which includes every managed user in it having been removed.
+
+```
+is_project_removed <project_id>
+```
+
+Returns: `bool`
+
+---
+
 ### Mapping Instructions
 
 These translate between OpenPortal identifiers and local system names.
@@ -718,6 +799,93 @@ Remove a local project group described by a project mapping.
 ```
 remove_local_project <project_mapping>
 ```
+
+#### `is_local_user_added`
+
+Ask a single agent whether it has completed everything `add_local_user` asks of
+it for this mapping. Answered by inspecting the live system, never a cache.
+
+What that means depends on the agent:
+
+- **account** (`op-freeipa`, `op-localaccount`): the account exists, is managed,
+  is enabled, is not blocked, maps to exactly this mapping, and is in every
+  group a managed user on this instance belongs to.
+- **filesystem** (`op-filesystem`): every directory `add_local_user` creates is
+  present - the user's own directory on each user volume, plus the project
+  directories and links it makes sure exist first.
+- **scheduler** (`op-slurm`): the Slurm user exists, defaults to the project's
+  account, and is associated with it on this cluster.
+
+```
+is_local_user_added <user_mapping>
+```
+
+Returns: `bool`
+
+#### `is_local_user_removed`
+
+Ask a single agent whether it has completed everything `remove_local_user` asks
+of it for this mapping:
+
+- **account**: the account is absent, or is disabled, not blocked, and out of
+  this instance's groups.
+- **filesystem**: every directory `remove_local_user` recycles is gone. The
+  project directories are not consulted - removal does not touch them, and they
+  outlive any one member of the project.
+- **scheduler**: no job of the user's is queued **or running**. The Slurm user
+  and their associations are kept on purpose so that the accounting history
+  survives, so the jobs are all that removal actually changes.
+
+  A running job counts even though removal does not cancel one. OpenPortal never
+  destroys anything — it disables, recycles, and cancels only what has not
+  started — so a job already running is left to finish, and until it does the
+  user genuinely has not finished leaving the cluster. This is the one place in
+  these checks where a `false` cannot be cleared by re-running the removal; it
+  clears itself when the job ends. It is barely reachable in practice, since a
+  removed user has already lost the ability to submit.
+
+```
+is_local_user_removed <user_mapping>
+```
+
+Returns: `bool`
+
+#### `is_local_project_added`
+
+Ask a single agent whether it has completed everything `add_local_project` asks
+of it for this mapping:
+
+- **account**: the project's group exists and carries this mapping's name.
+- **filesystem**: every project-volume directory, every configured link beside
+  one, and the per-project root of every user volume is present.
+- **scheduler**: the Slurm account exists, is managed by OpenPortal, and is
+  attached to this cluster.
+
+```
+is_local_project_added <project_mapping>
+```
+
+Returns: `bool`
+
+#### `is_local_project_removed`
+
+Ask a single agent whether it has completed everything `remove_local_project`
+asks of it for this mapping:
+
+- **account**: `op-freeipa` keeps the group on purpose - the gid has to stay
+  stable if the project is ever re-added - so what it checks is that every
+  managed user who was in it has been removed. `op-localaccount` does delete
+  the group, and checks that it is gone.
+- **filesystem**: every project directory, link and per-project user-volume root
+  is gone.
+- **scheduler**: no job of the project's is queued or running, for the same
+  reasons as `is_local_user_removed`.
+
+```
+is_local_project_removed <project_mapping>
+```
+
+Returns: `bool`
 
 #### `get_local_home_dir`
 
@@ -1103,6 +1271,10 @@ Returns: `Destinations`
 | `block_project` | `<project_id>` | `Vec<UserMapping>` | Block all users in a project |
 | `unblock_project` | `<project_id>` | `Vec<UserMapping>` | Unblock all users in a project |
 | `is_blocked_project` | `<project_id>` | `bool` | True if project has members and all are blocked |
+| `is_user_added` | `<user_id>` | `bool` | True if account, filesystem and scheduler agents all report the user as fully added |
+| `is_user_removed` | `<user_id>` | `bool` | True if all three agents report the user as fully removed |
+| `is_project_added` | `<project_id>` | `bool` | True if all three agents report the project as fully added |
+| `is_project_removed` | `<project_id>` | `bool` | True if all three agents report the project as fully removed |
 | `is_protected_user` | `<user_id>` | `bool` | Check if user is protected |
 | `is_existing_user` | `<user_id>` | `bool` | Check if user account exists |
 | `get_user_mapping` | `<user_id>` | `UserMapping` | Get local mapping for user |
@@ -1115,6 +1287,10 @@ Returns: `Destinations`
 | `remove_local_user` | `<user_mapping>` | — | Remove local user account |
 | `add_local_project` | `<project_mapping>` | — | Create local project group |
 | `remove_local_project` | `<project_mapping>` | — | Remove local project group |
+| `is_local_user_added` | `<user_mapping>` | `bool` | True if this agent has fully added the local user |
+| `is_local_user_removed` | `<user_mapping>` | `bool` | True if this agent has fully removed the local user |
+| `is_local_project_added` | `<project_mapping>` | `bool` | True if this agent has fully added the local project |
+| `is_local_project_removed` | `<project_mapping>` | `bool` | True if this agent has fully removed the local project |
 | `get_local_home_dir` | `<user_mapping>` | `String` | Get local user home dir |
 | `get_local_user_dirs` | `<user_mapping>` | `Vec<String>` | Get local user dirs *(not yet parseable)* |
 | `get_local_project_dirs` | `<project_mapping>` | `Vec<String>` | Get local project dirs |
@@ -1222,6 +1398,15 @@ unblock_project myproject.waldur
 
 # Check whether all users in a project are blocked
 is_blocked_project myproject.waldur
+
+# Check that an earlier add_user really finished everywhere
+is_user_added alice.myproject.waldur
+
+# Check that an earlier remove_project really finished everywhere
+is_project_removed myproject.waldur
+
+# Ask one agent directly whether it finished its part of adding a user
+is_local_user_added alice.myproject.waldur:alice_hpc:hpc_myproject
 ```
 
 ---

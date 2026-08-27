@@ -6,19 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-### Fixed
-
-- **Slurm usage reports missed everything a requeued job consumed before its
-  final attempt.** `op-slurm` called `sacct` without `--duplicates`, which
-  returns only the most recent accounting record for each job id. A requeued job
-  has one record per attempt, each carrying only its own elapsed time, so every
-  attempt before the last was invisible. On a production account measured over a
-  single day this hid about a third of the account's real consumption; jobs whose
-  final attempt was cancelled before it ran were reported as having used nothing
-  at all, because the one record we saw had zero elapsed time and was discarded
-  as a non-consumer.
-
 ### Added
+
+- **State verification instructions** — a caller can now ask whether an earlier
+  `add_user` / `add_project` / `remove_user` / `remove_project` actually ran to
+  completion, and re-run it if it did not:
+
+  ```
+  is_user_added alice.myproject.waldur
+  is_user_removed alice.myproject.waldur
+  is_project_added myproject.waldur
+  is_project_removed myproject.waldur
+  ```
 
 - **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
   of superseded attempts separately from the usage it has always reported, so
@@ -31,11 +30,108 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   repeatedly, is what a user fighting a job that will not run looks like from
   the outside.
 
+- **Reservations.** Usage reports now also log usage within any reservations,
+  with an associated reservation_report making this easy to query.
+
 - **Mean job size.** Reports now record the cores and GPUs each job was
   allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
   per-user variants) - many small jobs against a few large ones. Usage cannot
   answer this: the same core-seconds come from one job on a hundred cores or a
   hundred jobs on one core, which is exactly the distinction being drawn.
+
+- **`get_reservation_report`** ([slurm/tools/](slurm/tools/)): an operator tool
+  that answers the question a usage report cannot. A project's report says which
+  reservations *it* used; this says which projects used a *reservation*.
+
+  ```
+  get_reservation_report interactive this_month
+  ```
+
+  The tool shares the agent's code rather than reimplementing it - the slurm
+  crate now builds a library as well as its binaries - so what it says a job
+  consumed cannot drift from what the agent says.
+
+### Fixed
+
+- **The `slurmrestd` path never worked out which cluster it was talking to.**
+  `find_cluster` was only called when `op-slurm` was driving the command line, so
+  with `slurm-server` set and no `slurm-cluster` option the cluster fell back to
+  the literal `"linux"`. That name is written into the account and association
+  payloads sent over REST, and checked by `is_local_project_added`, so accounts
+  were created against a cluster that probably did not exist while every check
+  compared against the same wrong value and passed - and usage reports, which
+  query `sacct --cluster=`, came back empty. The REST path now resolves the
+  cluster too, warning rather than failing if it cannot, since a site with
+  `slurmrestd` but no local `sacctmgr` should be told what will not work rather
+  than stopped from starting.
+
+- **`op-cluster` no longer swallows filesystem and scheduler failures when
+  adding or removing a user or project.** All four paths now follow one policy:
+  the account agent goes first and a failure there aborts immediately, since
+  without it the mapping cannot be trusted; the filesystem and scheduler steps
+  are then both attempted, even if the first fails, because they manage separate
+  systems and there is no clean "nothing happened" to return to once the account
+  agent has been changed; and if either failed the operation returns an error
+  naming each system that failed and why.
+
+  Previously `remove_user` and `remove_project` logged a filesystem or scheduler
+  failure and returned success, so a caller was told the removal had completed
+  when the home directories were still there. They now fail, and the
+  `user_removed` / `project_removed` notification is not sent for a removal that
+  did not finish.
+
+- **A rename that merged two local accounts dropped one of them.** Every
+  per-user map was rebuilt with `collect()`, which keeps whichever colliding
+  entry came last, so consolidating two local usernames into one silently lost
+  one user's usage, jobs and waits - and which one depended on hash order.
+
+- **Scaling a `ProjectUsageReport` left its requeue and reservation figures
+  behind**, so `total_usage_including_requeues()` afterwards added two different
+  units together. `*=` and `/=` on a `DailyProjectUsageReport` also left the
+  component breakdowns unscaled while `*` and `/` scaled them.
+
+- **A day whose counters disagreed with its own totals was still cached.** The
+  check only logged, so the bad figures were then served from cache with nothing
+  downstream able to tell.
+
+- **Counters could abort the process rather than saturate.** The scalar totals
+  in a usage report saturate deliberately, but the per-user maps beside them
+  used a bare `+=`; with `overflow-checks` on and `panic = "abort"`, a
+  peer-supplied report could have killed the process before the scalar clamped.
+
+- **Slurm usage reports missed everything a requeued job consumed before its
+  final attempt.** `op-slurm` called `sacct` without `--duplicates`, which
+  returns only the most recent accounting record for each job id. A requeued job
+  has one record per attempt, each carrying only its own elapsed time, so every
+  attempt before the last was invisible. On a production account measured over a
+  single day this hid about a third of the account's real consumption; jobs whose
+  final attempt was cancelled before it ran were reported as having used nothing
+  at all, because the one record we saw had zero elapsed time and was discarded
+  as a non-consumer.
+
+- **`op-cluster` reported success for a scheduler step that had failed.** The
+  four scheduler helpers waited for their job and then asked the wrong value
+  whether it had failed:
+
+  ```rust
+  job.wait().await?;        // returns the finished job - discarded
+
+  if job.is_error() { ... } // asks the pre-wait binding, still pending
+  ```
+
+  `Job::wait` returns the finished job rather than updating the one it was
+  called on, and `Status::Error` counts as finished, so `wait` returns `Ok` for
+  a failed job and `job.is_error()` was always false. The error branch was
+  unreachable and all four returned `Ok(())` whatever the scheduler agent said.
+
+  On the remove paths this was masked, because the caller discarded the error
+  anyway (see below). On the add paths it was not: `add_user` and `add_project`
+  could report success with the Slurm account never created.
+
+  Every step now goes through one `wait_for_step`, which reads the job `wait`
+  hands back. The same stale-binding check existed in the two filesystem delete
+  helpers, where it was dead rather than wrong - `result_none()?` had already
+  turned a failed job into an error - and those are folded into the same helper.
 
 ## [0.92.0] - 2026-08-21
 

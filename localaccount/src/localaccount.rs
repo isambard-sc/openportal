@@ -310,40 +310,20 @@ async fn ensure_group_exists(
 ///   - system groups  (from config `system-groups`)
 ///   - per-instance groups  (from config `instance-groups` for this peer)
 ///
-async fn sync_groups(
-    local_user: &str,
-    user: &UserIdentifier,
-    instance: &Peer,
-    expires: &chrono::DateTime<Utc>,
-) -> Result<(), Error> {
-    assert_not_expired(expires)?;
-
+///
+/// Every group a fully-added, managed user must belong to on this instance.
+///
+/// Factored out of `sync_groups` so that `is_local_user_added` - which has to
+/// decide whether an earlier `add_user` really finished - asks about exactly
+/// the groups adding a user puts them in, and cannot drift from it.
+///
+fn required_group_names(user: &UserIdentifier, instance: &Peer) -> Result<Vec<String>, Error> {
     let cmds = get_commands()?;
 
     let mut groups: Vec<String> = Vec::new();
 
     // 1. Project group — the group that represents this user's project.
-    //
-    // Checked against `is_system_group` because this is the one group in the
-    // list that is *derived from a peer-supplied identifier* rather than named
-    // by configuration - so it is the one that can collide with a pre-existing
-    // privileged group. See
-    // `docs/specifications/security-review-2.md` (finding R13).
-    let project_group = identifier_to_projectid(&user.project_identifier());
-
-    if is_system_group(&project_group).await? {
-        tracing::warn!(
-            "Refusing to add user '{}' to existing system group '{}'",
-            local_user,
-            project_group
-        );
-        return Err(Error::Call(format!(
-            "Refusing to add user '{}' to existing system group '{}'",
-            local_user, project_group
-        )));
-    }
-
-    groups.push(project_group);
+    groups.push(identifier_to_projectid(&user.project_identifier()));
 
     // 2. Managed group — marks the user as managed by this agent.
     groups.push(cmds.managed_group.clone());
@@ -362,6 +342,39 @@ async fn sync_groups(
     // Deduplicate while preserving order.
     let mut seen = std::collections::HashSet::new();
     groups.retain(|g| seen.insert(g.clone()));
+
+    Ok(groups)
+}
+
+async fn sync_groups(
+    local_user: &str,
+    user: &UserIdentifier,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<(), Error> {
+    assert_not_expired(expires)?;
+
+    let cmds = get_commands()?;
+
+    let groups = required_group_names(user, instance)?;
+
+    // The project group is the one entry in that list that is *derived from a
+    // peer-supplied identifier* rather than named by configuration - so it is
+    // the one that can collide with a pre-existing privileged group. See
+    // `docs/specifications/security-review-2.md` (finding R13).
+    let project_group = identifier_to_projectid(&user.project_identifier());
+
+    if is_system_group(&project_group).await? {
+        tracing::warn!(
+            "Refusing to add user '{}' to existing system group '{}'",
+            local_user,
+            project_group
+        );
+        return Err(Error::Call(format!(
+            "Refusing to add user '{}' to existing system group '{}'",
+            local_user, project_group
+        )));
+    }
 
     // Ensure every group exists before we try to add the user to it.
     for group in &groups {
@@ -1387,6 +1400,215 @@ pub async fn is_protected_user(
         .any(|m| m.trim() == local_user.as_str());
 
     Ok(!is_managed)
+}
+
+///
+/// Return whether everything `add_user` does for this mapping has been done.
+///
+/// Everything here is read live from the system (`getent`), never from a
+/// cache: the question is precisely whether the system is in the state an
+/// earlier `add_user` claimed to leave it in.
+///
+pub async fn is_local_user_added(
+    mapping: &UserMapping,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let user = mapping.user();
+    let local_user = identifier_to_userid(user);
+
+    if !is_existing_user(user, expires).await? {
+        tracing::info!("User {} does not exist on this system", local_user);
+        return Ok(false);
+    }
+
+    // An unmanaged account is one this agent will not touch, so there is
+    // nothing for `add_user` to have left half-done.
+    if is_protected_user(user, expires).await? {
+        tracing::info!(
+            "User {} is not managed by this agent - nothing for add_user to do",
+            local_user
+        );
+        return Ok(true);
+    }
+
+    // A blocked user is neither added nor removed: `add_user` refuses to
+    // re-enable them, and only `unblock_user` will.
+    if is_blocked_user(user, expires).await? {
+        tracing::info!("User {} is blocked, so has not been added", local_user);
+        return Ok(false);
+    }
+
+    if is_removed_user(user, expires).await? {
+        tracing::info!("User {} is disabled, so has not been added", local_user);
+        return Ok(false);
+    }
+
+    let expected = UserMapping::new(user, &local_user, &get_primary_group_name(user))
+        .map_err(|e| Error::Call(e.to_string()))?;
+
+    if expected != *mapping {
+        tracing::info!(
+            "User {} maps to {} on this system rather than the requested {}",
+            user,
+            expected,
+            mapping
+        );
+        return Ok(false);
+    }
+
+    let groups = groups_for_user(&local_user, expires).await?;
+
+    for required in required_group_names(user, instance)? {
+        // The primary group is the account's login group and never appears in
+        // a `getent group` member list - `groups_for_user` says so - so it is
+        // checked as the mapping's local_group above rather than here.
+        if required == *mapping.local_group() {
+            continue;
+        }
+
+        if !groups.contains(&required) {
+            tracing::info!(
+                "User {} is not yet in group '{}', so has not been fully added",
+                local_user,
+                required
+            );
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_user` does for this mapping has been done.
+///
+/// `remove_user` disables the account and strips its supplementary groups; it
+/// never deletes it, so "removed" is a state the account is left in rather than
+/// its absence. It is also distinct from "blocked", which is likewise disabled:
+/// the removed group is what tells the two apart, and it is the same
+/// distinction `remove_user` itself makes before deciding it has nothing to do.
+///
+pub async fn is_local_user_removed(
+    mapping: &UserMapping,
+    instance: &Peer,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let user = mapping.user();
+    let local_user = identifier_to_userid(user);
+
+    if !is_existing_user(user, expires).await? {
+        return Ok(true);
+    }
+
+    // As in `is_local_user_added`: `remove_user` refuses to touch an account it
+    // does not manage, so there is nothing outstanding for it to do.
+    if is_protected_user(user, expires).await? {
+        tracing::info!(
+            "User {} is not managed by this agent - nothing for remove_user to do",
+            local_user
+        );
+        return Ok(true);
+    }
+
+    if is_blocked_user(user, expires).await? {
+        tracing::info!("User {} is blocked, not removed", local_user);
+        return Ok(false);
+    }
+
+    if !is_removed_user(user, expires).await? {
+        tracing::info!(
+            "User {} is not in the removed group, so has not been removed",
+            local_user
+        );
+        return Ok(false);
+    }
+
+    // Being disabled is not enough on its own - `remove_user` also strips the
+    // supplementary groups, and a user still in this instance's group would be
+    // handed that access straight back by a re-enable.
+    let groups = groups_for_user(&local_user, expires).await?;
+
+    if groups.contains(&instance_group_name(instance)) {
+        tracing::info!(
+            "User {} is still in the instance group, so has not been fully removed",
+            local_user
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `add_project` does for this mapping has been done,
+/// i.e. the project's Unix group exists with the name the mapping says it
+/// should have.
+///
+pub async fn is_local_project_added(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let project = mapping.project();
+    let group_name = identifier_to_projectid(project);
+
+    if group_name != *mapping.local_group() {
+        tracing::info!(
+            "Project {} maps to group '{}' on this system rather than the requested '{}'",
+            project,
+            group_name,
+            mapping.local_group()
+        );
+        return Ok(false);
+    }
+
+    if !is_existing_project(project, expires).await? {
+        tracing::info!("Group '{}' does not exist on this system", group_name);
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_project` does for this mapping has been
+/// done, i.e. the project's Unix group is gone.
+///
+pub async fn is_local_project_removed(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let project = mapping.project();
+
+    if !is_existing_project(project, expires).await? {
+        return Ok(true);
+    }
+
+    // A group this agent does not manage is one `remove_project` deliberately
+    // leaves alone and reports success for.
+    if is_protected_project(project, expires).await? {
+        tracing::info!(
+            "Group '{}' is not an OpenPortal-managed project group - nothing for \
+             remove_project to do",
+            identifier_to_projectid(project)
+        );
+        return Ok(true);
+    }
+
+    tracing::info!(
+        "Group '{}' still exists, so the project has not been removed",
+        identifier_to_projectid(project)
+    );
+
+    Ok(false)
 }
 
 #[cfg(test)]

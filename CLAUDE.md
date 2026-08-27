@@ -34,7 +34,7 @@ Each agent type is its own binary crate that implements specific infrastructure 
 
 - **filesystem** (`op-filesystem`): Agent for filesystem operations (creating directories, managing files).
 
-- **slurm** (`op-slurm`): Agent that interfaces with the Slurm scheduler.
+- **slurm** (`op-slurm`): Agent that interfaces with the Slurm scheduler. Unlike the other agents this crate also builds a library (`src/lib.rs`), so that the operator tools in `slurm/tools/` - currently `get_reservation_report` - run the agent's own accounting code rather than a second copy of it. A tool is a `[[bin]]` in `slurm/Cargo.toml`; it reads `sacct` directly and takes no config file.
 
 - **bridge** (`op-bridge`): Bridges non-Rust portal implementations to the OpenPortal network. Runs a local HTTP server to translate API calls into OpenPortal Jobs.
 

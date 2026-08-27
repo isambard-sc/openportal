@@ -7,13 +7,15 @@ use chrono::Utc;
 use greatwestern::grammar::Instruction::{
     AddLocalProject, AddLocalUser, ClearLocalProjectQuota, ClearLocalUserQuota, GetLocalHomeDir,
     GetLocalProjectDirs, GetLocalProjectQuota, GetLocalProjectQuotas, GetLocalStorageReport,
-    GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas, RemoveLocalProject, RemoveLocalUser,
-    SetLocalProjectQuota, SetLocalUserQuota,
+    GetLocalUserDirs, GetLocalUserQuota, GetLocalUserQuotas, IsLocalProjectAdded,
+    IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved, RemoveLocalProject,
+    RemoveLocalUser, SetLocalProjectQuota, SetLocalUserQuota,
 };
 use greatwestern::grammar::{Date, ProjectMapping, UserMapping};
 use greatwestern::storage::Quota;
 use greatwestern::storagereport::ProjectStorageReport;
 use greatwestern::Hpc;
+use std::path::PathBuf;
 use templemeads::agent;
 use templemeads::agent::filesystem::{process_args, run, Defaults};
 use templemeads::agent::Type as AgentType;
@@ -142,6 +144,18 @@ async fn main() -> Result<()> {
                     remove_user_dirs(&mapping).await?;
                     job.completed_none()
                 },
+                IsLocalUserAdded(mapping) => {
+                    job.completed(are_user_dirs_added(&mapping).await?)
+                },
+                IsLocalUserRemoved(mapping) => {
+                    job.completed(are_user_dirs_removed(&mapping).await?)
+                },
+                IsLocalProjectAdded(mapping) => {
+                    job.completed(are_project_dirs_added(&mapping).await?)
+                },
+                IsLocalProjectRemoved(mapping) => {
+                    job.completed(are_project_dirs_removed(&mapping).await?)
+                },
                 GetLocalHomeDir(mapping) => {
                     let config = cache::get_filesystem_config().await?;
                     let home_dir = config.home_volume()?.home_path(&mapping)?;
@@ -240,6 +254,158 @@ async fn main() -> Result<()> {
     run(config, filesystem_runner).await?;
 
     Ok(())
+}
+
+///
+/// The paths `add_local_project` creates for `mapping`, and that
+/// `remove_local_project` recycles again: every project-volume directory, the
+/// link beside any of them that is configured to have one, and the per-project
+/// root of every user volume.
+///
+/// Derived by walking exactly the same configuration in the same order as
+/// `create_project_dirs_and_links`, so that "has this been added?" cannot drift
+/// away from what adding it actually does. A path the configuration cannot
+/// produce is skipped here for the same reason it is skipped there - it was
+/// never created, so it is not evidence either way.
+///
+async fn project_paths(mapping: &ProjectMapping) -> Result<Vec<PathBuf>, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let mut paths = Vec::new();
+
+    for (volume, volume_config) in config.get_project_volumes() {
+        for path_config in volume_config.path_configs() {
+            match path_config.path(mapping.clone().into()) {
+                Ok(path) => {
+                    if let Ok(Some(link_path)) = path_config.link_path(mapping.clone().into()) {
+                        paths.push(link_path);
+                    }
+                    paths.push(path);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Could not get project directory path for volume {}: {}",
+                        volume,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    for (volume, volume_config) in config.get_user_volumes() {
+        for path_config in volume_config.path_configs() {
+            match path_config.project_path(mapping) {
+                Ok(path) => paths.push(path),
+                Err(error) => {
+                    tracing::warn!(
+                        "Could not get user directory root for volume {}: {}",
+                        volume,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
+///
+/// The paths `add_local_user` creates for `mapping`, and that
+/// `remove_local_user` recycles again - the user's own directory on every user
+/// volume. Note that this deliberately does not include the project
+/// directories `create_user_dirs` also ensures exist: those belong to the
+/// project, not to this user, and `remove_user_dirs` leaves them alone.
+///
+async fn user_paths(mapping: &UserMapping) -> Result<Vec<PathBuf>, Error> {
+    let config = cache::get_filesystem_config().await?;
+
+    let mut paths = Vec::new();
+
+    for (volume, volume_config) in config.get_user_volumes() {
+        for path_config in volume_config.path_configs() {
+            match path_config.path(mapping.clone().into()) {
+                Ok(path) => paths.push(path),
+                Err(error) => {
+                    tracing::warn!(
+                        "Could not get user directory path for volume {}: {}",
+                        volume,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
+///
+/// Return whether every path in `paths` exists (`want_present`) or whether
+/// none of them do (`!want_present`). The first path that disagrees is logged
+/// and decides the answer - it is the one a caller would have to re-run the
+/// add or remove to fix.
+///
+async fn all_paths_match(paths: &[PathBuf], want_present: bool) -> Result<bool, Error> {
+    let config = cache::get_filesystem_config().await?;
+    let roots = config.all_roots();
+
+    for path in paths {
+        if filesystem::path_exists(path, &roots).await? != want_present {
+            tracing::info!(
+                "Path '{}' is {} - expected it to be {}",
+                path.to_string_lossy(),
+                if want_present {
+                    "missing"
+                } else {
+                    "still present"
+                },
+                if want_present { "present" } else { "gone" }
+            );
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+///
+/// Return true only if everything `add_local_project` creates for this project
+/// is present. Read live from the filesystem - nothing here is cached.
+///
+async fn are_project_dirs_added(mapping: &ProjectMapping) -> Result<bool, Error> {
+    all_paths_match(&project_paths(mapping).await?, true).await
+}
+
+///
+/// Return true only if everything `remove_local_project` recycles for this
+/// project is gone.
+///
+async fn are_project_dirs_removed(mapping: &ProjectMapping) -> Result<bool, Error> {
+    all_paths_match(&project_paths(mapping).await?, false).await
+}
+
+///
+/// Return true only if everything `add_local_user` creates for this user is
+/// present - both their own directories and the project directories that
+/// `create_user_dirs` makes sure exist before it creates them.
+///
+async fn are_user_dirs_added(mapping: &UserMapping) -> Result<bool, Error> {
+    if !are_project_dirs_added(&mapping.project()).await? {
+        return Ok(false);
+    }
+
+    all_paths_match(&user_paths(mapping).await?, true).await
+}
+
+///
+/// Return true only if everything `remove_local_user` recycles for this user is
+/// gone. The project directories are not consulted: `remove_user_dirs` does not
+/// touch them, and they outlive any one member of the project.
+///
+async fn are_user_dirs_removed(mapping: &UserMapping) -> Result<bool, Error> {
+    all_paths_match(&user_paths(mapping).await?, false).await
 }
 
 ///

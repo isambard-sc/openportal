@@ -849,7 +849,7 @@ reason the example exists.
 
 5. **Everything is retried, so everything must be idempotent.** `create_award`
    arrives repeatedly for awards you already hold. `update_award` arrives for
-   awards you have never seen. A duplicate job id must not do the work twice.
+   awards you have never seen.
 
 6. **Never leave a job unanswered.** `site_portal.answer()` is built so that a
    handler returning, a handler raising, and a handler crashing all produce a

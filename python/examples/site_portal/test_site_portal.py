@@ -58,9 +58,11 @@ OTHER_OFFERING = "cluster2"
 LEAD = "alice@example.com"
 MEMBER = "bob@example.com"
 
-#: What `cluster1`'s operators agreed with `allocator`: one of our node hours is
-#: four of their GPU hours. Nothing derives this - it is an agreement.
+#: What each resource's operators agreed with `allocator`: one of our node hours
+#: is four of their GPU hours on `cluster1`, two on `cluster2`. Nothing derives
+#: these - they are agreements.
 AGREED = {"GPUHR": 4}
+AGREED_OTHER = {"GPUHR": 2}
 
 
 def make_job(
@@ -101,6 +103,7 @@ def make_job(
 def details(
     template: str = "standard",
     members: dict[str, str] | None = None,
+    allocation: str = "1000 NHR",
     **extra,
 ) -> str:
     """
@@ -110,14 +113,17 @@ def details(
     two portals - "Project Lead", "Project Member" and so on - and the awarding
     portal always sends the **whole** set, so passing a different one here is how
     a membership change arrives.
+
+    `allocation` defaults to this site's own unit, so that the figures checked
+    elsewhere in this suite are not multiplied by a conversion factor. An award
+    *must* carry one - an award of nothing is not an award - which the unit
+    section below checks.
     """
     d = openportal.AwardDetails()
     d.name = extra.pop("name", "My First Award")
     d.project_template = openportal.ProjectTemplate(template)
 
-    allocation = extra.pop("allocation", None)
-    if allocation is not None:
-        d.allocation = openportal.Allocation.from_string(allocation)
+    d.allocation = openportal.Allocation.from_string(allocation)
 
     for email, role in (members or {LEAD: "Project Lead"}).items():
         d.add_member(email, role)
@@ -175,10 +181,8 @@ def _run_all() -> None:
     # same call `POST /offerings` makes.
     check("a fresh portal offers nothing", site_portal.offering_names() == [])
 
-    # `cluster1` has an agreed conversion for GPU hours; `cluster2` has none, so
-    # it can only hold awards allocated in this site's own unit.
     site_portal.add_offering(OFFERING, ["standard", "large"], conversions=AGREED)
-    site_portal.add_offering(OTHER_OFFERING, ["standard"])
+    site_portal.add_offering(OTHER_OFFERING, ["standard"], conversions=AGREED_OTHER)
     check(
         "both resources are now offered",
         site_portal.offering_names() == [OFFERING, OTHER_OFFERING],
@@ -1004,32 +1008,39 @@ def _run_all() -> None:
         f"-> {report.total_usage.in_hours()}",
     )
 
-    # The same figures, on an award with no allocation: nothing declares a unit,
-    # so there is nothing to convert to and ours stand as they are.
-    plain_award = "myaward4.allocator"
-    site_portal.answer(make_job(f"create_project {plain_award} {details()}"))
-    held = store.load(OFFERING, plain_award)
-    approve(held, "myproject4.site", month_start)
-    store.save(held)
-    set_usage("myproject4.site", {a_day_this_month: {LEAD: 12.5}})
-    report = site_portal.answer(
-        make_job(f"get_usage_report {plain_award} this_month")
-    ).result
+    # An award of nothing is not an award. There is no amount to provision
+    # against and - since the allocation is what names the unit - no way to say
+    # what any usage reported for it would mean. All three spellings of "none"
+    # are refused, terminally: the awarding portal has to send an amount.
+    for missing in (
+        '{"name":"My First Award","template":"standard"}',
+        '{"name":"My First Award","template":"standard","allocation":null}',
+        '{"name":"My First Award","template":"standard","allocation":"No allocation"}',
+        '{"name":"My First Award","template":"standard","allocation":"0 GPUHR"}',
+    ):
+        job = site_portal.answer(make_job(f"create_project myaward4.allocator {missing}"))
+        check(
+            f"an award of nothing is rejected ({missing[46:70]}...)",
+            type(job.error) is openportal.ManagedProjectRejectedError,
+            f"-> {job.error}",
+        )
+
     check(
-        "...and an award with no allocation is reported unconverted",
-        abs(report.total_usage.hours - 12.5) < 0.001,
-        f"-> {report.total_usage.in_hours()}",
+        "...and none of them was recorded",
+        store.load(OFFERING, "myaward4.allocator") is None,
     )
 
-    # **The refusal, and why there is no safe default.** `cluster2` has no agreed
-    # factor for GPU hours. Guessing 1.0 would report a quarter of the usage;
-    # guessing 0 would report none; both are well-formed numbers an awarding
-    # portal would believe. So the award is refused when it arrives, terminally,
-    # because the two portals have to agree a factor before it can be held.
+    # **The refusal, and why there is no safe default.** A resource with nothing
+    # agreed cannot hold an award in the awarding portal's units. Guessing 1.0
+    # would report a quarter of this award's usage; guessing 0 would report none;
+    # both are well-formed numbers an awarding portal would believe. So the award
+    # is refused when it arrives, terminally, because what is missing is an
+    # agreement between two organisations rather than anything a retry supplies.
+    site_portal.add_offering("cluster8", ["standard"])
     job = site_portal.answer(
         make_job(
             f"create_project myaward5.allocator {details(allocation='5000 GPUHR')}",
-            offering=OTHER_OFFERING,
+            offering="cluster8",
         )
     )
     check(
@@ -1039,7 +1050,29 @@ def _run_all() -> None:
     )
     check(
         "...and was not recorded",
-        store.load(OTHER_OFFERING, "myaward5.allocator") is None,
+        store.load("cluster8", "myaward5.allocator") is None,
+    )
+    site_portal.remove_offering("cluster8")
+
+    # The same award on `cluster2`, where two of their GPU hours is one of ours,
+    # is answerable - and answered at that factor rather than cluster1's four.
+    site_portal.answer(
+        make_job(
+            f"create_project myaward5.allocator {details(allocation='5000 GPUHR')}",
+            offering=OTHER_OFFERING,
+        )
+    )
+    held = store.load(OTHER_OFFERING, "myaward5.allocator")
+    approve(held, "myproject5.site", month_start)
+    store.save(held)
+    set_usage("myproject5.site", {a_day_this_month: {LEAD: 12.5}})
+    report = site_portal.answer(
+        make_job(f"get_usage_report myaward5.allocator this_month", offering=OTHER_OFFERING)
+    ).result
+    check(
+        "the same usage on another resource converts at that resource's factor",
+        abs(report.total_usage.hours - 25.0) < 0.001,
+        f"-> {report.total_usage.in_hours()} at 2 to 1, against 50 at 4 to 1",
     )
 
     # A unit nobody has agreed gets the same answer, for the same reason - and

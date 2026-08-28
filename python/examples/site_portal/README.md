@@ -585,9 +585,14 @@ Two consequences worth taking seriously:
   Agree a factor, add it, and the award goes through on the allocator's next
   attempt. Refusing an award is cheap; reporting the wrong number for it is not.
 
-* **An award with no allocation declares no unit,** so there is nothing to
-  convert to and your own figures stand as they are. That is the honest reading,
-  and it is what this example does.
+* **An award with no allocation is not an award, so refuse it.** You cannot
+  award nothing: there is no amount to provision against, nothing to enforce,
+  and — since the allocation is what names the unit — no way to say what any
+  usage you later reported would mean. `create_award` answers
+  `ManagedProjectRejectedError`, the same as for a unit with no agreed factor
+  and for the same reason: the missing thing has to come from the awarding
+  portal, not from a default of yours. An allocation of `0` is refused too, on
+  the same grounds.
 
 One display quirk, since it will confuse you once: `Usage` currently holds a
 duration and prints itself in whatever time unit reads best, so 50 hours prints

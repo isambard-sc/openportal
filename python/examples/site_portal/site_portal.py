@@ -161,9 +161,10 @@ def converter_for(offering: str, allocation: openportal.Allocation | None):
     none. There is no safe default for a number whose meaning was never agreed.
     """
     if allocation is None or allocation.is_empty:
-        # No allocation, so no unit was declared, so there is nothing to convert
-        # to and our own figures are the only sensible reading of them.
-        return lambda hours: openportal.Usage.from_hours(hours)
+        # No allocation means no unit, and no award either - `create_award`
+        # refuses one, so this is a record predating that check rather than
+        # something to convert. There is nothing honest to return.
+        return None
 
     factor = conversions_for(offering).get(_canonical(str(allocation.units or "")))
 
@@ -443,6 +444,28 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     if str(details.project_template) not in templates_for(offering):
         raise openportal.ManagedProjectRejectedError(
             f"template '{details.project_template}' is not offered on {offering}"
+        )
+
+    # **Is this an award at all?**
+    #
+    # An award is for a quantity, so an award of nothing is not an award: there
+    # is no amount to provision against, nothing to enforce, and - because the
+    # allocation is what names the unit - no way to say what any usage we later
+    # report would mean. Refuse it rather than accepting an award that cannot be
+    # honoured or reported.
+    #
+    # Terminal, like the template: the awarding portal has to send an amount, and
+    # re-sending the same details without one will fail the same way.
+    if details.allocation is None or details.allocation.is_empty:
+        raise openportal.ManagedProjectRejectedError(
+            "no allocation named in the award - an award has to be for some "
+            "quantity, in units this site has agreed (e.g. '5000 GPUHR')"
+        )
+
+    if not (details.allocation.size or 0) > 0:
+        raise openportal.ManagedProjectRejectedError(
+            f"the allocation '{details.allocation}' awards nothing - an award "
+            "has to be for some quantity"
         )
 
     # **Can we report usage for this award at all?**
@@ -777,10 +800,11 @@ def build_usage_report(
     # portal chose, and that is what its reports mean. Read from the award we
     # hold rather than from the request, because the request does not carry it.
     #
-    # Falling back to an identity conversion cannot happen for an award we
-    # accepted - `create_award` refused any allocation we could not convert -
-    # but a record predating that check would otherwise crash a report, and a
-    # report is not the place to discover it.
+    # This cannot be None for an award we accepted: `create_award` refuses an
+    # award with no allocation, and one whose unit we have no agreed factor for.
+    # A record predating those checks would otherwise crash a report, though, and
+    # a report is not the place to discover it - so it is logged loudly and the
+    # figures go out in our own unit, which is at least a number we can name.
     allocation = openportal.AwardDetails(json.dumps(award.details)).allocation
     convert = converter_for(offering, allocation)
 

@@ -20,8 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   (`{"GPUHR": 4}` — one node hour here is four of their GPU hours), reports are
   converted into the award's unit on the way out, `GET /awards` shows each award
   in both units, and an award whose unit has no agreed factor is refused rather
-  than reported with a guessed one. The units are names on numbers, so an
-  allocation in credits works the same way as one in hours.
+  than reported with a guessed one. An award with no allocation, or one of zero,
+  is refused as well - an award is for a quantity, and the allocation is also
+  what names the unit. The units are names on numbers, so an allocation in
+  credits works the same way as one in hours.
 
 - **The site portal example dispatches both spellings of the award
   instructions.** `create_award` and `create_project` (and the update and remove

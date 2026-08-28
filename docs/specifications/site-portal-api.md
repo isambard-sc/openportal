@@ -195,10 +195,13 @@ corresponding `*_project` form — same instruction, same arguments, same result
 | `get_award` | *(no project equivalent — returns `AwardDetails`)* |
 | `get_awards` / `list_awards` | *(no project equivalent)* |
 
-You may receive **either** spelling: an agent that sends `create_award`
+You may receive **either** spelling. Today an agent that sends `create_award`
 produces the same `create_project` instruction internally, and that canonical
-form is what appears in the `command` field of the Job you fetch. Dispatch on
-the canonical name and you will handle both.
+form is what appears in the `command` field of the Job you fetch. The wire
+vocabulary is moving to the `*_award` spellings before 1.0, so **key your
+dispatch on both names** and route each pair to one handler: a table keyed only
+on the `*_project` forms will start answering "unsupported command" the day the
+agents change, and one keyed only on the `*_award` forms does not work today.
 
 Do not read the `*_project` spellings too literally. `create_project` asks you
 to *attach* an award to a project — usually by creating one, but attaching it to
@@ -305,9 +308,10 @@ waiting.
 
 For half the contract, failing *is* the answer. An award that needs human
 approval, an award whose template you do not offer, an award whose allocation
-exceeds what you will grant — none of these have a `ProjectMapping` to return
-(§4.1), and all of them are ordinary outcomes rather than faults. So the error
-carries the meaning, and the awarding portal acts on it.
+exceeds what you will grant or is denominated in a unit you have not agreed a
+conversion for — none of these have a `ProjectMapping` to return (§4.1), and all
+of them are ordinary outcomes rather than faults. So the error carries the
+meaning, and the awarding portal acts on it.
 
 #### The error classes
 
@@ -363,7 +367,8 @@ award as errored, marks its allocation erred, and writes an audit entry
 (`remote_project_service.py`, `record_award_rejected`). It stops treating the
 award as workable. Raise it when re-asking cannot help: an unknown template, a
 missing entitlement key, an end date already in the past, an allocation above
-what you will ever grant.
+what you will ever grant, no allocation at all, or one in units the two of you
+have never agreed a factor between.
 
 Getting these the wrong way round is costly in both directions. A rejection
 where you meant "pending" strands an award that only needed approving. A pending
@@ -561,12 +566,22 @@ example does this — see its `approve` endpoint.
   string `None` fills the slot. The same form appears in `get_projects` for an
   award that has no project yet because nobody has approved it. What removal
   does and does not end is §4.1.2.
-* **`update_*` is a merge.** Only the fields present in the supplied
-  `AwardDetails` change; absent fields keep their current values. `members` and
-  `allowed_domains`, when present, replace what you hold wholesale rather than
+* **`update_*` carries the whole of `AwardDetails`.** An awarding portal sends
+  every field it holds on every update, repeating what has not changed — merging
+  a partial update against held state proved more trouble than it was worth on
+  both sides. So `template` and `allocation` are present on an update exactly as
+  on a create, and a receiver is entitled to refuse one that omits them.
+
+  `members` and `allowed_domains` replace what you hold wholesale rather than
   adding to it — both are sets the awarding portal owns, so an update naming
-  fewer entries means fewer. An `allowed_domains` of `[]` permits nobody, and is
-  distinct from omitting the field.
+  fewer entries means fewer, and a member absent from an update has been
+  removed. An `allowed_domains` of `[]` permits nobody, and is distinct from
+  omitting the field.
+
+  Older senders may still deliver a partial update, in which case absent fields
+  keep their current values. Do not rely on that: it is being retired, and an
+  absent field is far more likely to be a caller that has not been updated than
+  a deliberate "leave this alone".
 * **`get_projects` returns mappings, `get_awards` returns details.** They are
   easy to confuse and the return types are different shapes.
 * `get_project` is retained for compatibility; new callers use `get_award`.
@@ -576,8 +591,17 @@ The `AwardDetails` object is specified in full in
 portal-to-portal work:
 
 * **`template`** names the kind of thing being asked for, and `key` may be
-  required to prove entitlement to it. Reject a `create_award` whose template
-  you do not offer, with a clear error, rather than provisioning a default.
+  required to prove entitlement to it. **The awarding portal must always name
+  one**, on an update as much as on a create. Reject an award whose template you
+  do not offer, with a clear error, rather than provisioning a default — and
+  reject one that names no template at all, rather than choosing for the caller.
+
+* **`allocation`** is how much has been awarded, and in whose units — see
+  [§4.3](#which-unit-are-the-figures-in) for what that obliges you to do with it.
+  **An award with no allocation is not an award**: there is no quantity to
+  provision against and no unit for any usage you later report, so refuse it
+  rather than accepting something you cannot honour or account for. So too an
+  allocation of zero, and one in units you have no agreed conversion for.
 * **`membership_control`** states whether *you* may change membership or roles
   independently of the awarding portal: `open` (default when absent),
   `members_only`, `roles_only`, `locked`. Honour it — the awarding portal is
@@ -603,12 +627,17 @@ What removal ends is the project's ability to **bill usage against that award**.
 
 ##### Which award a day is billed to
 
-Billing is per day, and the rule is:
+Billing is per day, and the convention — what both implementations do, and what
+an awarding portal will assume unless you have agreed otherwise with it — is:
 
 > A project's usage on a given day is billed to the award it was **last attached
 > to on that day**.
 
-Each clause carries weight:
+It is a convention rather than a rule the protocol enforces: how a site divides a
+day's usage between two awards is its own accounting decision, and nothing on the
+wire checks it. It is a good convention, though, and departing from it means both
+portals' figures disagree with nothing to flag it — so depart from it knowingly,
+and only by agreement. Each clause carries weight:
 
 * **"last attached"** — if the attachment changed during a day, the later
   attachment takes the *whole* day, not the part of it after the handover. So if
@@ -754,6 +783,55 @@ The `<DateRange>` argument is either an explicit range or one of the keywords
   ones hold a given award, and failing the ones that do not would break that
   sweep for no reason.
 
+#### Which unit are the figures in?
+
+The awarding portal's, and they are almost certainly not yours.
+
+An award's `allocation` (§4.1) carries a size and a unit — `5000 GPUHR` — and the
+awarding portal chose that unit. Your own accounting uses whatever unit your site
+counts in. The two of you **agree a factor between them, once, out of band**, and
+everything follows from it:
+
+```
+      N allocator units awarded    ─────►    M site units to spend at the site
+      X site units used            ─────►    Y allocator units reported back
+```
+
+A figure in a `ProjectUsageReport` is a bare number. Nothing in it says whether
+50 is 50 of your units or 50 of theirs, so **a site that reports its own figures
+unconverted is not reporting slightly differently — it is reporting a different
+quantity under the same name**, and both sides will have exchanged a perfectly
+well-formed report. Converting on the way out is the same kind of act as
+remapping the identifiers (§4.1.1), and belongs in the same place: build the
+report from what you recorded, then translate it into what the caller
+understands.
+
+**The units are names on numbers, and less literal than they look.** An awarding
+portal that allocates in "GPU hours" may be handing out a credit unit rather than
+time on a particular card. A site that accounts in "node hours" may run
+heterogeneous clusters, measure a scheduler billing unit underneath, and present
+a hypothetical node-hour equivalent to its users. Both are fine, and neither is
+the other's business: the contract needs two named units and one agreed factor.
+How a site gets from its own unit down to real cores, GPUs and memory is its
+internal accounting, and `breakdown` is where per-component figures go if they
+are wanted at all.
+
+`Allocation` canonicalises the spellings it knows — `NHR`, `CPUHR`, `COREHR`,
+`GPUHR`, `GBHR`, `BHR`, so "5000 GPU hours" and `5000 GPUHR` are one thing — and
+passes anything else through unchanged, which is what lets a pair of portals
+agree a unit of their own. Nothing here requires the unit to be a duration; an
+allocation denominated in money or cloud credits works the same way.
+
+Two obligations follow:
+
+* **Convert every figure you report into the award's unit**, per award, because
+  two awards on the same project may be denominated differently.
+* **Refuse an award in a unit you have no agreed factor for.** There is no safe
+  default: one-for-one silently misreports by the factor, and zero reports
+  nothing, and both are numbers the awarding portal will believe. What is missing
+  is an agreement between two organisations, which no retry supplies, so
+  `ManagedProjectRejectedError` is the honest answer (§3.3).
+
 #### `is_complete` decides whether you are asked again
 
 `DailyProjectUsageReport` carries an `is_complete` flag, and
@@ -867,14 +945,17 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 11. Answer within 30 seconds, not the two-minute expiry; serve slow reports from
     cache (§3.4).
 12. Report usage against the identifier you were asked about, not your own
-    (§4.1.1, §4.3).
+    (§4.1.1, §4.3), and in the unit the award was allocated in, not your own -
+    agreeing that factor out of band, and refusing an award whose unit you have
+    no factor for (§4.3).
 13. Treat `remove_award` as *detach*, not delete: keep the project, and keep the
     award's accrued usage reportable for the days it was attached (§4.1.2).
 14. Set `is_complete` deliberately, and never on a month you have no figures
     for — an empty report is complete vacuously, and the caller will believe it
     and stop asking (§4.3).
-15. Handle `membership_control` and reject unknown `template` values (§4.1), and
-    populate `AwardDetails.members` (§4.2).
+15. Handle `membership_control`, reject an award with an unknown `template` or
+    with none, and reject one with no `allocation` - an award is for a quantity
+    (§4.1). Populate `AwardDetails.members` (§4.2).
 16. Fetch and acknowledge notifications (§5).
 
 ---
@@ -896,9 +977,11 @@ The bridge tries 3 times at 2-second intervals, then logs and drops. Configure
 ### 7.1 The example portal
 
 [`python/examples/site_portal/`](../../python/examples/site_portal/) implements this
-document — every instruction, the approval path, the retry contract, the
-answer-everything guarantee — in about 400 lines of commented Python, with a
-test suite that drives each handler without needing a bridge. It is written to be
+document — every instruction, the approval path, the retry contract, the unit
+conversion, the answer-everything guarantee — in a few hundred lines of Python
+per file, most of it comments explaining why, with a test suite that drives each
+handler without needing a bridge and a script that stands the whole two-portal
+arrangement up on one machine. It is written to be
 read rather than deployed, and its README is explicit about what a production
 portal would have to add.
 

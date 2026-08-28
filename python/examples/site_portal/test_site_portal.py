@@ -58,6 +58,12 @@ OTHER_OFFERING = "cluster2"
 LEAD = "alice@example.com"
 MEMBER = "bob@example.com"
 
+#: One node of `cluster1`: four GPUs, so one node hour is four GPU hours.
+NODE = {"cpus": 2, "cores_per_cpu": 64, "gpus": 4, "memory_gb": 512, "billing": 100}
+
+#: One node of `cluster2`, which has none - so GPU hours are unaccountable there.
+CPU_ONLY_NODE = {"cpus": 2, "cores_per_cpu": 64, "gpus": 0, "memory_gb": 256, "billing": 50}
+
 
 def make_job(
     instruction: str,
@@ -110,6 +116,10 @@ def details(
     d = openportal.AwardDetails()
     d.name = extra.pop("name", "My First Award")
     d.project_template = openportal.ProjectTemplate(template)
+
+    allocation = extra.pop("allocation", None)
+    if allocation is not None:
+        d.allocation = openportal.Allocation.from_string(allocation)
 
     for email, role in (members or {LEAD: "Project Lead"}).items():
         d.add_member(email, role)
@@ -167,8 +177,10 @@ def _run_all() -> None:
     # same call `POST /offerings` makes.
     check("a fresh portal offers nothing", site_portal.offering_names() == [])
 
-    site_portal.add_offering(OFFERING, ["standard", "large"])
-    site_portal.add_offering(OTHER_OFFERING, ["standard"])
+    # `cluster1` has GPUs, `cluster2` does not - which is what decides whether an
+    # award allocated in GPU hours can be held on each.
+    site_portal.add_offering(OFFERING, ["standard", "large"], node=NODE)
+    site_portal.add_offering(OTHER_OFFERING, ["standard"], node=CPU_ONLY_NODE)
     check(
         "both resources are now offered",
         site_portal.offering_names() == [OFFERING, OTHER_OFFERING],
@@ -970,6 +982,107 @@ def _run_all() -> None:
 
     for stale in store.all_awards():
         store.delete(stale.offering, stale.project_id)
+
+    print("\n-- the allocation decides the unit usage is reported in ---------")
+
+    # An award allocated in GPU hours, on the resource whose nodes have four of
+    # them. What we hold is node hours; what the awarding portal must be told is
+    # GPU hours, and one node hour is four of those.
+    gpu_award = "myaward3.allocator"
+    site_portal.answer(
+        make_job(f"create_project {gpu_award} {details(allocation='5000 GPUHR')}")
+    )
+    held = store.load(OFFERING, gpu_award)
+    approve(held, "myproject3.site", month_start)
+    store.save(held)
+    set_usage("myproject3.site", {a_day_this_month: {LEAD: 12.5}})
+
+    report = site_portal.answer(
+        make_job(f"get_usage_report {gpu_award} this_month")
+    ).result
+    check(
+        "12.5 node hours are reported as 50 GPU hours",
+        abs(report.total_usage.hours - 50.0) < 0.001,
+        f"-> {report.total_usage.in_hours()}",
+    )
+
+    # The same figures, on an award with no allocation: nothing declares a unit,
+    # so there is nothing to convert to and ours stand as they are.
+    plain_award = "myaward4.allocator"
+    site_portal.answer(make_job(f"create_project {plain_award} {details()}"))
+    held = store.load(OFFERING, plain_award)
+    approve(held, "myproject4.site", month_start)
+    store.save(held)
+    set_usage("myproject4.site", {a_day_this_month: {LEAD: 12.5}})
+    report = site_portal.answer(
+        make_job(f"get_usage_report {plain_award} this_month")
+    ).result
+    check(
+        "...and an award with no allocation is reported unconverted",
+        abs(report.total_usage.hours - 12.5) < 0.001,
+        f"-> {report.total_usage.in_hours()}",
+    )
+
+    # **The refusal that stops a silent zero.** `cluster2` has no GPUs, so one
+    # node hour is nought GPU hours there: every report for such an award would
+    # be a well-formed 0.000, which an awarding portal would believe. So the
+    # award is refused when it arrives, terminally, because no amount of asking
+    # again grows a GPU.
+    job = site_portal.answer(
+        make_job(
+            f"create_project myaward5.allocator {details(allocation='5000 GPUHR')}",
+            offering=OTHER_OFFERING,
+        )
+    )
+    check(
+        "an award in units a resource cannot account in is rejected",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+    check(
+        "...and was not recorded",
+        store.load(OTHER_OFFERING, "myaward5.allocator") is None,
+    )
+
+    # A unit nobody has heard of gets the same answer, for the same reason.
+    job = site_portal.answer(
+        make_job(f"create_project myaward6.allocator {details(allocation='5000 WIDGETS')}")
+    )
+    check(
+        "an award in an unknown unit is rejected too",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+
+    # An award in the site's own unit needs no node at all.
+    site_portal.add_offering("cluster9", ["standard"])
+    job = site_portal.answer(
+        make_job(
+            f"create_project myaward7.allocator {details(allocation='100 NHR')}",
+            offering="cluster9",
+        )
+    )
+    check(
+        "an award in the site's own unit needs no node described",
+        type(job.error) is openportal.ManagedProjectPendingError,
+        f"-> {job.error}",
+    )
+    job = site_portal.answer(
+        make_job(
+            f"create_project myaward8.allocator {details(allocation='100 GPUHR')}",
+            offering="cluster9",
+        )
+    )
+    check(
+        "...but any other unit is refused until it is",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+    site_portal.remove_offering("cluster9")
+
+    for stale in store.all_awards():
+        if stale.project_id != AWARD:
+            store.delete(stale.offering, stale.project_id)
 
     print("\n-- withdrawing a resource --------------------------------------")
 

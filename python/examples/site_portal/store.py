@@ -193,6 +193,22 @@ class Offering:
         return sorted(self.raw.get("templates", []))
 
     @property
+    def node(self) -> dict[str, Any] | None:
+        """
+        One node of this resource, or `None` if the site has not described it.
+
+        This is the site's **unit conversion table**, and it is per-resource
+        because the hardware is: `cpus`, `cores_per_cpu`, `gpus`, `memory_gb`
+        and `billing` for one node are all a conversion factor from this site's
+        own unit into one of the units an awarding portal might allocate in. A
+        node with four GPUs makes one node hour worth four GPU hours; a node
+        with none makes GPU hours unaccountable here, which is a thing to refuse
+        an award over rather than to report zero for. See
+        `site_portal.converter_for`.
+        """
+        return self.raw.get("node")
+
+    @property
     def since(self) -> datetime.date | None:
         """The day we started advertising it, for the operator's benefit."""
         return _as_date(self.raw.get("since"))
@@ -222,14 +238,22 @@ def save_offerings(offerings: dict[str, Offering]) -> None:
     )
 
 
-def add_offering(name: str, templates: list[str], on: datetime.date) -> Offering:
+def add_offering(
+    name: str,
+    templates: list[str],
+    on: datetime.date,
+    node: dict[str, Any] | None = None,
+) -> Offering:
     """
-    Start advertising a resource, or change the templates one accepts.
+    Start advertising a resource, or change the templates or node of one.
 
     An upsert rather than an insert, and deliberately so: the operator API is
     retried and re-run like everything else here, and "add the cluster I already
     have" should not be an error. `since` is kept from the first time, because
     that is when we started offering it.
+
+    An omitted `node` keeps the one already recorded, so the templates can be
+    changed without restating the hardware.
     """
     offerings = load_offerings()
     existing = offerings.get(name)
@@ -238,6 +262,11 @@ def add_offering(name: str, templates: list[str], on: datetime.date) -> Offering
         "templates": sorted(set(templates)),
         "since": (existing.since or on).isoformat() if existing else on.isoformat(),
     }
+
+    node = node if node is not None else (existing.node if existing else None)
+
+    if node is not None:
+        raw["node"] = node
 
     offerings[name] = Offering(_safe(name, "offering"), raw)
     save_offerings(offerings)

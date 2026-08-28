@@ -193,15 +193,28 @@ hides most of what an offering is for:
 ```bash
 curl -X POST localhost:18780/offerings \
      -H 'content-type: application/json' \
-     -d '{"name": "cluster1", "templates": ["standard", "large"]}'
+     -d '{"name": "cluster1",
+          "templates": ["standard", "large"],
+          "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
+                   "memory_gb": 512, "billing": 100}}'
 
 curl -X POST localhost:18780/offerings \
      -H 'content-type: application/json' \
-     -d '{"name": "cluster2", "templates": ["standard"]}'
+     -d '{"name": "cluster2",
+          "templates": ["standard"],
+          "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 0,
+                   "memory_gb": 256, "billing": 50}}'
 ```
 
 That registers two clusters, and names the templates the allocator may ask for
 on each: `standard` and `large` on `cluster1`, only `standard` on `cluster2`.
+
+`node` describes one node of each resource. It looks like an odd thing to tell a
+portal, and it is doing something specific: it is the whole of this site's
+**unit conversion layer**, which step 6 explains. `cluster1`'s nodes have four
+GPUs, so one of its node hours is four GPU hours; `cluster2`'s have none, so GPU
+hours cannot be expressed there at all. It is optional, and leaving it out is a
+position rather than an oversight — see step 6.
 
 Running get on the same URL shows what is offered:
 
@@ -218,6 +231,9 @@ returns
                 "templates": ["large", "standard"],
                 "since": "2026-08-27",
                 "awards": 0,
+                "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
+                         "memory_gb": 512, "billing": 100},
+                "units": ["NHR", "CPUHR", "COREHR", "GPUHR", "GBHR", "BHR"],
                 "destinations": ["cluster1.site.allocator"],
                 "registered": true},
                ...]}
@@ -238,6 +254,11 @@ portal is offered to the `allocator` portal.
 `allocator` *addresses* `allocator.site.cluster1`, because a destination starts
 with the sender and ends with the thing being addressed. The middle element is
 your own portal either way.
+
+`units` is derived rather than stored: it is the allocation units an award on
+this resource can be held in, which follows from the node above. `cluster2`,
+having no GPUs, does not list `GPUHR` — and an award allocated in GPU hours
+there is refused rather than answered with zero (step 6).
 
 You can remove an offering via `DELETE /offerings/cluster1`.
 
@@ -292,7 +313,10 @@ It is asking to create an award (via the `create_award` instruction)
 where it is telling you that it refers to the award as `myaward1.allocator`.
 
 It is also providing some metadata about the award, including its name,
-the template it is against, and a list of members and their roles.
+the template it is against, its allocation, and a list of members and their
+roles. The allocation — `"allocation": "5000 GPUHR"` — is how much has been
+awarded and, just as importantly, in whose units. Step 6 is about what that
+obliges you to do with it.
 
 > [!NOTE]
 > The `*_award` instructions used throughout this README are the spellings to
@@ -437,6 +461,19 @@ curl -X PUT localhost:18780/projects/myproject1.site/usage \
      -d "{\"hours\": {\"$TODAY\": {\"alice@example.com\": 12.5}}}"
 ```
 
+Two things about those 12.5 hours. The **day** has to be one the award was
+attached on: a day's usage is billed to whichever award the project was attached
+to during it (step 10), so a day before the attachment belongs to no award and
+appears in no report — which looks like the push having failed when it has not.
+The reply names the award the day will be billed to, so it can be checked rather
+than assumed.
+
+And the **unit** is your own — node hours here (`site_portal.SITE_UNIT`) — never
+the unit an award was allocated in. Push what your accounting produced and let
+the report convert it per award: which award a day belongs to is worked out when
+the report is built, and so is the unit it must be expressed in. Step 6 covers
+that, and it is the part of this contract easiest to get quietly wrong.
+
 Or, if your parser already produces OpenPortal types, push a complete
 `ProjectUsageReport`:
 
@@ -479,6 +516,67 @@ report takes longer, then use a background reporter to compute it, and serve
 it from cache when it is ready. All OpenPortal calls are designed to be
 idempotent and re-tryable. The allocator portal will keep re-trying the
 request until it gets a valid response.
+
+#### In whose units? The award's, not yours
+
+There is one thing left that the report does not say out loud, and getting it
+wrong is expensive precisely because nothing complains.
+
+The award carries an **allocation**, and the allocator chose its units:
+
+```json
+{"name": "My First Award", "template": "standard", "allocation": "5000 GPUHR",
+ "members": {"alice@example.com": "Project Lead"}}
+```
+
+`5000 GPUHR` is five thousand GPU hours. `GPUHR`, `NHR`, `CPUHR`, `COREHR`,
+`GBHR` and `BHR` are the spellings OpenPortal canonicalises to, so "5000 GPU
+hours", "5000 gpuhr" and `5000 GPUHR` all arrive as the same thing.
+
+**That unit is the unit every usage report for this award is read in.** A figure
+in a report is a bare duration — 50 hours — with nothing attached saying what
+kind of hour it is. The allocator asked for GPU hours because that is what it
+allocated, so 50 means 50 GPU hours, and if your accounting produced node hours
+you have just reported a number roughly four times too small under a name that
+looks completely correct. Nothing on the wire can catch that: both sides
+exchanged a well-formed report.
+
+So a site has to convert, and that means keeping the factors. This example keeps
+them in the one place they come from — the hardware:
+
+| Your unit | Their unit | One of yours is | From |
+|---|---|---|---|
+| node hour | GPU hour | `node.gpus` GPU hours | 4 on `cluster1` |
+| node hour | core hour | `node.cpus × node.cores_per_cpu` core hours | 128 |
+| node hour | GB hour | `node.memory_gb` GB hours | 512 |
+| node hour | billing hour | `node.billing` billing hours | 100 |
+
+which is why `POST /offerings` takes a `node` (step 1). Push 12.5 node hours in
+for an award allocated in `GPUHR` on `cluster1`, ask for the report, and you get
+50 hours back. `site_portal.SITE_UNIT` is the unit *your* figures arrive in, and
+`site_portal.converter_for` is the whole conversion; a production portal would
+have a table with more in it than one node per resource, but not a different
+shape. Waldur keeps the same kind of table on its side.
+
+Two consequences worth taking seriously:
+
+* **A unit you cannot express is a reason to refuse the award.** `cluster2` has
+  no GPUs, so one node hour is *nought* GPU hours there: the arithmetic does not
+  fail, it quietly yields zero, and every report for such an award would come
+  back as a beautifully formatted `0.000 hours` that the allocator would believe
+  and — once a month was finalised — stop asking about. So `create_award` refuses
+  an allocation it cannot account in, with `ManagedProjectRejectedError`, which
+  is terminal because no amount of asking again grows a GPU. Refusing an award is
+  cheap; reporting zero for it is not.
+
+* **An award with no allocation declares no unit,** so there is nothing to
+  convert to and your own figures stand as they are. That is the honest reading,
+  and it is what this example does.
+
+One display quirk, since it will confuse you once: `Usage` prints itself in
+whatever time unit reads best, so 50 hours prints as `2.083 days`. The number is
+right and the word is about duration, not about GPUs. Read `usage.hours` or
+`usage.in_hours()` when you care about the allocation's unit.
 
 ### 7. Finalised versus unfinalised reports
 
@@ -692,7 +790,7 @@ rather than silently re-attaching it: attaching is an operator's decision, and i
 may well be a *different* project this time. Its earlier attachment periods are
 kept, because those days are still its days.
 
-## The ten things worth taking away
+## The eleven things worth taking away
 
 Each of these is commented at the point it matters in the code, but they are the
 reason the example exists.
@@ -755,7 +853,15 @@ reason the example exists.
    an empty report is complete *vacuously* — the one way to make that promise by
    accident.
 
-10. **`remove_award` detaches an award; it never deletes a project.** And it
+10. **The allocation names the unit your usage is reported in.** A figure in a
+    usage report is a bare duration; what makes 50 mean 50 GPU hours rather than
+    50 node hours is the `allocation` on the award, chosen by the awarding
+    portal. So convert your own figures on the way out, keep the factors
+    somewhere they follow from the hardware, and refuse an award whose unit this
+    resource cannot express — because that conversion does not fail, it returns
+    zero, and a zero is believed.
+
+11. **`remove_award` detaches an award; it never deletes a project.** And it
     does not end the award's history: it still owns every day up to and
     including its last attached day, so keep the record and keep those days
     reportable. Billing is per-day and the day belongs to whichever award was

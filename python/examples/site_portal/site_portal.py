@@ -76,9 +76,125 @@ def templates_for(offering: str) -> set[str]:
     return set(found.templates) if found else set()
 
 
-def add_offering(name: str, templates: list[str]) -> store.Offering:
+# --------------------------------------------------------------------------
+# Units: what a figure in a usage report means
+# --------------------------------------------------------------------------
+
+#: The unit this site does its own accounting in, and therefore the unit the
+#: figures pushed to `PUT /projects/{id}/usage` are in.
+#:
+#: Node hours here. Yours might be core hours, or a billing unit of your own -
+#: what matters is that it is *one* unit, decided once, and that everything
+#: arriving from your accounting is in it.
+SITE_UNIT = "NHR"
+
+#: Every unit an awarding portal may allocate in, and what one node hour is
+#: worth in it. The value is the attribute of the resource's node that gives the
+#: factor, and the `Allocation` method that applies it.
+#:
+#: This is the whole of the conversion layer, and it is small because the
+#: `Allocation` type already does the arithmetic: one node hour is
+#: `node.gpus` GPU hours, `node.cores` core hours, `node.memory_gb` GB hours,
+#: and so on. A site with heterogeneous hardware would key this by more than the
+#: offering, but the shape is the same.
+UNITS = {
+    "NHR": (None, "to_node_hours"),
+    "CPUHR": ("cpus", "to_cpu_hours"),
+    "COREHR": ("cores", "to_core_hours"),
+    "GPUHR": ("gpus", "to_gpu_hours"),
+    "GBHR": ("memory_gb", "to_gb_hours"),
+    "BHR": ("billing", "to_billing_hours"),
+}
+
+
+def node_for(offering: str) -> openportal.Node | None:
+    """One node of a resource, as the operator described it, or `None`."""
+    found = store.load_offerings().get(offering)
+    described = found.node if found else None
+
+    if not described:
+        return None
+
+    return openportal.Node.construct(
+        int(described.get("cpus", 0)),
+        int(described.get("cores_per_cpu", 0)),
+        int(described.get("gpus", 0)),
+        int(float(described.get("memory_gb", 0)) * 1024),
+        int(described.get("billing", 0)),
+    )
+
+
+def converter_for(offering: str, allocation: openportal.Allocation | None):
     """
-    Start advertising a resource, or change the templates it accepts.
+    Return a function turning *our* hours into the unit an award is allocated in.
+
+    **This is the piece that decides what the numbers in a usage report mean.**
+    A `Usage` is a bare duration; nothing in it says whether 50 means 50 node
+    hours or 50 GPU hours. The unit is the one the awarding portal allocated in,
+    so a site that reports its own figures unconverted is not reporting slightly
+    differently - it is reporting a different quantity under the same name, and
+    nothing on the wire will catch it.
+
+    Returns `None` when the conversion is not possible on this resource, which
+    the caller must treat as "we cannot hold this award" rather than as zero. And
+    zero is exactly what the arithmetic would otherwise produce: one node hour is
+    `node.gpus` GPU hours, so on a machine with no GPUs an award allocated in
+    GPU hours would be answered with a perfectly formatted **0.000 hours** every
+    cycle. Refusing the award is the only honest option, and it has to be done
+    here because no type below will raise.
+    """
+    if allocation is None or allocation.is_empty:
+        # No allocation, so no unit was declared, so there is nothing to convert
+        # to and the figures stand as they are. Our own unit is the only sensible
+        # reading of them.
+        return lambda hours: openportal.Usage.from_hours(hours)
+
+    units = str(allocation.units or "").upper()
+    entry = UNITS.get(units)
+
+    if entry is None:
+        # A unit we have never heard of. `Allocation.canonicalize` passes
+        # anything it does not recognise through unchanged, so this is a real
+        # possibility rather than a defensive branch.
+        return None
+
+    attribute, method = entry
+
+    if units == SITE_UNIT:
+        # Already ours. Convert nothing rather than round-tripping through a
+        # node we may not even have been told about.
+        return lambda hours: openportal.Usage.from_hours(hours)
+
+    node = node_for(offering)
+
+    if node is None:
+        return None
+
+    # The factor itself. Zero means this resource cannot express that unit at
+    # all - no GPUs, no billing weight - and multiplying by it would silently
+    # report nothing.
+    if not float(getattr(node, attribute, 0) or 0):
+        return None
+
+    def convert(hours: float) -> openportal.Usage:
+        ours = openportal.Allocation.from_node_hours(openportal.Usage.from_hours(hours))
+        return getattr(ours, method)(node)
+
+    return convert
+
+
+#: The fields describing one node. `cpus` and `cores_per_cpu` together give the
+#: core count, so a site asked for core hours needs both.
+NODE_FIELDS = ("cpus", "cores_per_cpu", "gpus", "memory_gb", "billing")
+
+
+def add_offering(
+    name: str,
+    templates: list[str],
+    node: dict[str, float] | None = None,
+) -> store.Offering:
+    """
+    Start advertising a resource, or change the templates or the node it has.
 
     **`templates` is required, and there is deliberately no default.** What a
     resource can be asked for is a decision about that resource - which
@@ -88,10 +204,18 @@ def add_offering(name: str, templates: list[str]) -> store.Offering:
     policy: it would simply see the template accepted and make awards against
     it.
 
+    `node` describes one node of the resource, and every unit conversion is
+    derived from it (`converter_for`). It is optional, and omitting it is a
+    position rather than an oversight: a resource with no node described can only
+    account in `SITE_UNIT`, so an award allocated in any other unit is refused
+    when it arrives. Describe the hardware and those awards become answerable.
+    An omitted `node` on a later call keeps the one already recorded.
+
     Raises `ValueError` on a name that could not survive being part of a
-    destination, and on an empty or blank template list - an offering that
+    destination, on an empty or blank template list - an offering that
     accepts no template rejects every award made through it, which is a
-    misconfiguration rather than a policy.
+    misconfiguration rather than a policy - and on a node field that is not a
+    number.
     """
     if not OFFERING_NAME.match(name or ""):
         raise ValueError(
@@ -107,7 +231,24 @@ def add_offering(name: str, templates: list[str]) -> store.Offering:
             'e.g. ["standard", "large"] - there is no default'
         )
 
-    return store.add_offering(name, templates, datetime.date.today())
+    if node is not None:
+        unknown = sorted(set(node) - set(NODE_FIELDS))
+
+        if unknown:
+            raise ValueError(
+                f"a node is described by {', '.join(NODE_FIELDS)}; "
+                f"not {', '.join(unknown)}"
+            )
+
+        try:
+            node = {field: float(node.get(field, 0) or 0) for field in NODE_FIELDS}
+        except (TypeError, ValueError):
+            raise ValueError("every node field must be a number")
+
+        if any(value < 0 for value in node.values()):
+            raise ValueError("a node cannot have a negative number of anything")
+
+    return store.add_offering(name, templates, datetime.date.today(), node)
 
 
 def remove_offering(name: str) -> store.Offering | None:
@@ -283,6 +424,23 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     if str(details.project_template) not in templates_for(offering):
         raise openportal.ManagedProjectRejectedError(
             f"template '{details.project_template}' is not offered on {offering}"
+        )
+
+    # **Can we report usage for this award at all?**
+    #
+    # The allocation names the unit - "5000 GPUHR" - and that unit is what every
+    # usage report for this award will be read in. If this resource cannot
+    # express it, saying so now is the only honest answer: the alternative is to
+    # accept the award and then answer every `get_usage_report` with a
+    # well-formed zero (see `converter_for`).
+    #
+    # Terminal rather than pending, because no amount of asking again changes
+    # what hardware we have. §3.3 lists an allocation we will never grant as a
+    # legitimate rejection; this is the same shape of answer.
+    if converter_for(offering, details.allocation) is None:
+        raise openportal.ManagedProjectRejectedError(
+            f"this site cannot account in '{details.allocation}' on {offering} - "
+            f"it reports in {SITE_UNIT}, and {offering} has no conversion to those units"
         )
 
     award = store.load(offering, project_id)
@@ -594,6 +752,29 @@ def build_usage_report(
     # choice affects only the intermediate form.
     local_project = openportal.ProjectIdentifier(award.projects_ever_attached[-1])
 
+    # **The unit every figure below is expressed in.** Our accounting produced
+    # them in `SITE_UNIT`; the award was allocated in whatever the awarding
+    # portal chose, and that is what its reports mean. Read from the award we
+    # hold rather than from the request, because the request does not carry it.
+    #
+    # Falling back to an identity conversion cannot happen for an award we
+    # accepted - `create_award` refused any allocation we could not convert -
+    # but a record predating that check would otherwise crash a report, and a
+    # report is not the place to discover it.
+    allocation = openportal.AwardDetails(json.dumps(award.details)).allocation
+    convert = converter_for(offering, allocation)
+
+    if convert is None:
+        logger.error(
+            "award %s on %s is allocated in '%s', which this site cannot "
+            "account in - reporting our own %s unconverted",
+            project_id,
+            offering,
+            allocation,
+            SITE_UNIT,
+        )
+        convert = lambda hours: openportal.Usage.from_hours(hours)  # noqa: E731
+
     report = openportal.ProjectUsageReport(local_project)
     months_with_days: set[str] = set()
     final: set[str] = set()
@@ -630,7 +811,10 @@ def build_usage_report(
                 report.add_mapping(
                     openportal.UserMapping(f"{user}:{email}:{local_project}")
                 )
-                daily.add_usage(email, openportal.Usage.from_hours(float(hours)))
+                # ...and the figure is converted out of our unit into the one
+                # the award was allocated in. `create_award` refused any award
+                # we could not do this for, so `convert` is never None here.
+                daily.add_usage(email, convert(float(hours)))
 
             # Completeness is a *decision*, not a date comparison. A day is
             # reported complete only when the site has declared its month final

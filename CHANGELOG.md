@@ -13,6 +13,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other
   dependencies, and only the *agents* it talks to have to be built.
 
+- **The site portal example honours the award's allocation units.** An award
+  carries an allocation in the awarding portal's units (`5000 GPUHR`), and that
+  unit is what every usage report for it is read in - a `Usage` is a bare
+  duration and says nothing about what kind of hour it holds. The example now
+  records one node per offered resource (`POST /offerings` takes a `node`), uses
+  it to convert its own node hours into the award's unit when a report is built,
+  and **refuses an award whose unit the resource cannot express** - one node hour
+  is nought GPU hours on a machine with no GPUs, so the arithmetic yields a
+  well-formed zero that an awarding portal would believe. `GET /offerings` now
+  reports each resource's node and the units awards on it can be held in.
+
 - **The site portal example dispatches both spellings of the award
   instructions.** `create_award` and `create_project` (and the update and remove
   pairs) are one instruction under two names, so its `HANDLERS` table maps both

@@ -774,6 +774,7 @@ def instructions() -> None:
     #: the details blob.
     details = (
         '{"name":"My First Award","template":"standard",'
+        '"allocation":"5000 GPUHR",'
         '"members":{"alice@example.com":"Project Lead"}}'
     )
     member = "alice@example.com"
@@ -784,6 +785,7 @@ def instructions() -> None:
     #: AwardDetails, not just the parts that changed.
     updated = (
         '{"name":"My First Award","template":"standard",'
+        '"allocation":"5000 GPUHR",'
         '"members":{"alice@example.com":"Project Lead",'
         '"bob@example.com":"Project Member"}}'
     )
@@ -805,12 +807,17 @@ Everything is up.
 
      curl -X POST http://127.0.0.1:{APP_PORT}/offerings \\
           -H 'content-type: application/json' \\
-          -d '{{"name": "{OFFERING}", "templates": ["standard", "large"]}}'
+          -d '{{"name": "{OFFERING}", "templates": ["standard", "large"],
+               "node": {{"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
+                        "memory_gb": 512, "billing": 100}}}}'
 
    That registers `{OFFERING}.{SITE.name}.{ALLOCATOR.name}` with the agents: a
    virtual agent on `{SITE.name}` that `{ALLOCATOR.name}` may address directly.
    `templates` is required and has no default - which templates a resource
    accepts is the site's decision, so it has to be stated rather than guessed.
+   `node` describes one node of it, and is where every unit conversion comes
+   from: four GPUs per node makes one node hour worth four GPU hours, which is
+   what step 6 turns on.
    The other two endpoints are
 
      curl http://127.0.0.1:{APP_PORT}/offerings                    # what is offered
@@ -864,9 +871,12 @@ Everything is up.
           -H 'content-type: application/json' \\
           -d "{{\\"hours\\": {{\\"$TODAY\\": {{\\"{member}\\": 12.5}}}}}}"
 
-   Two things to notice. The figures are filed under `myproject1.{SITE.name}`,
+   Three things to notice. The figures are filed under `myproject1.{SITE.name}`,
    because your accounting produces numbers for your own projects and has never
    heard of `{award}` - the mapping from step 4 is what joins the two.
+
+   They are also in *this site's* unit - node hours - and not in the GPU hours
+   the award was allocated in. Step 6 is where that is converted.
 
    And the day has to be **today**, which is why it comes from `date` rather than
    being typed. A day's usage is billed to whichever award the project was
@@ -896,12 +906,25 @@ Everything is up.
 
      {award}
      <today>
-       alice.{award}: 12.500 hours
-     Daily total: 12.500 hours
+       alice.{award}: 2.083 days
+     Daily total: 2.083 days
 
-   The usage went in against `{member}` on `myproject1.{SITE.name}`
-   and comes out as `alice.{award}` - while `user_mapping` still carries the
-   email, because that is the same person either way.
+   Two translations happened there, and both matter.
+
+   The **name**: usage went in against `{member}` on `myproject1.{SITE.name}` and
+   comes out as `alice.{award}`, while `user_mapping` still carries the email,
+   because that is the same person either way.
+
+   The **unit**: 12.5 went in and 50 came out. The award is allocated in
+   `5000 GPUHR`, one node hour on `{OFFERING}` is four GPU hours (its nodes have
+   four), so 12.5 node hours *is* 50 GPU hours. That is the figure the awards
+   portal wants, in the unit it allocated in. `2.083 days` is 50 hours printed
+   the way `Usage` likes to print itself - `report.total_usage.in_hours()` says
+   `50.000 hours`, and `.hours` gives the number.
+
+   Had the award been placed on a resource with no GPUs, this site would have
+   refused it outright rather than reporting a well-formed `0.000 hours` for
+   ever. README step 6 is where that is explained.
 
    `complete?` is False, and it decides whether the awards portal asks about this
    month again. Declaring a month settled is what stops it:

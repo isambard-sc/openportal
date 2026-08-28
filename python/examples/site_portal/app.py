@@ -283,10 +283,19 @@ class OfferingRequest(BaseModel):
     site's decision about that resource, and defaulting it would publish a guess
     under the site's name that an awarding portal could not tell from a policy.
     Name every template the resource really offers.
+
+    `node` describes one node of the resource — `cpus`, `cores_per_cpu`, `gpus`,
+    `memory_gb`, `billing` — and is this portal's whole unit-conversion layer. An
+    award allocated in GPU hours can only be reported on a resource whose nodes
+    have GPUs, and how many decides the factor. It is optional: without it the
+    resource can only account in the site's own unit, and an award allocated in
+    any other is refused when it arrives. Omitting it on a later call keeps the
+    node already recorded, so templates can be changed on their own.
     """
 
     name: str
     templates: list[str]
+    node: dict[str, float] | None = None
 
 
 def _offering_json(
@@ -304,6 +313,18 @@ def _offering_json(
         "name": offering.name,
         "templates": offering.templates,
         "since": offering.since.isoformat() if offering.since else None,
+        # One node of this resource, and the allocation units that follow from
+        # it. A unit absent from `units` is one an award cannot be held in here:
+        # `create_award` refuses it rather than reporting zero for it.
+        "node": offering.node,
+        "units": [
+            unit
+            for unit in site_portal.UNITS
+            if site_portal.converter_for(
+                offering.name, openportal.Allocation.from_string(f"1 {unit}")
+            )
+            is not None
+        ],
         # How many awards this resource holds. Shown because it is what makes
         # withdrawing one consequential: those awards stay on record and stop
         # being reachable, rather than being deleted (§4.1.2).
@@ -354,7 +375,10 @@ async def add_offering(request: OfferingRequest):
     ```bash
     curl -X POST localhost:8080/offerings \\
          -H 'content-type: application/json' \\
-         -d '{"name": "cluster1", "templates": ["standard", "large"]}'
+         -d '{"name": "cluster1",
+              "templates": ["standard", "large"],
+              "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
+                       "memory_gb": 512, "billing": 100}}'
     ```
 
     An upsert, and idempotent: posting a resource we already offer updates its
@@ -366,7 +390,9 @@ async def add_offering(request: OfferingRequest):
     an awarding portal has been retrying can land on the very next attempt.
     """
     try:
-        offering = site_portal.add_offering(request.name, request.templates)
+        offering = site_portal.add_offering(
+            request.name, request.templates, request.node
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -667,6 +693,13 @@ async def push_usage(local_project_id: str, push: UsagePush):
     is the source of truth, your parsers produce the numbers, and this endpoint
     is how they reach the portal. `get_usage_report` then serves them inside the
     thirty seconds it has (§3.4).
+
+    **The figures are in your own unit** - `site_portal.SITE_UNIT`, node hours
+    here - and never in the unit an award was allocated in. Push what your
+    accounting produced and let `build_usage_report` convert it per award: which
+    award a day belongs to is derived when the report is built (§4.1.2), and so
+    is the unit it has to be expressed in, and neither is knowable at the moment
+    a figure arrives.
     """
     # Deliberately *not* `load_by_local_id` alone. A project whose award has
     # just been removed still needs its last days pushed in - the removed award

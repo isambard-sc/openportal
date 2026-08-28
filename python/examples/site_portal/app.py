@@ -284,18 +284,18 @@ class OfferingRequest(BaseModel):
     under the site's name that an awarding portal could not tell from a policy.
     Name every template the resource really offers.
 
-    `node` describes one node of the resource — `cpus`, `cores_per_cpu`, `gpus`,
-    `memory_gb`, `billing` — and is this portal's whole unit-conversion layer. An
-    award allocated in GPU hours can only be reported on a resource whose nodes
-    have GPUs, and how many decides the factor. It is optional: without it the
-    resource can only account in the site's own unit, and an award allocated in
-    any other is refused when it arrives. Omitting it on a later call keeps the
-    node already recorded, so templates can be changed on their own.
+    `conversions` is what the two portals agreed each of this site's units is
+    worth in an awarding portal's: `{"GPUHR": 4}` means one node hour here is
+    four of their GPU hours. An award allocated in a unit with no agreed factor
+    is refused when it arrives, because there is no safe number to guess. It is
+    optional — without it the resource can only hold awards allocated in this
+    site's own unit — and omitting it on a later call keeps what was already
+    agreed, so templates can be changed on their own.
     """
 
     name: str
     templates: list[str]
-    node: dict[str, float] | None = None
+    conversions: dict[str, float] | None = None
 
 
 def _offering_json(
@@ -313,18 +313,12 @@ def _offering_json(
         "name": offering.name,
         "templates": offering.templates,
         "since": offering.since.isoformat() if offering.since else None,
-        # One node of this resource, and the allocation units that follow from
-        # it. A unit absent from `units` is one an award cannot be held in here:
-        # `create_award` refuses it rather than reporting zero for it.
-        "node": offering.node,
-        "units": [
-            unit
-            for unit in site_portal.UNITS
-            if site_portal.converter_for(
-                offering.name, openportal.Allocation.from_string(f"1 {unit}")
-            )
-            is not None
-        ],
+        # What an award on this resource may be allocated in, and what one of
+        # our units is worth in each. Our own unit is always here at 1.0; a unit
+        # absent from it is one an award cannot be held in, and `create_award`
+        # refuses those rather than guessing a factor.
+        "site_unit": site_portal.SITE_UNIT,
+        "conversions": site_portal.conversions_for(offering.name),
         # How many awards this resource holds. Shown because it is what makes
         # withdrawing one consequential: those awards stay on record and stop
         # being reachable, rather than being deleted (§4.1.2).
@@ -377,8 +371,7 @@ async def add_offering(request: OfferingRequest):
          -H 'content-type: application/json' \\
          -d '{"name": "cluster1",
               "templates": ["standard", "large"],
-              "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
-                       "memory_gb": 512, "billing": 100}}'
+              "conversions": {"GPUHR": 4}}'
     ```
 
     An upsert, and idempotent: posting a resource we already offer updates its
@@ -391,7 +384,7 @@ async def add_offering(request: OfferingRequest):
     """
     try:
         offering = site_portal.add_offering(
-            request.name, request.templates, request.node
+            request.name, request.templates, request.conversions
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -528,6 +521,14 @@ async def list_awards():
             "local_project_id": a.local_project_id,
             "name": a.details.get("name"),
             "template": a.details.get("template"),
+            # The award as the awarding portal expressed it, and what it is worth
+            # in our own unit at the agreed factor - which is the number this
+            # site would actually enforce a quota against.
+            "allocation": a.details.get("allocation"),
+            "allocation_in_site_units": site_portal.to_site_units(
+                a.offering,
+                openportal.AwardDetails(json.dumps(a.details)).allocation,
+            ),
             "members": list((a.details.get("members") or {}).keys()),
             # Whether it is attached now, and the full attachment history. A
             # detached award is kept rather than deleted: it still owns the days

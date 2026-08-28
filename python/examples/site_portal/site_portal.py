@@ -80,107 +80,118 @@ def templates_for(offering: str) -> set[str]:
 # Units: what a figure in a usage report means
 # --------------------------------------------------------------------------
 
-#: The unit this site does its own accounting in, and therefore the unit the
-#: figures pushed to `PUT /projects/{id}/usage` are in.
+# An award is for a *quantity*, and the two portals do not have to count in the
+# same thing. The awarding portal allocates in its unit; this site accounts in
+# its own; the two agree a factor between them, once, out of band.
+#
+#     N allocator units awarded  ->  M site units to spend here
+#     X site units used          ->  Y allocator units reported back
+#
+# That is the whole of it, and it is deliberately the whole of it. How a site
+# turns its own unit into real hardware - cores, GPUs, memory, a scheduler's
+# billing weight - is the site's own business logic and no part of this
+# contract. Nor are the units necessarily hours: they are numbers with an agreed
+# name, and one day they may be money or cloud credits without any of the logic
+# above changing.
+#
+# Converting on the way out is the same kind of act as remapping the
+# identifiers, and it happens in the same place for the same reason: a report is
+# built from what we recorded and then translated into what the other portal
+# understands.
+
+#: The unit this site accounts in - what the figures pushed to
+#: `PUT /projects/{id}/usage` are in, and what its own records hold.
 #:
-#: Node hours here. Yours might be core hours, or a billing unit of your own -
-#: what matters is that it is *one* unit, decided once, and that everything
-#: arriving from your accounting is in it.
+#: Node hours here, and worth being honest about how notional that is: a real
+#: site with heterogeneous clusters may measure a scheduler billing unit
+#: underneath and present a *hypothetical* node-hour equivalent to its users. The
+#: contract does not care. It needs one unit, named, that every figure this
+#: portal reports is expressed in.
 SITE_UNIT = "NHR"
 
-#: Every unit an awarding portal may allocate in, and what one node hour is
-#: worth in it. The value is the attribute of the resource's node that gives the
-#: factor, and the `Allocation` method that applies it.
-#:
-#: This is the whole of the conversion layer, and it is small because the
-#: `Allocation` type already does the arithmetic: one node hour is
-#: `node.gpus` GPU hours, `node.cores` core hours, `node.memory_gb` GB hours,
-#: and so on. A site with heterogeneous hardware would key this by more than the
-#: offering, but the shape is the same.
-UNITS = {
-    "NHR": (None, "to_node_hours"),
-    "CPUHR": ("cpus", "to_cpu_hours"),
-    "COREHR": ("cores", "to_core_hours"),
-    "GPUHR": ("gpus", "to_gpu_hours"),
-    "GBHR": ("memory_gb", "to_gb_hours"),
-    "BHR": ("billing", "to_billing_hours"),
-}
+
+def _canonical(unit: str) -> str:
+    """
+    A unit name in the spelling `Allocation` uses.
+
+    `Allocation` canonicalises the ones it knows - "gpu hours", "GPUhr" and
+    `GPUHR` are one unit - and passes anything else through lower-cased. Both
+    sides of every comparison below go through this, so an agreed unit of
+    `CREDITS` matches an award allocated in `credits`.
+    """
+    return openportal.Allocation.canonicalize(unit or "")
 
 
-def node_for(offering: str) -> openportal.Node | None:
-    """One node of a resource, as the operator described it, or `None`."""
+def conversions_for(offering: str) -> dict[str, float]:
+    """
+    The agreed factors for one resource: allocator unit → how many of them one
+    `SITE_UNIT` is worth.
+
+    `{"GPUHR": 4.0}` reads "one of our node hours is four of their GPU hours",
+    so an award of 5000 GPUHR is 1250 node hours to spend here, and 12.5 node
+    hours used is 50 GPU hours to report back.
+
+    Per-resource, because the agreement is: a node hour on a GPU cluster and a
+    node hour on a CPU cluster are not worth the same credit. Our own unit is
+    always in the table at 1.0 - if an awarding portal allocates in the unit we
+    already count in, there is nothing to agree.
+    """
     found = store.load_offerings().get(offering)
-    described = found.node if found else None
+    agreed = dict(found.conversions) if found else {}
 
-    if not described:
-        return None
-
-    return openportal.Node.construct(
-        int(described.get("cpus", 0)),
-        int(described.get("cores_per_cpu", 0)),
-        int(described.get("gpus", 0)),
-        int(float(described.get("memory_gb", 0)) * 1024),
-        int(described.get("billing", 0)),
-    )
+    return {_canonical(SITE_UNIT): 1.0} | {
+        _canonical(unit): float(factor) for unit, factor in agreed.items()
+    }
 
 
 def converter_for(offering: str, allocation: openportal.Allocation | None):
     """
-    Return a function turning *our* hours into the unit an award is allocated in.
+    Return a function turning a figure in *our* unit into the award's unit.
 
-    **This is the piece that decides what the numbers in a usage report mean.**
-    A `Usage` is a bare duration; nothing in it says whether 50 means 50 node
-    hours or 50 GPU hours. The unit is the one the awarding portal allocated in,
-    so a site that reports its own figures unconverted is not reporting slightly
-    differently - it is reporting a different quantity under the same name, and
-    nothing on the wire will catch it.
+    **This is what decides what the numbers in a usage report mean.** A `Usage`
+    is a bare number; nothing in it says whether 50 is 50 node hours or 50 GPU
+    hours. The unit is the one the awarding portal allocated in, so a site that
+    reports its own figures unconverted is not reporting slightly differently -
+    it is reporting a different quantity under the same name, and nothing on the
+    wire will catch it.
 
-    Returns `None` when the conversion is not possible on this resource, which
-    the caller must treat as "we cannot hold this award" rather than as zero. And
-    zero is exactly what the arithmetic would otherwise produce: one node hour is
-    `node.gpus` GPU hours, so on a machine with no GPUs an award allocated in
-    GPU hours would be answered with a perfectly formatted **0.000 hours** every
-    cycle. Refusing the award is the only honest option, and it has to be done
-    here because no type below will raise.
+    Returns `None` when there is no agreed factor, which the caller must treat as
+    "we cannot hold this award" rather than as zero or as one-for-one. Guessing
+    1.0 would silently report a quarter of the usage; guessing 0 would report
+    none. There is no safe default for a number whose meaning was never agreed.
     """
     if allocation is None or allocation.is_empty:
         # No allocation, so no unit was declared, so there is nothing to convert
-        # to and the figures stand as they are. Our own unit is the only sensible
-        # reading of them.
+        # to and our own figures are the only sensible reading of them.
         return lambda hours: openportal.Usage.from_hours(hours)
 
-    units = str(allocation.units or "").upper()
-    entry = UNITS.get(units)
+    factor = conversions_for(offering).get(_canonical(str(allocation.units or "")))
 
-    if entry is None:
-        # A unit we have never heard of. `Allocation.canonicalize` passes
-        # anything it does not recognise through unchanged, so this is a real
-        # possibility rather than a defensive branch.
+    if not factor:
         return None
 
-    attribute, method = entry
+    return lambda hours: openportal.Usage.from_hours(hours * factor)
 
-    if units == SITE_UNIT:
-        # Already ours. Convert nothing rather than round-tripping through a
-        # node we may not even have been told about.
-        return lambda hours: openportal.Usage.from_hours(hours)
 
-    node = node_for(offering)
+def to_site_units(offering: str, allocation: openportal.Allocation | None) -> float | None:
+    """
+    The other direction: what an award is worth here, in `SITE_UNIT`.
 
-    if node is None:
+    The same agreed factor, divided rather than multiplied. This is the number a
+    site actually enforces against - a quota, a budget, a limit in its own
+    scheduler - and it is worth showing because it makes the round trip visible:
+    5000 of their units in, 1250 of ours to spend, and every report back
+    multiplied by four again.
+    """
+    if allocation is None or allocation.is_empty or allocation.size is None:
         return None
 
-    # The factor itself. Zero means this resource cannot express that unit at
-    # all - no GPUs, no billing weight - and multiplying by it would silently
-    # report nothing.
-    if not float(getattr(node, attribute, 0) or 0):
+    factor = conversions_for(offering).get(_canonical(str(allocation.units or "")))
+
+    if not factor:
         return None
 
-    def convert(hours: float) -> openportal.Usage:
-        ours = openportal.Allocation.from_node_hours(openportal.Usage.from_hours(hours))
-        return getattr(ours, method)(node)
-
-    return convert
+    return float(allocation.size) / factor
 
 
 #: The fields describing one node. `cpus` and `cores_per_cpu` together give the
@@ -191,10 +202,10 @@ NODE_FIELDS = ("cpus", "cores_per_cpu", "gpus", "memory_gb", "billing")
 def add_offering(
     name: str,
     templates: list[str],
-    node: dict[str, float] | None = None,
+    conversions: dict[str, float] | None = None,
 ) -> store.Offering:
     """
-    Start advertising a resource, or change the templates or the node it has.
+    Start advertising a resource, or change its templates or agreed conversions.
 
     **`templates` is required, and there is deliberately no default.** What a
     resource can be asked for is a decision about that resource - which
@@ -204,18 +215,19 @@ def add_offering(
     policy: it would simply see the template accepted and make awards against
     it.
 
-    `node` describes one node of the resource, and every unit conversion is
-    derived from it (`converter_for`). It is optional, and omitting it is a
-    position rather than an oversight: a resource with no node described can only
-    account in `SITE_UNIT`, so an award allocated in any other unit is refused
-    when it arrives. Describe the hardware and those awards become answerable.
-    An omitted `node` on a later call keeps the one already recorded.
+    `conversions` records what the two portals agreed each of this site's units
+    is worth in an awarding portal's: `{"GPUHR": 4}` means one node hour here is
+    four of their GPU hours. It is optional, and omitting it is a position rather
+    than an oversight - a resource with no agreed factor can only hold awards
+    allocated in this site's own unit, and any other is refused when it arrives.
+    An omitted `conversions` on a later call keeps what was already agreed, so
+    templates can be changed without restating it.
 
     Raises `ValueError` on a name that could not survive being part of a
     destination, on an empty or blank template list - an offering that
     accepts no template rejects every award made through it, which is a
-    misconfiguration rather than a policy - and on a node field that is not a
-    number.
+    misconfiguration rather than a policy - and on a factor that is not a
+    positive number.
     """
     if not OFFERING_NAME.match(name or ""):
         raise ValueError(
@@ -231,24 +243,31 @@ def add_offering(
             'e.g. ["standard", "large"] - there is no default'
         )
 
-    if node is not None:
-        unknown = sorted(set(node) - set(NODE_FIELDS))
+    if conversions is not None:
+        checked = {}
 
-        if unknown:
-            raise ValueError(
-                f"a node is described by {', '.join(NODE_FIELDS)}; "
-                f"not {', '.join(unknown)}"
-            )
+        for unit, factor in conversions.items():
+            try:
+                factor = float(factor)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"the conversion for '{unit}' must be a number, not {factor!r}"
+                )
 
-        try:
-            node = {field: float(node.get(field, 0) or 0) for field in NODE_FIELDS}
-        except (TypeError, ValueError):
-            raise ValueError("every node field must be a number")
+            # Zero would report every award in that unit as having used nothing;
+            # a negative or infinite factor is not a quantity at all. Neither is
+            # a thing to store and discover later in a report.
+            if not factor > 0 or factor == float("inf"):
+                raise ValueError(
+                    f"the conversion for '{unit}' must be a positive number, "
+                    f"not {factor}"
+                )
 
-        if any(value < 0 for value in node.values()):
-            raise ValueError("a node cannot have a negative number of anything")
+            checked[str(unit).strip()] = factor
 
-    return store.add_offering(name, templates, datetime.date.today(), node)
+        conversions = checked
+
+    return store.add_offering(name, templates, datetime.date.today(), conversions)
 
 
 def remove_offering(name: str) -> store.Offering | None:
@@ -438,9 +457,10 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     # what hardware we have. §3.3 lists an allocation we will never grant as a
     # legitimate rejection; this is the same shape of answer.
     if converter_for(offering, details.allocation) is None:
+        agreed = ", ".join(sorted(conversions_for(offering))) or SITE_UNIT
         raise openportal.ManagedProjectRejectedError(
-            f"this site cannot account in '{details.allocation}' on {offering} - "
-            f"it reports in {SITE_UNIT}, and {offering} has no conversion to those units"
+            f"no agreed conversion between '{details.allocation}' and this "
+            f"site's {SITE_UNIT} on {offering} - it can hold awards in: {agreed}"
         )
 
     award = store.load(offering, project_id)

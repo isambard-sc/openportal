@@ -195,26 +195,23 @@ curl -X POST localhost:18780/offerings \
      -H 'content-type: application/json' \
      -d '{"name": "cluster1",
           "templates": ["standard", "large"],
-          "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
-                   "memory_gb": 512, "billing": 100}}'
+          "conversions": {"GPUHR": 4}}'
 
 curl -X POST localhost:18780/offerings \
      -H 'content-type: application/json' \
      -d '{"name": "cluster2",
           "templates": ["standard"],
-          "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 0,
-                   "memory_gb": 256, "billing": 50}}'
+          "conversions": {"GPUHR": 2}}'
 ```
 
 That registers two clusters, and names the templates the allocator may ask for
 on each: `standard` and `large` on `cluster1`, only `standard` on `cluster2`.
 
-`node` describes one node of each resource. It looks like an odd thing to tell a
-portal, and it is doing something specific: it is the whole of this site's
-**unit conversion layer**, which step 6 explains. `cluster1`'s nodes have four
-GPUs, so one of its node hours is four GPU hours; `cluster2`'s have none, so GPU
-hours cannot be expressed there at all. It is optional, and leaving it out is a
-position rather than an oversight — see step 6.
+`conversions` records what this site and `allocator` agreed each of this site's
+units is worth in theirs — one node hour here is four GPU hours on `cluster1`,
+two on `cluster2` — and step 6 is where that matters. It is optional, and leaving
+it out is a position rather than an oversight: a resource with nothing agreed can
+only hold awards allocated in this site's own unit.
 
 Running get on the same URL shows what is offered:
 
@@ -231,9 +228,8 @@ returns
                 "templates": ["large", "standard"],
                 "since": "2026-08-27",
                 "awards": 0,
-                "node": {"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
-                         "memory_gb": 512, "billing": 100},
-                "units": ["NHR", "CPUHR", "COREHR", "GPUHR", "GBHR", "BHR"],
+                "site_unit": "NHR",
+                "conversions": {"NHR": 1.0, "GPUHR": 4.0},
                 "destinations": ["cluster1.site.allocator"],
                 "registered": true},
                ...]}
@@ -255,10 +251,11 @@ portal is offered to the `allocator` portal.
 with the sender and ends with the thing being addressed. The middle element is
 your own portal either way.
 
-`units` is derived rather than stored: it is the allocation units an award on
-this resource can be held in, which follows from the node above. `cluster2`,
-having no GPUs, does not list `GPUHR` — and an award allocated in GPU hours
-there is refused rather than answered with zero (step 6).
+`conversions` is what an award on this resource may be allocated in, and what
+one of our units is worth in each. Our own unit is always there at `1.0` — if an
+awarding portal allocates in the unit we already count in, there is nothing to
+agree. An award allocated in a unit that is *not* there is refused rather than
+guessed at (step 6).
 
 You can remove an offering via `DELETE /offerings/cluster1`.
 
@@ -529,54 +526,69 @@ The award carries an **allocation**, and the allocator chose its units:
  "members": {"alice@example.com": "Project Lead"}}
 ```
 
-`5000 GPUHR` is five thousand GPU hours. `GPUHR`, `NHR`, `CPUHR`, `COREHR`,
-`GBHR` and `BHR` are the spellings OpenPortal canonicalises to, so "5000 GPU
-hours", "5000 gpuhr" and `5000 GPUHR` all arrive as the same thing.
+The two portals do not have to count in the same thing, and generally will not.
+The awarding portal allocates in its unit; you account in yours; the two of you
+**agree a factor between them, once, out of band**. Everything else follows:
 
-**That unit is the unit every usage report for this award is read in.** A figure
-in a report is a bare duration — 50 hours — with nothing attached saying what
-kind of hour it is. The allocator asked for GPU hours because that is what it
-allocated, so 50 means 50 GPU hours, and if your accounting produced node hours
-you have just reported a number roughly four times too small under a name that
-looks completely correct. Nothing on the wire can catch that: both sides
-exchanged a well-formed report.
+```
+      5000 allocator units awarded   ─────►   1250 site units to spend here
+        (5000 GPUHR)                            (1250 NHR, at 4 to 1)
 
-So a site has to convert, and that means keeping the factors. This example keeps
-them in the one place they come from — the hardware:
+      12.5 site units used           ─────►   50 allocator units reported back
+        (12.5 NHR)                              (50 GPUHR)
+```
 
-| Your unit | Their unit | One of yours is | From |
-|---|---|---|---|
-| node hour | GPU hour | `node.gpus` GPU hours | 4 on `cluster1` |
-| node hour | core hour | `node.cpus × node.cores_per_cpu` core hours | 128 |
-| node hour | GB hour | `node.memory_gb` GB hours | 512 |
-| node hour | billing hour | `node.billing` billing hours | 100 |
+That is the whole of it. Converting on the way out is the same kind of act as
+remapping the identifiers, for the same reason and in the same place: the report
+is built from what you recorded, and then translated into what the other portal
+understands.
 
-which is why `POST /offerings` takes a `node` (step 1). Push 12.5 node hours in
-for an award allocated in `GPUHR` on `cluster1`, ask for the report, and you get
-50 hours back. `site_portal.SITE_UNIT` is the unit *your* figures arrive in, and
-`site_portal.converter_for` is the whole conversion; a production portal would
-have a table with more in it than one node per resource, but not a different
-shape. Waldur keeps the same kind of table on its side.
+**The units are labels on numbers, and not necessarily as literal as they look.**
+An allocator that allocates in "GPU hours" may well be handing out a credit unit
+rather than time on a particular card. A site that accounts in "node hours" may
+have heterogeneous clusters, measure a scheduler billing unit underneath, and
+present a *hypothetical* node-hour equivalent to its users. Both are fine. The
+contract needs two named units and one agreed factor; how you get from your own
+unit down to real cores, GPUs and memory is your business logic and no part of
+this. (Nor will they always be hours — an allocation in money or cloud credits
+changes none of the reasoning above.)
+
+So this example records the agreement per resource, alongside the templates:
+
+```bash
+curl -X POST localhost:18780/offerings \
+     -H 'content-type: application/json' \
+     -d '{"name": "cluster1", "templates": ["standard", "large"],
+          "conversions": {"GPUHR": 4}}'
+```
+
+`{"GPUHR": 4}` reads "one of our node hours is four of their GPU hours". It is
+per-resource because the agreement is: a node hour on a GPU cluster and one on a
+CPU cluster are not worth the same credit. `site_portal.SITE_UNIT` is the unit
+your own figures are in, `converter_for` multiplies on the way out and
+`to_site_units` divides on the way in — the same factor, used in both directions.
+`GET /awards` shows both numbers for each award, and `GET /offerings` shows what
+each resource can hold.
 
 Two consequences worth taking seriously:
 
-* **A unit you cannot express is a reason to refuse the award.** `cluster2` has
-  no GPUs, so one node hour is *nought* GPU hours there: the arithmetic does not
-  fail, it quietly yields zero, and every report for such an award would come
-  back as a beautifully formatted `0.000 hours` that the allocator would believe
-  and — once a month was finalised — stop asking about. So `create_award` refuses
-  an allocation it cannot account in, with `ManagedProjectRejectedError`, which
-  is terminal because no amount of asking again grows a GPU. Refusing an award is
-  cheap; reporting zero for it is not.
+* **A unit with no agreed factor is a reason to refuse the award.** There is no
+  safe default: guessing one-for-one would report a quarter of this award's
+  usage, and guessing zero would report none, and both are well-formed numbers
+  the allocator will believe. So `create_award` answers
+  `ManagedProjectRejectedError` — terminal, because what is missing is an
+  agreement between two organisations, not something the next retry will supply.
+  Agree a factor, add it, and the award goes through on the allocator's next
+  attempt. Refusing an award is cheap; reporting the wrong number for it is not.
 
 * **An award with no allocation declares no unit,** so there is nothing to
   convert to and your own figures stand as they are. That is the honest reading,
   and it is what this example does.
 
-One display quirk, since it will confuse you once: `Usage` prints itself in
-whatever time unit reads best, so 50 hours prints as `2.083 days`. The number is
-right and the word is about duration, not about GPUs. Read `usage.hours` or
-`usage.in_hours()` when you care about the allocation's unit.
+One display quirk, since it will confuse you once: `Usage` currently holds a
+duration and prints itself in whatever time unit reads best, so 50 hours prints
+as `2.083 days`. The number is right. Read `usage.hours` or `usage.in_hours()`
+when you care about the allocation's unit.
 
 ### 7. Finalised versus unfinalised reports
 
@@ -853,13 +865,14 @@ reason the example exists.
    an empty report is complete *vacuously* — the one way to make that promise by
    accident.
 
-10. **The allocation names the unit your usage is reported in.** A figure in a
-    usage report is a bare duration; what makes 50 mean 50 GPU hours rather than
-    50 node hours is the `allocation` on the award, chosen by the awarding
-    portal. So convert your own figures on the way out, keep the factors
-    somewhere they follow from the hardware, and refuse an award whose unit this
-    resource cannot express — because that conversion does not fail, it returns
-    zero, and a zero is believed.
+10. **The two portals need not count in the same unit, so convert on the way
+    out.** N allocator units awarded become M site units to spend here; X site
+    units used become Y allocator units reported back, through one factor the two
+    of you agreed out of band. A figure in a report is a bare number, so nothing
+    catches a site that reports its own unit unconverted — it is not slightly
+    wrong, it is a different quantity under the same name. And refuse an award
+    whose unit you have no agreed factor for, because every default you could
+    guess is a plausible number the allocator will believe.
 
 11. **`remove_award` detaches an award; it never deletes a project.** And it
     does not end the award's history: it still owns every day up to and

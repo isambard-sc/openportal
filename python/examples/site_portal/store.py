@@ -193,20 +193,21 @@ class Offering:
         return sorted(self.raw.get("templates", []))
 
     @property
-    def node(self) -> dict[str, Any] | None:
+    def conversions(self) -> dict[str, float]:
         """
-        One node of this resource, or `None` if the site has not described it.
+        What one of this site's units is worth in an awarding portal's, per unit.
 
-        This is the site's **unit conversion table**, and it is per-resource
-        because the hardware is: `cpus`, `cores_per_cpu`, `gpus`, `memory_gb`
-        and `billing` for one node are all a conversion factor from this site's
-        own unit into one of the units an awarding portal might allocate in. A
-        node with four GPUs makes one node hour worth four GPU hours; a node
-        with none makes GPU hours unaccountable here, which is a thing to refuse
-        an award over rather than to report zero for. See
-        `site_portal.converter_for`.
+        `{"GPUHR": 4.0}` records an agreement between the two portals: one node
+        hour here is four of their GPU hours. It is an agreement rather than a
+        calculation - neither side derives it from the other's hardware - so it
+        is stored, not computed, and it is per-resource because a node hour on a
+        GPU cluster and one on a CPU cluster are not worth the same credit.
+
+        Empty means nothing has been agreed for this resource, which is a
+        position: it can hold awards allocated in this site's own unit and no
+        others. See `site_portal.converter_for`.
         """
-        return self.raw.get("node")
+        return dict(self.raw.get("conversions", {}))
 
     @property
     def since(self) -> datetime.date | None:
@@ -242,18 +243,18 @@ def add_offering(
     name: str,
     templates: list[str],
     on: datetime.date,
-    node: dict[str, Any] | None = None,
+    conversions: dict[str, float] | None = None,
 ) -> Offering:
     """
-    Start advertising a resource, or change the templates or node of one.
+    Start advertising a resource, or change the templates or conversions of one.
 
     An upsert rather than an insert, and deliberately so: the operator API is
     retried and re-run like everything else here, and "add the cluster I already
     have" should not be an error. `since` is kept from the first time, because
     that is when we started offering it.
 
-    An omitted `node` keeps the one already recorded, so the templates can be
-    changed without restating the hardware.
+    Omitted `conversions` keep what was already agreed, so the templates can be
+    changed without restating it.
     """
     offerings = load_offerings()
     existing = offerings.get(name)
@@ -263,10 +264,11 @@ def add_offering(
         "since": (existing.since or on).isoformat() if existing else on.isoformat(),
     }
 
-    node = node if node is not None else (existing.node if existing else None)
+    if conversions is None and existing is not None:
+        conversions = existing.conversions
 
-    if node is not None:
-        raw["node"] = node
+    if conversions:
+        raw["conversions"] = conversions
 
     offerings[name] = Offering(_safe(name, "offering"), raw)
     save_offerings(offerings)

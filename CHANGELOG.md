@@ -13,16 +13,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other
   dependencies, and only the *agents* it talks to have to be built.
 
-- **The site portal example honours the award's allocation units.** An award
-  carries an allocation in the awarding portal's units (`5000 GPUHR`), and that
-  unit is what every usage report for it is read in - a `Usage` is a bare
-  duration and says nothing about what kind of hour it holds. The example now
-  records one node per offered resource (`POST /offerings` takes a `node`), uses
-  it to convert its own node hours into the award's unit when a report is built,
-  and **refuses an award whose unit the resource cannot express** - one node hour
-  is nought GPU hours on a machine with no GPUs, so the arithmetic yields a
-  well-formed zero that an awarding portal would believe. `GET /offerings` now
-  reports each resource's node and the units awards on it can be held in.
+- **The site portal example converts between allocation units.** The two
+  portals need not count in the same thing: the awarding portal allocates in its
+  unit, the site accounts in its own, and the two agree a factor out of band. So
+  `POST /offerings` now takes the agreed `conversions` for a resource
+  (`{"GPUHR": 4}` — one node hour here is four of their GPU hours), reports are
+  converted into the award's unit on the way out, `GET /awards` shows each award
+  in both units, and an award whose unit has no agreed factor is refused rather
+  than reported with a guessed one. The units are names on numbers, so an
+  allocation in credits works the same way as one in hours.
 
 - **The site portal example dispatches both spellings of the award
   instructions.** `create_award` and `create_project` (and the update and remove

@@ -808,16 +808,15 @@ Everything is up.
      curl -X POST http://127.0.0.1:{APP_PORT}/offerings \\
           -H 'content-type: application/json' \\
           -d '{{"name": "{OFFERING}", "templates": ["standard", "large"],
-               "node": {{"cpus": 2, "cores_per_cpu": 64, "gpus": 4,
-                        "memory_gb": 512, "billing": 100}}}}'
+               "conversions": {{"GPUHR": 4}}}}'
 
    That registers `{OFFERING}.{SITE.name}.{ALLOCATOR.name}` with the agents: a
    virtual agent on `{SITE.name}` that `{ALLOCATOR.name}` may address directly.
    `templates` is required and has no default - which templates a resource
    accepts is the site's decision, so it has to be stated rather than guessed.
-   `node` describes one node of it, and is where every unit conversion comes
-   from: four GPUs per node makes one node hour worth four GPU hours, which is
-   what step 6 turns on.
+   `conversions` is what this site and the awards portal agreed one of this
+   site's units is worth in theirs - one node hour is four of their GPU hours -
+   which is what step 6 turns on.
    The other two endpoints are
 
      curl http://127.0.0.1:{APP_PORT}/offerings                    # what is offered
@@ -916,15 +915,16 @@ Everything is up.
    because that is the same person either way.
 
    The **unit**: 12.5 went in and 50 came out. The award is allocated in
-   `5000 GPUHR`, one node hour on `{OFFERING}` is four GPU hours (its nodes have
-   four), so 12.5 node hours *is* 50 GPU hours. That is the figure the awards
-   portal wants, in the unit it allocated in. `2.083 days` is 50 hours printed
-   the way `Usage` likes to print itself - `report.total_usage.in_hours()` says
-   `50.000 hours`, and `.hours` gives the number.
+   `5000 GPUHR` and the two portals agreed that one node hour here is four of
+   their GPU hours, so 12.5 of ours *is* 50 of theirs - which is the figure they
+   asked for, in the unit they allocated in. `2.083 days` is 50 hours printed the
+   way `Usage` likes to print itself; `report.total_usage.in_hours()` says
+   `50.000 hours` and `.hours` gives the number.
 
-   Had the award been placed on a resource with no GPUs, this site would have
-   refused it outright rather than reporting a well-formed `0.000 hours` for
-   ever. README step 6 is where that is explained.
+   The same factor runs the other way too: `curl .../awards` shows this award as
+   5000 of their units and 1250 of ours - the number a site would enforce a quota
+   against. And an award allocated in a unit with no agreed factor is refused
+   outright rather than reported with a guessed one. README step 6 has both.
 
    `complete?` is False, and it decides whether the awards portal asks about this
    month again. Declaring a month settled is what stops it:

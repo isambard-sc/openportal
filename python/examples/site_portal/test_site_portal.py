@@ -58,11 +58,9 @@ OTHER_OFFERING = "cluster2"
 LEAD = "alice@example.com"
 MEMBER = "bob@example.com"
 
-#: One node of `cluster1`: four GPUs, so one node hour is four GPU hours.
-NODE = {"cpus": 2, "cores_per_cpu": 64, "gpus": 4, "memory_gb": 512, "billing": 100}
-
-#: One node of `cluster2`, which has none - so GPU hours are unaccountable there.
-CPU_ONLY_NODE = {"cpus": 2, "cores_per_cpu": 64, "gpus": 0, "memory_gb": 256, "billing": 50}
+#: What `cluster1`'s operators agreed with `allocator`: one of our node hours is
+#: four of their GPU hours. Nothing derives this - it is an agreement.
+AGREED = {"GPUHR": 4}
 
 
 def make_job(
@@ -177,10 +175,10 @@ def _run_all() -> None:
     # same call `POST /offerings` makes.
     check("a fresh portal offers nothing", site_portal.offering_names() == [])
 
-    # `cluster1` has GPUs, `cluster2` does not - which is what decides whether an
-    # award allocated in GPU hours can be held on each.
-    site_portal.add_offering(OFFERING, ["standard", "large"], node=NODE)
-    site_portal.add_offering(OTHER_OFFERING, ["standard"], node=CPU_ONLY_NODE)
+    # `cluster1` has an agreed conversion for GPU hours; `cluster2` has none, so
+    # it can only hold awards allocated in this site's own unit.
+    site_portal.add_offering(OFFERING, ["standard", "large"], conversions=AGREED)
+    site_portal.add_offering(OTHER_OFFERING, ["standard"])
     check(
         "both resources are now offered",
         site_portal.offering_names() == [OFFERING, OTHER_OFFERING],
@@ -985,8 +983,8 @@ def _run_all() -> None:
 
     print("\n-- the allocation decides the unit usage is reported in ---------")
 
-    # An award allocated in GPU hours, on the resource whose nodes have four of
-    # them. What we hold is node hours; what the awarding portal must be told is
+    # An award allocated in GPU hours, on the resource with an agreed factor of
+    # four. What we hold is node hours; what the awarding portal must be told is
     # GPU hours, and one node hour is four of those.
     gpu_award = "myaward3.allocator"
     site_portal.answer(
@@ -1023,11 +1021,11 @@ def _run_all() -> None:
         f"-> {report.total_usage.in_hours()}",
     )
 
-    # **The refusal that stops a silent zero.** `cluster2` has no GPUs, so one
-    # node hour is nought GPU hours there: every report for such an award would
-    # be a well-formed 0.000, which an awarding portal would believe. So the
-    # award is refused when it arrives, terminally, because no amount of asking
-    # again grows a GPU.
+    # **The refusal, and why there is no safe default.** `cluster2` has no agreed
+    # factor for GPU hours. Guessing 1.0 would report a quarter of the usage;
+    # guessing 0 would report none; both are well-formed numbers an awarding
+    # portal would believe. So the award is refused when it arrives, terminally,
+    # because the two portals have to agree a factor before it can be held.
     job = site_portal.answer(
         make_job(
             f"create_project myaward5.allocator {details(allocation='5000 GPUHR')}",
@@ -1035,7 +1033,7 @@ def _run_all() -> None:
         )
     )
     check(
-        "an award in units a resource cannot account in is rejected",
+        "an award in a unit with no agreed conversion is rejected",
         type(job.error) is openportal.ManagedProjectRejectedError,
         f"-> {job.error}",
     )
@@ -1044,17 +1042,43 @@ def _run_all() -> None:
         store.load(OTHER_OFFERING, "myaward5.allocator") is None,
     )
 
-    # A unit nobody has heard of gets the same answer, for the same reason.
+    # A unit nobody has agreed gets the same answer, for the same reason - and
+    # the units are just names, so this is any name at all rather than a fixed
+    # list. Agree a factor for it and it becomes answerable, which is what will
+    # happen the day an allocation arrives in cloud credits.
     job = site_portal.answer(
-        make_job(f"create_project myaward6.allocator {details(allocation='5000 WIDGETS')}")
+        make_job(f"create_project myaward6.allocator {details(allocation='5000 CREDITS')}")
     )
     check(
-        "an award in an unknown unit is rejected too",
+        "an award in a unit nobody agreed is rejected too",
         type(job.error) is openportal.ManagedProjectRejectedError,
         f"-> {job.error}",
     )
 
-    # An award in the site's own unit needs no node at all.
+    site_portal.add_offering(OFFERING, ["standard", "large"], conversions={"CREDITS": 0.5})
+    site_portal.answer(
+        make_job(f"create_project myaward6.allocator {details(allocation='5000 CREDITS')}")
+    )
+    held = store.load(OFFERING, "myaward6.allocator")
+    approve(held, "myproject6.site", month_start)
+    store.save(held)
+    set_usage("myproject6.site", {a_day_this_month: {LEAD: 12.5}})
+    report = site_portal.answer(
+        make_job(f"get_usage_report myaward6.allocator this_month")
+    ).result
+    check(
+        "...and answerable once a factor is agreed, whatever the unit is called",
+        abs(report.total_usage.hours - 6.25) < 0.001,
+        f"-> {report.total_usage.in_hours()} for 12.5 of ours at 0.5",
+    )
+    check(
+        "the same factor values the award in our own units",
+        abs(site_portal.to_site_units(OFFERING, openportal.Allocation.from_string("5000 CREDITS")) - 10000.0) < 0.001,
+        "-> 5000 theirs = 10000 ours at 0.5",
+    )
+    site_portal.add_offering(OFFERING, ["standard", "large"], conversions=AGREED)
+
+    # An award in the site's own unit needs nothing agreed at all.
     site_portal.add_offering("cluster9", ["standard"])
     job = site_portal.answer(
         make_job(
@@ -1063,7 +1087,7 @@ def _run_all() -> None:
         )
     )
     check(
-        "an award in the site's own unit needs no node described",
+        "an award in the site's own unit needs no agreement",
         type(job.error) is openportal.ManagedProjectPendingError,
         f"-> {job.error}",
     )
@@ -1074,7 +1098,7 @@ def _run_all() -> None:
         )
     )
     check(
-        "...but any other unit is refused until it is",
+        "...but any other unit is refused until one is agreed",
         type(job.error) is openportal.ManagedProjectRejectedError,
         f"-> {job.error}",
     )

@@ -302,18 +302,22 @@ link an award to a project. This request looks like this:
 
 ```
 allocator.site.cluster1 create_award myaward1.allocator
-  {"name":"My First Award","template":"standard","members":{"alice@example.com":"Project Lead"}}
+  {"name":"My First Award","template":"standard","allocation":"5000 GPUHR",
+   "members":{"alice@example.com":"Project Lead"}}
 ```
 
 Here, the allocator is addressing your `cluster1` offering on your `site` portal.
 It is asking to create an award (via the `create_award` instruction)
 where it is telling you that it refers to the award as `myaward1.allocator`.
 
-It is also providing some metadata about the award, including its name,
-the template it is against, its allocation, and a list of members and their
-roles. The allocation — `"allocation": "5000 GPUHR"` — is how much has been
-awarded and, just as importantly, in whose units. Step 6 is about what that
-obliges you to do with it.
+It is also providing some metadata about the award: its name, the template it is
+against, the allocation, and a list of members and their roles.
+
+`"allocation":"5000 GPUHR"` is how much has been awarded and, just as
+importantly, in whose units — five thousand of the awarding portal's GPU hours,
+which are not necessarily five thousand of anything you count. Step 6 is about
+what that obliges you to do with it, and it is the part of this contract easiest
+to get quietly wrong.
 
 > [!NOTE]
 > The `*_award` instructions used throughout this README are the spellings to
@@ -683,7 +687,7 @@ or to add or remove members. This is done via the `update_award` instruction:
 
 ```
 allocator.site.cluster1 update_award myaward1.allocator
-   {"name":"My First Award","template":"standard",
+   {"name":"My First Award","template":"standard","allocation":"5000 GPUHR",
     "members":{"alice@example.com":"Project Lead","bob@example.com":"Project Member"}}
 ```
 

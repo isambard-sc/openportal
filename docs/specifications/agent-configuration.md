@@ -379,7 +379,7 @@ signal_url = "http://localhost/signal"
 | `url` | Public base URL of the HTTP API server |
 | `ip` | IP address to bind the HTTP API listener to |
 | `port` | Port to bind the HTTP API listener to |
-| `key` | 32-byte random HMAC key for authenticating API callers (see [bridge-api.md](bridge-api.md) §2) |
+| `key` | 32-byte random signing key for authenticating API callers - keyed BLAKE2b-256, see [bridge-api.md](bridge-api.md) §2 |
 | `signal_url` | URL called by the bridge to notify the portal software of new jobs |
 
 **Additional CLI subcommand:**

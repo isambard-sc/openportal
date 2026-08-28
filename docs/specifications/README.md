@@ -194,7 +194,7 @@ Specifies the HTTP/JSON API exposed by the `op-bridge` agent, which allows
 non-Rust portal software (e.g. Python/Django applications) to interact with
 the OpenPortal network. Covers:
 
-- Authentication (HMAC-SHA512 signatures, `Date` header, nonce replay
+- Authentication (keyed BLAKE2b-256 signatures, `Date` header, nonce replay
   prevention, rate limiting)
 - All 14 endpoints (`/run`, `/status`, `/fetch_jobs`, `/send_result`,
   `/sync_offerings`, `/health`, `/restart`, `/diagnostics`, …)

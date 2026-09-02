@@ -1,8 +1,15 @@
 # SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
 # SPDX-License-Identifier: CC0-1.0
 
-# The example's own dependencies. `openportal` itself is built from this
-# repository - see the README - and is not on PyPI.
+# The example's dependencies, including `openportal` itself - so that reading
+# and running this example needs no Rust toolchain. The agents it talks to
+# (op-portal, op-bridge) are separate: those are built from this repository, or
+# installed from a release.
+#
+# To use an `openportal` built from your own checkout instead, `make python` (or
+# `maturin develop -m python/Cargo.toml`) from the workspace root overwrites the
+# installed module in the current environment.
+openportal>=0.92.0
 fastapi>=0.115
 uvicorn>=0.32
 pydantic>=2.9

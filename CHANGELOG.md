@@ -51,7 +51,107 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   crate now builds a library as well as its binaries - so what it says a job
   consumed cannot drift from what the agent says.
 
+- **A Java client for the bridge API** (`java/`), for a site whose portal is
+  written in Java rather than Python. The Python module talks to a bridge
+  through Rust; a Java portal has to sign its own requests, so `BridgeAuth` is
+  the reference implementation of the v2 signature - keyed BLAKE2b-256 over the
+  JSON-encoded canonical string - and is what the rest is built on.
+  `BridgeClient` covers the endpoints a portal uses (`fetch_job`,
+  `send_result`, the offerings calls, `run`, `status`, `health`), `Job` answers
+  a job without discarding the fields it did not understand, and the error
+  classes are the same six the Python module raises, encoded the same way on
+  the wire. Unit tests pin the signature against golden vectors; the
+  `Live*Check` classes drive a real bridge.
+
+- **Java wrappers for every type the Python module exposes**, so the Java client
+  is a complete interface rather than a connection with raw JSON behind it:
+  `AwardDetails`, the usage and storage report trees, `Allocation`, `Usage`,
+  `StorageSize`, `Quota`, `DateRange`, the identifiers and mappings,
+  `Notification`, and the health and diagnostics responses. They agree with the
+  Rust implementation by test rather than by inspection - `TypesTest` pins each
+  against strings and JSON produced by the published Python module, and every
+  composite type was round-tripped through it in both directions. The rules that
+  are not visible in a field name are the ones the javadoc leads with: an absent
+  `membership_control` means *open*, an absent `allowed_domains` means
+  *everything*, a quota with no measurement declines to report a percentage
+  rather than reporting zero, and an allocation's unit is the one every report
+  about that award has to come back in. `BridgeClient` gains `diagnostics` and
+  `restart`, and `health` and `fetch_notification` now answer typed. `Job` gains
+  `errorMessage`, `progressMessage` and typed result readers, and now refuses to
+  answer a job whose state the Rust side would refuse - a `Created` job has not
+  been handed out, so an answer to it is an answer to a question nobody asked.
+
+- **A Java site portal example** (`java/examples/site_portal`), answering the
+  same contract as `python/examples/site_portal` against the same walkthrough -
+  offer a resource, refuse what cannot be honoured, approve, map, push usage,
+  convert it into the award's unit, finalise a month. Verified end to end
+  against the real agents: an award created from the Python allocator comes back
+  as a typed `ManagedProjectPendingError`, then as a `ProjectMapping` once
+  approved, and 12.5 node hours pushed in read back on the allocator's side as
+  50 GPU hours attributed to `alice.myaward1.allocator`.
+
+  It shares the Python example's `example.py`, which grows an `--app
+  {python,java,none}` option, because the four agents are the same Rust binaries
+  wired the same way whichever language answers them - the thing that differs is
+  the portal, so that is what the option selects. `--app none` starts the agents
+  and no portal, for running one from an IDE.
+
+  The example needs no web framework: the operator API is served by
+  `com.sun.net.httpserver`, so its routing is twenty readable lines rather than a
+  layer of annotations. 36 tests drive every handler with no bridge running.
+
+  CI runs both, on a **Java 21** runner against the library's declared Java 17
+  target - so an API added after 17 fails the build there rather than at a site
+  running the version the library says it supports.
+
 ### Fixed
+
+- **`Job.result_type`** on the Python module, mirroring the accessor Rust and the
+  Java client already have. Most Python never needs it - `result` has already
+  used it to decide what to build - but it was the only thing about an answer
+  Python could not see, and answering an instruction with the wrong type is not a
+  failure either side detects: a well-formed value under the wrong name
+  deserialises into the wrong thing, or not at all, and nothing on the wire
+  objects. A portal's own tests are where that gets caught, and they could not
+  look. It is also what diagnoses `Unknown result type: X` - a peer answering
+  with a type newer than the module is a version mismatch rather than a fault.
+  `test_site_portal.py` now pins the type every instruction in §4 answers with.
+
+- **`get_awards` could not answer at all from the Python module**, and an empty
+  quota map could not be answered either. `Job.completed()` infers a result's
+  wire type from the value it is given, and the `Vec<T>` chain had no arm for a
+  list of `AwardDetails` - so a non-empty `get_awards` failed with "Could not
+  extract result type", which the site portal example then reported as an
+  internal error. The *reading* side had no `"Vec<ProjectDetails>"` arm either,
+  so even a correctly typed answer was unreadable; both halves are needed and
+  both are here. Separately, `HashMap` results were guarded with
+  `!map.is_empty()`, which made "this project has no quotas set" unsayable -
+  `completed({})` failed outright. An empty dict is unambiguous (it is the only
+  dict type in the table), so the guard is gone.
+
+  An *empty list* is left as it was, deliberately. It matches every `Vec<T>` and
+  is typed as whichever arm is tried first, and that is harmless rather than
+  wrong: `Job::result<T>()` never consults `result_type`, and the Python reader
+  turns `[]` into an empty list under any `Vec<T>` name - an empty
+  `Vec<UserIdentifier>` really is an empty `Vec<ProjectDetails>`. The name only
+  carries information once there are elements.
+
+  Found by writing a second client: the Java example answers `get_awards` with
+  the honest `Vec<ProjectDetails>`, which nothing on the Python side could read.
+  `test_site_portal.py` now covers `get_awards` - typed, non-empty and empty -
+  which no test did before, which is why this survived.
+
+- **The bridge API specification described a signature scheme that does not
+  authenticate, and two request bodies the bridge rejects.** The primitive is
+  keyed BLAKE2b-256 rather than HMAC-SHA512, and what is signed is the canonical
+  string's JSON encoding rather than the string itself, so a client written from
+  the document got a bare `401` with nothing to say why; the two traps that
+  follow - non-ASCII must not be `\u`-escaped, and the length prefixes are byte
+  lengths - are now called out, and §2.3.1's Python was extracted from the
+  document and run against a live bridge. Separately, the offerings endpoints
+  take and return a JSON **array** of destination strings, not the bracketed
+  `Destinations` text form, and `POST /status` takes `{"job": "<uuid>"}` where
+  `/fetch_job` takes the bare UUID string. Both wrong shapes are a `500`.
 
 - **The `slurmrestd` path never worked out which cluster it was talking to.**
   `find_cluster` was only called when `op-slurm` was driving the command line, so

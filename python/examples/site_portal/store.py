@@ -12,7 +12,13 @@ It is deliberately dull, and deliberately separate from `site_portal.py`, to
 make one point: the contract and your state are different concerns. Keeping them
 apart is what lets you throw this file away without touching the handlers.
 
-Three design choices worth copying even so:
+Four design choices worth copying even so:
+
+* **The set of offerings is state, not a constant.** Which resources a site
+  offers changes - a cluster is procured, retired, or opened to a second
+  awarding portal - and none of those are code changes. So the offerings live
+  here with everything else, `app.py` exposes them, and OpenPortal is told the
+  new set whenever it changes.
 
 * **Awards are keyed on `(offering, project identifier)`, not on either
   alone.** The offering names *which resource* the award is for, so the same
@@ -83,6 +89,18 @@ def _path_for(offering: str, project_id: str) -> Path:
     )
 
 
+def _offerings_path() -> Path:
+    """
+    The file holding every offering we advertise.
+
+    One file for the whole set rather than one per offering, because the set is
+    what gets published: `sync_offerings` replaces OpenPortal's idea of what we
+    offer with the complete list, so reading and writing it as a whole is the
+    shape the contract asks for.
+    """
+    return STATE_DIR / "offerings.json"
+
+
 def _project_path(local_project_id: str) -> Path:
     """The file backing one of *our* projects, which is where usage lives."""
     return (
@@ -144,6 +162,138 @@ class Attachment:
     def covers(self, date: datetime.date) -> bool:
         """Whether this attachment was in force on `date`."""
         return self.since <= date and (self.to is None or self.to >= date)
+
+
+class Offering:
+    """
+    One resource we advertise, and the templates it accepts.
+
+    The name is the resource's own - `cluster1`, not `cluster1.site.allocator`.
+    The full three-part form is assembled per awarding portal when the set is
+    registered (`app.py`), because the same resource is normally offered to
+    several of them and that is a property of the relationship rather than of
+    the resource.
+    """
+
+    def __init__(self, name: str, raw: dict[str, Any]):
+        self.name = name
+        self.raw = raw
+
+    @property
+    def templates(self) -> list[str]:
+        """
+        The `AwardDetails.template` values this resource accepts, sorted.
+
+        Per-resource because a template selects things that belong to the
+        resource - in Waldur the organisation, the default offerings and the
+        billing a project is created with. An award naming a template this
+        resource does not offer is rejected rather than quietly given a
+        default (§4.1).
+        """
+        return sorted(self.raw.get("templates", []))
+
+    @property
+    def conversions(self) -> dict[str, float]:
+        """
+        What one of this site's units is worth in an awarding portal's, per unit.
+
+        `{"GPUHR": 4.0}` records an agreement between the two portals: one node
+        hour here is four of their GPU hours. It is an agreement rather than a
+        calculation - neither side derives it from the other's hardware - so it
+        is stored, not computed, and it is per-resource because a node hour on a
+        GPU cluster and one on a CPU cluster are not worth the same credit.
+
+        Empty means nothing has been agreed for this resource, which is a
+        position: it can hold awards allocated in this site's own unit and no
+        others. See `site_portal.converter_for`.
+        """
+        return dict(self.raw.get("conversions", {}))
+
+    @property
+    def since(self) -> datetime.date | None:
+        """The day we started advertising it, for the operator's benefit."""
+        return _as_date(self.raw.get("since"))
+
+
+def load_offerings() -> dict[str, Offering]:
+    """
+    Every offering we advertise, by name. Empty until an operator adds one.
+
+    Empty is a perfectly ordinary state and not a misconfiguration: a site that
+    advertises nothing simply cannot be asked for anything yet (§1.1).
+    """
+    path = _offerings_path()
+
+    if not path.exists():
+        return {}
+
+    with path.open() as handle:
+        stored = json.load(handle)
+
+    return {name: Offering(name, raw) for name, raw in sorted(stored.items())}
+
+
+def save_offerings(offerings: dict[str, Offering]) -> None:
+    _write_atomically(
+        _offerings_path(), {name: o.raw for name, o in offerings.items()}
+    )
+
+
+def add_offering(
+    name: str,
+    templates: list[str],
+    on: datetime.date,
+    conversions: dict[str, float] | None = None,
+) -> Offering:
+    """
+    Start advertising a resource, or change the templates or conversions of one.
+
+    An upsert rather than an insert, and deliberately so: the operator API is
+    retried and re-run like everything else here, and "add the cluster I already
+    have" should not be an error. `since` is kept from the first time, because
+    that is when we started offering it.
+
+    Omitted `conversions` keep what was already agreed, so the templates can be
+    changed without restating it.
+    """
+    offerings = load_offerings()
+    existing = offerings.get(name)
+
+    raw = {
+        "templates": sorted(set(templates)),
+        "since": (existing.since or on).isoformat() if existing else on.isoformat(),
+    }
+
+    if conversions is None and existing is not None:
+        conversions = existing.conversions
+
+    if conversions:
+        raw["conversions"] = conversions
+
+    offerings[name] = Offering(_safe(name, "offering"), raw)
+    save_offerings(offerings)
+
+    return offerings[name]
+
+
+def remove_offering(name: str) -> Offering | None:
+    """
+    Stop advertising a resource. Returns what was removed, or `None`.
+
+    **The awards on it are kept.** Withdrawing an offering says what we advertise
+    *now*; it does not rewrite what happened. Those awards still own the days
+    they were attached for, and deleting them would make a later usage report
+    empty - and an empty report is vacuously complete, which is how the last
+    days of an award get silently lost (§4.1.2). They simply become unreachable
+    until the offering is added back.
+    """
+    offerings = load_offerings()
+    removed = offerings.pop(name, None)
+
+    if removed is not None:
+        save_offerings(offerings)
+
+    return removed
 
 
 class Award:

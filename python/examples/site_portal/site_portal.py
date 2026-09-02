@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import re
 import time
 
 import openportal
@@ -32,32 +33,252 @@ logger = logging.getLogger(__name__)
 # What this portal offers
 # --------------------------------------------------------------------------
 
-#: The resources we offer, and to whom.
-#:
-#: An offering is a **virtual agent** on this portal: a name the awarding portal
-#: addresses directly, standing for one resource we run. On the wire it is
-#: written `<offering>.<us>.<them>` - the resource, offered by us, to them - and
-#: `app.py` registers the full paths with the bridge at startup.
-#:
-#: Two of them here, because one would hide the most important thing about them:
-#: **the offering is part of an award's identity, not a permission check.** An
-#: award created through `cluster1` is an award *on `cluster1`*. The same
-#: awarding portal can hold a different award of the same name on `cluster2`,
-#: and asking one resource about a project that lives on the other gets nothing
-#: back - see `_offering_of` and `build_usage_report` below.
-OFFERINGS = {"cluster1", "cluster2"}
+# An offering is a **virtual agent** on this portal: a name the awarding portal
+# addresses directly, standing for one resource we run. On the wire it is
+# written `<offering>.<us>.<them>` - the resource, offered by us, to them - and
+# `app.py` registers the full paths with the bridge.
+#
+# **The offering is part of an award's identity, not a permission check.** An
+# award created through `cluster1` is an award *on `cluster1`*. The same awarding
+# portal can hold a different award of the same name on `cluster2`, and asking
+# one resource about a project that lives on the other gets nothing back - see
+# `_offering_of` and `build_usage_report` below. Which is why running this with
+# two resources teaches more than running it with one.
+#
+# The set lives in `store.py` rather than in a constant here, because it is
+# state: a site procures a cluster, retires one, or opens one to a second
+# awarding portal, and none of those are code changes. `app.py` exposes
+# add/remove/list endpoints over these functions, and re-registers the set with
+# OpenPortal whenever it changes. A fresh portal therefore offers **nothing**
+# until an operator adds a resource - which is not a misconfiguration, just a
+# site that cannot be asked for anything yet (§1.1).
 
-#: The `AwardDetails.template` values each offering accepts.
+#: What an offering may be called. It becomes one element of a `Destination`, so
+#: it is what the grammar allows for an agent name and nothing more - checked
+#: here, at the point an operator types it, rather than failing later inside a
+#: destination nobody is looking at.
+OFFERING_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+
+def offerings() -> list[store.Offering]:
+    """Every resource we advertise, in name order."""
+    return list(store.load_offerings().values())
+
+
+def offering_names() -> list[str]:
+    """Just the names, which is what most callers want."""
+    return sorted(store.load_offerings())
+
+
+def templates_for(offering: str) -> set[str]:
+    """The templates one resource accepts - empty if we do not offer it."""
+    found = store.load_offerings().get(offering)
+
+    return set(found.templates) if found else set()
+
+
+# --------------------------------------------------------------------------
+# Units: what a figure in a usage report means
+# --------------------------------------------------------------------------
+
+# An award is for a *quantity*, and the two portals do not have to count in the
+# same thing. The awarding portal allocates in its unit; this site accounts in
+# its own; the two agree a factor between them, once, out of band.
+#
+#     N allocator units awarded  ->  M site units to spend here
+#     X site units used          ->  Y allocator units reported back
+#
+# That is the whole of it, and it is deliberately the whole of it. How a site
+# turns its own unit into real hardware - cores, GPUs, memory, a scheduler's
+# billing weight - is the site's own business logic and no part of this
+# contract. Nor are the units necessarily hours: they are numbers with an agreed
+# name, and one day they may be money or cloud credits without any of the logic
+# above changing.
+#
+# Converting on the way out is the same kind of act as remapping the
+# identifiers, and it happens in the same place for the same reason: a report is
+# built from what we recorded and then translated into what the other portal
+# understands.
+
+#: The unit this site accounts in - what the figures pushed to
+#: `PUT /projects/{id}/usage` are in, and what its own records hold.
 #:
-#: Per-offering, because a template means something different on each resource -
-#: in Waldur it selects the organisation, the default offerings and the billing
-#: that a project is created with, all of which are properties of the resource.
-#: An award naming a template this resource does not offer is rejected rather
-#: than quietly given a default (§4.1).
-OFFERED_TEMPLATES = {
-    "cluster1": {"standard", "large"},
-    "cluster2": {"standard"},
-}
+#: Node hours here, and worth being honest about how notional that is: a real
+#: site with heterogeneous clusters may measure a scheduler billing unit
+#: underneath and present a *hypothetical* node-hour equivalent to its users. The
+#: contract does not care. It needs one unit, named, that every figure this
+#: portal reports is expressed in.
+SITE_UNIT = "NHR"
+
+
+def _canonical(unit: str) -> str:
+    """
+    A unit name in the spelling `Allocation` uses.
+
+    `Allocation` canonicalises the ones it knows - "gpu hours", "GPUhr" and
+    `GPUHR` are one unit - and passes anything else through lower-cased. Both
+    sides of every comparison below go through this, so an agreed unit of
+    `CREDITS` matches an award allocated in `credits`.
+    """
+    return openportal.Allocation.canonicalize(unit or "")
+
+
+def conversions_for(offering: str) -> dict[str, float]:
+    """
+    The agreed factors for one resource: allocator unit → how many of them one
+    `SITE_UNIT` is worth.
+
+    `{"GPUHR": 4.0}` reads "one of our node hours is four of their GPU hours",
+    so an award of 5000 GPUHR is 1250 node hours to spend here, and 12.5 node
+    hours used is 50 GPU hours to report back.
+
+    Per-resource, because the agreement is: a node hour on a GPU cluster and a
+    node hour on a CPU cluster are not worth the same credit. Our own unit is
+    always in the table at 1.0 - if an awarding portal allocates in the unit we
+    already count in, there is nothing to agree.
+    """
+    found = store.load_offerings().get(offering)
+    agreed = dict(found.conversions) if found else {}
+
+    return {_canonical(SITE_UNIT): 1.0} | {
+        _canonical(unit): float(factor) for unit, factor in agreed.items()
+    }
+
+
+def converter_for(offering: str, allocation: openportal.Allocation | None):
+    """
+    Return a function turning a figure in *our* unit into the award's unit.
+
+    **This is what decides what the numbers in a usage report mean.** A `Usage`
+    is a bare number; nothing in it says whether 50 is 50 node hours or 50 GPU
+    hours. The unit is the one the awarding portal allocated in, so a site that
+    reports its own figures unconverted is not reporting slightly differently -
+    it is reporting a different quantity under the same name, and nothing on the
+    wire will catch it.
+
+    Returns `None` when there is no agreed factor, which the caller must treat as
+    "we cannot hold this award" rather than as zero or as one-for-one. Guessing
+    1.0 would silently report a quarter of the usage; guessing 0 would report
+    none. There is no safe default for a number whose meaning was never agreed.
+    """
+    if allocation is None or allocation.is_empty:
+        # No allocation means no unit, and no award either - `create_award`
+        # refuses one, so this is a record predating that check rather than
+        # something to convert. There is nothing honest to return.
+        return None
+
+    factor = conversions_for(offering).get(_canonical(str(allocation.units or "")))
+
+    if not factor:
+        return None
+
+    return lambda hours: openportal.Usage.from_hours(hours * factor)
+
+
+def to_site_units(offering: str, allocation: openportal.Allocation | None) -> float | None:
+    """
+    The other direction: what an award is worth here, in `SITE_UNIT`.
+
+    The same agreed factor, divided rather than multiplied. This is the number a
+    site actually enforces against - a quota, a budget, a limit in its own
+    scheduler - and it is worth showing because it makes the round trip visible:
+    5000 of their units in, 1250 of ours to spend, and every report back
+    multiplied by four again.
+    """
+    if allocation is None or allocation.is_empty or allocation.size is None:
+        return None
+
+    factor = conversions_for(offering).get(_canonical(str(allocation.units or "")))
+
+    if not factor:
+        return None
+
+    return float(allocation.size) / factor
+
+
+#: The fields describing one node. `cpus` and `cores_per_cpu` together give the
+#: core count, so a site asked for core hours needs both.
+NODE_FIELDS = ("cpus", "cores_per_cpu", "gpus", "memory_gb", "billing")
+
+
+def add_offering(
+    name: str,
+    templates: list[str],
+    conversions: dict[str, float] | None = None,
+) -> store.Offering:
+    """
+    Start advertising a resource, or change its templates or agreed conversions.
+
+    **`templates` is required, and there is deliberately no default.** What a
+    resource can be asked for is a decision about that resource - which
+    organisation, billing and default offerings a project on it is created with -
+    and nobody but the site knows it. A default would be a guess published under
+    the site's name, and the awarding portal has no way to tell a guess from a
+    policy: it would simply see the template accepted and make awards against
+    it.
+
+    `conversions` records what the two portals agreed each of this site's units
+    is worth in an awarding portal's: `{"GPUHR": 4}` means one node hour here is
+    four of their GPU hours. It is optional, and omitting it is a position rather
+    than an oversight - a resource with no agreed factor can only hold awards
+    allocated in this site's own unit, and any other is refused when it arrives.
+    An omitted `conversions` on a later call keeps what was already agreed, so
+    templates can be changed without restating it.
+
+    Raises `ValueError` on a name that could not survive being part of a
+    destination, on an empty or blank template list - an offering that
+    accepts no template rejects every award made through it, which is a
+    misconfiguration rather than a policy - and on a factor that is not a
+    positive number.
+    """
+    if not OFFERING_NAME.match(name or ""):
+        raise ValueError(
+            f"'{name}' is not a usable offering name: 1-64 characters of "
+            "A-Z, a-z, 0-9, '_' or '-', not starting with '-'"
+        )
+
+    templates = [t.strip() for t in (templates or []) if t and t.strip()]
+
+    if not templates:
+        raise ValueError(
+            f"name at least one template that awards on '{name}' may use, "
+            'e.g. ["standard", "large"] - there is no default'
+        )
+
+    if conversions is not None:
+        checked = {}
+
+        for unit, factor in conversions.items():
+            try:
+                factor = float(factor)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"the conversion for '{unit}' must be a number, not {factor!r}"
+                )
+
+            # Zero would report every award in that unit as having used nothing;
+            # a negative or infinite factor is not a quantity at all. Neither is
+            # a thing to store and discover later in a report.
+            if not factor > 0 or factor == float("inf"):
+                raise ValueError(
+                    f"the conversion for '{unit}' must be a positive number, "
+                    f"not {factor}"
+                )
+
+            checked[str(unit).strip()] = factor
+
+        conversions = checked
+
+    return store.add_offering(name, templates, datetime.date.today(), conversions)
+
+
+def remove_offering(name: str) -> store.Offering | None:
+    """
+    Stop advertising a resource; returns what was removed, or `None`.
+
+    The awards on it are kept - see `store.remove_offering` for why that is not
+    laziness.
+    """
+    return store.remove_offering(name)
 
 
 # --------------------------------------------------------------------------
@@ -202,7 +423,7 @@ def _username(email: str) -> str:
 
 def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     """
-    `create_project <project_id> <AwardDetails JSON>`
+    `create_award <project_id> <AwardDetails JSON>` (arrives as `create_project`)
 
     **This arrives repeatedly for awards you already hold.** The awarding
     portal re-sends it every synchronisation cycle to re-assert the award's
@@ -220,9 +441,49 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
     if details.project_template is None:
         raise openportal.ManagedProjectRejectedError("no template named in the award")
 
-    if str(details.project_template) not in OFFERED_TEMPLATES.get(offering, set()):
+    if str(details.project_template) not in templates_for(offering):
         raise openportal.ManagedProjectRejectedError(
             f"template '{details.project_template}' is not offered on {offering}"
+        )
+
+    # **Is this an award at all?**
+    #
+    # An award is for a quantity, so an award of nothing is not an award: there
+    # is no amount to provision against, nothing to enforce, and - because the
+    # allocation is what names the unit - no way to say what any usage we later
+    # report would mean. Refuse it rather than accepting an award that cannot be
+    # honoured or reported.
+    #
+    # Terminal, like the template: the awarding portal has to send an amount, and
+    # re-sending the same details without one will fail the same way.
+    if details.allocation is None or details.allocation.is_empty:
+        raise openportal.ManagedProjectRejectedError(
+            "no allocation named in the award - an award has to be for some "
+            "quantity, in units this site has agreed (e.g. '5000 GPUHR')"
+        )
+
+    if not (details.allocation.size or 0) > 0:
+        raise openportal.ManagedProjectRejectedError(
+            f"the allocation '{details.allocation}' awards nothing - an award "
+            "has to be for some quantity"
+        )
+
+    # **Can we report usage for this award at all?**
+    #
+    # The allocation names the unit - "5000 GPUHR" - and that unit is what every
+    # usage report for this award will be read in. If this resource cannot
+    # express it, saying so now is the only honest answer: the alternative is to
+    # accept the award and then answer every `get_usage_report` with a
+    # well-formed zero (see `converter_for`).
+    #
+    # Terminal rather than pending, because no amount of asking again changes
+    # what hardware we have. §3.3 lists an allocation we will never grant as a
+    # legitimate rejection; this is the same shape of answer.
+    if converter_for(offering, details.allocation) is None:
+        agreed = ", ".join(sorted(conversions_for(offering))) or SITE_UNIT
+        raise openportal.ManagedProjectRejectedError(
+            f"no agreed conversion between '{details.allocation}' and this "
+            f"site's {SITE_UNIT} on {offering} - it can hold awards in: {agreed}"
         )
 
     award = store.load(offering, project_id)
@@ -268,7 +529,7 @@ def create_award(job: openportal.Job) -> openportal.ProjectMapping:
 
 def update_award(job: openportal.Job) -> openportal.ProjectMapping:
     """
-    `update_project <project_id> <AwardDetails JSON>`
+    `update_award <project_id> <AwardDetails JSON>` (arrives as `update_project`)
 
     An update for an award we have never seen is normal, not an error - a
     missed message or a rebuilt database gets us here. Treat it as a create,
@@ -287,7 +548,7 @@ def update_award(job: openportal.Job) -> openportal.ProjectMapping:
 
 def remove_award(job: openportal.Job) -> openportal.ProjectMapping:
     """
-    `remove_project <project_id>`
+    `remove_award <project_id>` (arrives as `remove_project`)
 
     **Disconnects an award from a project. It does not delete the project.**
     The answer is `<project_id>:None` - there is no longer a project attached to
@@ -534,6 +795,30 @@ def build_usage_report(
     # choice affects only the intermediate form.
     local_project = openportal.ProjectIdentifier(award.projects_ever_attached[-1])
 
+    # **The unit every figure below is expressed in.** Our accounting produced
+    # them in `SITE_UNIT`; the award was allocated in whatever the awarding
+    # portal chose, and that is what its reports mean. Read from the award we
+    # hold rather than from the request, because the request does not carry it.
+    #
+    # This cannot be None for an award we accepted: `create_award` refuses an
+    # award with no allocation, and one whose unit we have no agreed factor for.
+    # A record predating those checks would otherwise crash a report, though, and
+    # a report is not the place to discover it - so it is logged loudly and the
+    # figures go out in our own unit, which is at least a number we can name.
+    allocation = openportal.AwardDetails(json.dumps(award.details)).allocation
+    convert = converter_for(offering, allocation)
+
+    if convert is None:
+        logger.error(
+            "award %s on %s is allocated in '%s', which this site cannot "
+            "account in - reporting our own %s unconverted",
+            project_id,
+            offering,
+            allocation,
+            SITE_UNIT,
+        )
+        convert = lambda hours: openportal.Usage.from_hours(hours)  # noqa: E731
+
     report = openportal.ProjectUsageReport(local_project)
     months_with_days: set[str] = set()
     final: set[str] = set()
@@ -570,7 +855,10 @@ def build_usage_report(
                 report.add_mapping(
                     openportal.UserMapping(f"{user}:{email}:{local_project}")
                 )
-                daily.add_usage(email, openportal.Usage.from_hours(float(hours)))
+                # ...and the figure is converted out of our unit into the one
+                # the award was allocated in. `create_award` refused any award
+                # we could not do this for, so `convert` is never None here.
+                daily.add_usage(email, convert(float(hours)))
 
             # Completeness is a *decision*, not a date comparison. A day is
             # reported complete only when the site has declared its month final
@@ -728,23 +1016,38 @@ def get_storage_reports(job: openportal.Job) -> openportal.StorageReport:
 # Dispatch
 # --------------------------------------------------------------------------
 
-#: Canonical instruction name → handler. The `*_award` spellings arrive as their
-#: `*_project` equivalents, so dispatching on the canonical name handles both
-#: (§2).
+#: Every instruction this portal answers, keyed on the command name as it
+#: arrives.
 #:
 #: Anything absent is answered with `OpenPortalUnsupportedCommandError`, which
 #: is a legitimate answer: a portal implements as much of the contract as it has
 #: answers for (§4.0). `get_users` is deliberately absent - members travel in
 #: `AwardDetails.members` instead.
+#:
+#: **Both spellings of the award instructions are here, deliberately.** An
+#: awarding portal sends `create_award`; the agents currently deliver it under
+#: its original name, `create_project`, and that is what you see in a job's
+#: `command` field today. The wire vocabulary is moving to the `*_award`
+#: spellings (and the attach/detach pair may end up named for what they actually
+#: do) before 1.0, so a table keyed on only one of the two will start answering
+#: `OpenPortalUnsupportedCommandError` on the day it changes. Keying on both
+#: costs three entries and spans the change - and since each pair is one
+#: instruction under two names, they share a handler rather than duplicating it.
 HANDLERS = {
+    # Attaching an award to a project, and detaching it again.
+    "create_award": create_award,
     "create_project": create_award,
+    "update_award": update_award,
     "update_project": update_award,
+    "remove_award": remove_award,
     "remove_project": remove_award,
-    "get_project": get_award,
+    # Reading awards back.
     "get_award": get_award,
+    "get_project": get_award,
     "get_awards": get_awards,
     "get_projects": get_projects,
     "get_project_mapping": get_project_mapping,
+    # Accounting.
     "get_usage_report": get_usage_report,
     "get_usage_reports": get_usage_reports,
     "get_storage_report": get_storage_report,
@@ -769,7 +1072,7 @@ def _authorise(job: openportal.Job) -> None:
     """
     offering = _offering_of(job)
 
-    if offering not in OFFERINGS:
+    if offering not in offering_names():
         raise openportal.ManagedProjectRejectedError(
             f"offering '{offering}' is not advertised by this portal"
         )

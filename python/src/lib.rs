@@ -1469,6 +1469,13 @@ impl Job {
         self.is_finished()
     }
 
+    fn completed_none(&self) -> PyResult<Job> {
+        match self.0.completed_none() {
+            Ok(result) => Ok(result.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn completed(&self, py: Python<'_>, result: Py<PyAny>) -> PyResult<Job> {
         macro_rules! try_extract {
             ($type:ty, $transform:expr) => {

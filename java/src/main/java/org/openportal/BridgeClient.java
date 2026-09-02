@@ -165,9 +165,14 @@ public final class BridgeClient {
         post("send_result", Json.write(job.json()));
     }
 
-    /** Fetch a notification by id, as the {@code notification_url} named it. */
-    public JsonNode fetchNotification(UUID id) {
-        return post("fetch_notification", Json.write(id.toString()));
+    /**
+     * Fetch a notification by id, as the {@code notification_url} named it.
+     *
+     * <p>Fails if the id is unknown - a notification is removed once fetched, so
+     * fetching the same one twice is an error rather than a repeat.
+     */
+    public Notification fetchNotification(UUID id) {
+        return Notification.fromJson(post("fetch_notification", Json.write(id.toString())));
     }
 
     // ----------------------------------------------------------------------
@@ -249,9 +254,45 @@ public final class BridgeClient {
         post("notify", Json.write(body));
     }
 
-    /** The bridge's own health. */
-    public JsonNode health() {
-        return get("health");
+    /**
+     * The health of the bridge and, nested under it, the agents behind it.
+     *
+     * <p>The one call that needs no arguments and answers even when the network
+     * behind the bridge is down - which is what makes it the first thing to try
+     * when something else is failing. A {@code 401} here is a key or clock
+     * problem, not a network one.
+     */
+    public Health health() {
+        return Health.fromJson(get("health"));
+    }
+
+    /**
+     * An agent's diagnostics report: what failed, what was slow, what expired.
+     *
+     * <p>{@code destination} is the dotted path to the agent, and an
+     * <b>empty string</b> means the bridge itself rather than "all of them".
+     */
+    public Diagnostics diagnostics(String destination) {
+        ObjectNode body = Json.object();
+        body.put("destination", destination == null ? "" : destination);
+
+        return Diagnostics.fromJson(post("diagnostics", Json.write(body)));
+    }
+
+    /**
+     * Restart an agent.
+     *
+     * <p>{@code restartType} is the agent's own vocabulary ({@code "soft"},
+     * {@code "hard"}); {@code destination} is the dotted path, and an empty
+     * string is the bridge itself. The answer says the restart was accepted, not
+     * that the agent is back - it will be unreachable for a moment either way.
+     */
+    public RestartResponse restart(String restartType, String destination) {
+        ObjectNode body = Json.object();
+        body.put("restart_type", restartType);
+        body.put("destination", destination == null ? "" : destination);
+
+        return RestartResponse.fromJson(post("restart", Json.write(body)));
     }
 
     // ----------------------------------------------------------------------

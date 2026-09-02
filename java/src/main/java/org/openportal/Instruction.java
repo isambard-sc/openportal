@@ -73,6 +73,79 @@ public record Instruction(String command, List<String> arguments) {
         return index < arguments.size() ? arguments.get(index) : "";
     }
 
+    /** The argument at {@code index} as a project identifier. */
+    public ProjectIdentifier projectIdentifier(int index) {
+        return ProjectIdentifier.parse(require(index, "a project identifier"));
+    }
+
+    /** The argument at {@code index} as a user identifier. */
+    public UserIdentifier userIdentifier(int index) {
+        return UserIdentifier.parse(require(index, "a user identifier"));
+    }
+
+    /** The argument at {@code index} as a project mapping. */
+    public ProjectMapping projectMapping(int index) {
+        return ProjectMapping.parse(require(index, "a project mapping"));
+    }
+
+    /** The argument at {@code index} as a user mapping. */
+    public UserMapping userMapping(int index) {
+        return UserMapping.parse(require(index, "a user mapping"));
+    }
+
+    /** The argument at {@code index} as a date range. */
+    public DateRange dateRange(int index) {
+        return DateRange.parse(require(index, "a date range"));
+    }
+
+    /** The argument at {@code index} as a volume name. */
+    public Volume volume(int index) {
+        return Volume.parse(require(index, "a volume name"));
+    }
+
+    /** The argument at {@code index} as a storage quota. */
+    public Quota quota(int index) {
+        return Quota.parse(require(index, "a storage quota"));
+    }
+
+    /**
+     * The JSON argument, parsed as an award.
+     *
+     * <p>The trailing blob on {@code create_award} and {@code update_award}. An
+     * instruction with no JSON argument gives an <b>empty</b> award rather than
+     * failing - which is what {@code remove_award} carries, and what an
+     * {@code update} that changes nothing looks like.
+     */
+    public AwardDetails awardDetails() {
+        return jsonArgument().map(AwardDetails::fromJson).orElseGet(AwardDetails::new);
+    }
+
+    /**
+     * The trailing JSON argument, if there is one.
+     *
+     * <p>Recognised by its first character, as {@link #parse} does - so an
+     * argument that merely happens to be JSON-shaped and is not last is not
+     * found here.
+     */
+    public java.util.Optional<String> jsonArgument() {
+        for (String argument : arguments) {
+            if (argument.startsWith("{") || argument.startsWith("[")) {
+                return java.util.Optional.of(argument);
+            }
+        }
+
+        return java.util.Optional.empty();
+    }
+
+    private String require(int index, String what) {
+        if (index >= arguments.size()) {
+            throw new OpenPortalOtherError(
+                    "'" + command + "' needs " + what + " as argument " + (index + 1));
+        }
+
+        return arguments.get(index);
+    }
+
     @Override
     public String toString() {
         return arguments.isEmpty() ? command : command + " " + String.join(" ", arguments);

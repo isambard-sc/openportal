@@ -177,6 +177,34 @@ public final class Job {
     }
 
     /**
+     * The result, read by whichever type's reader you expect.
+     *
+     * <p>{@code job.result(ProjectMapping::parse)} for a mapping,
+     * {@code job.result(AwardDetails::fromJson)} for an award. Empty when the
+     * job has no result - so a completed job that answered {@code None} and one
+     * that has not answered yet look the same here; ask {@link #state} to tell
+     * them apart.
+     *
+     * <p>Does not check {@link #resultType} against the reader. If you care
+     * that the answer is the type you asked for - and for a job you dispatched
+     * on you should - compare it yourself.
+     */
+    public <T> Optional<T> result(java.util.function.Function<JsonNode, T> reader) {
+        return result().map(reader);
+    }
+
+    /**
+     * The result as text, read by a string parser.
+     *
+     * <p>For the types whose whole wire form is a string:
+     * {@code job.resultText(ProjectMapping::parse)}. Reads through
+     * {@link #resultText}, so a JSON-string result arrives unquoted.
+     */
+    public <T> Optional<T> resultText(java.util.function.Function<String, T> parser) {
+        return resultText().map(parser);
+    }
+
+    /**
      * The typed error this job failed with, or empty if it did not fail.
      *
      * <p>Taken from {@code error.kind} when the job carries one - that was decided

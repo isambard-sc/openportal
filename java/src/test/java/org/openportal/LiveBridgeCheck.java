@@ -33,7 +33,7 @@ public final class LiveBridgeCheck {
         String me = bridge.getPortal();
         System.out.println("get_portal:      " + me);
 
-        System.out.println("health:          " + bridge.health().path("status").asText("(no status)"));
+        System.out.println("health:          " + bridge.health().status());
 
         List<Destination> before = bridge.getOfferings();
         System.out.println("get_offerings:   " + before);

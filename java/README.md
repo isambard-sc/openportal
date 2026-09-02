@@ -33,13 +33,16 @@ interpretation: get one byte of it wrong and the bridge answers `401
 Unauthorized` with nothing to say why. `BridgeAuth` is that, written out and
 tested against vectors, and it is the file to read first.
 
-Everything else here is the shapes on the wire — a `Job`, a `Destination`, the
-error classes — and the endpoints that carry them.
+Everything else here is the shapes on the wire — a `Job`, an `AwardDetails`, a
+`UsageReport` — and the endpoints that carry them. Every type the Python module
+exposes has a counterpart here, and they agree by test rather than by
+inspection: `TypesTest` pins each one against JSON and strings produced by the
+published Python module, which is the Rust implementation through pyo3.
 
 ## Building
 
 ```bash
-mvn test        # 21 unit tests, no bridge needed
+mvn test        # 65 unit tests, no bridge needed
 mvn install     # to your local repository as org.openportal:openportal:0.92.0
 ```
 
@@ -77,6 +80,34 @@ The signature is a pure function of the request, so all of that is testable
 without a bridge: `BridgeAuthTest` carries vectors that were produced
 independently and then accepted by a running bridge.
 
+## The types
+
+Reading and writing them is where the rest of the time goes, and a few carry a
+rule that is not visible in the field name. These are the ones worth knowing
+before you start; each type's javadoc says the rest.
+
+| Type | The thing to know |
+|---|---|
+| `AwardDetails` | The argument to every award instruction. Its wire type name is `ProjectDetails`, not `AwardDetails`. An absent `membership_control` means **open**, and an absent `allowed_domains` means **everything is allowed** while an empty list means nothing is. |
+| `Allocation` | How much, and **in whose unit**. That unit is the one every usage report about the award must come back in. An award with no allocation is not an award. Only six unit names are canonicalised; everything else is lower-cased and kept, so agree the exact string out of band. |
+| `Usage` | Whole seconds of *something* — the unit lives on the award, not here. Every operation saturates and subtraction clamps at zero. An object on the wire, `{"seconds": 7200}`, not a bare number. |
+| `UsageReport` → `ProjectUsageReport` → `DailyProjectUsageReport` | The three levels of a usage report. The daily figures are keyed by **local** username and the mapping to portal identifiers lives one level up; without it the allocator cannot attribute a single figure. |
+| `StorageReport` → `ProjectStorageReport` | A **snapshot**, not a total — so merging two takes the newer rather than summing. |
+| `StorageSize`, `Quota` | Binary units throughout, despite the decimal-looking names. A quota with no measurement declines to answer `percentageUsed()` rather than saying zero. |
+| `ProjectIdentifier`, `UserIdentifier`, `ProjectMapping`, `UserMapping` | Bare strings on the wire, and validated against an allow-list — a space, comma or `?` in a name would break an instruction string, a `sacctmgr` argument or a REST URL. A `UserMapping`'s `local_user` is a Unix name from an account agent and an **email address** from a portal; ask before using it as one. |
+| `DateRange` | Inclusive as dates, half-open as instants, and capped at five years — the span is what bounds how much work one instruction can ask for. |
+| `Notification` | Fire-and-forget. Spelt `{"UserAdded": …}` in JSON and `user_added …` as a string; dispatch on `eventType()`, which is always the snake_case name. |
+| `Health`, `Diagnostics` | Operational rather than part of the contract, but `health()` is the first thing to try when something else is failing — it answers even when the network behind the bridge does not. |
+
+Three of them hold their own JSON rather than a field per field:
+`DailyProjectUsageReport`, `ProjectStorageReport` and `Job`. That is deliberate.
+The daily report alone carries about thirty wire fields — requeue accounting,
+expansion factors, reservation occupancy — which an agent populates and reads
+back, and a report rebuilt from the fields this client happens to model would
+silently drop the rest. `plus` and `times` work from a table of field *kinds*
+for the same reason, so a field added to the wire later is still summed and
+scaled correctly.
+
 ## What maps to what
 
 | Python | Java |
@@ -92,7 +123,20 @@ independently and then accepted by a running bridge.
 | `openportal.fetch_notification(id)` | `BridgeClient.fetchNotification(UUID)` |
 | `job.completed(value)` / `job.errored(e)` | `Job.completed(OpenPortalType)` / `Job.errored(OpenPortalError)` |
 | `openportal.error_from_message(text)` | `OpenPortalError.decode(String)` |
+| `openportal.health()` / `diagnostics(dest)` / `restart(type, dest)` | `BridgeClient.health()` / `diagnostics(String)` / `restart(String, String)` |
 | `ManagedProjectPendingError` and friends | the same names, same hierarchy |
+| `AwardDetails(json)` / `ProjectDetails` | `AwardDetails.fromJson(String)` |
+| `Allocation.parse` / `Usage.from_hours` | `Allocation.parse` / `Usage.fromHours` |
+| `UsageReport.from_json` and the report tree | the same names, `fromJson` / `toJson` |
+| `Uuid` | `java.util.UUID` — no wrapper, the JDK has one |
+| the operators (`+`, `*`, `/`) on usage and reports | `plus`, `times`, `dividedBy` |
+| a property (`job.result`, `award.allocation`) | a method, and `Optional<T>` where the Python is `None`-able |
+
+Two differences beyond naming. `DailyProjectUsageReport` here can also *write*
+job counts and queue waits (`addJobs`, `addWaitSeconds`), which the Python module
+reads but cannot set — the fields are on the wire either way, and a report that
+carries usage but no job counts cannot answer "how many jobs". And a Java site
+gets the same `Live*` checks in place of Python's interactive interpreter.
 
 ## Two things worth knowing before you write a handler
 
@@ -140,11 +184,13 @@ answering the same board will race.
 
 ## Not in this client
 
-The bridge API has endpoints for restarting agents and reading their diagnostics
-(`bridge-api.md` §4). They are operational rather than part of the site portal
-contract, and are not wrapped here; `BridgeClient.health()` is, because it is one
-call and it answers "is the bridge there".
+**The instruction grammar.** `Instruction` splits a command into its verb and
+arguments and will hand you an argument typed on request
+(`instruction.projectIdentifier(0)`, `instruction.awardDetails()`), but it does
+not parse the command into a typed enum the way the Rust side does — so a
+malformed identifier reaches your handler rather than being refused before it.
+Validate what you use; the typed accessors do.
 
-The instruction grammar is not implemented either. `Instruction` splits a command
-into its verb and arguments; it does not parse or validate identifiers the way
-the Rust side does, so validate what you use. See its javadoc.
+**The agent side of the protocol.** This talks to a bridge over HTTP. It is not
+an OpenPortal agent: no paddington, no boards, no peer connections. A site
+portal does not need to be one — that is what the bridge is for.

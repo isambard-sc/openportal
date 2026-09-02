@@ -20,6 +20,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   the wire. Unit tests pin the signature against golden vectors; the
   `Live*Check` classes drive a real bridge.
 
+- **Java wrappers for every type the Python module exposes**, so the Java client
+  is a complete interface rather than a connection with raw JSON behind it:
+  `AwardDetails`, the usage and storage report trees, `Allocation`, `Usage`,
+  `StorageSize`, `Quota`, `DateRange`, the identifiers and mappings,
+  `Notification`, and the health and diagnostics responses. They agree with the
+  Rust implementation by test rather than by inspection - `TypesTest` pins each
+  against strings and JSON produced by the published Python module, and every
+  composite type was round-tripped through it in both directions. The rules that
+  are not visible in a field name are the ones the javadoc leads with: an absent
+  `membership_control` means *open*, an absent `allowed_domains` means
+  *everything*, a quota with no measurement declines to report a percentage
+  rather than reporting zero, and an allocation's unit is the one every report
+  about that award has to come back in. `BridgeClient` gains `diagnostics` and
+  `restart`, and `health` and `fetch_notification` now answer typed.
+
 - **The `openportal` Python module is on PyPI** (`pip install openportal`), so
   using it needs no Rust toolchain. The site portal example's
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other

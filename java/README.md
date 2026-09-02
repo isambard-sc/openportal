@@ -53,10 +53,7 @@ Java 17 or later. Two dependencies, both ordinary:
 | `org.bouncycastle:bcprov-jdk18on` | BLAKE2b, which the bridge signs with and the JDK does not have |
 | `com.fasterxml.jackson.core:jackson-databind` | JSON, used as a tree model rather than by data binding |
 
-## The four things the signing gets right
-
-Each of these has cost somebody an afternoon, and each is a `401` with no
-explanation. They are in `BridgeAuth`, commented where they are done.
+## The four things needed to get the signing right
 
 1. **The primitive is keyed BLAKE2b-256, not HMAC.** The bridge uses
    `orion::auth::authenticate`, which is BLAKE2b in its native keyed mode with a
@@ -82,9 +79,7 @@ independently and then accepted by a running bridge.
 
 ## The types
 
-Reading and writing them is where the rest of the time goes, and a few carry a
-rule that is not visible in the field name. These are the ones worth knowing
-before you start; each type's javadoc says the rest.
+Here are all of the OpenPortal types that have been wrapped in Java.
 
 | Type | The thing to know |
 |---|---|
@@ -152,45 +147,3 @@ deserialises the one against the other, so a `ProjectMapping` returned as a bare
 string with no `result_type` is a different answer. That is what
 `OpenPortalType` is for, and `site-portal-api.md` §4 lists the type each
 instruction must return.
-
-## Checking it against a real bridge
-
-The unit tests cover the pure functions. Three `Live*` checks in
-`src/test/java` need a running bridge, which is the only thing that can settle
-whether a signature is right — the easiest one to get is the Python example's:
-
-```bash
-cd ../python/examples/site_portal && python example.py start
-```
-
-then, from `java/`:
-
-```bash
-CP=target/classes:$(ls ~/.m2/repository/org/bouncycastle/bcprov-jdk18on/*/*.jar):…
-
-# every call is accepted, and an error round-trips as a typed error
-java -cp "$CP" org.openportal.LiveBridgeCheck ../python/examples/site_portal/data/python/site_bridge.toml
-
-# take whatever is on the board and answer it
-java -cp "$CP" org.openportal.LiveJobCheck ../python/examples/site_portal/data/python/site_bridge.toml
-
-# be signalled, fetch, answer - the whole cycle
-java -cp "$CP" org.openportal.LiveLoopCheck ../python/examples/site_portal/data/python/site_bridge.toml 18780 30
-```
-
-`LiveLoopCheck` stands up the `signal_url` the bridge was initialised with, so
-stop the Python app first (or point the bridge at a different port) — two things
-answering the same board will race.
-
-## Not in this client
-
-**The instruction grammar.** `Instruction` splits a command into its verb and
-arguments and will hand you an argument typed on request
-(`instruction.projectIdentifier(0)`, `instruction.awardDetails()`), but it does
-not parse the command into a typed enum the way the Rust side does — so a
-malformed identifier reaches your handler rather than being refused before it.
-Validate what you use; the typed accessors do.
-
-**The agent side of the protocol.** This talks to a bridge over HTTP. It is not
-an OpenPortal agent: no paddington, no boards, no peer connections. A site
-portal does not need to be one — that is what the bridge is for.

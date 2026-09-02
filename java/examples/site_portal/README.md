@@ -85,41 +85,8 @@ portal's own, so the tests need no environment at all.
 
 **A list result names its element type explicitly.** `ListHandler` carries the
 type alongside the handler, so an empty `get_projects` still answers
-`Vec<ProjectMapping>`. The Python example instead hands the list to
-`job.completed()` and lets it infer the type from the values, which for an
-**empty** list means whichever `Vec<T>` is tried first — usually
-`Vec<UserIdentifier>`.
-
-That difference is cosmetic rather than a correctness problem, and it is worth
-knowing why: nothing on either side gates deserialisation on the name.
-`Job::result<T>()` in Rust does not read `result_type` at all, and the Python
-reader dispatches on it but turns `[]` into an empty list under any `Vec<T>`
-name. So an empty `Vec<UserIdentifier>` genuinely is an empty
-`Vec<ProjectDetails>`. The name starts to matter only once there are elements,
-where a mismatch fails to deserialise.
-
-What is *not* cosmetic is that the name has to exist in the reader's table —
-that table, not the writer, is the contract. Declaring the honest
-`Vec<ProjectDetails>` is what surfaced that the Python module could neither
-write nor read it, so `get_awards` had never worked there; both halves are
-fixed in this branch.
-
-**Job counts can be written.** `DailyProjectUsageReport` here has `addJobs` and
-`addWaitSeconds`, which the Python module reads but cannot set. The fields are
-on the wire either way, and a report carrying usage but no job counts cannot
-answer "how many jobs".
-
-## Keeping the two in sync
-
-They are two implementations of one contract, and the contract is
-[`site-portal-api.md`](../../../docs/specifications/site-portal-api.md) — not
-either file. When it changes, both change; when one of them learns something,
-the other should. `SitePortalTest` and `test_site_portal.py` check the same
-properties in the same order for that reason, so a behaviour added to one has a
-visible hole in the other.
-
-The specification is the authority. Where these two disagree, at least one of
-them is wrong.
+`Vec<ProjectMapping>`. Python doesn't need to type empty lists, so
+`get_awards` answers `[]` rather than `Vec<ProjectDetails>`.
 
 ## Not a production portal
 

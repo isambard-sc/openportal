@@ -57,6 +57,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `com.sun.net.httpserver`, so its routing is twenty readable lines rather than a
   layer of annotations. 36 tests drive every handler with no bridge running.
 
+  CI runs both, on a **Java 21** runner against the library's declared Java 17
+  target - so an API added after 17 fails the build there rather than at a site
+  running the version the library says it supports.
+
 - **The `openportal` Python module is on PyPI** (`pip install openportal`), so
   using it needs no Rust toolchain. The site portal example's
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other

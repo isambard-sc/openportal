@@ -698,10 +698,32 @@ def _importable(module: str) -> bool:
         return False
 
 
-def start_all() -> None:
-    """Set up if needed, start the four agents and the app, then explain how to use them."""
+#: Where the Java site portal lives, for `start --app java`. Its `example`
+#: package answers the same contract as `site_portal.py` and serves the same
+#: endpoints, so everything the instructions below say applies to either.
+JAVA_EXAMPLE = REPO / "java" / "examples" / "site_portal"
+
+
+def start_all(app_kind: str = "python") -> None:
+    """
+    Set up if needed, start the four agents and the app, then explain how to
+    use them.
+
+    `app_kind` chooses which site portal answers the site bridge's jobs:
+    `python` (app.py), `java` (java/examples/site_portal), or `none` for
+    neither - which is what you want if you are about to start one yourself,
+    from an IDE or a debugger.
+
+    There is one harness rather than one per language deliberately. The four
+    agents are the same either way - they are the same Rust binaries, wired the
+    same way - and keeping two copies of this file in step would be a standing
+    cost for no gain. What differs between the two examples is the *portal*, and
+    that is exactly what this argument selects.
+    """
     setup()
-    check_python_deps()
+
+    if app_kind == "python":
+        check_python_deps()
 
     print("\nStarting the agents")
 
@@ -722,6 +744,22 @@ def start_all() -> None:
             + (", already running)" if process.resumed else ")")
         )
 
+    if app_kind == "none":
+        print(
+            f"\nNot starting a site portal - nothing will answer the site bridge until\n"
+            f"  you start one on port {APP_PORT}. The bridge's signal_url names that port,\n"
+            f"  so a portal on any other one is never told a job arrived."
+        )
+    elif app_kind == "java":
+        start_java_app()
+    else:
+        start_python_app()
+
+    instructions(app_kind)
+
+
+def start_python_app() -> None:
+    """Start app.py under uvicorn."""
     print("\nStarting the site portal's FastAPI app")
 
     app = start(
@@ -753,10 +791,78 @@ def start_all() -> None:
         + (", already running)" if app.resumed else ")")
     )
 
-    instructions()
+
+def java_app_jar() -> Path:
+    """
+    The Java example's jar, built if it is not there yet.
+
+    Built through Maven, which also installs the client library the example
+    depends on - so this is one command rather than an ordering the reader has
+    to know. It is slow the first time and cached afterwards.
+    """
+    jar = JAVA_EXAMPLE / "target" / "site-portal-0.92.0.jar"
+
+    if jar.exists():
+        return jar
+
+    if not shutil.which("mvn"):
+        raise Failed(
+            "The Java example needs Maven to build, and `mvn` is not on the PATH.\n"
+            "Install it, or run the Python app instead with `python example.py start`."
+        )
+
+    print("\nBuilding the Java site portal (first time only)")
+
+    for where in (REPO / "java", JAVA_EXAMPLE):
+        result = subprocess.run(
+            ["mvn", "-q", "install", "-DskipTests"],
+            cwd=where,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            raise Failed(
+                f"`mvn install` failed in {where}:\n\n"
+                f"{result.stdout[-2000:]}{result.stderr[-2000:]}"
+            )
+
+    if not jar.exists():
+        raise Failed(f"the build finished but {jar} is not there")
+
+    return jar
 
 
-def instructions() -> None:
+def start_java_app() -> None:
+    """Start the Java example, on the same port and against the same bridge."""
+    jar = java_app_jar()
+
+    print("\nStarting the Java site portal")
+
+    app = start(
+        APP,
+        [
+            "java",
+            "-jar",
+            str(jar),
+            # The same three things app.py reads from its environment: which
+            # bridge to serve, where to keep the awards, and who may award.
+            str(SITE_BRIDGE.py_config),
+            str(APP_PORT),
+            str(STATE_DIR),
+        ],
+        match=["java", str(jar)],
+        cwd=JAVA_EXAMPLE,
+        env={"PORTAL_AWARDING_PORTALS": AWARDING_PORTALS},
+    )
+    wait_for_port(APP_PORT, app)
+    print(
+        f"  - app listening on http://127.0.0.1:{APP_PORT} (pid {app.pid}"
+        + (", already running)" if app.resumed else ")")
+    )
+
+
+def instructions(app_kind: str = "python") -> None:
     """Print what is running and, more usefully, what to do with it."""
     award = f"myaward1.{ALLOCATOR.name}"
 
@@ -790,6 +896,16 @@ def instructions() -> None:
         '"bob@example.com":"Project Member"}}'
     )
 
+    # The site portal is whichever one is answering. Everything below is the
+    # same either way: the two implementations serve the same endpoints and
+    # answer the same contract, which is the point of the Java one existing.
+    app_names = {
+        "python": ("app.py", f"http://127.0.0.1:{APP_PORT}  (docs at /docs)"),
+        "java": ("java example", f"http://127.0.0.1:{APP_PORT}"),
+        "none": ("(not started)", f"start one on port {APP_PORT}"),
+    }
+    app_name, app_where = app_names.get(app_kind, app_names["python"])
+
     print(
         f"""
 Everything is up.
@@ -798,7 +914,7 @@ Everything is up.
   {SITE.name:<17}  site portal          {SITE.url}
   {ALLOCATOR_BRIDGE.name:<17}  awards bridge API    {ALLOCATOR_BRIDGE.http_url}
   {SITE_BRIDGE.name:<17}  site bridge API      {SITE_BRIDGE.http_url}
-  {'app.py':<17}  the site portal      http://127.0.0.1:{APP_PORT}  (docs at /docs)
+  {app_name:<17}  the site portal      {app_where}
 
 1. **The site has to offer a resource first.** A fresh portal advertises
    nothing, so there is nothing for the awards portal to address yet - and a
@@ -1046,7 +1162,19 @@ def main() -> int:
         help="throw away the existing configs (and keys) and write them again",
     )
 
-    commands.add_parser("start", help="set up if needed, then start everything")
+    start_parser = commands.add_parser(
+        "start", help="set up if needed, then start everything"
+    )
+    start_parser.add_argument(
+        "--app",
+        choices=("python", "java", "none"),
+        default="python",
+        help=(
+            "which site portal answers the site bridge: app.py (default), the "
+            "Java example in java/examples/site_portal, or none if you will "
+            "start one yourself"
+        ),
+    )
     commands.add_parser("status", help="show what is running")
     commands.add_parser("stop", help="stop everything")
     commands.add_parser("clean", help="stop everything and delete ./data")
@@ -1057,7 +1185,7 @@ def main() -> int:
         if args.command == "setup":
             setup(force=args.force)
         elif args.command == "start":
-            start_all()
+            start_all(args.app)
         elif args.command == "status":
             status()
         elif args.command == "stop":

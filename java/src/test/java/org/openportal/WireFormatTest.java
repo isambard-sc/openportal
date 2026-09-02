@@ -152,8 +152,10 @@ class WireFormatTest {
     }
 
     @Test
-    @DisplayName("a job cannot be answered twice")
-    void answeredOnce() {
+    @DisplayName("only a job in an answerable state can be answered")
+    void answerableStates() {
+        // Answering twice would not be ignored - the board takes the higher
+        // version, so the second answer would overwrite the first.
         Job answered = Job.parse(JOB).completedNone();
 
         assertTrue(
@@ -162,6 +164,26 @@ class WireFormatTest {
                                 org.junit.jupiter.api.Assertions.assertThrows(
                                         IllegalStateException.class, answered::completedNone))
                         .getMessage()
-                        .contains("already Complete"));
+                        .contains("in state Complete"));
+
+        // And a `Created` job has not been handed out yet, so an answer to it
+        // is an answer to a question nobody asked. These are the states the
+        // Rust side accepts, and getting them wrong here means a result the
+        // board refuses.
+        Job created = Job.parse(JOB.replace("\"state\":\"Pending\"", "\"state\":\"Created\""));
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class, created::completedNone);
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class, () -> created.errored("no"));
+
+        // A duplicate can be errored but not completed - it has no work of its
+        // own to have finished.
+        Job duplicate =
+                Job.parse(JOB.replace("\"state\":\"Pending\"", "\"state\":\"Duplicate\""));
+
+        assertEquals("Error", duplicate.errored("no").json().get("state").asText());
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class, duplicate::completedNone);
     }
 }

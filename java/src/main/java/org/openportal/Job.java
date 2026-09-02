@@ -197,11 +197,14 @@ public final class Job {
      * The result as text, read by a string parser.
      *
      * <p>For the types whose whole wire form is a string:
-     * {@code job.resultText(ProjectMapping::parse)}. Reads through
-     * {@link #resultText}, so a JSON-string result arrives unquoted.
+     * {@code job.resultText(ProjectMapping::parse)}. Note this reads through
+     * {@link #result()} and takes the text <i>inside</i> the JSON string, so
+     * the parser sees {@code a:b} rather than {@code "a:b"} - which is what
+     * {@link #resultText()} would have handed it, and why that one is not the
+     * accessor to build a typed value from.
      */
     public <T> Optional<T> resultText(java.util.function.Function<String, T> parser) {
-        return resultText().map(parser);
+        return result().map(JsonNode::asText).map(parser);
     }
 
     /**
@@ -229,6 +232,35 @@ public final class Job {
     }
 
     /** The machine-readable kind of this job's failure, or {@code ""}. */
+    /**
+     * The failure text, or {@code ""} on a job that did not fail.
+     *
+     * <p>The wire-encoded form - {@code "ManagedProjectPendingError: awaiting
+     * approval"}, with the class prefix still on it. {@link #error} decodes it
+     * into a typed exception, which is what to branch on; this is for showing a
+     * human.
+     */
+    public String errorMessage() {
+        return isError() ? resultText().orElse("") : "";
+    }
+
+    /**
+     * A word for how far this job has got, for a progress display.
+     *
+     * <p>Its state's name, except for a running job that has posted interim
+     * text, whose text this is instead. Never empty - a job always has some
+     * state - so this is not the field to test for a failure; use
+     * {@link #isError}.
+     */
+    public String progressMessage() {
+        if (state() == Status.RUNNING) {
+            return resultText().filter(text -> !text.isBlank()).orElse("Running");
+        }
+
+        // A duplicate reports as pending: it is waiting on the job it duplicates.
+        return state() == Status.DUPLICATE ? Status.PENDING.wire() : state().wire();
+    }
+
     public String errorKind() {
         JsonNode error = raw.get("error");
 
@@ -302,14 +334,22 @@ public final class Job {
     /**
      * A copy of this job, stamped as changed and answered.
      *
-     * <p>Refuses to answer a job that is already finished: the board would take
-     * the higher version, so a second answer would overwrite the first rather
-     * than being ignored.
+     * <p>Refuses a job whose state cannot be answered, matching the states the
+     * Rust side accepts: a completion needs {@code Pending} or {@code Running},
+     * and a failure also accepts {@code Duplicate}. Two of the refusals matter
+     * for different reasons - answering an already-finished job would overwrite
+     * the first answer rather than being ignored, because the board takes the
+     * higher version; and a {@code Created} job has not been handed out yet, so
+     * an answer to it is an answer to a question nobody asked.
      */
     private ObjectNode answering(Status state) {
-        if (isFinished()) {
-            throw new IllegalStateException(
-                    "job " + id() + " is already " + state().wire() + " and cannot be answered again");
+        boolean answerable = this.state() == Status.PENDING
+                || this.state() == Status.RUNNING
+                || (state == Status.ERROR && this.state() == Status.DUPLICATE);
+
+        if (!answerable) {
+            throw new IllegalStateException("cannot set " + state.wire().toLowerCase(
+                    java.util.Locale.ROOT) + " on job " + id() + " in state " + state().wire());
         }
 
         ObjectNode next = raw.deepCopy();

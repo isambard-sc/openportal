@@ -33,7 +33,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   *everything*, a quota with no measurement declines to report a percentage
   rather than reporting zero, and an allocation's unit is the one every report
   about that award has to come back in. `BridgeClient` gains `diagnostics` and
-  `restart`, and `health` and `fetch_notification` now answer typed.
+  `restart`, and `health` and `fetch_notification` now answer typed. `Job` gains
+  `errorMessage`, `progressMessage` and typed result readers, and now refuses to
+  answer a job whose state the Rust side would refuse - a `Created` job has not
+  been handed out, so an answer to it is an answer to a question nobody asked.
+
+- **A Java site portal example** (`java/examples/site_portal`), answering the
+  same contract as `python/examples/site_portal` against the same walkthrough -
+  offer a resource, refuse what cannot be honoured, approve, map, push usage,
+  convert it into the award's unit, finalise a month. Verified end to end
+  against the real agents: an award created from the Python allocator comes back
+  as a typed `ManagedProjectPendingError`, then as a `ProjectMapping` once
+  approved, and 12.5 node hours pushed in read back on the allocator's side as
+  50 GPU hours attributed to `alice.myaward1.allocator`.
+
+  It shares the Python example's `example.py`, which grows an `--app
+  {python,java,none}` option, because the four agents are the same Rust binaries
+  wired the same way whichever language answers them - the thing that differs is
+  the portal, so that is what the option selects. `--app none` starts the agents
+  and no portal, for running one from an IDE.
+
+  The example needs no web framework: the operator API is served by
+  `com.sun.net.httpserver`, so its routing is twenty readable lines rather than a
+  layer of annotations. 36 tests drive every handler with no bridge running.
 
 - **The `openportal` Python module is on PyPI** (`pip install openportal`), so
   using it needs no Rust toolchain. The site portal example's

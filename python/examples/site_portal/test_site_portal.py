@@ -633,6 +633,53 @@ def _run_all() -> None:
         == [f"{AWARD2}:{LOCAL_PROJECT2}"],
     )
 
+    print("\n-- listing awards, and the type a list goes back as -------------")
+
+    # `get_awards` returns `AwardDetails`, not mappings - the two listings have
+    # different shapes and are easy to confuse. This one had never been
+    # exercised, and it did not work: no `Vec<T>` extraction in the module
+    # matched a list of `AwardDetails`, so a non-empty answer failed with
+    # "Could not extract result type" and an empty one was typed as
+    # `Vec<UserIdentifier>` with nothing able to read `Vec<ProjectDetails>`
+    # back. Both halves - writing the type and reading it - are needed.
+    job = site_portal.answer(make_job("get_awards allocator"))
+    check("get_awards succeeds", not job.is_error, f"{job.error_message}")
+    # Read out of the JSON because `Job` exposes no `result_type` getter - which
+    # is part of why this went unnoticed: from Python there was no way to see
+    # what type an answer had gone out as.
+    answered_as = json.loads(job.to_json())["result_type"]
+    check(
+        "...typed as a list of ProjectDetails",
+        answered_as == "Vec<ProjectDetails>",
+        f"-> {answered_as}",
+    )
+    check(
+        "...and reads back as AwardDetails, not mappings",
+        all(type(a) is openportal.AwardDetails for a in job.result)
+        and [str(a.allocation) for a in job.result] == ["1000 NHR"],
+        f"-> {[type(a).__name__ for a in job.result]}",
+    )
+    check(
+        "...scoped to the resource it was asked of",
+        len(site_portal.answer(make_job("get_awards allocator")).result) == 1
+        and len(
+            site_portal.answer(
+                make_job("get_awards allocator", offering=OTHER_OFFERING)
+            ).result
+        )
+        == 1,
+    )
+
+    # An empty listing still has to be a listing. `ProjectUsageReport` is not
+    # the only type where "nothing" and "nothing, and that is final" differ:
+    # here the risk is that an empty list is unreadable, or read as the wrong
+    # element type. It is typed as whichever `Vec<T>` the module tries first,
+    # which is harmless - the reader turns `[]` into an empty list under any of
+    # those names - but it must not fail.
+    job = site_portal.answer(make_job("get_awards nobody"))
+    check("an empty listing succeeds", not job.is_error, f"{job.error_message}")
+    check("...and is an empty list", job.result == [], f"-> {job.result!r}")
+
     print("\n-- the same question asked of the wrong resource ----------------")
 
     # The award lives on cluster1. An awarding portal can perfectly well ask

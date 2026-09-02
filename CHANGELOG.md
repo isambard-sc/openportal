@@ -175,6 +175,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **`get_awards` could not answer at all from the Python module**, and an empty
+  quota map could not be answered either. `Job.completed()` infers a result's
+  wire type from the value it is given, and the `Vec<T>` chain had no arm for a
+  list of `AwardDetails` - so a non-empty `get_awards` failed with "Could not
+  extract result type", which the site portal example then reported as an
+  internal error. The *reading* side had no `"Vec<ProjectDetails>"` arm either,
+  so even a correctly typed answer was unreadable; both halves are needed and
+  both are here. Separately, `HashMap` results were guarded with
+  `!map.is_empty()`, which made "this project has no quotas set" unsayable -
+  `completed({})` failed outright. An empty dict is unambiguous (it is the only
+  dict type in the table), so the guard is gone.
+
+  An *empty list* is left as it was, deliberately. It matches every `Vec<T>` and
+  is typed as whichever arm is tried first, and that is harmless rather than
+  wrong: `Job::result<T>()` never consults `result_type`, and the Python reader
+  turns `[]` into an empty list under any `Vec<T>` name - an empty
+  `Vec<UserIdentifier>` really is an empty `Vec<ProjectDetails>`. The name only
+  carries information once there are elements.
+
+  Found by writing a second client: the Java example answers `get_awards` with
+  the honest `Vec<ProjectDetails>`, which nothing on the Python side could read.
+  `test_site_portal.py` now covers `get_awards` - typed, non-empty and empty -
+  which no test did before, which is why this survived.
+
 - **The bridge API specification described a signature scheme that does not
   authenticate, and two request bodies the bridge rejects.** The primitive is
   keyed BLAKE2b-256 rather than HMAC-SHA512, and what is signed is the canonical

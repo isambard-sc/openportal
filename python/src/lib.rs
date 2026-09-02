@@ -1519,6 +1519,15 @@ impl Job {
         try_extract!(Vec<UserMapping>, |v: Vec<UserMapping>| {
             v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
         });
+        // `get_awards` answers a list of these, and without this arm it could
+        // not answer at all: no other `Vec<T>` extraction matches a list of
+        // `AwardDetails`, so a non-empty answer fell through to "Could not
+        // extract result type". Named `Vec<ProjectDetails>` on the wire, via
+        // `NamedType for AwardDetails` - see the matching arm in `result`,
+        // which is the half that makes it readable.
+        try_extract!(Vec<AwardDetails>, |v: Vec<AwardDetails>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
         try_extract!(Vec<String>, |v| v);
         try_extract!(Vec<Usage>, |v: Vec<Usage>| {
             v.into_iter().map(|item| item.0).collect::<Vec<_>>()
@@ -1556,7 +1565,16 @@ impl Job {
                 }
             }
 
-            if is_volume_quota_dict && !map.is_empty() {
+            // Deliberately no `!map.is_empty()` here. An empty dict is a
+            // legitimate answer - "this project has no quotas set" - and
+            // refusing it made that unsayable: `completed({})` failed with
+            // "Could not extract result type", which is a hard failure rather
+            // than a mislabel. Nor is it ambiguous the way an empty list is:
+            // this is the only dict type in the table, so `{}` has exactly one
+            // reading. An empty *list* is ambiguous between every `Vec<T>` and
+            // gets whichever arm is tried first, but that is harmless - the
+            // reader turns `[]` into an empty list under any of those names.
+            if is_volume_quota_dict {
                 return match self.0.completed(map) {
                     Ok(result) => Ok(result.into()),
                     Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
@@ -1901,6 +1919,23 @@ impl Job {
                         let list = PyList::empty(py);
                         for item in result {
                             list.append(ProjectMapping::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<ProjectDetails>" => {
+                let result = match self.0.result::<Vec<grammar::AwardDetails>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(AwardDetails::from(item).into_pyobject(py)?)?;
                         }
                         Ok(list.into_any())
                     }

@@ -83,15 +83,26 @@ from whatever it already uses.
 what lets `SitePortalTest` point it at a temporary directory instead of the
 portal's own, so the tests need no environment at all.
 
-**A list result is named `Vec<T>`.** The Python example answers `get_projects`
-and `get_awards` by handing a list to `job.completed()`, which infers the type
-from the values — and that inference has two failure modes this example avoids
-by declaring the element type alongside the handler. An **empty** list matches
-every `Vec<T>` and gets typed as the first one tried; and a list of
-`AwardDetails` matches none of them, so a non-empty `get_awards` fails with
-"Could not extract result type". Both are worth fixing in the Python module;
-until then, if you are comparing the two portals' answers on those two
-instructions, this is where they differ, and this is the one that is right.
+**A list result names its element type explicitly.** `ListHandler` carries the
+type alongside the handler, so an empty `get_projects` still answers
+`Vec<ProjectMapping>`. The Python example instead hands the list to
+`job.completed()` and lets it infer the type from the values, which for an
+**empty** list means whichever `Vec<T>` is tried first — usually
+`Vec<UserIdentifier>`.
+
+That difference is cosmetic rather than a correctness problem, and it is worth
+knowing why: nothing on either side gates deserialisation on the name.
+`Job::result<T>()` in Rust does not read `result_type` at all, and the Python
+reader dispatches on it but turns `[]` into an empty list under any `Vec<T>`
+name. So an empty `Vec<UserIdentifier>` genuinely is an empty
+`Vec<ProjectDetails>`. The name starts to matter only once there are elements,
+where a mismatch fails to deserialise.
+
+What is *not* cosmetic is that the name has to exist in the reader's table —
+that table, not the writer, is the contract. Declaring the honest
+`Vec<ProjectDetails>` is what surfaced that the Python module could neither
+write nor read it, so `get_awards` had never worked there; both halves are
+fixed in this branch.
 
 **Job counts can be written.** `DailyProjectUsageReport` here has `addJobs` and
 `addWaitSeconds`, which the Python module reads but cannot set. The fields are

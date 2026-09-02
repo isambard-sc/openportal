@@ -421,14 +421,17 @@ Returns the current set of resource offerings available through the portal.
 
 **Authentication:** required (GET signature over `"get_offerings"`)
 
-**Response:** a `Destinations` string (comma-separated, wrapped in `[...]`):
+**Response:** a JSON array of destination strings:
 
 ```json
-"[resource-a.waldur.provider, resource-b.waldur.provider]"
+["resource-a.waldur.provider", "resource-b.waldur.provider"]
 ```
 
-See [instruction-protocol.md](instruction-protocol.md) §Destinations for the
-format.
+Note that this is an **array**, not the bracketed `Destinations` text form
+(`"[a, b]"`). That form appears inside instruction strings, where a command is
+one line - see [instruction-protocol.md](instruction-protocol.md) §Destinations -
+but over this API the type serialises as an array, and sending the text form
+instead is answered with a `500`.
 
 ---
 
@@ -518,11 +521,15 @@ Polls the current state of a previously submitted job.
 
 **Authentication:** required (POST signature over `"status"` and request body)
 
-**Request body:** a JSON UUID string
+**Request body:** an object naming the job
 
 ```json
 {"job": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}
 ```
+
+Note the wrapping object: `/status` takes `{"job": "<uuid>"}` where
+[`/fetch_job`](#post-fetch_job) takes the bare UUID string. They are not
+interchangeable, and the wrong one is a `500`.
 
 **Response:** the current `Job` object
 
@@ -626,17 +633,21 @@ virtual agents for new offerings are created.
 
 **Authentication:** required (POST signature over `"sync_offerings"` and request body)
 
-**Request body:** a `Destinations` string
+**Request body:** a JSON array of destination strings
 
 ```json
-"[resource-a.waldur.provider, resource-b.waldur.provider]"
+["resource-a.waldur.provider", "resource-b.waldur.provider"]
 ```
 
-**Response:** the accepted (validated) `Destinations` set
+**Response:** the accepted (validated) set, in the same form
 
 ```json
-"[resource-a.waldur.provider, resource-b.waldur.provider]"
+["resource-a.waldur.provider", "resource-b.waldur.provider"]
 ```
+
+An array, not the bracketed `Destinations` text form - see
+[`GET /get_offerings`](#get-get_offerings). The same applies to
+`/add_offerings` and `/remove_offerings` below.
 
 **Offering format:** each destination must have exactly three components:
 `<resource-name>.<local-portal-name>.<remote-portal-name>`. The middle

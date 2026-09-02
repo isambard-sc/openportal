@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **A Java client for the bridge API** (`java/`), for a site whose portal is
+  written in Java rather than Python. The Python module talks to a bridge
+  through Rust; a Java portal has to sign its own requests, so `BridgeAuth` is
+  the reference implementation of the v2 signature - keyed BLAKE2b-256 over the
+  JSON-encoded canonical string - and is what the rest is built on.
+  `BridgeClient` covers the endpoints a portal uses (`fetch_job`,
+  `send_result`, the offerings calls, `run`, `status`, `health`), `Job` answers
+  a job without discarding the fields it did not understand, and the error
+  classes are the same six the Python module raises, encoded the same way on
+  the wire. Unit tests pin the signature against golden vectors; the
+  `Live*Check` classes drive a real bridge.
+
 - **The `openportal` Python module is on PyPI** (`pip install openportal`), so
   using it needs no Rust toolchain. The site portal example's
   `requirements.txt` now pins `openportal>=0.92.0` alongside its other
@@ -121,6 +133,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   consumed cannot drift from what the agent says.
 
 ### Fixed
+
+- **The bridge API specification described a signature scheme that does not
+  authenticate, and two request bodies the bridge rejects.** The primitive is
+  keyed BLAKE2b-256 rather than HMAC-SHA512, and what is signed is the canonical
+  string's JSON encoding rather than the string itself, so a client written from
+  the document got a bare `401` with nothing to say why; the two traps that
+  follow - non-ASCII must not be `\u`-escaped, and the length prefixes are byte
+  lengths - are now called out, and §2.3.1's Python was extracted from the
+  document and run against a live bridge. Separately, the offerings endpoints
+  take and return a JSON **array** of destination strings, not the bracketed
+  `Destinations` text form, and `POST /status` takes `{"job": "<uuid>"}` where
+  `/fetch_job` takes the bare UUID string. Both wrong shapes are a `500`.
 
 - **The `slurmrestd` path never worked out which cluster it was talking to.**
   `find_cluster` was only called when `op-slurm` was driving the command line, so

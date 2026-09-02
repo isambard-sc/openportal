@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-License-Identifier: CC0-1.0
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.openportal</groupId>
+  <artifactId>openportal</artifactId>
+  <version>0.92.0</version>
+  <packaging>jar</packaging>
+
+  <name>openportal</name>
+  <description>
+    A Java client for the OpenPortal bridge API - the same surface the Python
+    `openportal` module wraps, for a portal that would rather not embed a Rust
+    extension. Version tracks the OpenPortal release it was written against.
+  </description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <!--
+      BLAKE2b, which the bridge signs its requests with and the JDK does not
+      have. `Blake2bDigest(key, 32, null, null)` is keyed BLAKE2b-256, which is
+      exactly what `orion::auth::authenticate` computes - see BridgeAuth.
+    -->
+    <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcprov-jdk18on</artifactId>
+      <version>1.78.1</version>
+    </dependency>
+
+    <!--
+      JSON. The tree model (`JsonNode`) rather than data binding: several fields
+      on the wire are JSON *inside* a JSON string, and a couple of types are
+      strings that parse into structures, so reading and writing nodes
+      explicitly keeps that visible instead of hiding it behind annotations.
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.17.2</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

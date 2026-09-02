@@ -1,0 +1,130 @@
+<!--
+SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-License-Identifier: CC0-1.0
+-->
+
+# An example site portal, in Java
+
+The Java counterpart of
+[`python/examples/site_portal`](../../../python/examples/site_portal). Same
+contract, same walkthrough, same answers — a site portal written against the
+[`org.openportal` Java client](../..) rather than the Python module.
+
+```bash
+# from the repository root
+cd python/examples/site_portal
+python example.py start --app java
+```
+
+That builds the Java portal, stands up two OpenPortal portals with a bridge
+each, and prints a ten-step walkthrough. **Follow the Python example's
+[README](../../../python/examples/site_portal/README.md) and the printed
+steps** — every `curl` and every allocator-side snippet works identically
+against this portal, which is the property worth having. This file covers only
+what is different.
+
+## Why the harness is shared
+
+One `example.py`, and it starts either portal. The four agents are the same
+Rust binaries wired the same way whichever language answers them, and keeping
+two thousand-line orchestrators in step would be a standing cost for nothing:
+the thing that differs between the two examples is the **portal**, so that is
+what `--app` selects.
+
+```bash
+python example.py start --app python   # app.py (the default)
+python example.py start --app java     # this
+python example.py start --app none     # neither - you start one yourself
+```
+
+`--app none` is the one to use from an IDE or a debugger. Start the portal on
+port **18780**: that is the port the site bridge's `signal_url` names, and a
+portal listening anywhere else is never told a job arrived.
+
+So Python is needed to run the *tutorial*, not to run a site portal. What a site
+actually deploys is the jar and a bridge:
+
+```bash
+mvn install                       # in java/ first, then here
+java -jar target/site-portal-0.92.0.jar <bridge invite file> <port> [state dir]
+```
+
+## What to read, and in what order
+
+| File | What is in it |
+|---|---|
+| **`SitePortal.java`** | **The contract.** One method per instruction, in the order `site-portal-api.md` §4 lists them. Read this one. |
+| `OperatorApi.java` | The HTTP surface: the two `/signal/*` endpoints OpenPortal calls, and the rest — approve, reject, offerings, usage — which are this site's own and no part of any contract. |
+| `Store.java` | Awards, offerings and projects as JSON files. A real portal has a database; what is worth copying is the shape. |
+| `Award.java`, `Attachment.java`, `Offering.java`, `LocalProject.java` | The records the store holds. `Attachment` is small and carries the whole billing rule. |
+| `App.java` | The wiring: connect, register what we offer, serve, sweep. |
+| `SitePortalTest.java` | 36 checks, no bridge needed — every handler driven through `SitePortal.answer`. |
+
+The shape to take away is `answer()` at the bottom of `SitePortal`: **every job
+gets an answer.** A handler either returns a value or throws; either way a
+result is posted. A job left unanswered is indistinguishable from an outage
+until it expires two minutes later, and it is the one failure mode worth
+designing out structurally rather than remembering to avoid.
+
+## Differences from the Python example
+
+Four, and each one is a deliberate choice rather than a gap.
+
+**No web framework.** The operator API is served by
+`com.sun.net.httpserver`, which ships with the JDK, so the example has no
+framework dependency and its routing is twenty lines you can read rather than a
+layer of annotations. The cost is that there is no `/docs` — FastAPI's generated
+API browser has no counterpart here, so the endpoints are the ones the
+walkthrough prints and the ones in `OperatorApi`. A real portal would serve them
+from whatever it already uses.
+
+**The store is an object, not a module.** Python's `store.py` reads
+`PORTAL_STATE_DIR` at import; `new Store(path)` takes the directory. That is
+what lets `SitePortalTest` point it at a temporary directory instead of the
+portal's own, so the tests need no environment at all.
+
+**A list result names its element type explicitly.** `ListHandler` carries the
+type alongside the handler, so an empty `get_projects` still answers
+`Vec<ProjectMapping>`. The Python example instead hands the list to
+`job.completed()` and lets it infer the type from the values, which for an
+**empty** list means whichever `Vec<T>` is tried first — usually
+`Vec<UserIdentifier>`.
+
+That difference is cosmetic rather than a correctness problem, and it is worth
+knowing why: nothing on either side gates deserialisation on the name.
+`Job::result<T>()` in Rust does not read `result_type` at all, and the Python
+reader dispatches on it but turns `[]` into an empty list under any `Vec<T>`
+name. So an empty `Vec<UserIdentifier>` genuinely is an empty
+`Vec<ProjectDetails>`. The name starts to matter only once there are elements,
+where a mismatch fails to deserialise.
+
+What is *not* cosmetic is that the name has to exist in the reader's table —
+that table, not the writer, is the contract. Declaring the honest
+`Vec<ProjectDetails>` is what surfaced that the Python module could neither
+write nor read it, so `get_awards` had never worked there; both halves are
+fixed in this branch.
+
+**Job counts can be written.** `DailyProjectUsageReport` here has `addJobs` and
+`addWaitSeconds`, which the Python module reads but cannot set. The fields are
+on the wire either way, and a report carrying usage but no job counts cannot
+answer "how many jobs".
+
+## Keeping the two in sync
+
+They are two implementations of one contract, and the contract is
+[`site-portal-api.md`](../../../docs/specifications/site-portal-api.md) — not
+either file. When it changes, both change; when one of them learns something,
+the other should. `SitePortalTest` and `test_site_portal.py` check the same
+properties in the same order for that reason, so a behaviour added to one has a
+visible hole in the other.
+
+The specification is the authority. Where these two disagree, at least one of
+them is wrong.
+
+## Not a production portal
+
+The operator API has **no authentication**, exactly as the Python example's
+does not, and for the same reason: it is bound to localhost and the point is the
+contract rather than the admin interface. The state directory is plain JSON with
+no locking, `seen` grows without bound, and the sweep is a fixed 30 seconds.
+Each is fine for a walkthrough and none of them is fine for a site.

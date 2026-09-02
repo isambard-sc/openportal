@@ -15,6 +15,14 @@ python example.py start
 and follow the instructions that are printed there. Then come back here
 to understand what this did in more detail.
 
+> [!TIP]
+> There is a Java portal answering the same contract, in
+> [`java/examples/site_portal`](../../../java/examples/site_portal). It uses this
+> same harness — `python example.py start --app java` — because the agents are
+> the same either way and only the portal differs. Every step below works
+> against either one; `--app none` starts the agents and no portal, for when you
+> want to run your own.
+
 > [!NOTE]
 > `example.py` drives two OpenPortal agents, `op-portal` and `op-bridge`. On Linux
 > you can just download them — no Rust toolchain, and it takes seconds:

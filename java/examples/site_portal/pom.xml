@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: © 2026 Christopher Woods <Christopher.Woods@bristol.ac.uk>
+SPDX-License-Identifier: CC0-1.0
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.openportal.example</groupId>
+  <artifactId>site-portal</artifactId>
+  <version>0.92.0</version>
+  <packaging>jar</packaging>
+
+  <name>OpenPortal example site portal (Java)</name>
+  <description>
+    The Java counterpart of python/examples/site_portal - a site portal that
+    answers the OpenPortal site portal contract, with an operator API in front
+    of it.
+  </description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <!--
+      The client library one directory up. `mvn install` there first, or build
+      both from `java/` if you add this as a module.
+    -->
+    <dependency>
+      <groupId>org.openportal</groupId>
+      <artifactId>openportal</artifactId>
+      <version>0.92.0</version>
+    </dependency>
+
+    <!--
+      No web framework. The operator API is a handful of endpoints served by
+      `com.sun.net.httpserver`, which ships with the JDK - so the example has
+      one dependency rather than a framework's worth, and the code that matters
+      is not buried in annotations. A real portal would use whatever it already
+      uses.
+    -->
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.14.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.6</version>
+      </plugin>
+      <plugin>
+        <!--
+          `java -jar target/site-portal-0.92.0.jar` starts the portal. The
+          dependencies are copied to target/lib and named in the manifest's
+          Class-Path rather than shaded into the jar, so what the example runs
+          against stays visible - three jars you can list, not one you cannot
+          see inside.
+        -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>org.openportal.example.App</mainClass>
+              <addClasspath>true</addClasspath>
+              <classpathPrefix>lib/</classpathPrefix>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution>
+            <id>copy-dependencies</id>
+            <phase>prepare-package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+              <includeScope>runtime</includeScope>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

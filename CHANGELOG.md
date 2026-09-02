@@ -175,6 +175,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **`Job.result_type`** on the Python module, mirroring the accessor Rust and the
+  Java client already have. Most Python never needs it - `result` has already
+  used it to decide what to build - but it was the only thing about an answer
+  Python could not see, and answering an instruction with the wrong type is not a
+  failure either side detects: a well-formed value under the wrong name
+  deserialises into the wrong thing, or not at all, and nothing on the wire
+  objects. A portal's own tests are where that gets caught, and they could not
+  look. It is also what diagnoses `Unknown result type: X` - a peer answering
+  with a type newer than the module is a version mismatch rather than a fault.
+  `test_site_portal.py` now pins the type every instruction in §4 answers with.
+
 - **`get_awards` could not answer at all from the Python module**, and an empty
   quota map could not be answered either. `Job.completed()` infers a result's
   wire type from the value it is given, and the `Vec<T>` chain had no arm for a

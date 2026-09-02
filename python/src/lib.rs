@@ -1639,6 +1639,37 @@ impl Job {
             .unwrap_or_default())
     }
 
+    /// The name of the type this job's result is, or `"None"` if it has none.
+    ///
+    /// The counterpart to [`result`]: that gives the value, this gives the name
+    /// it travelled under. Most Python never needs it - `result` has already
+    /// used it to decide what to build - but it is the only way to see what a
+    /// job was *answered as*, which matters in two places.
+    ///
+    /// Answering an instruction with the wrong type is not a failure either
+    /// side detects: a well-formed value under the wrong name deserialises
+    /// into the wrong thing or not at all, and nothing on the wire objects. A
+    /// portal's own tests are where that gets caught, and they need to be able
+    /// to look.
+    ///
+    /// It is also how an unrecognised type is diagnosed. `result` raises
+    /// `Unknown result type: X` for a name this module cannot build, and X is
+    /// the useful half of that - a peer answering with a type newer than this
+    /// module is a version mismatch rather than a fault, and this says so.
+    ///
+    /// Note the names are the *Rust* type names, so they are not always the
+    /// Python class: an `AwardDetails` is `"ProjectDetails"`, and a list is
+    /// `"Vec<T>"` of the element's name. Unlike a `Job` on either the Rust or
+    /// the Java side, an unfinished job answers `"None"` here rather than
+    /// nothing at all, matching `error_kind`'s empty string.
+    #[getter]
+    fn result_type(&self) -> PyResult<String> {
+        match self.0.result_type() {
+            Ok(result_type) => Ok(result_type),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     /// Raise this job's error, if it has one. A no-op otherwise.
     fn raise_for_error(&self) -> PyResult<()> {
         if self.0.is_error() {

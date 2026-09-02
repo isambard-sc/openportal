@@ -644,14 +644,10 @@ def _run_all() -> None:
     # back. Both halves - writing the type and reading it - are needed.
     job = site_portal.answer(make_job("get_awards allocator"))
     check("get_awards succeeds", not job.is_error, f"{job.error_message}")
-    # Read out of the JSON because `Job` exposes no `result_type` getter - which
-    # is part of why this went unnoticed: from Python there was no way to see
-    # what type an answer had gone out as.
-    answered_as = json.loads(job.to_json())["result_type"]
     check(
         "...typed as a list of ProjectDetails",
-        answered_as == "Vec<ProjectDetails>",
-        f"-> {answered_as}",
+        job.result_type == "Vec<ProjectDetails>",
+        f"-> {job.result_type}",
     )
     check(
         "...and reads back as AwardDetails, not mappings",
@@ -679,6 +675,36 @@ def _run_all() -> None:
     job = site_portal.answer(make_job("get_awards nobody"))
     check("an empty listing succeeds", not job.is_error, f"{job.error_message}")
     check("...and is an empty list", job.result == [], f"-> {job.result!r}")
+
+    print("\n-- the type each answer goes out as -----------------------------")
+
+    # Nothing on the wire objects to a well-formed value under the wrong type
+    # name: it deserialises into the wrong thing on the far side, or not at all.
+    # A portal's own tests are the only place that gets caught, so this checks
+    # the whole table at once. §4 of the specification lists what each
+    # instruction must return; these are those types' names as the Rust side
+    # registers them, which are not always the Python class name - an
+    # `AwardDetails` is a `ProjectDetails`, and a list is `Vec<T>`.
+    expected_types = {
+        f"get_project_mapping {AWARD}": "ProjectMapping",
+        f"get_award {AWARD}": "ProjectDetails",
+        "get_awards allocator": "Vec<ProjectDetails>",
+        "get_projects allocator": "Vec<ProjectMapping>",
+        f"get_usage_report {AWARD} this_month": "ProjectUsageReport",
+        "get_usage_reports allocator this_month": "UsageReport",
+        f"get_storage_report {AWARD} this_month": "ProjectStorageReport",
+        "get_storage_reports allocator": "StorageReport",
+        f"remove_project {AWARD2}": "ProjectMapping",
+    }
+
+    for command, expected in expected_types.items():
+        answered = site_portal.answer(make_job(command))
+        check(
+            f"{command.split()[0]} answers a {expected}",
+            not answered.is_error and answered.result_type == expected,
+            f"-> {answered.result_type}"
+            + (f" ({answered.error_message})" if answered.is_error else ""),
+        )
 
     print("\n-- the same question asked of the wrong resource ----------------")
 

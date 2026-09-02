@@ -12,7 +12,15 @@ over localhost HTTP.
 
 ## Installation
 
-Build and install the Python module from the workspace root:
+It is on PyPI, and needs no Rust toolchain:
+
+```bash
+pip install openportal
+```
+
+To install the module built from a checkout of this repository instead - which is
+what you want when changing the bindings themselves - build it from the workspace
+root:
 
 ```bash
 make python
@@ -20,7 +28,7 @@ make python
 maturin develop -m python/Cargo.toml
 ```
 
-This installs the `openportal` module into the current Python environment.
+Either way the `openportal` module ends up in the current Python environment.
 
 ## A worked example
 

@@ -53,7 +53,7 @@ reach the bridge.
 
 What follows from that, and is the reason this section exists:
 
-- **Request bodies and responses are cleartext.** The HMAC below authenticates the
+- **Request bodies and responses are cleartext.** The signature below authenticates the
   *request* direction only. Responses carry no MAC and no encryption, so anything
   on this hop can read a job's contents and tamper with a result travelling back to
   the portal. See
@@ -86,7 +86,7 @@ of it and authenticate at that layer — do not rely on this API's own protectio
 
 ### 1.2 Bridge Invite File
 
-The bridge generates a random 32-byte HMAC key when it is first initialised.
+The bridge generates a random 32-byte signing key when it is first initialised.
 This key is written to a TOML **bridge invite file**:
 
 ```toml
@@ -115,7 +115,7 @@ required header are rejected with HTTP 401.
 
 | Header | Description |
 |--------|-------------|
-| `Authorization` | `OpenPortal <hmac-signature>` |
+| `Authorization` | `OpenPortal <signature>` — see §2.3 |
 | `Date` | RFC 2822 timestamp, e.g. `Mon, 01 Jan 2024 12:00:00 GMT` |
 | `Content-Type` | Must be `application/json` for POST requests |
 
@@ -129,8 +129,29 @@ required header are rejected with HTTP 401.
 ### 2.3 Signature Calculation
 
 The `Authorization` header value is `OpenPortal <signature>`, where
-`<signature>` is an HMAC-SHA512 tag (hex-encoded) computed using the bridge
-invite key over a canonical call string.
+`<signature>` is a **keyed BLAKE2b-256** tag (32 bytes, hex-encoded, so 64 hex
+characters) computed with the bridge invite key over a canonical call string.
+
+Two things about how that tag is computed are easy to get wrong, and both
+produce a bare `401` with nothing to say why:
+
+1. **The primitive is keyed BLAKE2b-256, not HMAC.** It is `orion::auth::
+   authenticate`, which is BLAKE2b in its native keyed mode with a 32-byte
+   digest — not HMAC-SHA512, and not BLAKE2b wrapped in an HMAC construction.
+   In Python that is `hashlib.blake2b(message, key=key, digest_size=32)`; in
+   Java the JDK has no BLAKE2b, so use BouncyCastle's
+   `Blake2bDigest(key, 32, null, null)`; in Go, `golang.org/x/crypto/blake2b`'s
+   `New256(key)`.
+
+2. **The bytes authenticated are the canonical string's JSON encoding, not the
+   canonical string itself.** The signing helper is generic over anything
+   serialisable and serialises to JSON before signing, so what is actually fed
+   to BLAKE2b is the canonical string wrapped in double quotes with `"`, `\`
+   and control characters escaped — a literal newline in the canonical string
+   becomes the two characters `\n` in the signed message. Non-ASCII characters
+   are **not** `\u`-escaped: they stay as raw UTF-8, so a JSON encoder that
+   escapes them (Python's `json.dumps` does by default —
+   pass `ensure_ascii=False`) will produce a signature the bridge rejects.
 
 The canonical call string is built differently depending on whether the body is
 **empty**, not on the HTTP method. This matters for a `POST` with an empty body:
@@ -170,9 +191,9 @@ Where:
 | `<body>` | Raw UTF-8 request body string |
 | `<nonce>` | The `X-Nonce` header value |
 
-The HMAC is computed using `orion::auth::authenticate` (HMAC-SHA512) and
-hex-encoded. The bridge verifies it using a **constant-time comparison** to
-prevent timing attacks.
+The tag is computed using `orion::auth::authenticate` and hex-encoded. The
+bridge verifies it using a **constant-time comparison** to prevent timing
+attacks.
 
 > **The form above is version 1, and is ambiguous.** It is `\n`-joined with no
 > length prefixes and no field count, so its four shapes are not distinguishable
@@ -213,11 +234,18 @@ a field boundary, and the arity is fixed regardless of whether the body or nonce
 empty. The leading `openportal-sig-v2` tag is itself length-prefixed, so a version 2
 string can never collide with a version 1 one.
 
+Each `<byte-length>` is the length of the value **in bytes**, not in characters:
+a body containing `café` is longer than it looks, and a language whose string
+length is in UTF-16 code units (Java, JavaScript, C#) must encode first and
+measure the bytes.
+
 ```python
+import hashlib, json
+
 def canonical_v2(protocol, date_str, function, body, nonce):
-    def field(v):
-        b = v.encode() if isinstance(v, str) else v
-        return f"{len(b)}:".encode() + b
+    def field(value):
+        raw = value.encode("utf-8")
+        return f"{len(raw)}:".encode("utf-8") + raw
     return b"\n".join([
         field("openportal-sig-v2"),
         field(protocol),
@@ -228,10 +256,17 @@ def canonical_v2(protocol, date_str, function, body, nonce):
         field(nonce or ""),
     ])
 
-signature = hmac.new(key_bytes, canonical_v2(
-    "post", date_str, "run", body, nonce), hashlib.sha512).hexdigest()
-auth_header = f"OpenPortal {signature}"
+def sign(key_bytes, protocol, date_str, function, body, nonce):
+    canonical = canonical_v2(protocol, date_str, function, body, nonce)
+    # JSON-encode the canonical string, and do not escape non-ASCII (see above)
+    message = json.dumps(canonical.decode("utf-8"), ensure_ascii=False).encode("utf-8")
+    return hashlib.blake2b(message, key=key_bytes, digest_size=32).hexdigest()
+
+auth_header = f"OpenPortal {sign(key_bytes, 'post', date_str, 'run', body, nonce)}"
 ```
+
+That function is exercised against a running bridge by the Java example
+(`examples/java/site_portal`), which does the same thing with BouncyCastle.
 
 **Version negotiation.** The header is how the server knows which form to verify:
 
@@ -245,17 +280,18 @@ auth_header = f"OpenPortal {signature}"
 A version 2 signature sent *without* the header will be verified against the
 version 1 form and rejected with 401.
 
-**Example signature (pseudocode):**
+**Example signature (version 1, pseudocode):**
 
 ```python
-import hmac, hashlib, time
+import hashlib, json, time
 
 date_str = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
 body = '{"command":"waldur.provider get_offerings"}'
 nonce = "unique-nonce-abc123"
 
 canonical = f"post\napplication/json\n{date_str}\nrun\n{body}\n{nonce}"
-signature = hmac.new(key_bytes, canonical.encode(), hashlib.sha512).hexdigest()
+message = json.dumps(canonical, ensure_ascii=False).encode("utf-8")
+signature = hashlib.blake2b(message, key=key_bytes, digest_size=32).hexdigest()
 auth_header = f"OpenPortal {signature}"
 ```
 
@@ -385,14 +421,17 @@ Returns the current set of resource offerings available through the portal.
 
 **Authentication:** required (GET signature over `"get_offerings"`)
 
-**Response:** a `Destinations` string (comma-separated, wrapped in `[...]`):
+**Response:** a JSON array of destination strings:
 
 ```json
-"[resource-a.waldur.provider, resource-b.waldur.provider]"
+["resource-a.waldur.provider", "resource-b.waldur.provider"]
 ```
 
-See [instruction-protocol.md](instruction-protocol.md) §Destinations for the
-format.
+Note that this is an **array**, not the bracketed `Destinations` text form
+(`"[a, b]"`). That form appears inside instruction strings, where a command is
+one line - see [instruction-protocol.md](instruction-protocol.md) §Destinations -
+but over this API the type serialises as an array, and sending the text form
+instead is answered with a `500`.
 
 ---
 
@@ -482,11 +521,15 @@ Polls the current state of a previously submitted job.
 
 **Authentication:** required (POST signature over `"status"` and request body)
 
-**Request body:** a JSON UUID string
+**Request body:** an object naming the job
 
 ```json
 {"job": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}
 ```
+
+Note the wrapping object: `/status` takes `{"job": "<uuid>"}` where
+[`/fetch_job`](#post-fetch_job) takes the bare UUID string. They are not
+interchangeable, and the wrong one is a `500`.
 
 **Response:** the current `Job` object
 
@@ -590,17 +633,21 @@ virtual agents for new offerings are created.
 
 **Authentication:** required (POST signature over `"sync_offerings"` and request body)
 
-**Request body:** a `Destinations` string
+**Request body:** a JSON array of destination strings
 
 ```json
-"[resource-a.waldur.provider, resource-b.waldur.provider]"
+["resource-a.waldur.provider", "resource-b.waldur.provider"]
 ```
 
-**Response:** the accepted (validated) `Destinations` set
+**Response:** the accepted (validated) set, in the same form
 
 ```json
-"[resource-a.waldur.provider, resource-b.waldur.provider]"
+["resource-a.waldur.provider", "resource-b.waldur.provider"]
 ```
+
+An array, not the bracketed `Destinations` text form - see
+[`GET /get_offerings`](#get-get_offerings). The same applies to
+`/add_offerings` and `/remove_offerings` below.
 
 **Offering format:** each destination must have exactly three components:
 `<resource-name>.<local-portal-name>.<remote-portal-name>`. The middle
@@ -826,7 +873,7 @@ ignored.
 
 After receiving the signal, the web portal calls `POST /fetch_notification`
 (§4) with the UUID to retrieve the full `Notification` object. This endpoint
-is authenticated with the bridge HMAC key (§2), so the notification content is
+is authenticated with the bridge signing key (§2), so the notification content is
 never exposed to unauthenticated callers.
 
 ### 6.5 Notification URL Configuration

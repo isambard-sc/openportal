@@ -13,8 +13,9 @@ mod cache;
 
 use greatwestern::grammar::Instruction::{
     AddProject, AddUser, BlockUser, GetProjectMapping, GetProjects, GetUserMapping, GetUsers,
-    IsBlockedUser, IsExistingProject, IsExistingUser, IsProtectedUser, RemoveProject, RemoveUser,
-    UnblockUser, UpdateHomeDir,
+    IsBlockedUser, IsExistingProject, IsExistingUser, IsLocalProjectAdded, IsLocalProjectRemoved,
+    IsLocalUserAdded, IsLocalUserRemoved, IsProtectedUser, RemoveProject, RemoveUser, UnblockUser,
+    UpdateHomeDir,
 };
 use greatwestern::grammar::UserMapping;
 use greatwestern::Hpc;
@@ -217,6 +218,22 @@ async fn main() -> Result<()> {
                 IsBlockedUser(user) => {
                     let is_blocked = freeipa::is_blocked_user(&user, job.expires()).await?;
                     job.completed(is_blocked)
+                },
+                IsLocalUserAdded(mapping) => {
+                    let added = freeipa::is_local_user_added(&mapping, &sender, job.expires()).await?;
+                    job.completed(added)
+                },
+                IsLocalUserRemoved(mapping) => {
+                    let removed = freeipa::is_local_user_removed(&mapping, &sender, job.expires()).await?;
+                    job.completed(removed)
+                },
+                IsLocalProjectAdded(mapping) => {
+                    let added = freeipa::is_local_project_added(&mapping, job.expires()).await?;
+                    job.completed(added)
+                },
+                IsLocalProjectRemoved(mapping) => {
+                    let removed = freeipa::is_local_project_removed(&mapping, &sender, job.expires()).await?;
+                    job.completed(removed)
                 },
                 UpdateHomeDir(user, homedir) => {
                     let _ = freeipa::update_homedir(&user, &homedir, job.expires()).await?;

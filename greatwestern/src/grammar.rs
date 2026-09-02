@@ -2874,6 +2874,30 @@ pub enum Instruction {
     /// An instruction to check if a project exists
     IsExistingProject(ProjectIdentifier),
 
+    /// An instruction to check whether a user has been *fully* added to the
+    /// destination - i.e. every agent behind it (account, filesystem and
+    /// scheduler) independently reports the user as completely added. This is
+    /// deliberately stronger than `IsExistingUser`, which only asks the
+    /// account agent whether the account is there, and it must never be
+    /// answered from a cache: the point of the instruction is for a caller to
+    /// discover whether an earlier `AddUser` actually ran to completion, and
+    /// to re-run it if it did not.
+    IsUserAdded(UserIdentifier),
+
+    /// An instruction to check whether a user has been *fully* removed from
+    /// the destination - i.e. every agent behind it reports the removal as
+    /// complete. As with `IsUserAdded`, this is answered by asking those
+    /// agents afresh rather than from any cache.
+    IsUserRemoved(UserIdentifier),
+
+    /// An instruction to check whether a project has been *fully* added to
+    /// the destination - see `IsUserAdded`.
+    IsProjectAdded(ProjectIdentifier),
+
+    /// An instruction to check whether a project has been *fully* removed
+    /// from the destination - see `IsUserRemoved`.
+    IsProjectRemoved(ProjectIdentifier),
+
     /// An instruction to add a user
     AddUser(UserIdentifier),
 
@@ -2928,6 +2952,24 @@ pub enum Instruction {
 
     /// An instruction to remove a local project
     RemoveLocalProject(ProjectMapping),
+
+    /// An instruction asking a single agent (account, filesystem or
+    /// scheduler) whether it has fully completed everything `AddLocalUser`
+    /// asks of it for this mapping. Answered by inspecting the live system,
+    /// never a cache.
+    IsLocalUserAdded(UserMapping),
+
+    /// An instruction asking a single agent whether it has fully completed
+    /// everything `RemoveLocalUser` asks of it for this mapping.
+    IsLocalUserRemoved(UserMapping),
+
+    /// An instruction asking a single agent whether it has fully completed
+    /// everything `AddLocalProject` asks of it for this mapping.
+    IsLocalProjectAdded(ProjectMapping),
+
+    /// An instruction asking a single agent whether it has fully completed
+    /// everything `RemoveLocalProject` asks of it for this mapping.
+    IsLocalProjectRemoved(ProjectMapping),
 
     /// An instruction to get a local project report
     GetLocalUsageReport(ProjectMapping, DateRange),
@@ -3300,6 +3342,86 @@ impl Instruction {
                     tracing::error!("is_blocked_project failed to parse: {}", &rest(1));
                     Err(Error::Parse(format!(
                         "is_blocked_project failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_user_added" => match UserIdentifier::parse(&rest(1)) {
+                Ok(user) => Ok(Instruction::IsUserAdded(user)),
+                Err(_) => {
+                    tracing::error!("is_user_added failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_user_added failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_user_removed" => match UserIdentifier::parse(&rest(1)) {
+                Ok(user) => Ok(Instruction::IsUserRemoved(user)),
+                Err(_) => {
+                    tracing::error!("is_user_removed failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_user_removed failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_project_added" => match ProjectIdentifier::parse(&rest(1)) {
+                Ok(project) => Ok(Instruction::IsProjectAdded(project)),
+                Err(_) => {
+                    tracing::error!("is_project_added failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_project_added failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_project_removed" => match ProjectIdentifier::parse(&rest(1)) {
+                Ok(project) => Ok(Instruction::IsProjectRemoved(project)),
+                Err(_) => {
+                    tracing::error!("is_project_removed failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_project_removed failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_local_user_added" => match UserMapping::parse(&rest(1)) {
+                Ok(mapping) => Ok(Instruction::IsLocalUserAdded(mapping)),
+                Err(_) => {
+                    tracing::error!("is_local_user_added failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_local_user_added failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_local_user_removed" => match UserMapping::parse(&rest(1)) {
+                Ok(mapping) => Ok(Instruction::IsLocalUserRemoved(mapping)),
+                Err(_) => {
+                    tracing::error!("is_local_user_removed failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_local_user_removed failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_local_project_added" => match ProjectMapping::parse(&rest(1)) {
+                Ok(mapping) => Ok(Instruction::IsLocalProjectAdded(mapping)),
+                Err(_) => {
+                    tracing::error!("is_local_project_added failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_local_project_added failed to parse: {}",
+                        rest(1)
+                    )))
+                }
+            },
+            "is_local_project_removed" => match ProjectMapping::parse(&rest(1)) {
+                Ok(mapping) => Ok(Instruction::IsLocalProjectRemoved(mapping)),
+                Err(_) => {
+                    tracing::error!("is_local_project_removed failed to parse: {}", &rest(1));
+                    Err(Error::Parse(format!(
+                        "is_local_project_removed failed to parse: {}",
                         rest(1)
                     )))
                 }
@@ -4477,6 +4599,14 @@ impl Instruction {
             Instruction::BlockProject(_) => "block_project".to_string(),
             Instruction::UnblockProject(_) => "unblock_project".to_string(),
             Instruction::IsBlockedProject(_) => "is_blocked_project".to_string(),
+            Instruction::IsUserAdded(_) => "is_user_added".to_string(),
+            Instruction::IsUserRemoved(_) => "is_user_removed".to_string(),
+            Instruction::IsProjectAdded(_) => "is_project_added".to_string(),
+            Instruction::IsProjectRemoved(_) => "is_project_removed".to_string(),
+            Instruction::IsLocalUserAdded(_) => "is_local_user_added".to_string(),
+            Instruction::IsLocalUserRemoved(_) => "is_local_user_removed".to_string(),
+            Instruction::IsLocalProjectAdded(_) => "is_local_project_added".to_string(),
+            Instruction::IsLocalProjectRemoved(_) => "is_local_project_removed".to_string(),
             Instruction::GetUserMapping(_) => "get_user_mapping".to_string(),
             Instruction::GetProjectMapping(_) => "get_project_mapping".to_string(),
             Instruction::GetHomeDir(_) => "get_home_dir".to_string(),
@@ -4552,6 +4682,14 @@ impl Instruction {
             Instruction::BlockProject(project) => vec![project.to_string()],
             Instruction::UnblockProject(project) => vec![project.to_string()],
             Instruction::IsBlockedProject(project) => vec![project.to_string()],
+            Instruction::IsUserAdded(user) => vec![user.to_string()],
+            Instruction::IsUserRemoved(user) => vec![user.to_string()],
+            Instruction::IsProjectAdded(project) => vec![project.to_string()],
+            Instruction::IsProjectRemoved(project) => vec![project.to_string()],
+            Instruction::IsLocalUserAdded(mapping) => vec![mapping.to_string()],
+            Instruction::IsLocalUserRemoved(mapping) => vec![mapping.to_string()],
+            Instruction::IsLocalProjectAdded(mapping) => vec![mapping.to_string()],
+            Instruction::IsLocalProjectRemoved(mapping) => vec![mapping.to_string()],
             Instruction::GetUserMapping(user) => vec![user.to_string()],
             Instruction::GetProjectMapping(project) => vec![project.to_string()],
             Instruction::GetHomeDir(user) => vec![user.to_string()],
@@ -4671,6 +4809,20 @@ impl std::fmt::Display for Instruction {
             Instruction::BlockProject(project) => write!(f, "block_project {}", project),
             Instruction::UnblockProject(project) => write!(f, "unblock_project {}", project),
             Instruction::IsBlockedProject(project) => write!(f, "is_blocked_project {}", project),
+            Instruction::IsUserAdded(user) => write!(f, "is_user_added {}", user),
+            Instruction::IsUserRemoved(user) => write!(f, "is_user_removed {}", user),
+            Instruction::IsProjectAdded(project) => write!(f, "is_project_added {}", project),
+            Instruction::IsProjectRemoved(project) => write!(f, "is_project_removed {}", project),
+            Instruction::IsLocalUserAdded(mapping) => write!(f, "is_local_user_added {}", mapping),
+            Instruction::IsLocalUserRemoved(mapping) => {
+                write!(f, "is_local_user_removed {}", mapping)
+            }
+            Instruction::IsLocalProjectAdded(mapping) => {
+                write!(f, "is_local_project_added {}", mapping)
+            }
+            Instruction::IsLocalProjectRemoved(mapping) => {
+                write!(f, "is_local_project_removed {}", mapping)
+            }
             Instruction::AddLocalProject(mapping) => write!(f, "add_local_project {}", mapping),
             Instruction::RemoveLocalProject(mapping) => {
                 write!(f, "remove_local_project {}", mapping)
@@ -4837,6 +4989,10 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
         Instruction::BlockUser(user) => Some(user),
         Instruction::UnblockUser(user) => Some(user),
         Instruction::IsBlockedUser(user) => Some(user),
+        Instruction::IsUserAdded(user) => Some(user),
+        Instruction::IsUserRemoved(user) => Some(user),
+        Instruction::IsLocalUserAdded(user) => Some(user.user().clone()),
+        Instruction::IsLocalUserRemoved(user) => Some(user.user().clone()),
         _ => None,
     };
 
@@ -4876,6 +5032,10 @@ pub fn owning_portal(instruction: &Instruction) -> Option<PortalIdentifier> {
         Instruction::BlockProject(project) => Some(project),
         Instruction::UnblockProject(project) => Some(project),
         Instruction::IsBlockedProject(project) => Some(project),
+        Instruction::IsProjectAdded(project) => Some(project),
+        Instruction::IsProjectRemoved(project) => Some(project),
+        Instruction::IsLocalProjectAdded(project) => Some(project.project().clone()),
+        Instruction::IsLocalProjectRemoved(project) => Some(project.project().clone()),
         Instruction::GetStorageReport(project, _) => Some(project),
         Instruction::GetLocalStorageReport(project, _) => Some(project.project().clone()),
         _ => None,
@@ -5198,6 +5358,10 @@ mod tests {
             Instruction::BlockUser(user.clone()),
             Instruction::UnblockUser(user.clone()),
             Instruction::IsBlockedUser(user.clone()),
+            Instruction::IsUserAdded(user.clone()),
+            Instruction::IsUserRemoved(user.clone()),
+            Instruction::IsLocalUserAdded(user_mapping.clone()),
+            Instruction::IsLocalUserRemoved(user_mapping.clone()),
             Instruction::CreateProject(project.clone(), details.clone()),
             Instruction::UpdateProject(project.clone(), details.clone()),
             Instruction::GetProject(project.clone()),
@@ -5228,6 +5392,10 @@ mod tests {
             Instruction::BlockProject(project.clone()),
             Instruction::UnblockProject(project.clone()),
             Instruction::IsBlockedProject(project.clone()),
+            Instruction::IsProjectAdded(project.clone()),
+            Instruction::IsProjectRemoved(project.clone()),
+            Instruction::IsLocalProjectAdded(project_mapping.clone()),
+            Instruction::IsLocalProjectRemoved(project_mapping.clone()),
             Instruction::GetStorageReport(project.clone(), dates.clone()),
             Instruction::GetLocalStorageReport(project_mapping, dates.clone()),
             Instruction::GetProjects(portal.clone()),
@@ -5333,6 +5501,14 @@ mod tests {
             "block_project",
             "unblock_project",
             "is_blocked_project",
+            "is_user_added",
+            "is_user_removed",
+            "is_project_added",
+            "is_project_removed",
+            "is_local_user_added",
+            "is_local_user_removed",
+            "is_local_project_added",
+            "is_local_project_removed",
             "get_storage_report",
             "get_home_dir",
             "update_home_dir",
@@ -5502,6 +5678,93 @@ mod tests {
             Instruction::RemoveProject(project).command(),
             "remove_project"
         );
+    }
+
+    #[test]
+    fn test_state_verification_instructions_round_trip() {
+        #[allow(clippy::unwrap_used)]
+        let user = UserIdentifier::parse("user.project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let project = ProjectIdentifier::parse("project.portal").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let user_mapping = UserMapping::new(&user, "local_user", "local_group").unwrap();
+        #[allow(clippy::unwrap_used)]
+        let project_mapping = ProjectMapping::new(&project, "local_group").unwrap();
+
+        // Every one of these is answered with a plain `bool`, and the wire
+        // form has to survive a round trip through `Display` and `parse`
+        // unchanged - a cluster asks its sub-agents by formatting the
+        // instruction into a job string.
+        let cases: Vec<(Instruction, &str, &str)> = vec![
+            (
+                Instruction::IsUserAdded(user.clone()),
+                "is_user_added",
+                "is_user_added user.project.portal",
+            ),
+            (
+                Instruction::IsUserRemoved(user.clone()),
+                "is_user_removed",
+                "is_user_removed user.project.portal",
+            ),
+            (
+                Instruction::IsProjectAdded(project.clone()),
+                "is_project_added",
+                "is_project_added project.portal",
+            ),
+            (
+                Instruction::IsProjectRemoved(project.clone()),
+                "is_project_removed",
+                "is_project_removed project.portal",
+            ),
+            (
+                Instruction::IsLocalUserAdded(user_mapping.clone()),
+                "is_local_user_added",
+                "is_local_user_added user.project.portal:local_user:local_group",
+            ),
+            (
+                Instruction::IsLocalUserRemoved(user_mapping.clone()),
+                "is_local_user_removed",
+                "is_local_user_removed user.project.portal:local_user:local_group",
+            ),
+            (
+                Instruction::IsLocalProjectAdded(project_mapping.clone()),
+                "is_local_project_added",
+                "is_local_project_added project.portal:local_group",
+            ),
+            (
+                Instruction::IsLocalProjectRemoved(project_mapping.clone()),
+                "is_local_project_removed",
+                "is_local_project_removed project.portal:local_group",
+            ),
+        ];
+
+        for (instruction, command, wire) in cases {
+            assert_eq!(instruction.command(), command);
+            assert_eq!(instruction.to_string(), wire);
+            assert_eq!(
+                Instruction::parse(wire).unwrap_or_else(|e| unreachable!("{}: {:?}", wire, e)),
+                instruction,
+                "'{}' must parse back to the instruction it displays as",
+                wire
+            );
+            assert_eq!(
+                serde_json::from_str::<Instruction>(&format!("\"{}\"", wire))
+                    .unwrap_or_else(|e| unreachable!("{}: {:?}", wire, e)),
+                instruction
+            );
+        }
+
+        // A missing or malformed argument must be a parse error, never a
+        // panic and never a silently-empty identifier.
+        for bad in [
+            "is_user_added",
+            "is_user_added not-a-user",
+            "is_project_removed",
+            "is_local_user_added user.project.portal",
+            "is_local_project_added project.portal",
+        ] {
+            assert!(Instruction::parse(bad).is_err(), "'{}' must not parse", bad);
+        }
     }
 
     #[test]

@@ -65,6 +65,29 @@ jobs:
         # indefinitely. See docs/specifications/security-review-2.md section 5.
         run: cargo audit --deny warnings
 
+  java:
+    name: Java client and example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install toolchain
+        uses: actions/setup-java@v4
+        with:
+          # The library targets Java 17; built on a later JDK with
+          # `maven.compiler.release` so an API added after 17 fails the build
+          # here rather than at a site running the version it claims to support.
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+      - name: Client
+        # `install` rather than `test`, because the example below resolves the
+        # client from the local repository.
+        run: mvn -B --no-transfer-progress install --file java/pom.xml
+      - name: Example
+        run: mvn -B --no-transfer-progress test --file java/examples/site_portal/pom.xml
+
   code-checks:
     name: Tests and lints
     runs-on: ubuntu-24.04

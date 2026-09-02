@@ -2618,6 +2618,11 @@ const TERMINAL_STATES: [&str; 14] = [
 /// The bucket for a state Slurm reports that `TERMINAL_STATES` does not name.
 const OTHER_TERMINAL_STATE: &str = "OTHER";
 
+/// See `SlurmJob::has_ended`.
+fn finished_by_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlurmJob {
     id: u64,
@@ -2649,6 +2654,13 @@ pub struct SlurmJob {
     /// Which attempt of the job this is - set by `get_consumers`, which is the
     /// only place that can see a job's other attempts.
     attempt: Attempt,
+    /// Whether this record had finished when we asked - set by `get_consumers`,
+    /// which sees the unclipped end time. Defaults to true when reading a
+    /// cached record written before this was recorded: those were treated as
+    /// finished, and inventing a different answer for them now would change
+    /// figures that have already been reported.
+    #[serde(default = "finished_by_default")]
+    has_ended: bool,
     qos: String,
     nodes: u64,
     cpus: u64,
@@ -3027,10 +3039,10 @@ impl SlurmJob {
             }
         };
 
-        let mut nodes = 0;
-        let mut cpus = 0;
-        let mut memory = 0;
-        let mut gpus = 0;
+        let mut nodes: u64 = 0;
+        let mut cpus: u64 = 0;
+        let mut memory: u64 = 0;
+        let mut gpus: u64 = 0;
         let mut energy: u64 = 0;
         let mut billing: u64 = 0;
 
@@ -3087,17 +3099,17 @@ impl SlurmJob {
             };
 
             match tres_type {
-                "cpu" => cpus += count,
-                "mem" => memory += count,
+                "cpu" => cpus = cpus.saturating_add(count),
+                "mem" => memory = memory.saturating_add(count),
                 "gres" => match name {
-                    "gpu" => gpus += count,
+                    "gpu" => gpus = gpus.saturating_add(count),
                     _ => {
                         tracing::warn!("Unknown gres name: {}", name);
                     }
                 },
-                "node" => nodes += count,
-                "energy" => energy += count,
-                "billing" => billing += count,
+                "node" => nodes = nodes.saturating_add(count),
+                "energy" => energy = energy.saturating_add(count),
+                "billing" => billing = billing.saturating_add(count),
                 _ => {
                     tracing::warn!("Unknown tres type: {}", tres_type);
                 }
@@ -3123,10 +3135,10 @@ impl SlurmJob {
             }
         };
 
-        let mut requested_nodes = 0;
-        let mut requested_cpus = 0;
-        let mut requested_memory = 0;
-        let mut requested_gpus = 0;
+        let mut requested_nodes: u64 = 0;
+        let mut requested_cpus: u64 = 0;
+        let mut requested_memory: u64 = 0;
+        let mut requested_gpus: u64 = 0;
         let mut requested_billing: u64 = 0;
 
         for tres in requested {
@@ -3182,16 +3194,16 @@ impl SlurmJob {
             };
 
             match tres_type {
-                "cpu" => requested_cpus += count,
-                "mem" => requested_memory += count,
+                "cpu" => requested_cpus = requested_cpus.saturating_add(count),
+                "mem" => requested_memory = requested_memory.saturating_add(count),
                 "gres" => match name {
-                    "gpu" => requested_gpus += count,
+                    "gpu" => requested_gpus = requested_gpus.saturating_add(count),
                     _ => {
                         tracing::warn!("Unknown gres name: {}", name);
                     }
                 },
-                "node" => requested_nodes += count,
-                "billing" => requested_billing += count,
+                "node" => requested_nodes = requested_nodes.saturating_add(count),
+                "billing" => requested_billing = requested_billing.saturating_add(count),
                 _ => {
                     tracing::warn!("Unknown tres type: {}", tres_type);
                 }
@@ -3217,6 +3229,8 @@ impl SlurmJob {
             // `get_consumers` reclassifies once it can see the job's other
             // attempts; a job constructed on its own is its own last attempt.
             attempt: Attempt::Base,
+            // and decides this too, from the end time before it is clipped
+            has_ended: false,
             qos,
             nodes,
             cpus,
@@ -3285,7 +3299,23 @@ impl SlurmJob {
                     // ones that consumed nothing within it
                     let mut consumers: Vec<SlurmJob> = Vec::new();
 
+                    // `now`, not the window's end. The question is whether this
+                    // record's elapsed time is final, which it is as soon as
+                    // the record has ended - even if it ended after the window
+                    // we are reporting on, as an attempt spanning midnight
+                    // does. Asking whether it ended *inside* the window would
+                    // call every such attempt unfinished and stop the day it
+                    // began in ever being completed.
+                    let now = chrono::Utc::now();
+
                     for mut job in slurm_jobs {
+                        // Before clipping, while the real end time is still
+                        // here. A record still running has no end time at all -
+                        // Slurm reports zero - and some versions report the
+                        // projected end instead, which is in the future; both
+                        // are caught by this.
+                        job.has_ended = job.end_time.timestamp() > 0 && job.end_time <= now;
+
                         if job.start_time < *start_time {
                             job.start_time = *start_time;
                         } else if job.start_time > *end_time {
@@ -3528,6 +3558,22 @@ impl SlurmJob {
     /// invisible before requeue accounting.
     pub fn is_requeued_attempt(&self) -> bool {
         self.attempt == Attempt::Requeued
+    }
+
+    ///
+    /// True if this record had finished by the time we asked `sacct` for it, so
+    /// that its elapsed time is the job's whole runtime rather than the runtime
+    /// so far.
+    ///
+    /// `sacct` reports `elapsed` for a running record as the time it has been
+    /// running, which is a moving figure, and reports the record again in the
+    /// next window with a larger one. Usage copes with that - each window
+    /// records the part consumed inside it - but the runtime and the expansion
+    /// factor are recorded once, in the window the job started in, so recording
+    /// them from a record that is still running freezes a partial answer.
+    ///
+    pub fn has_ended(&self) -> bool {
+        self.has_ended
     }
 
     /// The node Slurm blamed for a `NODE_FAIL`, if it named one.
@@ -3832,6 +3878,137 @@ pub async fn add_project(
     tracing::info!("Added account: {}", account);
 
     Ok(())
+}
+
+///
+/// Return whether everything `add_project` does for this mapping has been done:
+/// the Slurm account exists, is managed by OpenPortal, and is attached to this
+/// cluster. The REST counterpart of `sacctmgr::is_local_project_added`, and
+/// like it, read straight from Slurm rather than from this agent's cache.
+///
+pub async fn is_local_project_added(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    let expected = SlurmAccount::from_mapping(mapping)?;
+
+    let account = match get_account_from_slurm(expected.name(), expires).await? {
+        Some(account) => account,
+        None => {
+            tracing::info!("Slurm account {} does not exist", expected.name());
+            return Ok(false);
+        }
+    };
+
+    if !account.is_managed() {
+        tracing::info!(
+            "Slurm account {} is not managed by OpenPortal - nothing for add_local_project to do",
+            account.name()
+        );
+        return Ok(true);
+    }
+
+    let cluster = cache::get_cluster().await?;
+
+    if !account.in_cluster(&cluster) {
+        tracing::info!(
+            "Slurm account {} is not in cluster {}, so has not been added",
+            account.name(),
+            cluster
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `add_user` does for this mapping has been done:
+/// the Slurm user exists, defaults to the project's account, and is associated
+/// with it on this cluster. The REST counterpart of
+/// `sacctmgr::is_local_user_added`.
+///
+pub async fn is_local_user_added(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    // The user cannot be fully added while the account they are meant to
+    // default to is not - `get_user_create_if_not_exists` creates it first.
+    if !is_local_project_added(&mapping.clone().into(), expires).await? {
+        return Ok(false);
+    }
+
+    let expected = SlurmUser::from_mapping(mapping)?;
+
+    let user = match get_user_from_slurm(expected.name(), expires).await? {
+        Some(user) => user,
+        None => {
+            tracing::info!("Slurm user {} does not exist", expected.name());
+            return Ok(false);
+        }
+    };
+
+    let account = SlurmAccount::from_mapping(&mapping.clone().into())?;
+    let cluster = cache::get_cluster().await?;
+
+    if *user.default_account() != Some(account.name().to_string()) {
+        tracing::info!(
+            "Slurm user {} does not default to account {}, so has not been added",
+            user.name(),
+            account.name()
+        );
+        return Ok(false);
+    }
+
+    if !user
+        .associations()
+        .iter()
+        .any(|a| a.account() == account.name() && a.cluster() == cluster)
+    {
+        tracing::info!(
+            "Slurm user {} is not associated with account {} on cluster {}, so has not been added",
+            user.name(),
+            account.name(),
+            cluster
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+///
+/// Return whether everything `remove_local_project` does for this mapping has
+/// been done. Delegated to the `sacctmgr` version because the removal itself is:
+/// `remove_local_project` cancels the project's queued jobs through
+/// `sacctmgr::cancel_pending_project_jobs` on this path too. See
+/// `sacctmgr::has_active_jobs` for what counts as not-yet-removed.
+///
+pub async fn is_local_project_removed(
+    mapping: &ProjectMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    sacctmgr::is_local_project_removed(mapping, expires).await
+}
+
+///
+/// Return whether everything `remove_local_user` does for this mapping has been
+/// done. Delegated to the `sacctmgr` version, as for
+/// `is_local_project_removed`.
+///
+pub async fn is_local_user_removed(
+    mapping: &UserMapping,
+    expires: &chrono::DateTime<Utc>,
+) -> Result<bool, Error> {
+    assert_not_expired(expires)?;
+
+    sacctmgr::is_local_user_removed(mapping, expires).await
 }
 
 pub async fn get_usage_report(
@@ -4178,6 +4355,41 @@ mod tests {
         failed.sort();
 
         assert_eq!(failed, ["badnode01", "badnode02"]);
+    }
+
+    #[test]
+    fn test_a_cached_record_from_before_this_field_reads_as_finished() {
+        // Hourly reports are cached as the records themselves, so an upgrade
+        // reads back records written without `has_ended`. Those were all
+        // treated as finished, and their runtimes have already been reported;
+        // defaulting to "not finished" would drop them out of every expansion
+        // figure on the next read and change numbers that have been given out.
+        let job = consumers_for(day_one())
+            .into_iter()
+            .find(|job| job.id() == 100)
+            .expect("job 100 is in day one");
+
+        assert!(job.has_ended());
+
+        let Ok(serialised) = serde_json::to_string(&job) else {
+            unreachable!("a SlurmJob serialises");
+        };
+
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&serialised) else {
+            unreachable!("what we just wrote is JSON");
+        };
+
+        let Some(object) = value.as_object_mut() else {
+            unreachable!("a SlurmJob is an object");
+        };
+
+        assert!(object.remove("has_ended").is_some());
+
+        let Ok(cached) = serde_json::from_value::<SlurmJob>(value) else {
+            unreachable!("an older cached record still reads");
+        };
+
+        assert!(cached.has_ended());
     }
 
     #[test]

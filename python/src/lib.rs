@@ -1469,6 +1469,13 @@ impl Job {
         self.is_finished()
     }
 
+    fn completed_none(&self) -> PyResult<Job> {
+        match self.0.completed_none() {
+            Ok(result) => Ok(result.into()),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
+    }
+
     fn completed(&self, py: Python<'_>, result: Py<PyAny>) -> PyResult<Job> {
         macro_rules! try_extract {
             ($type:ty, $transform:expr) => {
@@ -1519,6 +1526,15 @@ impl Job {
         try_extract!(Vec<UserMapping>, |v: Vec<UserMapping>| {
             v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
         });
+        // `get_awards` answers a list of these, and without this arm it could
+        // not answer at all: no other `Vec<T>` extraction matches a list of
+        // `AwardDetails`, so a non-empty answer fell through to "Could not
+        // extract result type". Named `Vec<ProjectDetails>` on the wire, via
+        // `NamedType for AwardDetails` - see the matching arm in `result`,
+        // which is the half that makes it readable.
+        try_extract!(Vec<AwardDetails>, |v: Vec<AwardDetails>| {
+            v.into_iter().map(|item| item.0.clone()).collect::<Vec<_>>()
+        });
         try_extract!(Vec<String>, |v| v);
         try_extract!(Vec<Usage>, |v: Vec<Usage>| {
             v.into_iter().map(|item| item.0).collect::<Vec<_>>()
@@ -1556,7 +1572,16 @@ impl Job {
                 }
             }
 
-            if is_volume_quota_dict && !map.is_empty() {
+            // Deliberately no `!map.is_empty()` here. An empty dict is a
+            // legitimate answer - "this project has no quotas set" - and
+            // refusing it made that unsayable: `completed({})` failed with
+            // "Could not extract result type", which is a hard failure rather
+            // than a mislabel. Nor is it ambiguous the way an empty list is:
+            // this is the only dict type in the table, so `{}` has exactly one
+            // reading. An empty *list* is ambiguous between every `Vec<T>` and
+            // gets whichever arm is tried first, but that is harmless - the
+            // reader turns `[]` into an empty list under any of those names.
+            if is_volume_quota_dict {
                 return match self.0.completed(map) {
                     Ok(result) => Ok(result.into()),
                     Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
@@ -1619,6 +1644,37 @@ impl Job {
             .error_or_infer()
             .map(|e| e.kind().to_owned())
             .unwrap_or_default())
+    }
+
+    /// The name of the type this job's result is, or `"None"` if it has none.
+    ///
+    /// The counterpart to [`result`]: that gives the value, this gives the name
+    /// it travelled under. Most Python never needs it - `result` has already
+    /// used it to decide what to build - but it is the only way to see what a
+    /// job was *answered as*, which matters in two places.
+    ///
+    /// Answering an instruction with the wrong type is not a failure either
+    /// side detects: a well-formed value under the wrong name deserialises
+    /// into the wrong thing or not at all, and nothing on the wire objects. A
+    /// portal's own tests are where that gets caught, and they need to be able
+    /// to look.
+    ///
+    /// It is also how an unrecognised type is diagnosed. `result` raises
+    /// `Unknown result type: X` for a name this module cannot build, and X is
+    /// the useful half of that - a peer answering with a type newer than this
+    /// module is a version mismatch rather than a fault, and this says so.
+    ///
+    /// Note the names are the *Rust* type names, so they are not always the
+    /// Python class: an `AwardDetails` is `"ProjectDetails"`, and a list is
+    /// `"Vec<T>"` of the element's name. Unlike a `Job` on either the Rust or
+    /// the Java side, an unfinished job answers `"None"` here rather than
+    /// nothing at all, matching `error_kind`'s empty string.
+    #[getter]
+    fn result_type(&self) -> PyResult<String> {
+        match self.0.result_type() {
+            Ok(result_type) => Ok(result_type),
+            Err(e) => Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+        }
     }
 
     /// Raise this job's error, if it has one. A no-op otherwise.
@@ -1901,6 +1957,23 @@ impl Job {
                         let list = PyList::empty(py);
                         for item in result {
                             list.append(ProjectMapping::from(item).into_pyobject(py)?)?;
+                        }
+                        Ok(list.into_any())
+                    }
+                    None => Ok(py.None().into_bound(py)),
+                }
+            }
+            "Vec<ProjectDetails>" => {
+                let result = match self.0.result::<Vec<grammar::AwardDetails>>() {
+                    Ok(result) => result,
+                    Err(e) => return Err(PyErr::new::<PyOSError, _>(format!("{:?}", e))),
+                };
+
+                match result {
+                    Some(result) => {
+                        let list = PyList::empty(py);
+                        for item in result {
+                            list.append(AwardDetails::from(item).into_pyobject(py)?)?;
                         }
                         Ok(list.into_any())
                     }
@@ -3143,6 +3216,15 @@ impl ProjectUsageReport {
         Ok(self.0.total_runtime_seconds())
     }
 
+    /// How many jobs the runtime and expansion figures were accumulated over -
+    /// the denominator for the means derived from them. Not the same as
+    /// `num_jobs`: a job still running when the window closed is counted as a
+    /// job but has no runtime to contribute.
+    #[getter]
+    fn expansion_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.expansion_jobs())
+    }
+
     /// The mean runtime of a job, in seconds - the figure that gives a wait its
     /// meaning. Eleven hours of queueing says one thing beside a job that runs
     /// for a day and quite another beside one that runs for five minutes.
@@ -4014,6 +4096,15 @@ impl DailyProjectUsageReport {
     #[getter]
     fn total_runtime_seconds(&self) -> PyResult<u64> {
         Ok(self.0.total_runtime_seconds())
+    }
+
+    /// How many jobs the runtime and expansion figures were accumulated over -
+    /// the denominator for the means derived from them. Not the same as
+    /// `num_jobs`: a job still running when the window closed is counted as a
+    /// job but has no runtime to contribute.
+    #[getter]
+    fn expansion_jobs(&self) -> PyResult<u64> {
+        Ok(self.0.expansion_jobs())
     }
 
     /// The mean runtime of a job, in seconds - the figure that gives a wait its

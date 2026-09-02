@@ -53,6 +53,17 @@ LOCAL_PROJECT2 = "myproject2.site"
 OFFERING = "cluster1"
 OTHER_OFFERING = "cluster2"
 
+#: The award's members. The same two the README and `example.py` use, so all
+#: three describe one award rather than three similar ones.
+LEAD = "alice@example.com"
+MEMBER = "bob@example.com"
+
+#: What each resource's operators agreed with `allocator`: one of our node hours
+#: is four of their GPU hours on `cluster1`, two on `cluster2`. Nothing derives
+#: these - they are agreements.
+AGREED = {"GPUHR": 4}
+AGREED_OTHER = {"GPUHR": 2}
+
 
 def make_job(
     instruction: str,
@@ -89,12 +100,34 @@ def make_job(
     )
 
 
-def details(template: str = "standard", **extra) -> str:
-    """An `AwardDetails` JSON blob, as an awarding portal would send it."""
+def details(
+    template: str = "standard",
+    members: dict[str, str] | None = None,
+    allocation: str = "1000 NHR",
+    **extra,
+) -> str:
+    """
+    An `AwardDetails` JSON blob, as an awarding portal would send it.
+
+    `members` maps email to role. Roles are free-form strings agreed between the
+    two portals - "Project Lead", "Project Member" and so on - and the awarding
+    portal always sends the **whole** set, so passing a different one here is how
+    a membership change arrives.
+
+    `allocation` defaults to this site's own unit, so that the figures checked
+    elsewhere in this suite are not multiplied by a conversion factor. An award
+    *must* carry one - an award of nothing is not an award - which the unit
+    section below checks.
+    """
     d = openportal.AwardDetails()
-    d.name = extra.pop("name", "My Project")
+    d.name = extra.pop("name", "My First Award")
     d.project_template = openportal.ProjectTemplate(template)
-    d.add_member("alice@bristol.ac.uk", "member")
+
+    d.allocation = openportal.Allocation.from_string(allocation)
+
+    for email, role in (members or {LEAD: "Project Lead"}).items():
+        d.add_member(email, role)
+
     for key, value in extra.items():
         setattr(d, key, value)
     return d.to_json()
@@ -141,6 +174,55 @@ def run() -> None:
 
 
 def _run_all() -> None:
+    print("\n-- what this site offers ---------------------------------------")
+
+    # Offerings are state, not a constant, so a fresh portal offers nothing and
+    # the suite starts by adding the two resources it works with. This is the
+    # same call `POST /offerings` makes.
+    check("a fresh portal offers nothing", site_portal.offering_names() == [])
+
+    site_portal.add_offering(OFFERING, ["standard", "large"], conversions=AGREED)
+    site_portal.add_offering(OTHER_OFFERING, ["standard"], conversions=AGREED_OTHER)
+    check(
+        "both resources are now offered",
+        site_portal.offering_names() == [OFFERING, OTHER_OFFERING],
+        f"-> {site_portal.offering_names()}",
+    )
+    check(
+        "each carries its own templates",
+        site_portal.templates_for(OFFERING) == {"standard", "large"}
+        and site_portal.templates_for(OTHER_OFFERING) == {"standard"},
+    )
+
+    # Adding one twice is an update, not an error - the operator API is retried
+    # like everything else here.
+    site_portal.add_offering(OTHER_OFFERING, ["standard", "small"])
+    check(
+        "re-adding a resource updates its templates",
+        site_portal.templates_for(OTHER_OFFERING) == {"standard", "small"},
+    )
+    site_portal.add_offering(OTHER_OFFERING, ["standard"])
+    check("still two resources", len(site_portal.offerings()) == 2)
+
+    for bad in ["", "-lead", "my.cluster", "my cluster", "caf\u00e9"]:
+        try:
+            site_portal.add_offering(bad, ["standard"])
+            raise AssertionError(f"{bad!r} should not be a usable offering name")
+        except ValueError:
+            pass
+    check("a name that could not be part of a destination is refused", True)
+
+    # There is no default template. A resource that accepts none would reject
+    # every award made through it, and guessing one on the site's behalf would
+    # publish a policy nobody decided.
+    for no_templates in [[], [""], ["  "], None]:
+        try:
+            site_portal.add_offering("cluster9", no_templates)
+            raise AssertionError(f"{no_templates!r} should not be accepted")
+        except ValueError:
+            pass
+    check("a resource with no templates is refused", "cluster9" not in site_portal.offering_names())
+
     print("\n-- create_award, and the pending answer -------------------------")
 
     # A new award is recorded and answers "not yet", because a human has not
@@ -282,8 +364,32 @@ def _run_all() -> None:
     check("get_award returns AwardDetails", type(job.result) is openportal.AwardDetails)
     check(
         "...with members populated (there is no get_users)",
-        "alice@bristol.ac.uk" in (job.result.members or {}),
+        LEAD in (job.result.members or {}),
         f"-> {list((job.result.members or {}).keys())}",
+    )
+
+    print("\n-- both spellings of an instruction reach one handler -----------")
+
+    # An awarding portal sends `create_award`; the agents deliver it as
+    # `create_project` today, and the wire vocabulary is moving to the award
+    # spellings before 1.0. Either name must land on the same handler, or the day
+    # it changes this portal starts answering "unsupported command".
+    for spelling in ("create_project", "create_award"):
+        job = site_portal.answer(make_job(f"{spelling} {AWARD} {details()}"))
+        check(
+            f"'{spelling}' is answered by the same handler",
+            str(job.result) == f"{AWARD}:{LOCAL_PROJECT}",
+            f"-> {job.result}",
+        )
+
+    check(
+        "...and every award instruction has both spellings",
+        all(
+            site_portal.HANDLERS.get(f"{verb}_award")
+            is site_portal.HANDLERS.get(f"{verb}_project")
+            is not None
+            for verb in ("create", "update", "remove")
+        ),
     )
 
     print("\n-- update_award for an award we do not hold ---------------------")
@@ -299,12 +405,66 @@ def _run_all() -> None:
     )
     store.delete(OFFERING, "myaward4.allocator")
 
+    print("\n-- update_award for one we hold: a member is added --------------")
+
+    # The everyday case: the award exists and is attached, and the allocator has
+    # added someone to it. That needs no approval - the award was already
+    # approved, and this changes its metadata rather than its attachment - so it
+    # answers with the mapping, exactly as a repeated create would.
+    both = {LEAD: "Project Lead", MEMBER: "Project Member"}
+    job = site_portal.answer(make_job(f"update_project {AWARD} {details(members=both)}"))
+    check(
+        "an update for a held award answers with the mapping",
+        str(job.result) == f"{AWARD}:{LOCAL_PROJECT}",
+        f"-> {job.result}",
+    )
+
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "...and both members are now on the award, with their roles",
+        (held.members or {}) == both,
+        f"-> {held.members}",
+    )
+    check(
+        "...and the attachment is untouched",
+        store.load(OFFERING, AWARD).local_project_id == LOCAL_PROJECT,
+    )
+
+    # **The member list is definitive, not a delta.** The awarding portal sends
+    # the whole set every time, so somebody who has left simply is not in it -
+    # there is no "remove_member". `AwardDetails.merge` replaces `members`
+    # wholesale for exactly this reason.
+    job = site_portal.answer(
+        make_job(f"update_project {AWARD} {details(members={LEAD: 'Project Lead'})}")
+    )
+    held = site_portal.answer(make_job(f"get_award {AWARD}")).result
+    check(
+        "a member absent from an update has been removed",
+        MEMBER not in (held.members or {}),
+        f"-> {list((held.members or {}).keys())}",
+    )
+
+    # An update carries the *whole* of AwardDetails, and the awarding portal must
+    # always name the right template - on an update exactly as on a create. A
+    # missing or unoffered one is refused, and refused *terminally*: the award is
+    # recorded as errored rather than retried. Nothing here substitutes the
+    # template we happen to hold; getting it right is the caller's obligation.
+    no_template = (
+        f'{{"name":"My First Award","members":{{"{LEAD}":"Project Lead"}}}}'
+    )
+    job = site_portal.answer(make_job(f"update_project {AWARD} {no_template}"))
+    check(
+        "an update with no template is rejected",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+
     print("\n-- usage: recorded in our namespace, answered in theirs --------")
 
     # Push figures in the way an operator's parser would - against our own
     # project identifier, which is the only one that accounting knows.
     award = store.load(OFFERING, AWARD)
-    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {LEAD: 12.5}})
 
     job = site_portal.answer(make_job(f"get_usage_report {AWARD} this_month"))
     check("get_usage_report succeeds", not job.is_error, f"{job.error_message}")
@@ -330,7 +490,7 @@ def _run_all() -> None:
     )
     check(
         "...and the email unchanged, being the same person either way",
-        "alice@bristol.ac.uk" in report.user_mapping.values(),
+        LEAD in report.user_mapping.values(),
         f"-> {list(report.user_mapping.values())}",
     )
     check(
@@ -433,7 +593,7 @@ def _run_all() -> None:
 
     # Put the award back the way the rest of the suite expects it.
     set_final(LOCAL_PROJECT, [])
-    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {LEAD: 12.5}})
 
     print("\n-- a second award, on the other resource ------------------------")
 
@@ -472,6 +632,79 @@ def _run_all() -> None:
         ]
         == [f"{AWARD2}:{LOCAL_PROJECT2}"],
     )
+
+    print("\n-- listing awards, and the type a list goes back as -------------")
+
+    # `get_awards` returns `AwardDetails`, not mappings - the two listings have
+    # different shapes and are easy to confuse. This one had never been
+    # exercised, and it did not work: no `Vec<T>` extraction in the module
+    # matched a list of `AwardDetails`, so a non-empty answer failed with
+    # "Could not extract result type" and an empty one was typed as
+    # `Vec<UserIdentifier>` with nothing able to read `Vec<ProjectDetails>`
+    # back. Both halves - writing the type and reading it - are needed.
+    job = site_portal.answer(make_job("get_awards allocator"))
+    check("get_awards succeeds", not job.is_error, f"{job.error_message}")
+    check(
+        "...typed as a list of ProjectDetails",
+        job.result_type == "Vec<ProjectDetails>",
+        f"-> {job.result_type}",
+    )
+    check(
+        "...and reads back as AwardDetails, not mappings",
+        all(type(a) is openportal.AwardDetails for a in job.result)
+        and [str(a.allocation) for a in job.result] == ["1000 NHR"],
+        f"-> {[type(a).__name__ for a in job.result]}",
+    )
+    check(
+        "...scoped to the resource it was asked of",
+        len(site_portal.answer(make_job("get_awards allocator")).result) == 1
+        and len(
+            site_portal.answer(
+                make_job("get_awards allocator", offering=OTHER_OFFERING)
+            ).result
+        )
+        == 1,
+    )
+
+    # An empty listing still has to be a listing. `ProjectUsageReport` is not
+    # the only type where "nothing" and "nothing, and that is final" differ:
+    # here the risk is that an empty list is unreadable, or read as the wrong
+    # element type. It is typed as whichever `Vec<T>` the module tries first,
+    # which is harmless - the reader turns `[]` into an empty list under any of
+    # those names - but it must not fail.
+    job = site_portal.answer(make_job("get_awards nobody"))
+    check("an empty listing succeeds", not job.is_error, f"{job.error_message}")
+    check("...and is an empty list", job.result == [], f"-> {job.result!r}")
+
+    print("\n-- the type each answer goes out as -----------------------------")
+
+    # Nothing on the wire objects to a well-formed value under the wrong type
+    # name: it deserialises into the wrong thing on the far side, or not at all.
+    # A portal's own tests are the only place that gets caught, so this checks
+    # the whole table at once. §4 of the specification lists what each
+    # instruction must return; these are those types' names as the Rust side
+    # registers them, which are not always the Python class name - an
+    # `AwardDetails` is a `ProjectDetails`, and a list is `Vec<T>`.
+    expected_types = {
+        f"get_project_mapping {AWARD}": "ProjectMapping",
+        f"get_award {AWARD}": "ProjectDetails",
+        "get_awards allocator": "Vec<ProjectDetails>",
+        "get_projects allocator": "Vec<ProjectMapping>",
+        f"get_usage_report {AWARD} this_month": "ProjectUsageReport",
+        "get_usage_reports allocator this_month": "UsageReport",
+        f"get_storage_report {AWARD} this_month": "ProjectStorageReport",
+        "get_storage_reports allocator": "StorageReport",
+        f"remove_project {AWARD2}": "ProjectMapping",
+    }
+
+    for command, expected in expected_types.items():
+        answered = site_portal.answer(make_job(command))
+        check(
+            f"{command.split()[0]} answers a {expected}",
+            not answered.is_error and answered.result_type == expected,
+            f"-> {answered.result_type}"
+            + (f" ({answered.error_message})" if answered.is_error else ""),
+        )
 
     print("\n-- the same question asked of the wrong resource ----------------")
 
@@ -663,7 +896,7 @@ def _run_all() -> None:
     # project, and - the part that is easy to get wrong - it must not delete the
     # usage the award already accrued.
     set_final(LOCAL_PROJECT, [])
-    set_usage(LOCAL_PROJECT, {a_day_this_month: {"alice@bristol.ac.uk": 12.5}})
+    set_usage(LOCAL_PROJECT, {a_day_this_month: {LEAD: 12.5}})
 
     job = site_portal.answer(make_job(f"remove_project {AWARD}"))
     check("remove_award answers with :None", str(job.result) == f"{AWARD}:None")
@@ -747,10 +980,10 @@ def _run_all() -> None:
     set_usage(
         LOCAL_PROJECT,
         {
-            early.isoformat(): {"alice@bristol.ac.uk": 1.0},
-            handover.isoformat(): {"alice@bristol.ac.uk": 2.0},
+            early.isoformat(): {LEAD: 1.0},
+            handover.isoformat(): {LEAD: 2.0},
             (handover + datetime.timedelta(days=1)).isoformat(): {
-                "alice@bristol.ac.uk": 4.0
+                LEAD: 4.0
             },
         },
     )
@@ -824,6 +1057,192 @@ def _run_all() -> None:
 
     for stale in store.all_awards():
         store.delete(stale.offering, stale.project_id)
+
+    print("\n-- the allocation decides the unit usage is reported in ---------")
+
+    # An award allocated in GPU hours, on the resource with an agreed factor of
+    # four. What we hold is node hours; what the awarding portal must be told is
+    # GPU hours, and one node hour is four of those.
+    gpu_award = "myaward3.allocator"
+    site_portal.answer(
+        make_job(f"create_project {gpu_award} {details(allocation='5000 GPUHR')}")
+    )
+    held = store.load(OFFERING, gpu_award)
+    approve(held, "myproject3.site", month_start)
+    store.save(held)
+    set_usage("myproject3.site", {a_day_this_month: {LEAD: 12.5}})
+
+    report = site_portal.answer(
+        make_job(f"get_usage_report {gpu_award} this_month")
+    ).result
+    check(
+        "12.5 node hours are reported as 50 GPU hours",
+        abs(report.total_usage.hours - 50.0) < 0.001,
+        f"-> {report.total_usage.in_hours()}",
+    )
+
+    # An award of nothing is not an award. There is no amount to provision
+    # against and - since the allocation is what names the unit - no way to say
+    # what any usage reported for it would mean. All three spellings of "none"
+    # are refused, terminally: the awarding portal has to send an amount.
+    for missing in (
+        '{"name":"My First Award","template":"standard"}',
+        '{"name":"My First Award","template":"standard","allocation":null}',
+        '{"name":"My First Award","template":"standard","allocation":"No allocation"}',
+        '{"name":"My First Award","template":"standard","allocation":"0 GPUHR"}',
+    ):
+        job = site_portal.answer(make_job(f"create_project myaward4.allocator {missing}"))
+        check(
+            f"an award of nothing is rejected ({missing[46:70]}...)",
+            type(job.error) is openportal.ManagedProjectRejectedError,
+            f"-> {job.error}",
+        )
+
+    check(
+        "...and none of them was recorded",
+        store.load(OFFERING, "myaward4.allocator") is None,
+    )
+
+    # **The refusal, and why there is no safe default.** A resource with nothing
+    # agreed cannot hold an award in the awarding portal's units. Guessing 1.0
+    # would report a quarter of this award's usage; guessing 0 would report none;
+    # both are well-formed numbers an awarding portal would believe. So the award
+    # is refused when it arrives, terminally, because what is missing is an
+    # agreement between two organisations rather than anything a retry supplies.
+    site_portal.add_offering("cluster8", ["standard"])
+    job = site_portal.answer(
+        make_job(
+            f"create_project myaward5.allocator {details(allocation='5000 GPUHR')}",
+            offering="cluster8",
+        )
+    )
+    check(
+        "an award in a unit with no agreed conversion is rejected",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+    check(
+        "...and was not recorded",
+        store.load("cluster8", "myaward5.allocator") is None,
+    )
+    site_portal.remove_offering("cluster8")
+
+    # The same award on `cluster2`, where two of their GPU hours is one of ours,
+    # is answerable - and answered at that factor rather than cluster1's four.
+    site_portal.answer(
+        make_job(
+            f"create_project myaward5.allocator {details(allocation='5000 GPUHR')}",
+            offering=OTHER_OFFERING,
+        )
+    )
+    held = store.load(OTHER_OFFERING, "myaward5.allocator")
+    approve(held, "myproject5.site", month_start)
+    store.save(held)
+    set_usage("myproject5.site", {a_day_this_month: {LEAD: 12.5}})
+    report = site_portal.answer(
+        make_job(f"get_usage_report myaward5.allocator this_month", offering=OTHER_OFFERING)
+    ).result
+    check(
+        "the same usage on another resource converts at that resource's factor",
+        abs(report.total_usage.hours - 25.0) < 0.001,
+        f"-> {report.total_usage.in_hours()} at 2 to 1, against 50 at 4 to 1",
+    )
+
+    # A unit nobody has agreed gets the same answer, for the same reason - and
+    # the units are just names, so this is any name at all rather than a fixed
+    # list. Agree a factor for it and it becomes answerable, which is what will
+    # happen the day an allocation arrives in cloud credits.
+    job = site_portal.answer(
+        make_job(f"create_project myaward6.allocator {details(allocation='5000 CREDITS')}")
+    )
+    check(
+        "an award in a unit nobody agreed is rejected too",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+
+    site_portal.add_offering(OFFERING, ["standard", "large"], conversions={"CREDITS": 0.5})
+    site_portal.answer(
+        make_job(f"create_project myaward6.allocator {details(allocation='5000 CREDITS')}")
+    )
+    held = store.load(OFFERING, "myaward6.allocator")
+    approve(held, "myproject6.site", month_start)
+    store.save(held)
+    set_usage("myproject6.site", {a_day_this_month: {LEAD: 12.5}})
+    report = site_portal.answer(
+        make_job(f"get_usage_report myaward6.allocator this_month")
+    ).result
+    check(
+        "...and answerable once a factor is agreed, whatever the unit is called",
+        abs(report.total_usage.hours - 6.25) < 0.001,
+        f"-> {report.total_usage.in_hours()} for 12.5 of ours at 0.5",
+    )
+    check(
+        "the same factor values the award in our own units",
+        abs(site_portal.to_site_units(OFFERING, openportal.Allocation.from_string("5000 CREDITS")) - 10000.0) < 0.001,
+        "-> 5000 theirs = 10000 ours at 0.5",
+    )
+    site_portal.add_offering(OFFERING, ["standard", "large"], conversions=AGREED)
+
+    # An award in the site's own unit needs nothing agreed at all.
+    site_portal.add_offering("cluster9", ["standard"])
+    job = site_portal.answer(
+        make_job(
+            f"create_project myaward7.allocator {details(allocation='100 NHR')}",
+            offering="cluster9",
+        )
+    )
+    check(
+        "an award in the site's own unit needs no agreement",
+        type(job.error) is openportal.ManagedProjectPendingError,
+        f"-> {job.error}",
+    )
+    job = site_portal.answer(
+        make_job(
+            f"create_project myaward8.allocator {details(allocation='100 GPUHR')}",
+            offering="cluster9",
+        )
+    )
+    check(
+        "...but any other unit is refused until one is agreed",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+    site_portal.remove_offering("cluster9")
+
+    for stale in store.all_awards():
+        if stale.project_id != AWARD:
+            store.delete(stale.offering, stale.project_id)
+
+    print("\n-- withdrawing a resource --------------------------------------")
+
+    # A resource can be retired. What that ends is its *reachability*: requests
+    # for it are refused, because the virtual agent behind it is withdrawn too.
+    site_portal.add_offering("cluster3", ["standard"])
+    job = site_portal.answer(make_job(f"create_project temp.allocator {details()}", offering="cluster3"))
+    check(
+        "an award can be made on a newly added resource",
+        type(job.error) is openportal.ManagedProjectPendingError,
+        f"-> {job.error}",
+    )
+
+    check("removing it reports what went", site_portal.remove_offering("cluster3") is not None)
+    check("removing it again reports nothing", site_portal.remove_offering("cluster3") is None)
+
+    job = site_portal.answer(make_job("get_award temp.allocator", offering="cluster3"))
+    check(
+        "a request through a withdrawn resource is refused",
+        type(job.error) is openportal.ManagedProjectRejectedError,
+        f"-> {job.error}",
+    )
+
+    # ...and what it does *not* end is the record. Those days still have to be
+    # reportable if the resource comes back (§4.1.2).
+    check(
+        "the awards on it are kept, not deleted",
+        store.load("cluster3", "temp.allocator") is not None,
+    )
+    store.delete("cluster3", "temp.allocator")
 
     print("\n-- every job gets an answer ------------------------------------")
 

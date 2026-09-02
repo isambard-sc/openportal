@@ -14,10 +14,15 @@ which is which:
 the `signal_url` and `notification_url` you gave `op-bridge init`. Their shape
 is dictated by the contract (site-portal-api.md §3.1, §5).
 
-**What an operator calls** - everything under `/awards`. This is *not* part of
-any OpenPortal contract; it exists because someone has to approve awards and
-push usage figures in, and a portal with no web interface needs some way to do
-it. Yours will look nothing like this.
+**What an operator calls** - everything under `/offerings` and `/awards`. This
+is *not* part of any OpenPortal contract; it exists because someone has to say
+which resources this site offers, approve the awards made on them and push usage
+figures in, and a portal with no web interface needs some way to do it. Yours
+will look nothing like this.
+
+Note the order those two are in. A fresh portal offers nothing, so nothing can
+be asked of it: `POST /offerings` with a resource name comes first, and only then
+can an awarding portal make an award on it (§1.1).
 """
 
 from __future__ import annotations
@@ -74,16 +79,66 @@ def my_portal() -> str:
 # --------------------------------------------------------------------------
 
 
+def awarding_portals() -> list[str]:
+    """
+    The portals allowed to make awards here.
+
+    A real portal reads this from its own configuration, and would let an
+    operator manage it in the same way the resources below are managed. It is an
+    environment variable here so that the example has one fewer moving part.
+    """
+    raw = os.environ.get("PORTAL_AWARDING_PORTALS", "allocator")
+
+    return [them.strip() for them in raw.split(",") if them.strip()]
+
+
+def destinations_for(offering: str) -> list[openportal.Destination]:
+    """
+    The wire names of one resource: `<offering>.<us>.<them>`, one per awarding
+    portal.
+
+    The middle element must be our own agent name - an offering in somebody
+    else's namespace is not something this portal can advertise, and the portal
+    agent rejects it. One registration per (resource, awarding portal) pair,
+    because each is a separate virtual agent that that portal may address.
+    """
+    return [
+        openportal.Destination(f"{offering}.{my_portal()}.{them}")
+        for them in awarding_portals()
+    ]
+
+
+def publish_offerings() -> list[str]:
+    """
+    Tell OpenPortal the complete set of resources we advertise.
+
+    **Until an offering is registered, requests for it have nowhere to land**
+    (§1.1) - they are held and only delivered once it exists. So this runs at
+    startup, before anything is served, and again after every change below.
+
+    `sync_offerings` is a *replace*, not a merge: anything absent is withdrawn,
+    and an empty set withdraws everything. That is what makes this one function
+    enough for adding and removing alike - there is no separate "unregister".
+    """
+    offerings = [
+        destination
+        for offering in site_portal.offering_names()
+        for destination in destinations_for(offering)
+    ]
+
+    active = [str(o) for o in openportal.sync_offerings(offerings)]
+    logger.info("registered offerings: %s", active)
+
+    return active
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Connect to the bridge and register our offerings.
+    Connect to the bridge and register whatever we currently offer.
 
-    **Until an offering is registered, requests for it have nowhere to land**
-    (§1.1) - they are held and only delivered once it exists. So this happens at
-    startup, before we serve anything, and again whenever the set changes.
-
-    `sync_offerings` is a *replace*, not a merge: anything absent is withdrawn.
+    A fresh portal offers nothing, and starts up perfectly happily: an operator
+    adds a resource through `POST /offerings` and it is registered from then on.
     """
     global _my_portal
 
@@ -92,21 +147,7 @@ async def lifespan(app: FastAPI):
     me = openportal.get_portal()
     _my_portal = str(me)
 
-    # `<offering>.<us>.<them>` - the middle element must be our own agent name.
-    # A real portal reads the list of awarding portals from its configuration.
-    awarding_portals = os.environ.get("PORTAL_AWARDING_PORTALS", "allocator").split(",")
-
-    # One registration per (resource, awarding portal) pair. Each is a virtual
-    # agent on this portal that the named portal may address directly.
-    offerings = [
-        openportal.Destination(f"{offering}.{me}.{them.strip()}")
-        for offering in sorted(site_portal.OFFERINGS)
-        for them in awarding_portals
-        if them.strip()
-    ]
-
-    active = openportal.sync_offerings(offerings)
-    logger.info("registered offerings: %s", [str(o) for o in active])
+    publish_offerings()
 
     sweeper = asyncio.create_task(_sweep_forever())
     try:
@@ -227,6 +268,179 @@ async def _sweep_forever() -> None:
 # --------------------------------------------------------------------------
 
 
+class OfferingRequest(BaseModel):
+    """
+    A resource to start advertising, and the templates it accepts.
+
+    `name` is the resource's own name - `cluster1`, not `cluster1.site.allocator`.
+    The other two elements are added from our own portal name and the list of
+    awarding portals, because neither is an operator's to choose here: an
+    offering in somebody else's namespace is not something this portal can
+    advertise.
+
+    `templates` are the `AwardDetails.template` values awards on this resource
+    may name, and it is **required**: what a resource can be asked for is the
+    site's decision about that resource, and defaulting it would publish a guess
+    under the site's name that an awarding portal could not tell from a policy.
+    Name every template the resource really offers.
+
+    `conversions` is what the two portals agreed each of this site's units is
+    worth in an awarding portal's: `{"GPUHR": 4}` means one node hour here is
+    four of their GPU hours. An award allocated in a unit with no agreed factor
+    is refused when it arrives, because there is no safe number to guess. It is
+    optional — without it the resource can only hold awards allocated in this
+    site's own unit — and omitting it on a later call keeps what was already
+    agreed, so templates can be changed on their own.
+    """
+
+    name: str
+    templates: list[str]
+    conversions: dict[str, float] | None = None
+
+
+def _offering_json(
+    offering: store.Offering, registered: set[str], awards: list[store.Award]
+) -> dict:
+    """
+    One offering as the endpoints below report it.
+
+    `awards` is passed in rather than read here so that listing many offerings
+    reads the award store once instead of once per row.
+    """
+    destinations = [str(d) for d in destinations_for(offering.name)]
+
+    return {
+        "name": offering.name,
+        "templates": offering.templates,
+        "since": offering.since.isoformat() if offering.since else None,
+        # What an award on this resource may be allocated in, and what one of
+        # our units is worth in each. Our own unit is always here at 1.0; a unit
+        # absent from it is one an award cannot be held in, and `create_award`
+        # refuses those rather than guessing a factor.
+        "site_unit": site_portal.SITE_UNIT,
+        "conversions": site_portal.conversions_for(offering.name),
+        # How many awards this resource holds. Shown because it is what makes
+        # withdrawing one consequential: those awards stay on record and stop
+        # being reachable, rather than being deleted (§4.1.2).
+        "awards": len([a for a in awards if a.offering == offering.name]),
+        # What the awarding portals address, and whether OpenPortal currently
+        # has it registered. The second is the agents' view rather than ours,
+        # and the two differing means a sync did not happen or did not take.
+        "destinations": destinations,
+        "registered": all(d in registered for d in destinations),
+    }
+
+
+@app.get("/offerings")
+async def list_offerings():
+    """
+    `GET /offerings` - every resource we advertise.
+
+    Two sources, deliberately: `offerings` is our own state, and `registered`
+    on each row is what the OpenPortal agents actually hold right now. They
+    should agree; if they do not, the set was changed while the bridge was
+    unreachable and `POST /offerings/sync` puts it right.
+    """
+    try:
+        registered = {str(o) for o in openportal.get_offerings()}
+    except OSError:
+        # The bridge is not answering. Our own records are still worth serving -
+        # they are the source of truth, and this is exactly the state where an
+        # operator most wants to see them.
+        registered = set()
+
+    awards = store.all_awards()
+
+    return {
+        "portal": my_portal(),
+        "awarding_portals": awarding_portals(),
+        "offerings": [
+            _offering_json(offering, registered, awards)
+            for offering in site_portal.offerings()
+        ],
+    }
+
+
+@app.post("/offerings")
+async def add_offering(request: OfferingRequest):
+    """
+    `POST /offerings` - start advertising a resource.
+
+    ```bash
+    curl -X POST localhost:8080/offerings \\
+         -H 'content-type: application/json' \\
+         -d '{"name": "cluster1",
+              "templates": ["standard", "large"],
+              "conversions": {"GPUHR": 4}}'
+    ```
+
+    An upsert, and idempotent: posting a resource we already offer updates its
+    templates and re-registers it, rather than failing. Everything here is
+    retried, including by operators. It is also how the templates on a resource
+    are changed - post it again with the new list.
+
+    Registration happens immediately, so an award request for this resource that
+    an awarding portal has been retrying can land on the very next attempt.
+    """
+    try:
+        offering = site_portal.add_offering(
+            request.name, request.templates, request.conversions
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    registered = set(publish_offerings())
+
+    return _offering_json(offering, registered, store.all_awards())
+
+
+@app.delete("/offerings/{name}")
+async def remove_offering(name: str):
+    """
+    `DELETE /offerings/{name}` - stop advertising a resource.
+
+    The registration is withdrawn, so the awarding portals can no longer address
+    it and new requests for it have nowhere to land.
+
+    **The awards on it are kept**, and the response says how many. That is not
+    laziness: an award still owns the days it was attached for, and those days
+    may not have been collected yet - deleting the record would make a later
+    usage report empty, and an empty report is vacuously complete, which is how
+    the final days of an award get silently lost (§4.1.2). The operator API goes
+    on working for them, and adding the resource back makes them reachable
+    again.
+    """
+    removed = site_portal.remove_offering(name)
+
+    if removed is None:
+        raise HTTPException(status_code=404, detail=f"'{name}' is not offered")
+
+    orphaned = len([a for a in store.all_awards() if a.offering == name])
+    publish_offerings()
+
+    return {
+        "removed": removed.name,
+        "templates": removed.templates,
+        # Kept, not deleted - still readable and reportable through /awards.
+        "awards_kept": orphaned,
+        "offerings": site_portal.offering_names(),
+    }
+
+
+@app.post("/offerings/sync")
+async def resync_offerings():
+    """
+    `POST /offerings/sync` - re-register the current set with OpenPortal.
+
+    Nothing needs this in normal operation; startup and every change above
+    already register. It is here for the case that produces a puzzling silence:
+    the set was changed while the bridge was down, so our records and the
+    agents' disagree and requests for a resource we believe we offer have
+    nowhere to land.
+    """
+    return {"registered": publish_offerings()}
+
+
 class Approval(BaseModel):
     """
     An approval, and **the project the award is being attached to**.
@@ -282,8 +496,13 @@ class Finalisation(BaseModel):
     An operations decision that one month's accounting will not change again.
 
     `month` is `"YYYY-MM"`. `final` is separate from it so the decision can be
-    taken back - if a late correction lands, clear it and the allocator starts
-    asking about that month again.
+    taken back when a late correction lands - but clearing it here does **not**
+    make the awarding portal ask again. It stopped asking when it recorded the
+    month as settled, and nothing on this side reaches into its records: someone
+    has to tell it, and it un-finalises the month at its end, which is what
+    triggers the refetch. Clearing the flag here is still right - it stops this
+    portal claiming a month is settled while corrections are still landing - it
+    is simply not what restarts the conversation.
     """
 
     month: str
@@ -302,6 +521,14 @@ async def list_awards():
             "local_project_id": a.local_project_id,
             "name": a.details.get("name"),
             "template": a.details.get("template"),
+            # The award as the awarding portal expressed it, and what it is worth
+            # in our own unit at the agreed factor - which is the number this
+            # site would actually enforce a quota against.
+            "allocation": a.details.get("allocation"),
+            "allocation_in_site_units": site_portal.to_site_units(
+                a.offering,
+                openportal.AwardDetails(json.dumps(a.details)).allocation,
+            ),
             "members": list((a.details.get("members") or {}).keys()),
             # Whether it is attached now, and the full attachment history. A
             # detached award is kept rather than deleted: it still owns the days
@@ -467,6 +694,13 @@ async def push_usage(local_project_id: str, push: UsagePush):
     is the source of truth, your parsers produce the numbers, and this endpoint
     is how they reach the portal. `get_usage_report` then serves them inside the
     thirty seconds it has (§3.4).
+
+    **The figures are in your own unit** - `site_portal.SITE_UNIT`, node hours
+    here - and never in the unit an award was allocated in. Push what your
+    accounting produced and let `build_usage_report` convert it per award: which
+    award a day belongs to is derived when the report is built (§4.1.2), and so
+    is the unit it has to be expressed in, and neither is knowable at the moment
+    a figure arrives.
     """
     # Deliberately *not* `load_by_local_id` alone. A project whose award has
     # just been removed still needs its last days pushed in - the removed award
@@ -563,6 +797,9 @@ async def finalise_usage(local_project_id: str, decision: Finalisation):
     *wrong* is the expensive direction: finalise a month early and the allocator
     records the figures it has and stops asking, so a correction that lands
     afterwards is never collected. When in doubt, leave it open.
+
+    The one thing it will not let you do is declare the **current** month final -
+    see below. Withdrawing a declaration (`final: false`) is always allowed.
     """
     # As with pushing usage: a month of a detached award can still be declared
     # final, and often needs to be - it is the last thing the allocator is
@@ -590,6 +827,35 @@ async def finalise_usage(local_project_id: str, decision: Finalisation):
         )
 
     month = f"{parsed.year:04d}-{parsed.month:02d}"
+
+    # **The current month cannot be declared final**, and this is a refusal
+    # rather than a warning.
+    #
+    # `is_complete` means "these figures will not change", and about a month
+    # that is still running that cannot be true - the day is not over. The
+    # awarding portal knows it too: the current month is exempt from
+    # completeness and is re-requested whatever it is told (§4.3), so the claim
+    # would be disregarded at the other end anyway.
+    #
+    # Refusing it here means this portal never *stores* a promise it cannot
+    # keep, which matters for the month after: a stored claim would silently
+    # become a claim about a finished month the moment the calendar rolled over,
+    # and it would then be believed.
+    #
+    # Withdrawing a claim (`final: false`) is always allowed - taking back
+    # something you should not have said needs no permission.
+    today = datetime.date.today()
+
+    if decision.final and month == f"{today.year:04d}-{today.month:02d}":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{month} is the current month, so its figures can still change "
+                "and it cannot be declared final. Finalise it once it has "
+                "ended; until then the awarding portal will keep asking about "
+                "it, which is correct and costs one request per sync cycle."
+            ),
+        )
 
     project = store.load_project(local_project_id)
     months = set(project.final_months)

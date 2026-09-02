@@ -8,6 +8,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **State verification instructions** — a caller can now ask whether an earlier
+  `add_user` / `add_project` / `remove_user` / `remove_project` actually ran to
+  completion, and re-run it if it did not:
+
+  ```
+  is_user_added alice.myproject.waldur
+  is_user_removed alice.myproject.waldur
+  is_project_added myproject.waldur
+  is_project_removed myproject.waldur
+  ```
+
+- **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
+  of superseded attempts separately from the usage it has always reported, so
+  the two can be told apart rather than merged:
+
+- **Expansion factor.** Usage reports now record each project's total wall-clock
+  runtime and the expansion factor of its jobs - queue time over runtime - so
+  that a project waiting a long time for a little work can be spotted. The
+  particular pattern of a job that queues for hours and then exits in seconds,
+  repeatedly, is what a user fighting a job that will not run looks like from
+  the outside.
+
+- **Reservations.** Usage reports now also log usage within any reservations,
+  with an associated reservation_report making this easy to query.
+
+- **Mean job size.** Reports now record the cores and GPUs each job was
+  allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
+  per-user variants) - many small jobs against a few large ones. Usage cannot
+  answer this: the same core-seconds come from one job on a hundred cores or a
+  hundred jobs on one core, which is exactly the distinction being drawn.
+
+- **`get_reservation_report`** ([slurm/tools/](slurm/tools/)): an operator tool
+  that answers the question a usage report cannot. A project's report says which
+  reservations *it* used; this says which projects used a *reservation*.
+
+  ```
+  get_reservation_report interactive this_month
+  ```
+
+  The tool shares the agent's code rather than reimplementing it - the slurm
+  crate now builds a library as well as its binaries - so what it says a job
+  consumed cannot drift from what the agent says.
+
 - **A Java client for the bridge API** (`java/`), for a site whose portal is
   written in Java rather than Python. The Python module talks to a bridge
   through Rust; a Java portal has to sign its own requests, so `BridgeAuth` is
@@ -60,118 +103,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   CI runs both, on a **Java 21** runner against the library's declared Java 17
   target - so an API added after 17 fails the build there rather than at a site
   running the version the library says it supports.
-
-- **The `openportal` Python module is on PyPI** (`pip install openportal`), so
-  using it needs no Rust toolchain. The site portal example's
-  `requirements.txt` now pins `openportal>=0.92.0` alongside its other
-  dependencies, and only the *agents* it talks to have to be built.
-
-- **The site portal example converts between allocation units.** The two
-  portals need not count in the same thing: the awarding portal allocates in its
-  unit, the site accounts in its own, and the two agree a factor out of band. So
-  `POST /offerings` now takes the agreed `conversions` for a resource
-  (`{"GPUHR": 4}` — one node hour here is four of their GPU hours), reports are
-  converted into the award's unit on the way out, `GET /awards` shows each award
-  in both units, and an award whose unit has no agreed factor is refused rather
-  than reported with a guessed one. An award with no allocation, or one of zero,
-  is refused as well - an award is for a quantity, and the allocation is also
-  what names the unit. The units are names on numbers, so an allocation in
-  credits works the same way as one in hours.
-
-- **The site portal example dispatches both spellings of the award
-  instructions.** `create_award` and `create_project` (and the update and remove
-  pairs) are one instruction under two names, so its `HANDLERS` table maps both
-  to one handler. Agents deliver the `*_project` spelling today; the example
-  keeps working when the wire moves to the `*_award` forms, and its README is
-  written against those.
-
-- **The site portal example can be run without a Rust toolchain at all.** Its
-  README now points at the prebuilt `op-portal` and `op-bridge` attached to each
-  release (Linux x86-64 and aarch64; anywhere else still builds), and
-  `example.py` prints the `curl` for the missing binary rather than only
-  `cargo build`.
-
-- **The example site portal's walkthrough covers `update_award`.** The
-  instructions `example.py` prints now add a second member to a live award and
-  show what that teaches: an update answers with the mapping and needs no
-  approval, the member list is the whole set rather than a delta (so an absent
-  member has been removed), and the details carry the template like a create
-  does - omit it and the update is refused terminally. The test suite covers the
-  same ground, and all three files now use one cast (`alice@example.com` as
-  Project Lead, `bob@example.com` as Project Member).
-
-- **The example site portal refuses to finalise the current month.**
-  `is_complete` means "these figures will not change", which cannot be true of a
-  month that is still running - and an awarding portal is entitled to disregard
-  such a claim anyway (site-portal-api.md §4.3). `POST /usage/finalise` now
-  answers `400` for the current month, so the portal never stores a promise that
-  would quietly become a claim about a finished month once the calendar rolled
-  over. Withdrawing a declaration (`final: false`) is still allowed for any
-  month.
-
-- **The example site portal's resources are now managed over its API.** Which
-  clusters the example advertises was a constant in `site_portal.py`; it is now
-  state in `store.py`, with `GET /offerings`, `POST /offerings`,
-  `DELETE /offerings/{name}` and `POST /offerings/sync` in `app.py`. Adding or
-  withdrawing one re-registers the complete set with OpenPortal immediately, so
-  a cluster can be offered while the portal is running. A fresh portal offers
-  nothing until a resource is added — which is the first step of the local setup
-  below — and adding one has to name the templates it accepts, since which
-  templates a resource offers is the site's decision and not something to
-  default. Withdrawing a resource keeps the awards made on it; they simply stop
-  being reachable.
-
-- **A one-command local setup for the example site portal** —
-  `python/examples/site_portal/example.py` writes the configs for an awards
-  portal, a site portal and a bridge for each, connects them, starts them
-  together with the example's FastAPI app, and prints the calls that walk an
-  award through the whole cycle — offering a cluster, making the award,
-  approving it, pushing in today's usage and reading the report back on the
-  awarding portal's side, in its own namespace. `setup`, `start`, `status`, `stop` and `clean`,
-  with everything it creates confined to a git-ignored `data/` directory.
-
-- **State verification instructions** — a caller can now ask whether an earlier
-  `add_user` / `add_project` / `remove_user` / `remove_project` actually ran to
-  completion, and re-run it if it did not:
-
-  ```
-  is_user_added alice.myproject.waldur
-  is_user_removed alice.myproject.waldur
-  is_project_added myproject.waldur
-  is_project_removed myproject.waldur
-  ```
-
-- **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
-  of superseded attempts separately from the usage it has always reported, so
-  the two can be told apart rather than merged:
-
-- **Expansion factor.** Usage reports now record each project's total wall-clock
-  runtime and the expansion factor of its jobs - queue time over runtime - so
-  that a project waiting a long time for a little work can be spotted. The
-  particular pattern of a job that queues for hours and then exits in seconds,
-  repeatedly, is what a user fighting a job that will not run looks like from
-  the outside.
-
-- **Reservations.** Usage reports now also log usage within any reservations,
-  with an associated reservation_report making this easy to query.
-
-- **Mean job size.** Reports now record the cores and GPUs each job was
-  allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
-  per-user variants) - many small jobs against a few large ones. Usage cannot
-  answer this: the same core-seconds come from one job on a hundred cores or a
-  hundred jobs on one core, which is exactly the distinction being drawn.
-
-- **`get_reservation_report`** ([slurm/tools/](slurm/tools/)): an operator tool
-  that answers the question a usage report cannot. A project's report says which
-  reservations *it* used; this says which projects used a *reservation*.
-
-  ```
-  get_reservation_report interactive this_month
-  ```
-
-  The tool shares the agent's code rather than reimplementing it - the slurm
-  crate now builds a library as well as its binaries - so what it says a job
-  consumed cannot drift from what the agent says.
 
 ### Fixed
 

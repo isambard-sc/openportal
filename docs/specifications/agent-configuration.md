@@ -691,7 +691,7 @@ links        = [""]               # optional symlinks, one per root
 | `is_home` | boolean | auto | Whether this is the primary home volume. Auto-set to `true` when only one user volume exists. At most one user volume can be the home. |
 | `quota_engine` | string | (none) | Name of a `quota_engines` entry to use for quota management. |
 | `max_quota` | size string | unlimited | Maximum allowed quota for any user. |
-| `default_quota` | size string | unlimited | Default quota assigned to new users. |
+| `default_quota` | size string | unlimited | Quota applied when this agent creates a user's directory on this volume, and only if the user has no quota there yet. It is never re-applied to an existing directory, so a quota set with `set_local_user_quota` is not overwritten by a repeated `add_local_user`. |
 | `mount_point` | string | (none) | Filesystem mount point (required by some quota engines). |
 | `default_inode_limit` | integer | (engine default) | Default number of files/directories allowed. |
 
@@ -704,7 +704,7 @@ links        = [""]               # optional symlinks, one per root
 | `permissions` | string or array | `"2770"` | Octal directory permissions (SGID bit typical for shared directories). |
 | `quota_engine` | string | (none) | Quota engine to use. |
 | `max_quota` | size string | unlimited | Maximum allowed quota for any project. |
-| `default_quota` | size string | unlimited | Default quota for new projects. |
+| `default_quota` | size string | unlimited | Quota applied when this agent creates a project's directory on this volume, and only if the project has no quota there yet. It is never re-applied to an existing directory, so a quota set with `set_local_project_quota` is not overwritten by a repeated `add_local_project` or by adding a new member to the project. |
 | `mount_point` | string | (none) | Filesystem mount point. |
 | `default_inode_limit` | integer | (engine default) | Default inode limit. |
 | `links` | array of strings | `[]` | Symlink templates to create alongside each root. Empty string = no link for that root. Placeholder: `{project}`. |

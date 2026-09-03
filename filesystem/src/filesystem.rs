@@ -454,13 +454,21 @@ pub async fn clean_and_check_path(
     Ok(path)
 }
 
+/// Create the directory `path`, owned by `username`:`groupname` with `permissions`.
+///
+/// Returns `true` if this call brought the directory into existence - either by
+/// creating it fresh, or by restoring it from `.recycle` - and `false` if it was
+/// already there and was left as it was found. Callers use that to tell a genuine
+/// creation from a repeated `add_local_project` / `add_local_user`, which must not
+/// re-apply anything that an operator may have changed since - see the default quota
+/// handling in `main.rs`.
 pub async fn create_dir(
     path: &std::path::Path,
     roots: &[PathBuf],
     username: &str,
     groupname: &str,
     permissions: &str,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let path = clean_and_check_path(path, roots, false).await?;
 
     // convert the permissions into a u32
@@ -513,7 +521,7 @@ async fn create_dir_native(
     username: &str,
     groupname: &str,
     permissions: u32,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     // Resolve the names to ids. This goes through `getent` rather than libc - see
     // `crate::nameservice` for why a static musl binary cannot use `getpwnam_r` /
     // `getgrnam_r`, and why a lookup that fails to answer must not be reported as a
@@ -533,7 +541,7 @@ async fn create_dir_native(
         if let Some(recycle_path) = check_recycle_native(path).await? {
             if clear_placeholder_dir_native(path).await? {
                 restore_from_recycle_native(&recycle_path, path, uid, gid).await?;
-                return Ok(());
+                return Ok(true);
             }
         }
 
@@ -573,13 +581,13 @@ async fn create_dir_native(
         // as we should assume that another process has already beaten
         // us to creating the directory
         tracing::info!("Directory already exists with required permissions.");
-        return Ok(());
+        return Ok(false);
     }
 
     // Check if this directory exists in .recycle - if so, restore it
     if let Some(recycle_path) = check_recycle_native(path).await? {
         restore_from_recycle_native(&recycle_path, path, uid, gid).await?;
-        return Ok(());
+        return Ok(true);
     }
 
     // use a lock to ensure that only a single task can create directories
@@ -661,7 +669,7 @@ async fn create_dir_native(
             )
         })?;
 
-    Ok(())
+    Ok(true)
 }
 
 async fn create_dir_remote(
@@ -670,7 +678,7 @@ async fn create_dir_remote(
     groupname: &str,
     permissions: u32,
     prefix: &[String],
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let path_str = path.to_string_lossy();
 
     // Check if the directory already exists on the remote.
@@ -683,13 +691,13 @@ async fn create_dir_remote(
     if let Some(recycle_path) = check_recycle_remote(path, prefix).await? {
         if !already_exists || clear_placeholder_dir_remote(path, prefix).await? {
             restore_from_recycle_remote(&recycle_path, path, username, groupname, prefix).await?;
-            return Ok(());
+            return Ok(true);
         }
     }
 
     if already_exists {
         tracing::info!("Directory already exists (remote): {}", path_str);
-        return Ok(());
+        return Ok(false);
     }
 
     // Serialise directory creation with the same lock used by the native path.
@@ -739,7 +747,7 @@ async fn create_dir_remote(
         )));
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Create a symlink at `link` pointing to `path`.
@@ -2009,6 +2017,82 @@ mod tests {
                 .await
                 .is_err()
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The name of the user and group running the tests, as `getent` knows them.
+    /// `None` if they cannot be looked up, in which case the caller skips - a build
+    /// environment where `id` is unavailable is not a failure of the code under test.
+    fn current_user_and_group() -> Option<(String, String)> {
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("id").args(args).output().ok()?;
+            match output.status.success() {
+                true => Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+                false => None,
+            }
+        };
+
+        Some((run(&["-un"])?, run(&["-gn"])?))
+    }
+
+    #[tokio::test]
+    async fn test_create_dir_reports_whether_it_created_the_directory() {
+        // The default quota is applied only to a directory this agent has just brought
+        // into existence, so `create_dir` must tell a real creation from a repeated
+        // `add_local_project` / `add_local_user` finding the directory already there.
+        let Some((user, group)) = current_user_and_group() else {
+            return;
+        };
+
+        let base = std::env::temp_dir().join(format!("op-create-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir base");
+
+        let path = base.join("fred");
+
+        assert!(
+            create_dir_native(&path, &user, &group, 0o755)
+                .await
+                .expect("create"),
+            "creating the directory must be reported as a creation"
+        );
+
+        assert!(
+            !create_dir_native(&path, &user, &group, 0o755)
+                .await
+                .expect("create again"),
+            "finding the directory already there must not be reported as a creation"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_create_dir_counts_a_restore_from_recycle_as_a_creation() {
+        // A restored directory is one that was not here a moment ago, so it counts as
+        // brought into existence. Its quota, which removal leaves in place, is what
+        // then stops the default from being re-applied over it.
+        let Some((user, group)) = current_user_and_group() else {
+            return;
+        };
+
+        let base = std::env::temp_dir().join(format!("op-create-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let recycle = base.join(".recycle").join("fred");
+        std::fs::create_dir_all(&recycle).expect("mkdir recycle/fred");
+        std::fs::create_dir(recycle.join("keep-me")).expect("mkdir keep-me");
+
+        let path = base.join("fred");
+
+        assert!(
+            create_dir_native(&path, &user, &group, 0o755)
+                .await
+                .expect("restore"),
+            "restoring the directory must be reported as a creation"
+        );
+        assert!(path.join("keep-me").exists(), "contents must come back");
 
         let _ = std::fs::remove_dir_all(&base);
     }

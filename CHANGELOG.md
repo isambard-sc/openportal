@@ -106,6 +106,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **Default quotas were being incorrectly re-applied** - adding a new user to
+  a project (or anything else that triggered directory creation on the filesystem
+  agent) re-applied the default quota to that directory. This is now fixed. The
+  default quota is now only applied when a directory is created, and an existing
+  quota has not been set. You should use `get_project_quota` and
+  `set_project_quota` to inspect and modify quotas at a higher level rather
+  than relying on the default value to be set.
+
 - **`Job.result_type`** on the Python module, mirroring the accessor Rust and the
   Java client already have. Most Python never needs it - `result` has already
   used it to decide what to build - but it was the only thing about an answer

@@ -3,7 +3,7 @@
 
 [package]
 name = "op-proxy"
-version = "0.92.0"
+version = "0.93.0"
 description = "A blind relay proxy for OpenPortal agents that can only make outbound connections"
 edition = "2021"
 license = "MIT"

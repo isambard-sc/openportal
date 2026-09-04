@@ -149,18 +149,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `test_site_portal.py` now covers `get_awards` - typed, non-empty and empty -
   which no test did before, which is why this survived.
 
-- **The bridge API specification described a signature scheme that does not
-  authenticate, and two request bodies the bridge rejects.** The primitive is
-  keyed BLAKE2b-256 rather than HMAC-SHA512, and what is signed is the canonical
-  string's JSON encoding rather than the string itself, so a client written from
-  the document got a bare `401` with nothing to say why; the two traps that
-  follow - non-ASCII must not be `\u`-escaped, and the length prefixes are byte
-  lengths - are now called out, and §2.3.1's Python was extracted from the
-  document and run against a live bridge. Separately, the offerings endpoints
-  take and return a JSON **array** of destination strings, not the bracketed
-  `Destinations` text form, and `POST /status` takes `{"job": "<uuid>"}` where
-  `/fetch_job` takes the bare UUID string. Both wrong shapes are a `500`.
-
 - **The `slurmrestd` path never worked out which cluster it was talking to.**
   `find_cluster` was only called when `op-slurm` was driving the command line, so
   with `slurm-server` set and no `slurm-cluster` option the cluster fell back to

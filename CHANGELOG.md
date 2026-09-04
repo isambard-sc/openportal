@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [0.93.0] - 2026-09-04
+
 ### Added
 
 - **State verification instructions** — a caller can now ask whether an earlier
@@ -18,27 +20,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   is_project_added myproject.waldur
   is_project_removed myproject.waldur
   ```
-
 - **Requeue accounting.** `DailyProjectUsageReport` now carries the consumption
   of superseded attempts separately from the usage it has always reported, so
   the two can be told apart rather than merged:
-
 - **Expansion factor.** Usage reports now record each project's total wall-clock
   runtime and the expansion factor of its jobs - queue time over runtime - so
   that a project waiting a long time for a little work can be spotted. The
   particular pattern of a job that queues for hours and then exits in seconds,
   repeatedly, is what a user fighting a job that will not run looks like from
   the outside.
-
 - **Reservations.** Usage reports now also log usage within any reservations,
   with an associated reservation_report making this easy to query.
-
 - **Mean job size.** Reports now record the cores and GPUs each job was
   allocated, giving `average_cpus_per_job()` and `average_gpus_per_job()` (and
   per-user variants) - many small jobs against a few large ones. Usage cannot
   answer this: the same core-seconds come from one job on a hundred cores or a
   hundred jobs on one core, which is exactly the distinction being drawn.
-
 - **`get_reservation_report`** ([slurm/tools/](slurm/tools/)): an operator tool
   that answers the question a usage report cannot. A project's report says which
   reservations *it* used; this says which projects used a *reservation*.
@@ -50,7 +47,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   The tool shares the agent's code rather than reimplementing it - the slurm
   crate now builds a library as well as its binaries - so what it says a job
   consumed cannot drift from what the agent says.
-
 - **A Java client for the bridge API** (`java/`), for a site whose portal is
   written in Java rather than Python. The Python module talks to a bridge
   through Rust; a Java portal has to sign its own requests, so `BridgeAuth` is
@@ -62,7 +58,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   classes are the same six the Python module raises, encoded the same way on
   the wire. Unit tests pin the signature against golden vectors; the
   `Live*Check` classes drive a real bridge.
-
 - **Java wrappers for every type the Python module exposes**, so the Java client
   is a complete interface rather than a connection with raw JSON behind it:
   `AwardDetails`, the usage and storage report trees, `Allocation`, `Usage`,
@@ -80,7 +75,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `errorMessage`, `progressMessage` and typed result readers, and now refuses to
   answer a job whose state the Rust side would refuse - a `Created` job has not
   been handed out, so an answer to it is an answer to a question nobody asked.
-
 - **A Java site portal example** (`java/examples/site_portal`), answering the
   same contract as `python/examples/site_portal` against the same walkthrough -
   offer a resource, refuse what cannot be honoured, approve, map, push usage,
@@ -113,7 +107,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   quota has not been set. You should use `get_project_quota` and
   `set_project_quota` to inspect and modify quotas at a higher level rather
   than relying on the default value to be set.
-
 - **`Job.result_type`** on the Python module, mirroring the accessor Rust and the
   Java client already have. Most Python never needs it - `result` has already
   used it to decide what to build - but it was the only thing about an answer
@@ -124,7 +117,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   look. It is also what diagnoses `Unknown result type: X` - a peer answering
   with a type newer than the module is a version mismatch rather than a fault.
   `test_site_portal.py` now pins the type every instruction in §4 answers with.
-
 - **`get_awards` could not answer at all from the Python module**, and an empty
   quota map could not be answered either. `Job.completed()` infers a result's
   wire type from the value it is given, and the `Vec<T>` chain had no arm for a
@@ -148,7 +140,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   the honest `Vec<ProjectDetails>`, which nothing on the Python side could read.
   `test_site_portal.py` now covers `get_awards` - typed, non-empty and empty -
   which no test did before, which is why this survived.
-
 - **The `slurmrestd` path never worked out which cluster it was talking to.**
   `find_cluster` was only called when `op-slurm` was driving the command line, so
   with `slurm-server` set and no `slurm-cluster` option the cluster fell back to
@@ -160,7 +151,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   cluster too, warning rather than failing if it cannot, since a site with
   `slurmrestd` but no local `sacctmgr` should be told what will not work rather
   than stopped from starting.
-
 - **`op-cluster` no longer swallows filesystem and scheduler failures when
   adding or removing a user or project.** All four paths now follow one policy:
   the account agent goes first and a failure there aborts immediately, since
@@ -175,26 +165,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   when the home directories were still there. They now fail, and the
   `user_removed` / `project_removed` notification is not sent for a removal that
   did not finish.
-
 - **A rename that merged two local accounts dropped one of them.** Every
   per-user map was rebuilt with `collect()`, which keeps whichever colliding
   entry came last, so consolidating two local usernames into one silently lost
   one user's usage, jobs and waits - and which one depended on hash order.
-
 - **Scaling a `ProjectUsageReport` left its requeue and reservation figures
   behind**, so `total_usage_including_requeues()` afterwards added two different
   units together. `*=` and `/=` on a `DailyProjectUsageReport` also left the
   component breakdowns unscaled while `*` and `/` scaled them.
-
 - **A day whose counters disagreed with its own totals was still cached.** The
   check only logged, so the bad figures were then served from cache with nothing
   downstream able to tell.
-
 - **Counters could abort the process rather than saturate.** The scalar totals
   in a usage report saturate deliberately, but the per-user maps beside them
   used a bare `+=`; with `overflow-checks` on and `panic = "abort"`, a
   peer-supplied report could have killed the process before the scalar clamped.
-
 - **Slurm usage reports missed everything a requeued job consumed before its
   final attempt.** `op-slurm` called `sacct` without `--duplicates`, which
   returns only the most recent accounting record for each job id. A requeued job
@@ -204,7 +189,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   final attempt was cancelled before it ran were reported as having used nothing
   at all, because the one record we saw had zero elapsed time and was discarded
   as a non-consumer.
-
 - **`op-cluster` reported success for a scheduler step that had failed.** The
   four scheduler helpers waited for their job and then asked the wrong value
   whether it had failed:
@@ -2557,6 +2541,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Initial release
   This is an initial alpha release of the OpenPortal project. It is not yet feature complete and is not recommended for production use.
 
+[0.93.0]: https://github.com/isambard-sc/openportal/releases/tag/0.93.0
 [0.92.0]: https://github.com/isambard-sc/openportal/releases/tag/0.92.0
 [0.91.0]: https://github.com/isambard-sc/openportal/releases/tag/0.91.0
 [0.90.0]: https://github.com/isambard-sc/openportal/releases/tag/0.90.0

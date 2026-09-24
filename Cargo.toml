@@ -5,7 +5,7 @@
 
 members = [
     "bridge", "cluster", "clusters",
-    "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
+    "filesystem", "freeipa", "greatwestern", "k8s", "localaccount", "paddington", "portal",
     "provider", "proxy", "python", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
     "docs/cmdline/cluster"
@@ -16,7 +16,7 @@ members = [
 # available in maturin's build environment.
 default-members = [
     "bridge", "cluster", "clusters",
-    "filesystem", "freeipa", "greatwestern", "localaccount", "paddington", "portal",
+    "filesystem", "freeipa", "greatwestern", "k8s", "localaccount", "paddington", "portal",
     "provider", "proxy", "slurm", "templemeads",
     "docs/echo", "docs/job", "docs/cmdline/portal",
     "docs/cmdline/cluster"

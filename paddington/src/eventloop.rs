@@ -8,14 +8,17 @@ use crate::error::Error;
 use crate::{client, server};
 
 pub async fn run(config: ServiceConfig) -> Result<(), Error> {
-    match rustls::crypto::ring::default_provider().install_default() {
-        Ok(_) => {}
-        Err(e) => {
-            tracing::error!("Could not install default ring provider: {:?}", e);
-            return Err(Error::NotExists(
-                "Could not install default ring provider".to_owned(),
-            ));
-        }
+    // `Err` here only ever means a process-wide default provider is already
+    // installed - rustls allows exactly one, and it does not matter who
+    // installed it. An agent that also runs its own rustls-backed client
+    // before this event loop starts (e.g. op-k8s connecting to a Kubernetes
+    // API server, or op-slurm's REST client) installs one first; that is
+    // fine, not a reason to refuse to start.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("A default rustls crypto provider was already installed.");
     }
 
     let mut server_handles = vec![];

@@ -5,10 +5,12 @@ use anyhow::Result;
 
 mod client;
 mod resources;
+mod usage;
 
 use greatwestern::grammar::Instruction::{
-    AddLocalProject, AddLocalUser, GetLocalLimit, IsLocalProjectAdded, IsLocalProjectRemoved,
-    IsLocalUserAdded, IsLocalUserRemoved, RemoveLocalProject, RemoveLocalUser, SetLocalLimit,
+    AddLocalProject, AddLocalUser, GetLocalLimit, GetLocalUsageReport, IsLocalProjectAdded,
+    IsLocalProjectRemoved, IsLocalUserAdded, IsLocalUserRemoved, RemoveLocalProject,
+    RemoveLocalUser, SetLocalLimit,
 };
 use greatwestern::usagereport::Usage;
 use greatwestern::Hpc;
@@ -107,6 +109,21 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to the Kubernetes API server at {}", api_server);
 
+    let db_url = match config.secret("k8s-db-url") {
+        Some(db_url) => db_url,
+        None => {
+            return Err(anyhow::anyhow!(
+                "No usage-tracking database URL provided. Set this in the k8s-db-url \
+                 option, e.g. postgres://readonly_user:password@host:5432/dbname"
+                    .to_owned(),
+            ));
+        }
+    };
+
+    usage::connect(&db_url).await?;
+
+    tracing::info!("Connected to the usage-tracking database");
+
     set_notify_runner::<Hpc>(default_notify_runner).await?;
 
     async_runnable! {
@@ -155,6 +172,10 @@ async fn main() -> Result<()> {
                     let node_hours = limit.hours().max(0.0) as u64;
                     client::set_project_node_hours(&mapping, node_hours).await?;
                     job.completed(Usage::new(node_hours.saturating_mul(SECONDS_PER_HOUR)))
+                }
+                GetLocalUsageReport(mapping, dates) => {
+                    let report = usage::get_usage_report(&mapping, &dates).await?;
+                    job.completed(report)
                 }
                 _ => {
                     Err(Error::InvalidInstruction(

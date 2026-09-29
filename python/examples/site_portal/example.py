@@ -26,6 +26,13 @@ a *site* portal for an award (site-portal-api.md §1):
                                                 ▼
     FastAPI app  ◄──  site_bridge       ◄──  site               (site portal)
 
+The arrows are the direction a `create_award` *travels*. The connection between
+the two portals is made the other way: `site` dials out to `allocator`. That is
+the arrangement to copy, because it means only the awards portal has to accept
+a connection from the internet - a site stays a client, and can keep its whole
+OpenPortal deployment behind its own firewall. One websocket carries traffic
+both ways, so which end dials has no bearing on which end can send.
+
 Both bridges are usable from Python, so you can drive either end: the allocator
 to *make* requests, the site to see what its own bridge holds.
 
@@ -143,10 +150,11 @@ ALLOCATOR_BRIDGE = Agent("allocator_bridge", "op-bridge", 18742, http_port=18752
 #: The site portal's bridge. The FastAPI app in app.py serves *its* jobs.
 SITE_BRIDGE = Agent("site_bridge", "op-bridge", 18743, http_port=18753)
 
-#: Start order: a portal listens and its bridge connects in, and `allocator`
-#: connects out to `site`, so the listeners come up first. Nothing breaks if
-#: they do not - paddington reconnects - but the logs are much easier to read.
-AGENTS = (SITE, ALLOCATOR, SITE_BRIDGE, ALLOCATOR_BRIDGE)
+#: Start order: each portal listens and its bridge connects in, and `site`
+#: connects out to `allocator`, so the one it dials comes up first. Nothing
+#: breaks if they do not - paddington reconnects - but the logs are much easier
+#: to read.
+AGENTS = (ALLOCATOR, SITE, ALLOCATOR_BRIDGE, SITE_BRIDGE)
 
 BRIDGES = (SITE_BRIDGE, ALLOCATOR_BRIDGE)
 
@@ -340,14 +348,28 @@ def setup(force: bool = False) -> None:
     connect(host=ALLOCATOR, guest=ALLOCATOR_BRIDGE, guest_type="bridge")
     connect(host=SITE, guest=SITE_BRIDGE, guest_type="bridge")
 
-    #    ...and `allocator` connects out to `site`, which is the link the whole
-    #    example rests on. Either direction of connection would do - one
-    #    websocket carries traffic both ways - but *both* ends must declare the
-    #    other `--type portal`. That declaration is not decoration: an agent
-    #    learns which of its peers is a portal from its own config, and
-    #    originates that portal's route from it (portalroutes.rs). Leave it off
-    #    and instructions naming the other portal are refused.
-    connect(host=SITE, guest=ALLOCATOR, guest_type="portal", zone=PORTAL_ZONE)
+    #    ...and `site` connects out to `allocator`, which is the link the whole
+    #    example rests on.
+    #
+    #    Either direction would work - one websocket carries traffic both ways,
+    #    so `allocator` can still send `create_award` down a connection `site`
+    #    opened. This direction is the one to copy because of what it asks of
+    #    each side's network. The awards portal is the one party every site has
+    #    to reach, so it is the one that accepts connections; a site only ever
+    #    dials out, and needs no port open to the internet at all. A site that
+    #    had to listen would be asking its own security team for a hole in the
+    #    firewall on behalf of every awards portal it works with.
+    #
+    #    The zone is unchanged by the direction. It names the relationship -
+    #    `allocator` awarding on `site` - not who dialled whom, and it travels
+    #    in the invite whichever side issues it.
+    #
+    #    *Both* ends must still declare the other `--type portal`. That
+    #    declaration is not decoration: an agent learns which of its peers is a
+    #    portal from its own config, and originates that portal's route from it
+    #    (portalroutes.rs). Leave it off and instructions naming the other
+    #    portal are refused.
+    connect(host=ALLOCATOR, guest=SITE, guest_type="portal", zone=PORTAL_ZONE)
 
     # 4. The config files the `openportal` Python module reads: the bridge's
     #    HTTP URL and its API key. One per bridge, so you can point Python at
